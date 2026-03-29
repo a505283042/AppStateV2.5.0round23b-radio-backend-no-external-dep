@@ -1,0 +1,528 @@
+diff -ruN /mnt/data/workproj/orig/AppStateV2.5.0round23b-radio-backend-no-external-dep/docs/radio_audiotools_migration_plan.md /mnt/data/workproj/AppStateV2.5.0round23b-radio-backend-no-external-dep/docs/radio_audiotools_migration_plan.md
+--- /mnt/data/workproj/orig/AppStateV2.5.0round23b-radio-backend-no-external-dep/docs/radio_audiotools_migration_plan.md	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/workproj/AppStateV2.5.0round23b-radio-backend-no-external-dep/docs/radio_audiotools_migration_plan.md	2026-03-28 09:05:46.831274128 +0000
+@@ -0,0 +1,75 @@
++# Radio 切换到 Arduino Audio Tools 的迁移方案（Phase-1）
++
++## 目标
++
++只替换 radio 的“网络收流层”，保留现有：
++
++- minimp3 解码
++- PCM pending / I2S 输出
++- audio_service / audio.cpp 的大框架
++- 本地 MP3 / FLAC 路径
++
++## 当前问题
++
++现有 `audio_mp3_stream.cpp` 自己实现了：
++
++- HTTP + chunked + ICY metadata 解析
++- reader task
++- ring buffer
++- MP3 解码
++
++而 `audio_mp3.cpp` 也自己实现了一套：
++
++- MP3 inbuf
++- minimp3 解码
++- PCM pending / I2S 输出
++
++两条链路存在重复逻辑，并且 radio 的主要问题已经确认不在缓存大小，而在 legacy 收流层本身。
++
++## Phase-1 改动范围
++
++### 已开始的结构调整
++
++1. 新增 `AudioMp3Source` 抽象（`include/audio/audio_mp3_source.h`）
++2. 将 `audio_mp3.cpp` 从“强绑 AudioFile”改为“内部基于 source 回调读字节”
++3. 继续保留 `audio_mp3_start(sd, path)` 作为本地文件兼容入口
++
++### 下一步（Phase-2）
++
++新增 `audio_radio_audiotools_source.cpp/.h`：
++
++- 仅负责 Audio Tools URL/ICY 收流
++- 向 `audio_mp3_start_source()` 提供 `read()` / `close()` 回调
++- 不再在 radio 路径里重复维护第二套 minimp3 + PCM 逻辑
++
++## 建议接法
++
++```cpp
++URLStreamBuffered url;
++// 或后续稳定后切换到 ICYStreamBuffered
++
++AudioMp3Source src{};
++src.ctx = &url_adapter;
++src.read = url_adapter_read;
++src.close = url_adapter_close;
++src.debug_name = url;
++src.is_stream = true;
++
++return audio_mp3_start_source(src, url);
++```
++
++## 网络源 read() 语义约定
++
++- `>0`：本次成功读到字节数
++- `0`：暂时无数据（would-block），解码器继续等待，不等价 EOF
++- `-1`：真正结束/断流
++- `-2`：错误
++
++## 为什么先不直接把 Audio Tools 全接进来
++
++因为需要先把解码后半段从“文件语义”里拆出来。否则：
++
++- 本地文件 `read()==0` 表示 EOF
++- 网络流 `read()==0` 很可能只是暂时没数据
++
++这会直接导致 radio 误判结束。
+diff -ruN /mnt/data/workproj/orig/AppStateV2.5.0round23b-radio-backend-no-external-dep/include/audio/audio_mp3.h /mnt/data/workproj/AppStateV2.5.0round23b-radio-backend-no-external-dep/include/audio/audio_mp3.h
+--- /mnt/data/workproj/orig/AppStateV2.5.0round23b-radio-backend-no-external-dep/include/audio/audio_mp3.h	2026-03-24 21:47:36.000000000 +0000
++++ /mnt/data/workproj/AppStateV2.5.0round23b-radio-backend-no-external-dep/include/audio/audio_mp3.h	2026-03-28 09:05:46.811118546 +0000
+@@ -2,6 +2,14 @@
+ #include <stdbool.h>
+ #include <SdFat.h>
+ 
++#include "audio/audio_mp3_source.h"
++
+ bool audio_mp3_start(SdFat& sd, const char* path);
++
++// Phase-1: 将本地 MP3 解码器改造成“可接任意字节源”。
++// 现阶段先给 Audio Tools / 网络流预留统一入口，不改变现有本地文件调用方式。
++// 调用方需要保证 source 中的 read/close 回调与 ctx 在播放期间始终有效。
++bool audio_mp3_start_source(const AudioMp3Source& source, const char* debug_name = nullptr);
++
+ void audio_mp3_stop();
+ bool audio_mp3_loop(); // 解码一段并输出，返回是否还在播放
+diff -ruN /mnt/data/workproj/orig/AppStateV2.5.0round23b-radio-backend-no-external-dep/include/audio/audio_mp3_source.h /mnt/data/workproj/AppStateV2.5.0round23b-radio-backend-no-external-dep/include/audio/audio_mp3_source.h
+--- /mnt/data/workproj/orig/AppStateV2.5.0round23b-radio-backend-no-external-dep/include/audio/audio_mp3_source.h	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/workproj/AppStateV2.5.0round23b-radio-backend-no-external-dep/include/audio/audio_mp3_source.h	2026-03-28 09:05:46.763008344 +0000
+@@ -0,0 +1,21 @@
++#pragma once
++
++#include <stddef.h>
++#include <stdint.h>
++
++// 通用 MP3 字节源抽象：
++// 1) 本地文件：read() 返回实际字节数；读到文件尾返回 AUDIO_MP3_SOURCE_EOF
++// 2) 网络流：read() 返回实际字节数；暂时无数据返回 AUDIO_MP3_SOURCE_WOULD_BLOCK；
++//    真正断流/结束返回 AUDIO_MP3_SOURCE_EOF；错误返回 AUDIO_MP3_SOURCE_ERROR
++
++constexpr int AUDIO_MP3_SOURCE_WOULD_BLOCK = 0;
++constexpr int AUDIO_MP3_SOURCE_EOF = -1;
++constexpr int AUDIO_MP3_SOURCE_ERROR = -2;
++
++struct AudioMp3Source {
++  void* ctx = nullptr;
++  int (*read)(void* ctx, uint8_t* dst, size_t bytes) = nullptr;
++  void (*close)(void* ctx) = nullptr;
++  const char* debug_name = nullptr;
++  bool is_stream = false;
++};
+diff -ruN /mnt/data/workproj/orig/AppStateV2.5.0round23b-radio-backend-no-external-dep/platformio.ini /mnt/data/workproj/AppStateV2.5.0round23b-radio-backend-no-external-dep/platformio.ini
+--- /mnt/data/workproj/orig/AppStateV2.5.0round23b-radio-backend-no-external-dep/platformio.ini	2026-03-24 21:47:36.000000000 +0000
++++ /mnt/data/workproj/AppStateV2.5.0round23b-radio-backend-no-external-dep/platformio.ini	2026-03-28 09:06:40.511981719 +0000
+@@ -26,6 +26,7 @@
+     -DARDUINO_LOOP_STACK_SIZE=32768
+     -DLOG_LEVEL=2
+     -DDISABLE_FS_H_WARNING  ; 禁用 SdFat 的 FS.h 冲突警告
++    -DAUDIO_RADIO_USE_AUDIOTOOLS=0  ; Phase-1: 先搭骨架，后续切换 backend 时再打开
+ 
+ ; Build type
+ build_type = debug
+@@ -41,4 +42,7 @@
+     https://github.com/OSSLibraries/Arduino_MFRC522v2.git
+ 
+     ; Audio (optional)
++    ; Phase-2 启用 Audio Tools backend 时再打开：
++    ; pschatzmann/arduino-audio-tools
++    ; pschatzmann/arduino-libhelix
+     ; espressif/esp32-audioI2S
+diff -ruN /mnt/data/workproj/orig/AppStateV2.5.0round23b-radio-backend-no-external-dep/src/audio/audio_mp3.cpp /mnt/data/workproj/AppStateV2.5.0round23b-radio-backend-no-external-dep/src/audio/audio_mp3.cpp
+--- /mnt/data/workproj/orig/AppStateV2.5.0round23b-radio-backend-no-external-dep/src/audio/audio_mp3.cpp	2026-03-24 21:47:36.000000000 +0000
++++ /mnt/data/workproj/AppStateV2.5.0round23b-radio-backend-no-external-dep/src/audio/audio_mp3.cpp	2026-03-28 09:06:27.272045545 +0000
+@@ -7,9 +7,14 @@
+ #define MINIMP3_IMPLEMENTATION
+ #include "../../lib/minimp3/minimp3.h"
+ 
++namespace {
+ static SdFat* g_sd = nullptr;
+ static AudioFile g_file;
+ static mp3dec_t g_dec;
++static AudioMp3Source g_source{};
++static bool g_source_active = false;
++static bool g_source_is_stream = false;
++static bool g_source_eof = false;
+ 
+ static uint8_t g_inbuf[8 * 1024];
+ static int g_inbuf_filled = 0;
+@@ -21,40 +26,136 @@
+ static size_t s_pending_frames = 0;
+ static int s_channels = 2; // 当前声道数
+ static int s_last_sr = 0; // 上次设置的采样率（文件级 static，便于重置）
++static const char* s_debug_name = nullptr;
+ 
++static int file_source_read(void* ctx, uint8_t* dst, size_t bytes)
++{
++  AudioFile* f = static_cast<AudioFile*>(ctx);
++  if (!f || !dst || bytes == 0) return AUDIO_MP3_SOURCE_ERROR;
++  int n = f->read(dst, bytes);
++  if (n > 0) return n;
++  return AUDIO_MP3_SOURCE_EOF;
++}
+ 
++static void file_source_close(void* ctx)
++{
++  AudioFile* f = static_cast<AudioFile*>(ctx);
++  if (f) f->close();
++}
+ 
+-bool audio_mp3_start(SdFat& sd, const char* path)
++static void reset_decoder_state()
++{
++  mp3dec_init(&g_dec);
++  g_inbuf_filled = 0;
++  g_playing = false;
++  g_sr = 44100;
++  s_last_sr = 0;
++  s_channels = 2;
++  s_pending_off = 0;
++  s_pending_frames = 0;
++  g_source_eof = false;
++}
++
++static void clear_source()
++{
++  g_source = AudioMp3Source{};
++  g_source_active = false;
++  g_source_is_stream = false;
++  s_debug_name = nullptr;
++}
++
++static bool fill_input_buffer(size_t min_fill_target)
++{
++  if (!g_source_active || !g_source.read) return false;
++  if ((size_t)g_inbuf_filled >= min_fill_target) return true;
++
++  int space = (int)sizeof(g_inbuf) - g_inbuf_filled;
++  if (space <= 0) return true;
++
++  int n = g_source.read(g_source.ctx, g_inbuf + g_inbuf_filled, (size_t)space);
++  if (n > 0) {
++    g_inbuf_filled += n;
++    return true;
++  }
++
++  if (n == AUDIO_MP3_SOURCE_WOULD_BLOCK) {
++    return true;
++  }
++
++  if (n == AUDIO_MP3_SOURCE_EOF) {
++    g_source_eof = true;
++    return true;
++  }
++
++  LOGE("[MP3] source read failed name=%s code=%d", s_debug_name ? s_debug_name : "<null>", n);
++  return false;
++}
++}
++
++bool audio_mp3_start_source(const AudioMp3Source& source, const char* debug_name)
+ {
+   audio_mp3_stop();
+ 
++  if (!source.read) {
++    LOGE("[MP3] invalid source: read callback missing");
++    return false;
++  }
++
+   const uint32_t t0 = millis();
+-  uint32_t t_after_open = t0;
+-  uint32_t t_after_init = t0;
+-  uint32_t t_after_prefill = t0;
++  const uint32_t t_after_init = t0;
++
++  g_source = source;
++  g_source_active = true;
++  g_source_is_stream = source.is_stream;
++  s_debug_name = debug_name ? debug_name : source.debug_name;
++  reset_decoder_state();
++
++  // 对本地文件保持“启动即预读”的行为；对网络流允许先空转等待。
++  if (!fill_input_buffer(sizeof(g_inbuf))) {
++    audio_mp3_stop();
++    return false;
++  }
++
++  if (!g_source_is_stream && g_inbuf_filled <= 0) {
++    audio_mp3_stop();
++    return false;
++  }
++
++  g_playing = true;
++  const uint32_t t_after_prefill = millis();
++  LOGI("[MP3] start source detail name=%s stream=%d init=%lums prefill=%lums total=%lums prefill_bytes=%d",
++       s_debug_name ? s_debug_name : "<null>",
++       g_source_is_stream ? 1 : 0,
++       (unsigned long)(t_after_init - t0),
++       (unsigned long)(t_after_prefill - t_after_init),
++       (unsigned long)(t_after_prefill - t0),
++       g_inbuf_filled);
++  return true;
++}
+ 
++bool audio_mp3_start(SdFat& sd, const char* path)
++{
+   g_sd = &sd;
++  const uint32_t t0 = millis();
+   if (!g_file.open(sd, path)) {
+     LOGE("[MP3] open failed: %s", path);
+     return false;
+   }
+-  t_after_open = millis();
++  const uint32_t t_after_open = millis();
+ 
+-  mp3dec_init(&g_dec);
+-  g_inbuf_filled = 0;
+-  t_after_init = millis();
++  AudioMp3Source src{};
++  src.ctx = &g_file;
++  src.read = file_source_read;
++  src.close = file_source_close;
++  src.debug_name = path;
++  src.is_stream = false;
+ 
+-  // 预读一点
+-  int n = g_file.read(g_inbuf, sizeof(g_inbuf));
+-  if (n <= 0) { audio_mp3_stop(); return false; }
+-  g_inbuf_filled = n;
+-  t_after_prefill = millis();
++  bool ok = audio_mp3_start_source(src, path);
++  if (!ok) return false;
+ 
+-  g_playing = true;
+-  g_sr = 44100;
+-  s_last_sr = 0; // 重置采样率缓存，确保新文件一定会设置 I2S 时钟
+   const auto& st = g_file.last_open_stats();
+-  LOGI("[MP3] start detail lock_wait=%lums dir_prepare=%lums dir_cache=%u cache_reason=%s file_open=%lums file_size=%lums open=%lums init=%lums prefill=%lums total=%lums",
++  const uint32_t t_after_start = millis();
++  LOGI("[MP3] start detail lock_wait=%lums dir_prepare=%lums dir_cache=%u cache_reason=%s file_open=%lums file_size=%lums open=%lums start=%lums total=%lums",
+        (unsigned long)st.lock_wait_ms,
+        (unsigned long)st.dir_prepare_ms,
+        (unsigned)st.used_dir_cache,
+@@ -62,118 +163,122 @@
+        (unsigned long)st.file_open_ms,
+        (unsigned long)st.file_size_ms,
+        (unsigned long)(t_after_open - t0),
+-       (unsigned long)(t_after_init - t_after_open),
+-       (unsigned long)(t_after_prefill - t_after_init),
+-       (unsigned long)(t_after_prefill - t0));
++       (unsigned long)(t_after_start - t_after_open),
++       (unsigned long)(t_after_start - t0));
+   return true;
+ }
+ 
+ void audio_mp3_stop()
+ {
+-    // ✅ 清 pending PCM（非常重要）
+-    s_pending_off = 0;
+-    s_pending_frames = 0;
++  s_pending_off = 0;
++  s_pending_frames = 0;
+ 
+-    if (g_file.f) g_file.close();
+-    g_playing = false;
+-    g_inbuf_filled = 0;
+-}
++  if (g_source_active && g_source.close) {
++    g_source.close(g_source.ctx);
++  }
+ 
++  clear_source();
++  g_playing = false;
++  g_inbuf_filled = 0;
++  g_source_eof = false;
++}
+ 
+ bool audio_mp3_loop()
+ {
+-    if (!g_playing) return false;
++  if (!g_playing) return false;
+ 
+-    // --- A) 先把 pending 的 PCM 写完 ---
+-    if (s_pending_frames > 0) {
+-        size_t w = audio_i2s_write_frames(g_pcm + s_pending_off * 2, s_pending_frames);
+-        if (w == SIZE_MAX) { audio_mp3_stop(); return false; }
+-        s_pending_off    += w;
+-        s_pending_frames -= w;
+-
+-        // 这轮先不解新帧，尽快回到主循环（高频喂）
+-        return true;
+-    }
+-
+-    // --- B) 输入补充 ---
+-    if (g_inbuf_filled < 2048) {
+-        int space = (int)sizeof(g_inbuf) - g_inbuf_filled;
+-        if (space > 0) {
+-            int n = g_file.read(g_inbuf + g_inbuf_filled, space);
+-            if (n > 0) g_inbuf_filled += n;
+-        }
+-        if (g_inbuf_filled == 0) { audio_mp3_stop(); return false; }
+-    }
++  // --- A) 先把 pending 的 PCM 写完 ---
++  if (s_pending_frames > 0) {
++    size_t w = audio_i2s_write_frames(g_pcm + s_pending_off * 2, s_pending_frames);
++    if (w == SIZE_MAX) { audio_mp3_stop(); return false; }
++    s_pending_off    += w;
++    s_pending_frames -= w;
++    return true;
++  }
+ 
+-    // --- C) 解一帧 ---
+-    mp3dec_frame_info_t info;
+-    int samples = mp3dec_decode_frame(&g_dec, g_inbuf, g_inbuf_filled, g_pcm, &info);
+-
+-    if (info.frame_bytes == 0) {
+-        // 只要有数据且没解出帧，就尝试找同步
+-        if (g_inbuf_filled >= 2) {
+-            int sync_pos = -1;
+-            // 搜索缓冲区，寻找 0xFF (Syncword 开始)
+-            // 注意：从 1 开始搜，因为 0 位置已经证明解不出帧了
+-            for (int i = 1; i < g_inbuf_filled - 1; ++i) {
+-                if (g_inbuf[i] == 0xFF && (g_inbuf[i+1] & 0xE0) == 0xE0) {
+-                    sync_pos = i;
+-                    break;
+-                }
+-            }
+-
+-            if (sync_pos > 0) {
+-                // 移位到新的同步点
+-                memmove(g_inbuf, g_inbuf + sync_pos, g_inbuf_filled - sync_pos);
+-                g_inbuf_filled -= sync_pos;
+-                LOGD("[MP3] Resynced to pos %d", sync_pos);
+-            } else {
+-                // 彻底没找到，保留最后 1 字节（防止切断跨缓冲区的同步头），其余丢弃
+-                int keep = 1;
+-                memmove(g_inbuf, g_inbuf + g_inbuf_filled - keep, keep);
+-                g_inbuf_filled = keep;
+-            }
+-        }
+-        return true;
++  // --- B) 输入补充 ---
++  if (g_inbuf_filled < 2048) {
++    if (!fill_input_buffer(2048)) {
++      audio_mp3_stop();
++      return false;
+     }
+-
+-    // --- D) 消费输入 ---
+-    if (info.frame_bytes > 0 && info.frame_bytes <= g_inbuf_filled) {
+-        memmove(g_inbuf, g_inbuf + info.frame_bytes, g_inbuf_filled - info.frame_bytes);
+-        g_inbuf_filled -= info.frame_bytes;
+-    } else {
++    if (g_inbuf_filled == 0) {
++      if (g_source_eof) {
+         audio_mp3_stop();
+         return false;
++      }
++      // 流式输入：暂时没数据，保持播放任务活着
++      return true;
+     }
++  }
+ 
+-    // --- E) 处理单声道/双声道 ---
+-    if (samples > 0) {
+-        g_sr = info.hz;
+-        s_channels = info.channels;
+-        if (g_sr != s_last_sr) {
+-            audio_i2s_set_sample_rate(g_sr);
+-            s_last_sr = g_sr;
+-        }
+-
+-        // 如果是单声道，扩充为双声道（复制到左右声道）
+-        if (s_channels == 1) {
+-            // 从后往前复制，避免覆盖
+-            for (int i = samples - 1; i >= 0; --i) {
+-                g_pcm[i * 2] = g_pcm[i];     // 左声道
+-                g_pcm[i * 2 + 1] = g_pcm[i]; // 右声道
+-            }            
++  // --- C) 解一帧 ---
++  mp3dec_frame_info_t info;
++  int samples = mp3dec_decode_frame(&g_dec, g_inbuf, g_inbuf_filled, g_pcm, &info);
++
++  if (info.frame_bytes == 0) {
++    if (g_inbuf_filled >= 2) {
++      int sync_pos = -1;
++      for (int i = 1; i < g_inbuf_filled - 1; ++i) {
++        if (g_inbuf[i] == 0xFF && (g_inbuf[i + 1] & 0xE0) == 0xE0) {
++          sync_pos = i;
++          break;
+         }
++      }
+ 
+-        // --- F) 写 PCM（建立 pending） ---
+-        s_pending_off = 0;
+-        s_pending_frames = (size_t)samples;// 转换为帧数（每帧2个样本）
+-
+-        // 先尝试写一次，写不完就留 pending
+-        size_t w = audio_i2s_write_frames(g_pcm, s_pending_frames);
+-        if (w == SIZE_MAX) { audio_mp3_stop(); return false; }
+-        s_pending_off    += w;
+-        s_pending_frames -= w;
++      if (sync_pos > 0) {
++        memmove(g_inbuf, g_inbuf + sync_pos, g_inbuf_filled - sync_pos);
++        g_inbuf_filled -= sync_pos;
++        LOGD("[MP3] Resynced to pos %d", sync_pos);
++      } else {
++        int keep = 1;
++        memmove(g_inbuf, g_inbuf + g_inbuf_filled - keep, keep);
++        g_inbuf_filled = keep;
++      }
+     }
+ 
++    // 文件源且已经 EOF：继续冲一轮残余字节后退出；流源则保持等待下一批输入。
++    if (g_source_eof && g_inbuf_filled <= 1) {
++      audio_mp3_stop();
++      return false;
++    }
+     return true;
++  }
++
++  // --- D) 消费输入 ---
++  if (info.frame_bytes > 0 && info.frame_bytes <= g_inbuf_filled) {
++    memmove(g_inbuf, g_inbuf + info.frame_bytes, g_inbuf_filled - info.frame_bytes);
++    g_inbuf_filled -= info.frame_bytes;
++  } else {
++    audio_mp3_stop();
++    return false;
++  }
++
++  // --- E) 处理单声道/双声道 ---
++  if (samples > 0) {
++    g_sr = info.hz;
++    s_channels = info.channels;
++    if (g_sr != s_last_sr) {
++      audio_i2s_set_sample_rate(g_sr);
++      s_last_sr = g_sr;
++    }
++
++    if (s_channels == 1) {
++      for (int i = samples - 1; i >= 0; --i) {
++        g_pcm[i * 2] = g_pcm[i];
++        g_pcm[i * 2 + 1] = g_pcm[i];
++      }
++    }
++
++    // --- F) 写 PCM（建立 pending） ---
++    s_pending_off = 0;
++    s_pending_frames = (size_t)samples;
++
++    size_t w = audio_i2s_write_frames(g_pcm, s_pending_frames);
++    if (w == SIZE_MAX) { audio_mp3_stop(); return false; }
++    s_pending_off    += w;
++    s_pending_frames -= w;
++  }
++
++  return true;
+ }
