@@ -535,6 +535,7 @@ static void web_handle_settings_get() {
   json += ",\"show_next_lyric\":"; json += (ws.show_next_lyric ? "true" : "false");
   json += ",\"show_cover\":"; json += (ws.show_cover ? "true" : "false");
   json += ",\"web_cover_spin\":"; json += (ws.web_cover_spin ? "true" : "false");
+  json += ",\"show_wifi_info\":"; json += (ws.show_wifi_info ? "true" : "false");
   json += "}";
   web_send_no_cache_headers();
   s_server.send(200, "application/json; charset=utf-8", json);
@@ -558,6 +559,7 @@ static void web_handle_settings_post() {
   ws.show_next_lyric = web_parse_bool(s_server.arg("show_next_lyric"), ws.show_next_lyric);
   ws.show_cover = web_parse_bool(s_server.arg("show_cover"), ws.show_cover);
   ws.web_cover_spin = web_parse_bool(s_server.arg("web_cover_spin"), ws.web_cover_spin);
+  ws.show_wifi_info = web_parse_bool(s_server.arg("show_wifi_info"), ws.show_wifi_info);
   web_settings_set(ws);
   if (!web_settings_save()) { web_send_json_err("保存设置失败", 500); return; }
   web_send_json_ok_simple("settings_saved");
@@ -869,6 +871,20 @@ static void web_handle_scan() {
   if (!app_request_start_rescan()) { web_send_json_err("当前状态不允许开始重扫"); return; }
   web_send_json_ok_simple("rescan_started");
 }
+
+static void web_handle_wifiinfo_toggle() {
+  WebRuntimeSettings ws = web_settings_get();
+  ws.show_wifi_info = !ws.show_wifi_info;
+  web_settings_set(ws);
+  
+  String json; json.reserve(80);
+  json += "{\"ok\":true";
+  json += ",\"show_wifi_info\":"; json += (ws.show_wifi_info ? "true" : "false");
+  json += "}";
+  web_send_no_cache_headers();
+  s_server.send(200, "application/json; charset=utf-8", json);
+}
+
 static void web_setup_routes() {
   s_server.on("/", HTTP_GET, web_handle_root);
   s_server.on("/artists", HTTP_GET, web_handle_artists_page);
@@ -900,6 +916,7 @@ static void web_setup_routes() {
   s_server.on("/api/volume", HTTP_POST, web_handle_volume);
   s_server.on("/api/state/save", HTTP_POST, web_handle_state_save);
   s_server.on("/api/scan", HTTP_POST, web_handle_scan);
+  s_server.on("/api/wifiinfo/toggle", HTTP_POST, web_handle_wifiinfo_toggle);
   s_server.onNotFound([](){ web_send_json_err("not_found", 404); });
 }
 void web_server_start() {

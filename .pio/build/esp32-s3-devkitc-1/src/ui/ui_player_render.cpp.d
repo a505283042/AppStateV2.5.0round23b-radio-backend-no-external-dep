@@ -180,6 +180,26 @@
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32s3/include/esp_hw_support/include/soc/esp32/spiram.h \
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/cores/esp32/io_pin_remap.h \
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/cores/esp32/Arduino.h \
+ C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src/WiFi.h \
+ C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/cores/esp32/Print.h \
+ C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/cores/esp32/IPv6Address.h \
+ C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src/WiFiType.h \
+ C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src/WiFiSTA.h \
+ C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src/WiFiGeneric.h \
+ C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32s3/include/esp_wifi/include/esp_smartconfig.h \
+ C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32s3/include/wifi_provisioning/include/wifi_provisioning/manager.h \
+ C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32s3/include/protocomm/include/common/protocomm.h \
+ C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32s3/include/protocomm/include/security/protocomm_security.h \
+ C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32s3/include/wifi_provisioning/include/wifi_provisioning/wifi_config.h \
+ C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src/WiFiAP.h \
+ C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src/WiFiScan.h \
+ C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src/WiFiClient.h \
+ C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/cores/esp32/Client.h \
+ C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src/WiFiServer.h \
+ C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/cores/esp32/Server.h \
+ C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src/WiFiUdp.h \
+ C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/cores/esp32/Udp.h \
+ C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/cores/esp32/cbuf.h \
  include/ui/ui_internal.h \
  .pio/libdeps/esp32-s3-devkitc-1/LovyanGFX/src/lgfx/v1/lgfx_fonts.hpp \
  .pio/libdeps/esp32-s3-devkitc-1/LovyanGFX/src/lgfx/v1/misc/enum.hpp \
@@ -240,7 +260,6 @@
  .pio/libdeps/esp32-s3-devkitc-1/LovyanGFX/src/lgfx/v1/lgfx_filesystem_support.hpp \
  .pio/libdeps/esp32-s3-devkitc-1/LovyanGFX/src/lgfx/v1/../internal/alloca.h \
  .pio/libdeps/esp32-s3-devkitc-1/LovyanGFX/src/lgfx/v1/LGFXBase.hpp \
- C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/cores/esp32/Print.h \
  .pio/libdeps/esp32-s3-devkitc-1/LovyanGFX/src/lgfx/v1/misc/colortype.hpp \
  .pio/libdeps/esp32-s3-devkitc-1/LovyanGFX/src/lgfx/v1/misc/../../utility/pgmspace.h \
  .pio/libdeps/esp32-s3-devkitc-1/LovyanGFX/src/lgfx/v1/misc/pixelcopy.hpp \
@@ -307,4 +326,5 @@
  .pio/libdeps/esp32-s3-devkitc-1/LovyanGFX/src/lgfx/v1/touch/Touch_RA8875.hpp \
  include/board/board_pins.h include/ui/ui_text_utils.h \
  include/ui/ui_progress.h include/ui/ui_colors.h include/ui/ui_icons.h \
- include/audio/audio.h include/lyrics/lyrics.h include/utils/log.h
+ include/audio/audio.h include/lyrics/lyrics.h include/utils/log.h \
+ include/web/web_settings.h

@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <WiFi.h>
 #include "ui/ui_internal.h"
 #include "ui/ui_text_utils.h"
 #include "ui/ui_progress.h"
@@ -7,6 +8,7 @@
 #include "audio/audio.h"
 #include "lyrics/lyrics.h"
 #include "utils/log.h"
+#include "web/web_settings.h"
 #undef LOG_TAG
 #define LOG_TAG "UI"
 
@@ -117,7 +119,31 @@ void cover_info_draw()
   const int y_title = 176;   // 标题
   const int y_artist= 195;   // 歌手（下移3像素）
 
-  // 4) 歌词显示（屏幕上半部分）- 在遮罩之后绘制，确保可见
+  // 4) WiFi信息显示（屏幕最上方）- 在遮罩之后绘制，确保可见
+  const auto& ws = web_settings_get();
+  if (ws.show_wifi_info) {
+    const uint16_t c_wifi = 0xAD55;  // WiFi信息颜色（亮灰色）
+    const int y_wifi_name = 19;      // WiFi名称显示位置
+    const int y_wifi_ip = 34;        // IP地址显示位置
+    
+    // 获取WiFi名称和IP地址
+    String wifiName = "-";
+    String wifiIP = "0.0.0.0";
+    
+    if (WiFi.status() == WL_CONNECTED) {
+      wifiName = WiFi.SSID();
+      wifiIP = WiFi.localIP().toString();
+    } else if (WiFi.getMode() == WIFI_AP) {
+      wifiName = "AP模式";
+      wifiIP = WiFi.softAPIP().toString();
+    }
+    
+    // 分两行显示WiFi名称和IP地址
+    draw_center_text_on_sprite(dst, wifiName.c_str(), y_wifi_name, c_wifi, safe_pad);
+    draw_center_text_on_sprite(dst, wifiIP.c_str(), y_wifi_ip, c_wifi, safe_pad);
+  }
+
+  // 5) 歌词显示（屏幕上半部分）- 在遮罩之后绘制，确保可见
   bool hasLyrics = g_lyricsDisplay.hasLyrics();
   LOGD("[UI] hasLyrics: %d", hasLyrics);
   if (hasLyrics) {

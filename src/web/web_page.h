@@ -31,7 +31,7 @@ static const char WEBCTRL_INDEX_HTML[] PROGMEM = R"HTML(
     .status{display:flex;justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap}
     .small{font-size:12px;color:#aaa}
     .media{display:grid;grid-template-columns:112px 1fr;gap:14px;align-items:start}
-    .media.noCover{grid-template-columns:1fr}
+    .media.noCover{grid-template-columns:112px 1fr}
     .cover{width:112px;height:112px;border-radius:14px;background:#2a2a2a;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#8e8e8e;font-size:13px;cursor:pointer;user-select:none}
     .cover img{width:100%;height:100%;object-fit:cover;display:block}
     .cover.rotate{border-radius:50%;padding:4px;background:#202020}
@@ -54,13 +54,13 @@ static const char WEBCTRL_INDEX_HTML[] PROGMEM = R"HTML(
           <h1>ESP32S3 播放器</h1>
           <div class="muted" id="net">连接中...</div>
         </div>
-        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-          <div class="small" id="pollInfo">刷新：加载中...</div>
-          <a class="linkbtn secondary" href="/artists" style="padding:10px 12px;font-size:14px">歌手页</a>
-          <a class="linkbtn secondary" href="/albums" style="padding:10px 12px;font-size:14px">专辑页</a>
-          <a class="linkbtn secondary" href="/radios" style="padding:10px 12px;font-size:14px">电台页</a>
-          <a class="linkbtn secondary" href="/settings" style="padding:10px 12px;font-size:14px">网页设置</a>
-        </div>
+        <div class="small" id="pollInfo">刷新：加载中...</div>
+      </div>
+      <div class="nav" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:12px">
+        <a class="linkbtn secondary" href="/artists" style="padding:10px 12px;font-size:14px">歌手页</a>
+        <a class="linkbtn secondary" href="/albums" style="padding:10px 12px;font-size:14px">专辑页</a>
+        <a class="linkbtn secondary" href="/radios" style="padding:10px 12px;font-size:14px">电台页</a>
+        <a class="linkbtn secondary" href="/settings" style="padding:10px 12px;font-size:14px">网页设置</a>
       </div>
     </div>
 
@@ -117,6 +117,8 @@ static const char WEBCTRL_INDEX_HTML[] PROGMEM = R"HTML(
       <div class="controls2" style="grid-template-columns:1fr 1fr">
         <button class="secondary" id="radioBackBtn" style="display:none" onclick="returnFromRadio()">返回音乐播放</button>
         <button class="secondary" onclick="savePlayerState()">保存当前状态</button>
+        <button class="secondary" id="wifiInfoBtn" onclick="toggleWifiInfo()">隐藏WiFi信息</button>
+        <div></div>
       </div>
       <div class="small" style="margin-top:8px">保存到设备内部 NVS：音量、当前歌曲、播放模式、当前分组与视图</div>
     </div>
@@ -201,9 +203,16 @@ function updateCover(j){
   const allowSpin = j.web_cover_spin !== false;
   const base = j.cover_url && j.cover_url.length ? j.cover_url : '';
 
+  // 封面区域保持原有布局，只是控制图片显示
   media.classList.toggle('noCover', !allowCover);
-  box.style.display = allowCover ? 'flex' : 'none';
-  if(!allowCover){ return; }
+  if(!allowCover){ 
+    // 不显示封面图片，但保持封面区域
+    img.style.display='none';
+    img.removeAttribute('src');
+    fallback.style.display='block';
+    fallback.innerHTML='网页端封面<br>显示已关闭';
+    return; 
+  }
 
   box.classList.toggle('rotate', rotateView);
   box.classList.toggle('spin', rotateView && allowSpin && !!j.is_playing && !j.is_paused && !j.rescanning);
@@ -277,6 +286,24 @@ async function handlePrev(){
 
 async function handleNext(){
   await sendCmd('/api/next');
+}
+
+async function toggleWifiInfo(){
+  try{
+    const r = await fetch('/api/wifiinfo/toggle', {method:'POST'});
+    const j = await r.json();
+    if(j && j.ok && j.show_wifi_info !== undefined) {
+      updateWifiInfoButton(j.show_wifi_info);
+    }
+  }catch(e){}
+  scheduleNext(120);
+}
+
+function updateWifiInfoButton(showWifiInfo) {
+  const btn = document.getElementById('wifiInfoBtn');
+  if(btn) {
+    btn.textContent = showWifiInfo ? '隐藏WiFi信息' : '显示WiFi信息';
+  }
 }
 
 async function sendCmd(path){ try{ await fetch(path,{method:'POST'});}catch(e){} scheduleNext(120); }
@@ -409,7 +436,7 @@ static const char WEBCTRL_ARTISTS_HTML[] PROGMEM = R"HTML(
   <title>ESP32S3 歌手页</title>
   <style>
     body{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:#111;color:#eee}
-    .wrap{max-width:1200px;margin:0 auto;padding:16px}
+    .wrap{max-width:760px;margin:0 auto;padding:16px}
     .card{background:#1b1b1b;border-radius:16px;padding:16px;margin-bottom:12px;box-shadow:0 4px 18px rgba(0,0,0,.25)}
     .top{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}
     .actions{display:flex;gap:8px;flex-wrap:wrap}
@@ -417,7 +444,6 @@ static const char WEBCTRL_ARTISTS_HTML[] PROGMEM = R"HTML(
     a.secondary,button.secondary{background:#444}
     input{width:100%;padding:12px 14px;border-radius:12px;border:1px solid #444;background:#111;color:#eee;box-sizing:border-box}
     .muted{color:#aaa;font-size:14px}
-    .layout{display:grid;grid-template-columns:360px minmax(0,1fr);gap:12px}
     .list{max-height:70vh;overflow:auto}
     .item{padding:12px;border:1px solid #2e2e2e;border-radius:12px;margin-bottom:8px;cursor:pointer;background:#151515}
     .item.active{border-color:#2f6feb;background:#16233d}
@@ -445,8 +471,7 @@ static const char WEBCTRL_ARTISTS_HTML[] PROGMEM = R"HTML(
         <div class="sectionTitle">歌手页</div>
         <div class="muted" id="statusText">加载中...</div>
       </div>
-      <div class="actions">
-        <button id="refreshBtn" class="secondary">刷新</button>
+      <div class="nav" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:12px">
         <a class="secondary" href="/">控制页</a>
         <a class="secondary" href="/albums">专辑页</a>
         <a class="secondary" href="/radios">电台页</a>
@@ -458,11 +483,9 @@ static const char WEBCTRL_ARTISTS_HTML[] PROGMEM = R"HTML(
       <input id="searchInput" placeholder="搜索歌手名">
     </div>
 
-    <div class="layout">
-      <div class="card">
-        <div class="muted" id="countText">-</div>
-        <div class="list" id="artistList"></div>
-      </div>
+    <div class="card">
+      <div class="muted" id="countText">-</div>
+      <div class="list" id="artistList"></div>
     </div>
   </div>
 <script>
@@ -646,7 +669,6 @@ const $ = id => document.getElementById(id);
    loadArtists().catch(()=>{}); 
  } 
 
- $('refreshBtn').onclick = ()=>loadArtists().catch(e=>alert(e.message||'加载失败')); 
  $('searchInput').addEventListener('input', renderList); 
  loadArtists().catch(e=>{ $('statusText').textContent='加载失败'; alert(e.message||'加载失败'); });
 </script>
@@ -663,7 +685,7 @@ static const char WEBCTRL_ALBUMS_HTML[] PROGMEM = R"HTML(
   <title>ESP32S3 专辑页</title>
   <style>
     body{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:#111;color:#eee}
-    .wrap{max-width:1200px;margin:0 auto;padding:16px}
+    .wrap{max-width:760px;margin:0 auto;padding:16px}
     .card{background:#1b1b1b;border-radius:16px;padding:16px;margin-bottom:12px;box-shadow:0 4px 18px rgba(0,0,0,.25)}
     .top{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}
     .actions{display:flex;gap:8px;flex-wrap:wrap}
@@ -671,7 +693,6 @@ static const char WEBCTRL_ALBUMS_HTML[] PROGMEM = R"HTML(
     a.secondary,button.secondary{background:#444}
     input{width:100%;padding:12px 14px;border-radius:12px;border:1px solid #444;background:#111;color:#eee;box-sizing:border-box}
     .muted{color:#aaa;font-size:14px}
-    .layout{display:grid;grid-template-columns:380px minmax(0,1fr);gap:12px}
     .list{max-height:70vh;overflow:auto}
     .item{padding:12px;border:1px solid #2e2e2e;border-radius:12px;margin-bottom:8px;cursor:pointer;background:#151515}
     .item.active{border-color:#2f6feb;background:#16233d}
@@ -699,8 +720,7 @@ static const char WEBCTRL_ALBUMS_HTML[] PROGMEM = R"HTML(
         <div class="sectionTitle">专辑页</div>
         <div class="muted" id="statusText">加载中...</div>
       </div>
-      <div class="actions">
-        <button id="refreshBtn" class="secondary">刷新</button>
+      <div class="nav" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:12px">
         <a class="secondary" href="/">控制页</a>
         <a class="secondary" href="/artists">歌手页</a>
         <a class="secondary" href="/radios">电台页</a>
@@ -712,11 +732,9 @@ static const char WEBCTRL_ALBUMS_HTML[] PROGMEM = R"HTML(
       <input id="searchInput" placeholder="搜索 专辑名 / 歌手名">
     </div>
 
-    <div class="layout">
-      <div class="card">
-        <div class="muted" id="countText">-</div>
-        <div class="list" id="albumList"></div>
-      </div>
+    <div class="card">
+      <div class="muted" id="countText">-</div>
+      <div class="list" id="albumList"></div>
     </div>
   </div>
 <script>
@@ -900,7 +918,6 @@ const $ = id => document.getElementById(id);
    loadAlbums().catch(()=>{}); 
  } 
 
- $('refreshBtn').onclick = ()=>loadAlbums().catch(e=>alert(e.message||'加载失败')); 
  $('searchInput').addEventListener('input', renderList); 
  loadAlbums().catch(e=>{ $('statusText').textContent='加载失败'; alert(e.message||'加载失败'); });
 </script>
@@ -918,7 +935,7 @@ static const char WEBCTRL_RADIOS_HTML[] PROGMEM = R"HTML(
   <title>ESP32S3 电台页</title>
   <style>
     body{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:#111;color:#eee}
-    .wrap{max-width:900px;margin:0 auto;padding:16px}
+    .wrap{max-width:760px;margin:0 auto;padding:16px}
     .card{background:#1b1b1b;border-radius:16px;padding:16px;margin-bottom:12px;box-shadow:0 4px 18px rgba(0,0,0,.25)}
     .topbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:space-between}
     .nav{display:flex;gap:8px;flex-wrap:wrap}
@@ -939,8 +956,8 @@ static const char WEBCTRL_RADIOS_HTML[] PROGMEM = R"HTML(
         <div style="font-size:22px;font-weight:800">网络电台</div>
         <div class="muted">网络电台功能已上线 - 支持电台目录浏览与实时状态显示</div>
       </div>
-      <div class="nav">
-        <a class="secondary" href="/">首页</a>
+      <div class="nav" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:12px">
+        <a class="secondary" href="/">控制页</a>
         <a class="secondary" href="/artists">歌手页</a>
         <a class="secondary" href="/albums">专辑页</a>
         <a class="secondary" href="/settings">网页设置</a>

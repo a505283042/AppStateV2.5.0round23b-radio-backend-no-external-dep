@@ -25,6 +25,7 @@ struct WebRuntimeSettings {
   bool show_next_lyric = true;
   bool show_cover = true;
   bool web_cover_spin = true;
+  bool show_wifi_info = true;
 };
 
 // 启动时优先从 NVS 加载网页运行设置；若不存在则兼容导入旧版 SD 配置；都没有则使用默认值。
