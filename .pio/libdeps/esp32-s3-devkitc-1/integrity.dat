@@ -1,4 +1,4 @@
-https://github.com/pschatzmann/arduino-audio-tools.git
-https://github.com/OSSLibraries/Arduino_MFRC522v2.git
-greiman/SdFat@^2.2.3
 lovyan03/LovyanGFX@^1.1.12
+https://github.com/pschatzmann/arduino-audio-tools.git
+greiman/SdFat@^2.2.3
+https://github.com/OSSLibraries/Arduino_MFRC522v2.git
