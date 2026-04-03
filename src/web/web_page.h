@@ -462,6 +462,11 @@ static const char WEBCTRL_ARTISTS_HTML[] PROGMEM = R"HTML(
     .expandActions{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
     .expandEmpty{padding:12px 0;color:#aaa}
     @media (max-width:900px){.layout{grid-template-columns:1fr}.list{max-height:none}}
+    
+    /* 悬浮回到顶部按钮 */
+    .scrollToTopBtn{position:fixed;bottom:20px;right:20px;width:50px;height:50px;border-radius:50%;background:#2f6feb;color:#fff;border:none;font-size:24px;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,.3);opacity:0;transform:translateY(20px);transition:opacity 0.3s,transform 0.3s;z-index:1000;display:flex;align-items:center;justify-content:center}
+    .scrollToTopBtn.visible{opacity:1;transform:translateY(0)}
+    .scrollToTopBtn:hover{background:#1a5bd4}
   </style>
 </head>
 <body>
@@ -671,10 +676,28 @@ const $ = id => document.getElementById(id);
 
  $('searchInput').addEventListener('input', renderList); 
  loadArtists().catch(e=>{ $('statusText').textContent='加载失败'; alert(e.message||'加载失败'); });
+ 
+ // 悬浮回到顶部按钮功能
+ const scrollToTopBtn = document.createElement('button');
+ scrollToTopBtn.className = 'scrollToTopBtn';
+ scrollToTopBtn.innerHTML = '↑';
+ scrollToTopBtn.title = '回到顶部';
+ scrollToTopBtn.onclick = () => window.scrollTo({top:0,behavior:'smooth'});
+ document.body.appendChild(scrollToTopBtn);
+ 
+ // 滚动检测
+ window.addEventListener('scroll', () => {
+   const scrollY = window.scrollY;
+   if (scrollY > 300) {
+     scrollToTopBtn.classList.add('visible');
+   } else {
+     scrollToTopBtn.classList.remove('visible');
+   }
+ });
 </script>
 </body>
 </html>
-)HTML";
+)HTML;)HTML";
 
 static const char WEBCTRL_ALBUMS_HTML[] PROGMEM = R"HTML(
 <!doctype html>
@@ -711,6 +734,11 @@ static const char WEBCTRL_ALBUMS_HTML[] PROGMEM = R"HTML(
     .expandActions{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
     .expandEmpty{padding:12px 0;color:#aaa}
     @media (max-width:900px){.layout{grid-template-columns:1fr}.list{max-height:none}}
+    
+    /* 悬浮回到顶部按钮 */
+    .scrollToTopBtn{position:fixed;bottom:20px;right:20px;width:50px;height:50px;border-radius:50%;background:#2f6feb;color:#fff;border:none;font-size:24px;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,.3);opacity:0;transform:translateY(20px);transition:opacity 0.3s,transform 0.3s;z-index:1000;display:flex;align-items:center;justify-content:center}
+    .scrollToTopBtn.visible{opacity:1;transform:translateY(0)}
+    .scrollToTopBtn:hover{background:#1a5bd4}
   </style>
 </head>
 <body>
@@ -920,10 +948,28 @@ const $ = id => document.getElementById(id);
 
  $('searchInput').addEventListener('input', renderList); 
  loadAlbums().catch(e=>{ $('statusText').textContent='加载失败'; alert(e.message||'加载失败'); });
+ 
+ // 悬浮回到顶部按钮功能
+ const scrollToTopBtn = document.createElement('button');
+ scrollToTopBtn.className = 'scrollToTopBtn';
+ scrollToTopBtn.innerHTML = '↑';
+ scrollToTopBtn.title = '回到顶部';
+ scrollToTopBtn.onclick = () => window.scrollTo({top:0,behavior:'smooth'});
+ document.body.appendChild(scrollToTopBtn);
+ 
+ // 滚动检测
+ window.addEventListener('scroll', () => {
+   const scrollY = window.scrollY;
+   if (scrollY > 300) {
+     scrollToTopBtn.classList.add('visible');
+   } else {
+     scrollToTopBtn.classList.remove('visible');
+   }
+ });
 </script>
 </body>
 </html>
-)HTML";
+)HTML;)HTML";
 
 
 static const char WEBCTRL_RADIOS_HTML[] PROGMEM = R"HTML(
@@ -946,6 +992,11 @@ static const char WEBCTRL_RADIOS_HTML[] PROGMEM = R"HTML(
     .item{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;padding:12px;border-radius:12px;background:#161616;border:1px solid #2a2a2a}
     .name{font-size:16px;font-weight:700}.meta{font-size:12px;color:#aaa;margin-top:4px}
     .err{color:#ff8f8f;font-size:13px;white-space:pre-wrap}
+    
+    /* 悬浮回到顶部按钮 */
+    .scrollToTopBtn{position:fixed;bottom:20px;right:20px;width:50px;height:50px;border-radius:50%;background:#2f6feb;color:#fff;border:none;font-size:24px;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,.3);opacity:0;transform:translateY(20px);transition:opacity 0.3s,transform 0.3s;z-index:1000;display:flex;align-items:center;justify-content:center}
+    .scrollToTopBtn.visible{opacity:1;transform:translateY(0)}
+    .scrollToTopBtn:hover{background:#1a5bd4}
   </style>
 </head>
 <body>
@@ -1014,7 +1065,25 @@ async function loadStatus(){
   }catch(e){}
 }
 loadRadios(); loadStatus();
+
+// 悬浮回到顶部按钮功能
+const scrollToTopBtn = document.createElement('button');
+scrollToTopBtn.className = 'scrollToTopBtn';
+scrollToTopBtn.innerHTML = '↑';
+scrollToTopBtn.title = '回到顶部';
+scrollToTopBtn.onclick = () => window.scrollTo({top:0,behavior:'smooth'});
+document.body.appendChild(scrollToTopBtn);
+
+// 滚动检测
+window.addEventListener('scroll', () => {
+  const scrollY = window.scrollY;
+  if (scrollY > 300) {
+    scrollToTopBtn.classList.add('visible');
+  } else {
+    scrollToTopBtn.classList.remove('visible');
+  }
+});
 </script>
 </body>
 </html>
-)HTML";
+)HTML;
