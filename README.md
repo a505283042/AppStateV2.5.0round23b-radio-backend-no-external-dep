@@ -1,491 +1,661 @@
-# ESP32-S3 音乐播放器
+# ESP32-S3 圆屏音乐播放器
 
-一个基于 ESP32-S3 的高音质音乐播放器，支持 NFC 控制、歌词显示、双视图封面展示等功能。
+一个基于 **ESP32-S3 + PSRAM** 的本地音乐 / 网络电台播放器，面向“圆屏桌面播放器”场景设计，支持：
 
-## 功能特性
+- 本地 **MP3 / FLAC** 播放
+- **HTTP MP3 网络电台** 播放
+- **圆形 TFT 双视图 UI**（旋转封面 / 信息视图）
+- **歌词显示** 与下一句提示
+- **NFC 绑定播放**（歌曲 / 歌手 / 专辑）
+- **Web 控制页**（状态查看、切歌、音量、模式、电台、封面、设置）
+- 基于 **V3 音乐索引** 的快速启动与重扫
+- 基于 **NVS** 的播放状态与网页设置持久化
 
-### 核心功能
-- **音乐播放**: 支持 MP3、FLAC 等格式音频播放
-- **暂停/恢复**: 支持播放暂停和恢复，带有淡入淡出效果
-- **双视图封面**: 
-  - 旋转封面视图 - 专辑封面持续旋转动画
-  - 信息详情视图 - 显示封面、歌词、歌曲信息、进度条
-- **歌词显示**: 支持 LRC 格式歌词文件，实时同步滚动显示
-- **NFC 控制**: 使用 NFC 标签快速切换播放列表/专辑
-- **硬件按键**: 6 个物理按键控制（模式、播放、上一首、下一首、音量+/-）
+> 本 README 按当前主线整理：
+> - 网络电台主线已统一为 **Audio Tools URLStream -> unified MP3 core (`audio_mp3.cpp`)**
+> - 旧的 `audio_mp3_stream*` 兼容播放链已下线或应视为历史残留
+> - 历史数据兼容层（如旧 NVS key / 旧 NFC 绑定格式）仍保留，用于平滑升级
 
-### 播放模式
-- 全部顺序播放
-- 全部随机播放
-- 歌手顺序播放
-- 歌手随机播放
-- 专辑顺序播放
-- 专辑随机播放
+---
 
-### 技术特性
-- **双缓冲渲染**: 使用 LovyanGFX 实现无闪烁封面动画
-- **PSRAM 支持**: 充分利用 ESP32-S3 的 PSRAM 存储封面和歌词数据
-- **并行加载**: 封面解码与歌词加载并行执行，减少等待时间
-- **状态机架构**: 清晰的状态管理（启动/播放器/NFC管理）
+## 1. 当前能力概览
 
-## 硬件需求
+### 已完成
+
+- 本地文件播放：`MP3`、`FLAC`
+- 电台播放：`HTTP MP3 stream`
+- UI 双视图：
+  - 旋转封面视图
+  - 信息详情视图（标题 / 歌手 / 专辑 / 进度 / 歌词）
+- 歌词：LRC 解析、当前句 / 下一句 / 再下一句摘要
+- 封面：
+  - MP3 内嵌 APIC
+  - FLAC picture block
+  - 外部封面兜底
+  - `/System/default_cover.jpg` 默认封面
+- 播放模式：
+  - 全部顺序 / 全部随机
+  - 歌手顺序 / 歌手随机
+  - 专辑顺序 / 专辑随机
+- 列表选择模式（歌手 / 专辑）
+- NFC 绑定：
+  - `track`
+  - `artist`
+  - `album`
+- Web 控制：
+  - 当前状态
+  - 切歌 / 播放暂停 / 模式切换 / 音量
+  - 歌手 / 专辑 / 电台页面
+  - 当前封面获取
+  - 设置页
+  - 扫描 / 保存状态
+- 启动恢复：
+  - NVS blob 快照恢复播放状态
+  - 兼容旧版 NVS key
+- Wi‑Fi：
+  - 优先 STA 连 `wifi.conf`
+  - 失败自动回退 AP 热点
+- 运行时监控：
+  - heap / internal / dma / psram
+  - 任务栈高水位
+
+### 当前主线不包含
+
+- `m3u8 / HLS` 播放
+- SMB / NFS / NAS 目录浏览
+- 网络 FLAC 文件播放
+- OTA / 蓝牙 / 触摸交互
+
+---
+
+## 2. 硬件组成
 
 ### 主控
-- **ESP32-S3 DevKitC-1** (带 PSRAM)
+
+- ESP32-S3（带 PSRAM）
+- 当前 PlatformIO 配置按 **16MB Flash + OPI PSRAM** 使用
 
 ### 显示
-- **GC9A01 圆形 TFT 显示屏** (240x240)
+
+- GC9A01 圆形 TFT，240x240
+- 图形库：`LovyanGFX`
 
 ### 音频
-- **PCM5102A I2S DAC** 或其他 I2S 音频解码器
+
+- I2S DAC：如 `PCM5102A`
 
 ### 存储
-- **SD 卡模块** (支持 SDHC/SDXC)
+
+- TF / SD 卡（`SdFat`）
 
 ### NFC
-- **RC522 NFC 读卡器模块**
+
+- RC522（SPI）
 
 ### 按键
-- 6 个轻触按键（连接到 GPIO）
 
-## 引脚连接
+- 6 个独立按键：模式 / 播放 / 上一首 / 下一首 / 音量减 / 音量加
 
-### SPI - SD 卡
+---
+
+## 3. 默认引脚定义
+
+### SD SPI
+
 | 功能 | GPIO |
-|------|------|
-| MOSI | 11   |
-| MISO | 13   |
-| SCK  | 12   |
-| CS   | 10   |
+|---|---:|
+| MOSI | 11 |
+| MISO | 13 |
+| SCK | 12 |
+| CS | 10 |
 
-### SPI - 显示屏 + NFC
-| 功能 | GPIO |
-|------|------|
-| MOSI | 14   |
-| MISO | 47   |
-| SCK  | 21   |
-| TFT CS  | 42   |
-| TFT DC  | 41   |
-| TFT RST | 40   |
-| RC522 CS  | 38   |
-| RC522 RST | 39   |
+### UI SPI（TFT + RC522）
 
-### I2S - 音频输出
 | 功能 | GPIO |
-|------|------|
-| BCLK | 4    |
-| LRCK | 5    |
-| DOUT | 6    |
+|---|---:|
+| MOSI | 14 |
+| MISO | 47 |
+| SCK | 21 |
+| TFT CS | 42 |
+| TFT DC | 41 |
+| TFT RST | 40 |
+| RC522 CS | 38 |
+| RC522 RST | 39 |
+| RC522 IRQ | 45 |
+
+### I2S
+
+| 功能 | GPIO |
+|---|---:|
+| BCLK | 4 |
+| LRCK | 5 |
+| DOUT | 6 |
 
 ### 按键
+
 | 功能 | GPIO |
-|------|------|
-| MODE | 15   |
-| PLAY | 16   |
-| PREV | 17   |
-| NEXT | 18   |
-| VOL- | 8    |
-| VOL+ | 3    |
+|---|---:|
+| MODE | 15 |
+| PLAY | 16 |
+| PREV | 17 |
+| NEXT | 18 |
+| VOL- | 8 |
+| VOL+ | 3 |
 
-## 软件架构
+> 实际板级定义在：`include/board/board_pins.h` 与 `include/keys/keys_pins.h`
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                        应用层 (App)                          │
-├─────────────────────────────────────────────────────────────┤
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐       │
-│  │  STATE_BOOT  │  │ STATE_PLAYER │  │STATE_NFC_ADMIN│      │
-│  └──────────────┘  └──────────────┘  └──────────────┘       │
-├─────────────────────────────────────────────────────────────┤
-│                        服务层 (Service)                      │
-├──────────┬──────────┬──────────┬──────────┬────────────────┤
-│   UI     │  Audio   │ Storage  │   NFC    │     Keys       │
-│  系统     │  服务    │  存储     │  系统     │    按键        │
-├──────────┴──────────┴──────────┴──────────┴────────────────┤
-│                        硬件抽象层 (HAL)                      │
-├──────────┬──────────┬──────────┬──────────┬────────────────┤
-│  TFT     │  I2S     │   SD     │   SPI    │    GPIO        │
-│ 显示屏    │  音频     │   卡     │  总线     │    按键        │
-└──────────┴──────────┴──────────┴──────────┴────────────────┘
-```
+---
 
-### 核心模块
+## 4. 软件架构
 
-| 模块 | 说明 |
-|------|------|
-| `app_state` | 应用状态机管理 |
-| `player_state` | 播放器逻辑（播放控制、切歌、随机播放等）|
-| `audio_service` | 音频服务（解码、I2S 输出）|
-| `ui` | UI 系统（LovyanGFX 驱动、双缓冲、封面渲染）|
-| `lyrics` | 歌词解析与显示 |
-| `storage` | SD 卡文件管理与音乐库索引 |
-| `nfc` | NFC 标签读写 |
-| `keys` | 按键扫描与处理 |
+## 总体分层
 
-## 项目结构
+```text
+App State
+├─ Boot
+├─ Player
+└─ NFC Admin
 
-```
-├── include/                 # 头文件
-│   ├── app_state.h         # 应用状态机
-│   ├── player_state.h      # 播放器状态
-│   ├── boot_state.h        # 启动状态
-│   ├── app_flags.h         # 全局标志
-│   ├── audio/              # 音频系统
-│   │   ├── audio.h
-│   │   ├── audio_service.h
-│   │   ├── audio_i2s.h
-│   │   ├── audio_mp3.h
-│   │   └── audio_flac.h
-│   ├── board/              # 板级硬件抽象
-│   │   ├── board_pins.h    # 引脚定义
-│   │   └── board_spi.h
-│   ├── keys/               # 按键系统
-│   │   ├── keys.h
-│   │   └── keys_pins.h
-│   ├── lyrics/             # 歌词系统
-│   │   └── lyrics.h
-│   ├── nfc/                # NFC 系统
-│   │   ├── nfc.h
-│   │   └── nfc_admin_state.h
-│   ├── storage/            # 存储系统
-│   │   ├── storage.h
-│   │   └── storage_music.h
-│   ├── ui/                 # UI 系统
-│   │   ├── ui.h
-│   │   ├── ui_colors.h
-│   │   ├── ui_icons.h
-│   │   ├── ui_progress.h
-│   │   ├── ui_text_utils.h
-│   │   ├── gc9a01_lgfx.h
-│   │   └── ui_cover_mem.h
-│   └── utils/              # 工具类
-│       └── log.h
-├── src/                    # 源文件
-│   ├── main.cpp            # 程序入口
-│   ├── app_state.cpp       # 状态机实现
-│   ├── player_state.cpp    # 播放器逻辑
-│   ├── boot_state.cpp      # 启动逻辑
-│   ├── audio/              # 音频系统源码
-│   ├── board/              # 板级源码
-│   ├── keys/               # 按键系统源码
-│   ├── lyrics/             # 歌词系统源码
-│   ├── nfc/                # NFC 系统源码
-│   ├── storage/            # 存储系统源码
-│   └── ui/                 # UI 系统源码
-├── platformio.ini          # PlatformIO 配置
-└── README.md               # 本文件
+Player Core
+├─ player_state / player_control / player_playlist
+├─ player_assets（歌词/封面/总时长补齐与预取）
+├─ player_snapshot（NVS 快照）
+└─ player_source（本地 / 网络电台来源摘要）
+
+Audio
+├─ audio_service（独立任务，命令队列）
+├─ audio.cpp（本地文件播放入口）
+├─ audio_flac.cpp
+├─ audio_mp3.cpp（统一 MP3 核心）
+├─ audio_mp3_source_file.cpp
+├─ audio_mp3_source_audiotools.cpp
+└─ audio_radio_backend.cpp
+
+Storage
+├─ storage_catalog_v3
+├─ storage_index_v3
+├─ storage_scan_v3
+├─ storage_builder_v3
+└─ storage_groups_v3
+
+UI / Web / NFC
+├─ ui_*（圆屏渲染、封面缓存、列表页）
+├─ web_server / web_snapshot / web_settings
+└─ nfc / nfc_binding / nfc_admin_state
 ```
 
-## 依赖库
+## 当前音频主线
 
-| 库 | 版本 | 用途 |
-|----|------|------|
-| [LovyanGFX](https://github.com/lovyan03/LovyanGFX) | ^1.1.12 | 显示屏驱动（支持双缓冲）|
-| [TFT_eSPI](https://github.com/Bodmer/TFT_eSPI) | ^2.5.43 | 备用显示驱动 |
-| [LVGL](https://lvgl.io/) | ^8.3.11 | GUI 框架 |
-| [SdFat](https://github.com/greiman/SdFat) | ^2.2.3 | SD 卡访问 |
-| [MFRC522](https://github.com/miguelbalboa/MFRC522) | ^1.4.10 | NFC/RFID 读写 |
+### 本地文件
 
-## 构建与上传
+```text
+player -> audio_service_play(...) -> audio.cpp
+     -> MP3 / FLAC 解码 -> I2S
+```
 
-### 使用 PlatformIO
+### 网络电台
 
-1. 安装 [PlatformIO](https://platformio.org/)
-2. 打开项目文件夹
-3. 构建并上传：
+```text
+player -> audio_radio_backend.cpp
+       -> audio_service_play_stream_mp3(...)
+       -> audio_mp3_start_url(...)
+       -> Audio Tools URLStream
+       -> audio_mp3.cpp unified MP3 core
+       -> I2S
+```
+
+这意味着当前项目已经实现了：
+
+- **文件 MP3** 与 **网络 MP3** 共用统一 MP3 解码主线
+- “来源”和“解码器”已经开始分离，后续扩展网络文件 / NAS / WebDAV 会更顺
+
+---
+
+## 5. 启动流程
+
+系统启动大致顺序如下：
+
+1. 初始化串口与 SPI 总线
+2. 初始化 SD 卡
+3. 读取 NFC 绑定表 `/System/nfc_map.txt`
+4. 初始化固定封面缓冲区（优先 PSRAM）
+5. 初始化 UI
+6. 启动 `audio_service` 音频任务
+7. 启动运行时监控任务
+8. 初始化 NFC
+9. 加载或重建 `V3` 音乐索引 `/System/music_index_v3.bin`
+10. 预加载电台列表 `/System/radio_list.txt`
+11. 从 NVS 读取待恢复快照
+12. 启动 Web 服务器
+13. 进入 `STATE_PLAYER`
+
+---
+
+## 6. SD 卡目录约定
+
+推荐最小目录：
+
+```text
+/ Music/
+    xxx.mp3
+    xxx.flac
+/ System/
+    music_index_v3.bin
+    radio_list.txt
+    nfc_map.txt
+    default_cover.jpg
+    /config/
+        wifi.conf
+        web_settings.conf   # 旧版导入源，可选
+```
+
+### 音乐目录
+
+- 默认扫描根目录：`/Music`
+- 启动时优先加载 `/System/music_index_v3.bin`
+- 若索引不存在或加载失败，会自动重扫 `/Music` 并重建索引
+
+### 电台列表
+
+文件：`/System/radio_list.txt`
+
+支持格式：
+
+```text
+name|url
+name|url|format
+name|url|format|region
+name|url|format|region|logo
+```
+
+示例：
+
+```text
+怀集音乐之声|http://lhttp.qingting.fm/live/4804/64k.mp3|mp3|广东
+央广音乐之声|http://ngcdn003.cnr.cn/live/yyzs/index.m3u8|hls|全国
+```
+
+> 说明：当前项目的**电台实际主线是 HTTP MP3**。即使列表文件可以记 `format` 字段，`m3u8/hls` 仍属于后续扩展方向，不是当前稳定能力。
+
+### NFC 绑定表
+
+文件：`/System/nfc_map.txt`
+
+当前新格式：
+
+```text
+UID|TYPE|KEY|DISPLAY
+```
+
+示例：
+
+```text
+09:76:10:05|track|/Music/周杰伦 - 忍者.flac|忍者 - 周杰伦
+F7:8C:64:06|album|王菲菲 - 那些年|王菲菲 - 那些年
+```
+
+兼容旧格式：
+
+```text
+UID=PATH
+```
+
+系统会自动按 `track` 处理旧格式。
+
+### Wi‑Fi 配置
+
+文件：`/System/config/wifi.conf`
+
+示例：
+
+```ini
+hostname=esp32s3-player
+
+ssid=MyWiFi
+password=12345678
+
+ssid=BackupWiFi
+password=87654321
+```
+
+行为：
+
+- 启动时按顺序尝试连接配置文件里的 Wi‑Fi
+- 连接失败后自动开启 AP：
+  - SSID: `ESP32S3-Player`
+  - Password: `12345678`
+
+---
+
+## 7. Web 控制
+
+### 入口页面
+
+- `/`：主控页
+- `/artists`
+- `/albums`
+- `/radios`
+- `/settings`
+
+### 主要 API
+
+- `GET /api/status`
+- `GET /api/artists`
+- `GET /api/albums`
+- `GET /api/radios`
+- `GET /api/artist/detail`
+- `GET /api/album/detail`
+- `GET /api/settings`
+- `POST /api/settings`
+- `GET /api/cover/current`
+- `POST /api/track/play`
+- `POST /api/artist/play`
+- `POST /api/album/play`
+- `POST /api/radio/play`
+- `POST /api/radio/stop`
+- `POST /api/playpause`
+- `POST /api/next`
+- `POST /api/prev`
+- `POST /api/mode/toggle`
+- `POST /api/mode/category`
+- `POST /api/view/toggle`
+- `POST /api/volume`
+- `POST /api/state/save`
+- `POST /api/scan`
+
+### 网页设置
+
+当前持久化在 **NVS** 中：
+
+- 刷新档位：省流量 / 平衡 / 流畅
+- 歌词同步策略：精准优先 / 平衡 / 等轮询优先
+- 是否显示下一句歌词
+- 是否显示封面
+- 旋转视图时网页封面是否旋转
+
+如果没有 NVS 设置，会尝试导入旧版 SD 文件：
+
+- `/System/config/web_settings.conf`
+
+---
+
+## 8. 按键语义
+
+### 正常播放状态
+
+| 按键 | 操作 | 行为 |
+|---|---|---|
+| MODE | 单击 | 切换小类：顺序 / 随机 |
+| MODE | 双击 | 切换大类：全部 / 歌手 / 专辑 |
+| MODE | 长按 | 开始重扫音乐库 |
+| PLAY | 短按 | 播放 / 暂停 / 恢复 |
+| PLAY | 长按 | 切换 UI 视图 |
+| PREV | 短按 | 上一首 |
+| PREV | 长按 | 进入 NFC 管理模式 |
+| NEXT | 短按 | 下一首 |
+| NEXT | 长按 | 歌手/专辑模式下进入列表选择；全部模式下大步前进 |
+| VOL- | 按住连发 | 音量减 |
+| VOL+ | 按住连发 | 音量加 |
+
+### 扫描中
+
+- 仅允许 `MODE` 触发取消扫描
+- 其他按键逻辑屏蔽
+
+### NFC 管理模式
+
+- `MODE` / `PLAY` 交给 `nfc_admin_state` 处理
+
+---
+
+## 9. 播放模式说明
+
+项目内部的 6 个播放模式：
+
+- `PLAY_MODE_ALL_SEQ`
+- `PLAY_MODE_ALL_RND`
+- `PLAY_MODE_ARTIST_SEQ`
+- `PLAY_MODE_ARTIST_RND`
+- `PLAY_MODE_ALBUM_SEQ`
+- `PLAY_MODE_ALBUM_RND`
+
+切换逻辑分成两层：
+
+- **小类切换**：顺序 ↔ 随机
+- **大类切换**：全部 → 歌手 → 专辑
+
+这种拆法让模式控制更清楚，也更适合映射到 Web 与硬件按键。
+
+---
+
+## 10. V3 音乐索引
+
+当前主线使用 **V3 catalog**：
+
+- 启动优先加载 `/System/music_index_v3.bin`
+- 失败则重扫 `/Music`
+- 扫描结果重建并保存回 V3 索引
+
+V3 的设计目标：
+
+- 降低启动全盘扫描成本
+- 支持更大的音乐库
+- 将 `tracks / albums / artists / string_pool` 结构化存储
+- 为歌手 / 专辑分组和列表页提供更稳定的基础
+
+日志中会输出大致内存统计，例如：
+
+- `tracks`
+- `albums`
+- `artists`
+- `string_pool`
+- `artist_groups`
+- `album_groups`
+
+---
+
+## 11. 状态恢复
+
+播放器状态使用 **NVS blob** 保存，主要包括：
+
+- 音量
+- 播放模式
+- 当前 group
+- 当前 track index
+- 当前 track path
+- 当前 UI view
+- 用户是否处于暂停态
+
+恢复策略：
+
+- 启动时先读取“待恢复快照”
+- 首次进入 player 后先恢复轻量状态
+- 再延后恢复曲目，避免阻塞进入主界面
+
+兼容保留：
+
+- 旧 NVS key 读取逻辑仍在
+- 目的是让旧版本升级后仍能恢复已有状态
+
+---
+
+## 12. 内存设计（当前版本重点）
+
+### 已明确放到 PSRAM 的大头
+
+- 固定封面原图缓冲：约 `400 KB`
+- 240x240 RGB565 封面相关 sprite / cache：约 `1.1 MB`
+- V3 索引核心数据（tracks / albums / artists / string_pool）优先走 PSRAM
+
+### 内部 RAM 主要压力来源
+
+- `AudioTask / UiTask / loopTask / RuntimeMon / PlayerAssetTask` 栈
+- Wi‑Fi / WebServer / TCPIP 运行期开销
+- 音频热路径缓冲
+- `String / vector` 造成的小块分配与碎片
+
+### 当前原则
+
+- **热路径**（I2S / 解码关键缓冲）优先留内部 RAM
+- **大块静态资源**（封面 / 索引）优先放 PSRAM
+- 未来可继续把歌词缓存、playlist 索引等往 PSRAM 推
+
+---
+
+## 13. 依赖库
+
+当前 `platformio.ini` 中的核心依赖：
+
+- `LovyanGFX`
+- `SdFat`
+- `Arduino_MFRC522v2`
+- `arduino-audio-tools`
+
+说明：
+
+- `Audio Tools` 当前主要用于 **网络收流层**
+- 本地文件播放仍走项目自己的解码 / 音频服务主线
+
+---
+
+## 14. 构建与烧录
+
+### 环境
+
+- PlatformIO
+- Arduino framework
+- `board = esp32-s3-devkitc-1`
+
+### 主要配置
+
+- Flash size: `16MB`
+- Partitions: `default_16MB.csv`
+- PSRAM: `enabled`
+- Memory type: `qio_opi`
+- Flash mode: `qio`
+- Flash freq: `80MHz`
+- Monitor speed: `115200`
+
+### 常用命令
 
 ```bash
-pio run --target upload
-```
-
-4. 打开串口监视器：
-
-```bash
+pio run
+pio run -t upload
 pio device monitor
 ```
 
-### 配置说明
+---
 
-- **板子**: ESP32-S3 DevKitC-1
-- **框架**: Arduino
-- **波特率**: 115200
-- **PSRAM**: 启用 (OPI 模式)
-- **Flash 模式**: QIO 80MHz
+## 15. 关键日志参考
 
-## 使用说明
+启动时建议关注这些日志：
 
-### 按键操作
+- `psramFound / FreePsram / FreeHeap`
+- `[SDIO] recursive SD mutex created`
+- `[BOOT] NFC bindings loaded`
+- `[CATALOG_V3] load ok` 或 `native rebuild ok`
+- `[RADIO] catalog loaded`
+- `[SNAPSHOT] pending loaded`
+- `[WEB] STA connected` 或 `[WEB] AP ready`
+- `[WEB] server started`
+- `[MON][MEM] ...`
+- `[MON][STACK] ...`
 
-| 按键 | 短按 | 长按 (800ms) |
-|------|------|--------------|
-| MODE | 切换随机/顺序模式 | 重新扫描 SD 卡 |
-| PLAY | 播放/暂停（带淡入淡出效果）| 切换封面/信息视图 |
-| PREV | 上一首 | 进入 NFC 管理模式 |
-| NEXT | 下一首 | 全部模式下跳10首，歌手/专辑模式下进入列表选择 |
-| VOL+ | 音量增加 | - |
-| VOL- | 音量减少 | - |
+如果电台播放异常，建议重点看：
 
-**暂停功能说明**：
-- 暂停时音量会平滑淡出到0（约10ms）
-- 恢复时音量会平滑淡入到正常水平（约10ms）
-- 暂停时光标和时间文本会闪烁，提供视觉反馈
-- 暂停时自动清空I2S DMA缓冲区，消除底噪
-- 切歌时自动清除暂停状态，确保新歌正常播放
-- 播放结束时自动复位暂停状态，防止下一首歌卡在暂停状态
+- `[RADIO] http code=...`
+- `content-type=...`
+- `icy-metaint=...`
+- `backend=...`
 
-### 进入列表选择模式
+---
 
-1. **切换到歌手模式或专辑模式**：
-   - 按 **MODE** 键切换播放模式，直到进入歌手模式或专辑模式
+## 16. 已知边界与注意事项
 
-2. **进入列表选择**：
-   - 在歌手模式或专辑模式下，长按 **NEXT** 键
-   - 系统会自动进入相应的列表选择界面（歌手列表或专辑列表）
+1. 当前稳定网络音频能力是 **HTTP MP3 电台**。  
+   `m3u8/HLS` 不是当前稳定主线。
 
-### 列表选择模式操作
+2. 当前项目仍保留部分**兼容迁移层**，例如：
+   - 旧 NVS key 恢复
+   - 旧 NFC `UID=PATH` 格式导入
+   - V3 catalog 到旧 `TrackInfo` 的桥接
 
-在歌手/专辑列表选择模式下：
+3. 如果你的本地分支里还看到这些文件：
+   - `audio_mp3_stream.cpp`
+   - `audio_mp3_stream_audiotools.cpp`
+   - `audio_mp3_stream.h`
 
-| 按键 | 功能 |
-|------|------|
-| MODE | 取消选择（短按或长按） |
-| PLAY | 确认选择并播放该组的第一首歌曲 |
-| PREV | 上一项 |
-| NEXT | 下一项 |
-| VOL+ | 向下翻页（+5项） |
-| VOL- | 向上翻页（-5项） |
+   它们应视为历史兼容残留，而不是当前推荐主线。
 
-### 退出列表选择模式
+4. Web 页当前是轻量内嵌页面，不是独立前端工程。
 
-- 按 **MODE** 键（短按或长按）
-- 或选择一个项目后自动退出
+5. 目前重点优化方向仍然是：
+   - 内部 RAM 压力
+   - String / 队列对象瘦身
+   - 歌词 / playlist 索引进一步外移到 PSRAM
 
-### SD 卡目录结构
+---
 
-支持两种目录结构：
+## 17. 后续演进建议
 
-#### 方式一：单层目录（扁平结构）
-所有音乐文件放在同一目录下：
+### 较近目标
 
-```
-/Music/                     # 音乐根目录
-├── 01.歌曲A.mp3
-├── 02.歌曲B.mp3
-├── 03.歌曲C.flac
-├── 歌曲A.lrc               # 歌词文件（与歌曲同名）
-├── 歌曲B.lrc
-└── cover.jpg               # 可选：默认封面
-```
+- 继续瘦身内部 RAM
+- 统一更多播放源抽象
+- 优化 Web JSON 构造与长时间运行稳定性
+- 收口兼容桥接层
 
-#### 方式二：多层目录（歌手/专辑结构）
-按歌手和专辑组织：
+### 中期方向
 
-```
-/Music/                     # 音乐根目录
-├── 歌手A/
-│   ├── 专辑1/
-│   │   ├── 01.歌曲.mp3
-│   │   ├── 02.歌曲.mp3
-│   │   └── cover.jpg       # 专辑封面
-│   └── 专辑2/
-│       ├── 01.歌曲.mp3
-│       └── cover.jpg
-├── 歌手B/
-│   └── ...
-└── System/
-    └── default_cover.jpg   # 默认封面（放在这里或Music根目录）
-```
+- 远程 MP3 文件播放
+- WebDAV / NAS 文件源
+- 更完整的列表页与筛选页
+- 更细的播放状态 / 电台元数据展示
 
-**歌词文件**：可以放在音乐文件同目录（与歌曲同名），或放在 `/Lyrics/` 目录下。
+### 更远方向
 
-### 扫描数据结构
+- HLS / m3u8
+- 网络 FLAC
+- 更通用的 media source 抽象
 
-V3 目录在存储层内部使用紧凑索引（StringPool + Track/Album/Artist 行表）；`TrackInfo` 仅作为运行时兼容视图按需展开，不再作为持久化主存储结构。
+---
 
+## 18. 项目结构（按职责）
 
-扫描完成后，系统会生成以下数据结构：
+```text
+include/
+├─ audio/
+├─ board/
+├─ keys/
+├─ lyrics/
+├─ nfc/
+├─ radio/
+├─ storage/
+├─ ui/
+├─ utils/
+└─ web/
 
-#### TrackInfo（音轨信息）
-```cpp
-struct TrackInfo {
-  String artist;        // 艺术家名称
-  String album;         // 专辑名称
-  String title;         // 歌曲标题
-  String audio_path;    // 音频文件路径，如 /Music/歌手/专辑/01.歌曲.mp3
-  String ext;           // 扩展名，如 .mp3 .flac
-  String lrc_path;      // 歌词文件路径（若不存在则为空）
-  
-  // 封面信息
-  CoverSource cover_source;  // 封面来源：无/MP3内嵌/FLAC内嵌/外部文件
-  uint32_t cover_offset;     // 内嵌封面在文件中的偏移量
-  uint32_t cover_size;       // 封面数据字节数
-  String cover_mime;         // 图片类型：image/jpeg 或 image/png
-  String cover_path;         // 外部封面文件路径（如 folder.jpg）
-};
+src/
+├─ audio/
+├─ board/
+├─ keys/
+├─ lyrics/
+├─ nfc/
+├─ radio/
+├─ storage/
+├─ ui/
+├─ utils/
+├─ web/
+├─ player_*.cpp
+├─ app_state.cpp
+├─ boot_state.cpp
+└─ main.cpp
 ```
 
-#### PlaylistGroup（列表分组）
-```cpp
-struct PlaylistGroup {
-  String name;                 // 歌手名或专辑名
-  String primary_artist;       // 专辑模式下的主歌手
-  std::vector<int> track_indices;
-};
-```
+---
 
-#### 索引缓存
-扫描结果会自动保存到 `/System/music_index_v3.bin`，下次开机时直接加载；若索引缺失或版本不匹配，则自动重新扫描 `/Music`（递归扫描子目录）。
+## 19. 一句话总结
 
-长按 **MODE** 键可手动触发重新扫描。
+这不是一个“只有 SD 本地播放”的小播放器了。当前主线已经演进成：
 
-### NFC 标签绑定
-
-NFC 功能允许用户使用 NFC 标签快速切换到特定的歌曲或专辑，提供便捷的物理交互方式。
-
-#### 进入 NFC 管理模式
-
-在播放器界面，长按 **PREV** 键即可进入 NFC 管理模式。
-
-#### NFC 绑定流程
-
-1. **进入 NFC 管理模式**
-   - 在播放器界面长按 **PREV** 键
-   - 系统显示"请刷卡"界面，并显示当前选中的曲目编号
-
-2. **刷卡识别**
-   - 将 NFC 标签靠近读卡器
-   - 系统识别卡片 UID 并显示确认界面
-   - 界面显示卡片 UID 和要绑定的曲目信息
-   - 如果卡片已绑定其他曲目，会显示"替换旧曲目"提示
-
-3. **确认绑定**
-   - 短按 **PLAY** 键确认绑定
-   - 系统显示"保存中..."界面
-   - 保存成功后显示"请移开卡片"
-
-4. **移开卡片**
-   - 移开 NFC 标签
-   - 系统检测到卡片移开后显示"绑定完成"
-   - 自动返回播放器界面
-
-5. **取消绑定**
-   - 在确认界面，短按 **MODE** 键可取消绑定
-   - 或在 30 秒内无操作自动超时退出
-
-#### 使用 NFC 标签
-
-1. **快速播放**
-   - 在播放器界面，将已绑定的 NFC 标签靠近读卡器
-   - 系统自动识别并播放绑定的曲目
-   - 支持连续刷卡切换不同曲目
-
-2. **冷却机制**
-   - 绑定完成后，系统会自动忽略该标签 1.5 秒
-   - 防止刚绑定完立即触发播放
-
-#### NFC 管理模式按键操作
-
-| 按键 | 功能 |
-|------|------|
-| MODE | 取消绑定，返回播放器 |
-| PLAY | 确认绑定（在确认界面） |
-| PREV | 无效 |
-| NEXT | 无效 |
-| VOL+ | 无效 |
-| VOL- | 无效 |
-
-#### NFC 绑定文件格式
-
-绑定关系存储在 `/System/nfc_map.txt` 文件中，格式如下：
-
-```
-# NFC 绑定配置文件
-# 格式: UID=曲目索引
-# UID 格式: XX:XX:XX:XX (大写十六进制)
-
-A1:B2:C3:D4=0
-E5:F6:78:9A=1
-BC:DE:F0:12=3
-```
-
-- 每行一个绑定关系
-- UID 格式为 4 字节十六进制，用冒号分隔
-- 曲目索引为 0 起始的整数
-- 以 `#` 开头的行是注释
-
-#### NFC 技术实现
-
-**硬件支持**：
-- 使用 MFRC522 NFC 读卡器模块
-- 支持 ISO14443A 标准的 Mifare 系列卡片
-- SPI 接口通信（4MHz，MODE0）
-
-**软件特性**：
-- **UID 检测与去重**：自动规范化 UID 格式，防止重复触发
-- **卡片移开检测**：使用 `PICC_WakeupA` 唤醒检测，准确判断卡片是否在场
-- **防抖机制**：300ms 防抖时间，避免误判
-- **SPI 总线共享**：与显示屏共享 SPI 总线，使用互斥锁保护
-- **文件安全**：使用临时文件策略保存绑定关系，防止数据损坏
-
-**状态机设计**：
-```
-ADMIN_IDLE → ADMIN_WAIT_CARD → ADMIN_CONFIRM_BIND → ADMIN_SAVING → ADMIN_WAIT_REMOVE → ADMIN_DONE → 退出
-```
-
-**UI 界面**：
-- 所有界面使用中文显示
-- 6 种状态界面：等待刷卡、确认绑定、保存中、等待移卡、完成、错误
-- 彩色文本提示不同状态信息
-
-#### 注意事项
-
-1. **卡片兼容性**
-   - 支持 ISO14443A 标准的 Mifare 系列卡片
-   - 不支持 ISO14443B 等其他标准
-   - 建议使用 Mifare Classic 1K 或 Mifare Ultralight
-
-2. **UID 格式**
-   - 系统自动将 UID 转换为大写格式
-   - 绑定文件中 UID 必须使用冒号分隔格式（如 `A1:B2:C3:D4`）
-
-3. **文件安全**
-   - 修改绑定文件时建议先备份
-   - 系统使用临时文件策略，断电不会损坏数据
-
-4. **使用建议**
-   - 为不同专辑准备多张 NFC 标签
-   - 在标签上贴上对应的专辑封面，方便识别
-   - 避免频繁快速刷卡，等待系统响应
-
-## 开发计划
-
-- [x] 基础音乐播放
-- [x] 双视图封面显示
-- [x] 歌词同步显示
-- [x] 多种播放模式
-- [x] NFC 控制（完整实现）
-- [ ] 收音机功能 (STATE_RADIO)
-- [ ] 均衡器设置
-- [ ] 蓝牙音频输出
-
-## 调试信息
-
-项目使用分级日志系统：
-- `LOGE` - 错误
-- `LOGW` - 警告
-- `LOGI` - 信息
-- `LOGD` - 调试
-- `LOGV` - 详细
-
-日志级别可在 `platformio.ini` 中通过 `LOG_LEVEL` 宏配置。
-
-## 许可证
-
-[待添加]
-
-## 致谢
-
-- [LovyanGFX](https://github.com/lovyan03/LovyanGFX) - 优秀的图形库
-- [ESP32-audioI2S](https://github.com/schreibfaul1/ESP32-audioI2S) - 音频播放参考
-- [SdFat](https://github.com/greiman/SdFat) - 高性能 SD 卡访问库
-- [Arduino_MFRC522v2](https://github.com/OSSLibraries/Arduino_MFRC522v2) - NFC/RFID 读写库
+**以 ESP32-S3 为核心、以 V3 索引为底座、以统一 MP3 核心承接本地与网络来源、带圆屏 UI / NFC / Web 控制的多来源音乐播放器原型。**

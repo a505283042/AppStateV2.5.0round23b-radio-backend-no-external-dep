@@ -1,0 +1,7 @@
+# 格式：名称|URL|格式|地区|logo
+怀集音乐之声|http://lhttp.qingting.fm/live/4804/64k.mp3|mp3|音乐台|/System/radio_logo/4804.jpg
+两广之声音乐台|http://lhttp.qingting.fm/live/20500149/64k.mp3|mp3|音乐台|/System/radio_logo/20500149.jpg
+清晨音乐台|http://lhttp.qingting.fm/live/4915/64k.mp3|mp3|音乐台|/System/radio_logo/4915.jpg
+达州综合广播|http://lhttp.qingting.fm/live/5022394/64k.mp3|mp3|资讯台|/System/radio_logo/5022394.jpg
+达州交通音乐广播|http://lhttp.qingting.fm/live/5022395/64k.mp3|mp3|资讯台|/System/radio_logo/5022395.jpg
+

@@ -1,0 +1,6 @@
+# NFC map v2
+# UID|TYPE|KEY|DISPLAY
+1D:E9:08:15:19:10:80|track|/Music/林俊杰 - 可惜没如果.flac|可惜没如果 - 林俊杰
+64:F4:CF:06|track|/Music/梁静茹 - 如果有一天.flac|如果有一天 - 梁静茹
+F7:8C:64:06|album|王菲菲 - 那些年|王菲菲 - 那些年
+09:76:10:05|track|/Music/周杰伦 - 忍者.flac|忍者 - 周杰伦
