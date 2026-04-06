@@ -1,17 +1,18 @@
 #include "player_list_select.h"
 
+#include "keys/keys.h"
 #include "player_playlist.h"
 #include "storage/storage_catalog_v3.h"
 #include "storage/storage_groups_v3.h"
 #include "utils/log.h"
 
+// 只给本文件用的内部变量和内部函数
 namespace {
 
 PlayerListSelectHooks s_hooks{};
 ListSelectState s_list_state = ListSelectState::NONE;
 int s_list_selected_idx = 0;
 const std::vector<PlaylistGroup>* s_list_groups = nullptr;
-bool s_list_just_entered = false;
 std::vector<PlaylistGroup> s_empty_groups;
 
 const std::vector<PlaylistGroup>& list_select_current_groups()
@@ -25,7 +26,6 @@ void list_select_clear_state(bool clear_ui)
     s_list_state = ListSelectState::NONE;
     s_list_selected_idx = 0;
     s_list_groups = nullptr;
-    s_list_just_entered = false;
     if (clear_ui) {
         ui_clear_list_select();
     }
@@ -49,22 +49,23 @@ bool list_select_try_play_selected_group(const std::vector<PlaylistGroup>& list_
         return false;
     }
 
-    const int next_track = (int)list_groups[current_group_idx].track_indices[0];
-    list_select_clear_state(true);
-
-    TrackInfo t;
-    if (storage_catalog_v3_get_legacy_trackinfo(next_track, t, "/Music")) {
-        ui_show_player_loading(t.title.c_str(), t.artist.c_str());
+    player_playlist_force_rebuild();
+    const auto& playlist = player_playlist_get_current();
+    if (playlist.empty()) {
+        list_select_clear_state(true);
+        return false;
     }
 
-    player_playlist_force_rebuild();
+    const int next_track = (int)playlist[0];
+    list_select_clear_state(true);
+
     if (s_hooks.play_track_dispatch) {
         return s_hooks.play_track_dispatch(next_track, false, true);
     }
     return false;
 }
 
-} // namespace
+} // 只给本文件用的内部变量和内部函数结束
 
 void player_list_select_setup_hooks(const PlayerListSelectHooks& hooks)
 {
@@ -92,9 +93,9 @@ bool player_list_select_enter(play_mode_t mode)
         }
 
         s_list_state = ListSelectState::ARTIST;
-        s_list_just_entered = true;
+        keys_sync_to_hw_state();
         LOGI("[LIST] 进入歌手列表选择模式，共 %d 个歌手，当前选中: %d",
-             (int)s_list_groups->size(), s_list_selected_idx + 1);
+            (int)s_list_groups->size(), s_list_selected_idx + 1);
         return true;
     }
 
@@ -112,9 +113,9 @@ bool player_list_select_enter(play_mode_t mode)
         }
 
         s_list_state = ListSelectState::ALBUM;
-        s_list_just_entered = true;
+        keys_sync_to_hw_state();
         LOGI("[LIST] 进入专辑列表选择模式，共 %d 个专辑，当前选中: %d",
-             (int)s_list_groups->size(), s_list_selected_idx + 1);
+            (int)s_list_groups->size(), s_list_selected_idx + 1);
         return true;
     }
 
@@ -144,11 +145,6 @@ const std::vector<PlaylistGroup>& player_list_select_get_groups()
 void player_list_select_handle_key(key_event_t evt)
 {
     if (s_list_state == ListSelectState::NONE) return;
-
-    if (s_list_just_entered) {
-        s_list_just_entered = false;
-        return;
-    }
 
     const auto& list_groups = list_select_current_groups();
     const int group_count = (int)list_groups.size();

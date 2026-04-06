@@ -69,49 +69,6 @@ void ui_enter_player(void)
   ui_request_refresh();
 }
 
-void ui_show_player_loading(const char* title, const char* artist)
-{
-  ui_draw_lock();
-  ui_set_screen(UI_SCREEN_PLAYER);
-
-  // 让 UiTask 暂时不要把旧封面重新推上来
-  s_coverSprReady = false;
-  s_src = nullptr;
-  s_angle_deg = 0.0f;
-  s_rot_last_ms = millis();
-  s_rotate_wait_audio_start = false;
-  s_rotate_wait_prefetch_done = false;
-
-  s_ui_play_ms  = 0;
-  s_ui_total_ms = 0;
-
-  tft.fillScreen(TFT_BLACK);
-  tft.setFont(&g_font_cjk);
-  tft.setTextSize(1);
-  tft.setTextWrap(false);
-
-  // 轻量占位图，避免用户看到长时间纯黑屏
-  tft.drawCircle(120, 88, 36, TFT_DARKGREY);
-  tft.drawCircle(120, 88, 37, TFT_DARKGREY);
-  tft.fillCircle(120, 88, 4, TFT_WHITE);
-
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  draw_center_text("正在切换...", 142);
-
-  if (title && title[0]) {
-    draw_centered_wrapped_2lines(&tft, String(title), 120, 166, 16, 190, TFT_WHITE);
-  }
-  if (artist && artist[0]) {
-    tft.setTextColor(0xAD55, TFT_BLACK);
-    draw_center_text(artist, 206);
-  }
-
-  s_screen_cleared = true;
-  ui_draw_unlock();
-  ui_request_refresh();
-}
-
-
 void ui_return_to_player(void)
 {
   ui_draw_lock();

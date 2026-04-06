@@ -47,7 +47,6 @@ void ui_set_screen(ui_screen_t screen);    /* 切换当前显示页面 */
 
 /* -------- 页面切换 -------- */
 void ui_enter_player(void);                /* 进入播放器页 */
-void ui_show_player_loading(const char* title, const char* artist); /* 切歌过渡页 */
 void ui_return_to_player(void);            /* 从 NFC admin / 扫描页轻量返回播放器 */
 void ui_enter_nfc_admin(void);             /* 进入 NFC 管理页 */
 

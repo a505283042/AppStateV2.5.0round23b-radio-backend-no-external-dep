@@ -181,6 +181,6 @@
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/cores/esp32/io_pin_remap.h \
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/cores/esp32/Arduino.h \
  include/storage/storage_groups_v3.h include/storage/storage_types_v3.h \
- include/ui/ui.h include/player_playlist.h \
+ include/ui/ui.h include/keys/keys.h include/player_playlist.h \
  include/storage/storage_catalog_v3.h include/storage/storage_view_v3.h \
  include/utils/log.h

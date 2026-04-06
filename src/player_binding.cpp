@@ -52,6 +52,42 @@ const std::vector<PlaylistGroup>& binding_album_groups()
     return storage_catalog_v3_album_groups();
 }
 
+static bool nfc_binding_keep_random_flag()
+{
+    return g_play_mode == PLAY_MODE_ALL_RND ||
+           g_play_mode == PLAY_MODE_ARTIST_RND ||
+           g_play_mode == PLAY_MODE_ALBUM_RND;
+}
+
+static play_mode_t nfc_binding_mode_for_type(NfcBindType type)
+{
+    const bool is_random = nfc_binding_keep_random_flag();
+
+    switch (type) {
+        case NFC_BIND_TRACK:
+            return is_random ? PLAY_MODE_ALL_RND : PLAY_MODE_ALL_SEQ;
+        case NFC_BIND_ARTIST:
+            return is_random ? PLAY_MODE_ARTIST_RND : PLAY_MODE_ARTIST_SEQ;
+        case NFC_BIND_ALBUM:
+            return is_random ? PLAY_MODE_ALBUM_RND : PLAY_MODE_ALBUM_SEQ;
+        default:
+            return is_random ? PLAY_MODE_ALL_RND : PLAY_MODE_ALL_SEQ;
+    }
+}
+
+static void nfc_binding_apply_mode(NfcBindType type)
+{
+    g_play_mode = nfc_binding_mode_for_type(type);
+    g_random_play = (g_play_mode == PLAY_MODE_ALL_RND ||
+                     g_play_mode == PLAY_MODE_ARTIST_RND ||
+                     g_play_mode == PLAY_MODE_ALBUM_RND);
+
+    LOGI("[NFC] apply mode type=%d -> mode=%d random=%d",
+         (int)type,
+         (int)g_play_mode,
+         g_random_play ? 1 : 0);
+}
+
 } // namespace
 
 void player_binding_setup_hooks(const PlayerBindingHooks& hooks)
@@ -76,7 +112,7 @@ bool player_binding_try_handle_nfc_uid(const String& uid)
                     return true;
                 }
 
-                g_play_mode = PLAY_MODE_ALL_SEQ;
+                nfc_binding_apply_mode(NFC_BIND_TRACK);
                 player_playlist_set_current_group_idx(-1);
                 player_playlist_force_rebuild();
                 player_state_mark_next_play_from_nfc();
@@ -121,7 +157,7 @@ bool player_play_artist_binding(const String& artist)
             LOGI("[PLAYER] artist binding matched: group=%d name=%s first_idx=%d",
                  i, playlist_group_name_cstr(cat, groups[i]),
                  groups[i].track_indices.empty() ? -1 : (int)groups[i].track_indices[0]);
-            g_play_mode = PLAY_MODE_ARTIST_SEQ;
+            nfc_binding_apply_mode(NFC_BIND_ARTIST);
             player_playlist_set_current_group_idx(i);
             player_playlist_force_rebuild();
 
@@ -163,7 +199,7 @@ bool player_play_album_binding(const String& album)
             LOGI("[PLAYER] album binding matched: group=%d name=%s first_idx=%d",
                  i, group_key.c_str(),
                  groups[i].track_indices.empty() ? -1 : (int)groups[i].track_indices[0]);
-            g_play_mode = PLAY_MODE_ALBUM_SEQ;
+            nfc_binding_apply_mode(NFC_BIND_ALBUM);
             player_playlist_set_current_group_idx(i);
             player_playlist_force_rebuild();
 
