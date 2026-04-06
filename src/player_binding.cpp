@@ -9,6 +9,7 @@
 #include "storage/storage_groups_v3.h"
 #include "utils/log.h"
 
+// 只给本文件用的内部变量和内部函数
 namespace {
 
 PlayerBindingHooks s_hooks{};
@@ -32,7 +33,7 @@ static bool nfc_binding_should_suppress_duplicate(int track_idx)
     s_nfc_last_track_ms = now;
     return false;
 }
-
+// 触发播放轨道回调
 bool binding_play_track_dispatch(int idx, bool verbose, bool force_cover)
 {
     if (idx < 0) return false;
@@ -41,24 +42,24 @@ bool binding_play_track_dispatch(int idx, bool verbose, bool force_cover)
     }
     return false;
 }
-
+// 获取艺术家组
 const std::vector<PlaylistGroup>& binding_artist_groups()
 {
     return storage_catalog_v3_artist_groups();
 }
-
+// 获取专辑组
 const std::vector<PlaylistGroup>& binding_album_groups()
 {
     return storage_catalog_v3_album_groups();
 }
-
+// 是否保持随机播放标志
 static bool nfc_binding_keep_random_flag()
 {
     return g_play_mode == PLAY_MODE_ALL_RND ||
            g_play_mode == PLAY_MODE_ARTIST_RND ||
            g_play_mode == PLAY_MODE_ALBUM_RND;
 }
-
+// 获取NFC绑定类型的播放模式
 static play_mode_t nfc_binding_mode_for_type(NfcBindType type)
 {
     const bool is_random = nfc_binding_keep_random_flag();
@@ -74,7 +75,7 @@ static play_mode_t nfc_binding_mode_for_type(NfcBindType type)
             return is_random ? PLAY_MODE_ALL_RND : PLAY_MODE_ALL_SEQ;
     }
 }
-
+// 应用NFC绑定类型的播放模式
 static void nfc_binding_apply_mode(NfcBindType type)
 {
     g_play_mode = nfc_binding_mode_for_type(type);
@@ -88,13 +89,13 @@ static void nfc_binding_apply_mode(NfcBindType type)
          g_random_play ? 1 : 0);
 }
 
-} // namespace
-
+} //
+// 设置NFC绑定回调
 void player_binding_setup_hooks(const PlayerBindingHooks& hooks)
 {
     s_hooks = hooks;
 }
-
+// 尝试处理NFC UID
 bool player_binding_try_handle_nfc_uid(const String& uid)
 {
     NfcBindingEntry entry;
@@ -138,7 +139,7 @@ bool player_binding_try_handle_nfc_uid(const String& uid)
 
     return true;
 }
-
+// 尝试播放艺术家
 bool player_play_artist_binding(const String& artist)
 {
     String key = artist;
@@ -179,7 +180,7 @@ bool player_play_artist_binding(const String& artist)
     LOGI("[PLAYER] artist binding not found: %s", key.c_str());
     return false;
 }
-
+// 尝试播放专辑
 bool player_play_album_binding(const String& album)
 {
     String key = album;

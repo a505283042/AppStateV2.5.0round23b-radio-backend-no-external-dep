@@ -15,12 +15,13 @@ int s_list_selected_idx = 0;
 const std::vector<PlaylistGroup>* s_list_groups = nullptr;
 std::vector<PlaylistGroup> s_empty_groups;
 
+// 获取当前播放列表中的组
 const std::vector<PlaylistGroup>& list_select_current_groups()
 {
     if (s_list_groups) return *s_list_groups;
     return s_empty_groups;
 }
-
+// 清除列表选择状态
 void list_select_clear_state(bool clear_ui)
 {
     s_list_state = ListSelectState::NONE;
@@ -30,7 +31,7 @@ void list_select_clear_state(bool clear_ui)
         ui_clear_list_select();
     }
 }
-
+// 尝试播放选中的组
 bool list_select_try_play_selected_group(const std::vector<PlaylistGroup>& list_groups, int group_count)
 {
     player_playlist_set_current_group_idx(s_list_selected_idx);
@@ -67,16 +68,17 @@ bool list_select_try_play_selected_group(const std::vector<PlaylistGroup>& list_
 
 } // 只给本文件用的内部变量和内部函数结束
 
+// 设置列表选择模块回调
 void player_list_select_setup_hooks(const PlayerListSelectHooks& hooks)
 {
     s_hooks = hooks;
 }
-
+// 重置列表选择状态
 void player_list_select_reset()
 {
     list_select_clear_state(false);
 }
-
+// 进入列表选择模式
 bool player_list_select_enter(play_mode_t mode)
 {
     if (mode == PLAY_MODE_ARTIST_SEQ || mode == PLAY_MODE_ARTIST_RND) {
@@ -121,27 +123,27 @@ bool player_list_select_enter(play_mode_t mode)
 
     return false;
 }
-
+// 判断列表选择模块是否激活
 bool player_list_select_is_active()
 {
     return s_list_state != ListSelectState::NONE;
 }
-
+// 获取当前列表选择状态
 ListSelectState player_list_select_get_state()
 {
     return s_list_state;
 }
-
+// 获取当前选中的组索引
 int player_list_select_get_selected_idx()
 {
     return s_list_selected_idx;
 }
-
+// 获取当前播放列表中的组
 const std::vector<PlaylistGroup>& player_list_select_get_groups()
 {
     return list_select_current_groups();
 }
-
+// 处理按键事件
 void player_list_select_handle_key(key_event_t evt)
 {
     if (s_list_state == ListSelectState::NONE) return;
