@@ -182,6 +182,6 @@
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/cores/esp32/Arduino.h \
  include/app_flags.h include/ui/ui.h include/storage/storage_types_v3.h \
  include/nfc/nfc_binding.h include/player_playlist.h \
- include/player_recover.h include/storage/storage_catalog_v3.h \
- include/storage/storage_view_v3.h include/storage/storage_groups_v3.h \
- include/utils/log.h
+ include/player_recover.h include/player_state.h \
+ include/storage/storage_catalog_v3.h include/storage/storage_view_v3.h \
+ include/storage/storage_groups_v3.h include/utils/log.h

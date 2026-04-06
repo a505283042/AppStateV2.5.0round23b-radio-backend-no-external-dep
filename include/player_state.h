@@ -23,3 +23,6 @@ bool player_play_idx_v3(uint32_t idx, bool verbose = false, bool force_cover = f
 /** 当前播放索引（供 NFC admin 等少量编排场景读取）。 */
 int player_state_current_index(void);
 void player_state_set_current_index(int idx);
+
+/** 标记下一次播放来自 NFC 触发。 */
+void player_state_mark_next_play_from_nfc();

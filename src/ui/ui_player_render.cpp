@@ -7,8 +7,11 @@
 #include "ui/ui_icons.h"
 #include "audio/audio.h"
 #include "lyrics/lyrics.h"
+#include "player_assets.h"
+#include "player_state.h"
 #include "utils/log.h"
 #include "web/web_settings.h"
+
 #undef LOG_TAG
 #define LOG_TAG "UI"
 
@@ -344,8 +347,10 @@ void ui_player_update_progress(uint32_t play_ms, uint32_t total_ms)
   s_ui_play_ms  = play_ms;
   s_ui_total_ms = total_ms;   // 0 表示未知
 
-  // 更新歌词显示时间
   g_lyricsDisplay.updateTime(play_ms);
+
+  player_assets_try_apply_deferred_current_cover(player_state_current_index());
+
   ui_request_refresh();
 }
 

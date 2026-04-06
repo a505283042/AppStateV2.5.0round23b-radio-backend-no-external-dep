@@ -71,7 +71,7 @@ void boot_state_run(void)
     nfc_init();
 
     // 让用户看到"启动中..."界面
-    delay(1000);
+    // delay(1000);
 
     prepare_music_catalogs();
 

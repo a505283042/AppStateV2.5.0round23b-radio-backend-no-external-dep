@@ -326,5 +326,5 @@
  .pio/libdeps/esp32-s3-devkitc-1/LovyanGFX/src/lgfx/v1/touch/Touch_RA8875.hpp \
  include/board/board_pins.h include/ui/ui_text_utils.h \
  include/ui/ui_progress.h include/ui/ui_colors.h include/ui/ui_icons.h \
- include/audio/audio.h include/lyrics/lyrics.h include/utils/log.h \
- include/web/web_settings.h
+ include/audio/audio.h include/lyrics/lyrics.h include/player_assets.h \
+ include/player_state.h include/utils/log.h include/web/web_settings.h

@@ -34,6 +34,7 @@ struct PlayerDeferredAssetJob {
     bool need_total = false;
     bool need_lyrics = false;
     bool need_cover = false;
+    bool suppress_next_prefetch = false;
     char lyrics_path[PLAYER_ASSET_PATH_MAX] = {0};
     char audio_path[PLAYER_ASSET_PATH_MAX] = {0};
     char cover_path[PLAYER_ASSET_PATH_MAX] = {0};
@@ -82,3 +83,17 @@ void player_assets_cancel_pending_cover_prefetch();
 void player_assets_arm_pending_cover_prefetch(const TrackInfo& t, int track_idx, uint32_t delay_ms);
 /** 在 loop / player_state 里轮询触发，到了时机就真正启动预读。 */
 void player_assets_try_run_pending_cover_prefetch();
+
+/** 清空预装的当前歌曲封面原图。 */
+void player_assets_clear_primed_current_cover();
+/** 预装当前歌曲封面原图（用于 NFC 切歌前置）。 */
+bool player_assets_prime_current_cover(int track_idx, uint8_t* buf, size_t len, bool is_png);
+
+/** 设置当前曲封面延后应用（用于 NFC 切歌优化）。 */
+void player_assets_set_deferred_current_cover_apply(int track_idx, uint32_t delay_ms);
+/** 尝试应用延后的当前曲封面。 */
+void player_assets_try_apply_deferred_current_cover(int current_track_idx);
+/** 清空延后应用状态。 */
+void player_assets_clear_deferred_current_cover_apply();
+
+void player_assets_block_next_cover_prefetch_for(uint32_t delay_ms);

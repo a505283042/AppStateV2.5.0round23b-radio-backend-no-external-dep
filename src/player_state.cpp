@@ -25,6 +25,7 @@ static constexpr int  V3_TEST_START_INDEX = 0;
 
 static bool s_started = false;
 static int  s_cur = 0;
+static bool s_next_play_from_nfc = false;
 
 static bool player_play_trackinfo_core(const TrackInfo& t,
                                        int idx_for_state,
@@ -170,6 +171,9 @@ static bool player_play_trackinfo_core(const TrackInfo& t,
                                        bool verbose,
                                        bool force_cover)
 {
+    const bool from_nfc = s_next_play_from_nfc;
+    s_next_play_from_nfc = false;
+
     player_assets_init_once();
     player_control_init_once();
     player_recover_init_once();
@@ -259,6 +263,10 @@ static bool player_play_trackinfo_core(const TrackInfo& t,
     t_after_ui_prepare = millis();
 
     PlayerDeferredAssetJob asset_job{};
+    char* primed_lyrics_text = nullptr;
+    size_t primed_lyrics_len = 0;
+    bool lyrics_primed = false;
+    
     const bool has_deferred_assets = player_assets_prepare_deferred_request(
         t,
         s_cur,
@@ -266,10 +274,79 @@ static bool player_play_trackinfo_core(const TrackInfo& t,
         t.lrc_path.length() > 0,
         need_decode_cover,
         asset_job);
+    asset_job.suppress_next_prefetch = from_nfc;
     t_after_lyrics_prefetch = millis();
+
+    if (from_nfc && asset_job.need_lyrics && asset_job.lyrics_path[0]) {
+        if (audio_service_fetch_lyrics(asset_job.lyrics_path, 
+                                       &primed_lyrics_text, 
+                                       &primed_lyrics_len, 
+                                       true) && 
+            primed_lyrics_text && 
+            primed_lyrics_len > 0) { 
+            if (g_lyricsDisplay.loadFromOwnedTextBuffer(primed_lyrics_text, primed_lyrics_len)) {
+                primed_lyrics_text = nullptr; // ownership moved
+                lyrics_primed = true;
+                asset_job.need_lyrics = false; // 后台不要再读一次
+                LOGI("[PLAYER] NFC lyrics primed before play track=%d len=%u", 
+                     s_cur, (unsigned)primed_lyrics_len);
+            }
+        }
+    }
+
+    uint8_t* primed_cover_buf = nullptr;
+    size_t primed_cover_len = 0;
+    bool primed_cover_is_png = false;
+    bool cover_primed = false;
+    
+    player_assets_clear_primed_current_cover();
+    player_assets_clear_deferred_current_cover_apply();
+    
+    if (from_nfc && need_decode_cover && !cover_cache_hit) {
+        player_assets_set_deferred_current_cover_apply(s_cur, 90);
+    }
+    
+    if (from_nfc && 
+        asset_job.need_cover && 
+        !cover_cache_hit && 
+        asset_job.cover_source != COVER_NONE && 
+        asset_job.cover_size > 0 && 
+        asset_job.cover_size <= 96 * 1024) {
+        if (audio_service_fetch_cover(asset_job.cover_source,
+                                      asset_job.audio_path,
+                                      asset_job.cover_path,
+                                      asset_job.cover_offset,
+                                      asset_job.cover_size,
+                                      &primed_cover_buf,
+                                      &primed_cover_len,
+                                      &primed_cover_is_png,
+                                      true) &&
+            primed_cover_buf && 
+            primed_cover_len > 0) {
+            if (player_assets_prime_current_cover(s_cur,
+                                                  primed_cover_buf,
+                                                  primed_cover_len,
+                                                  primed_cover_is_png)) {
+                primed_cover_buf = nullptr; // ownership moved
+                cover_primed = true;
+                LOGI("[PLAYER] NFC cover primed before play track=%d len=%u", 
+                     s_cur, (unsigned)primed_cover_len);
+            }
+        }
+    }
 
     if (!audio_service_play(t.audio_path.c_str(), true)) {
         LOGE("[AUDIO] play failed");
+        player_assets_clear_primed_current_cover();
+        if (primed_cover_buf) {
+            ui_cover_free_allocated(primed_cover_buf);
+            primed_cover_buf = nullptr;
+        }
+        if (primed_lyrics_text) {
+            ui_cover_free_allocated(reinterpret_cast<uint8_t*>(primed_lyrics_text));
+            primed_lyrics_text = nullptr;
+        }
+        g_lyricsDisplay.clear();
         player_assets_reset_job(asset_job);
         return false;
     }
@@ -474,4 +551,9 @@ int player_state_current_index(void)
 void player_state_set_current_index(int idx)
 {
     s_cur = idx;
+}
+
+void player_state_mark_next_play_from_nfc()
+{
+    s_next_play_from_nfc = true;
 }

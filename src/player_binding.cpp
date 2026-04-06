@@ -4,6 +4,7 @@
 #include "nfc/nfc_binding.h"
 #include "player_playlist.h"
 #include "player_recover.h"
+#include "player_state.h"
 #include "storage/storage_catalog_v3.h"
 #include "storage/storage_groups_v3.h"
 #include "utils/log.h"
@@ -11,6 +12,26 @@
 namespace {
 
 PlayerBindingHooks s_hooks{};
+
+static int s_nfc_last_track_idx = -1;
+static uint32_t s_nfc_last_track_ms = 0;
+
+// NFC 防重入 helper 函数
+static bool nfc_binding_should_suppress_duplicate(int track_idx)
+{
+    if (track_idx < 0) return false;
+    
+    uint32_t now = millis();
+    if (track_idx == s_nfc_last_track_idx && (uint32_t)(now - s_nfc_last_track_ms) < 1000) {
+        LOGW("[NFC] duplicate track trigger suppressed idx=%d dt=%ums", 
+             track_idx, (unsigned)(now - s_nfc_last_track_ms));
+        return true;
+    }
+    
+    s_nfc_last_track_idx = track_idx;
+    s_nfc_last_track_ms = now;
+    return false;
+}
 
 bool binding_play_track_dispatch(int idx, bool verbose, bool force_cover)
 {
@@ -50,9 +71,15 @@ bool player_binding_try_handle_nfc_uid(const String& uid)
             int idx = player_recover_find_track_idx_by_path(entry.key);
             if (idx >= 0) {
                 LOGI("[NFC] uid matched, play track idx=%d path=%s", idx, entry.key.c_str());
+
+                if (nfc_binding_should_suppress_duplicate(idx)) {
+                    return true;
+                }
+
                 g_play_mode = PLAY_MODE_ALL_SEQ;
                 player_playlist_set_current_group_idx(-1);
                 player_playlist_force_rebuild();
+                player_state_mark_next_play_from_nfc();
                 (void)binding_play_track_dispatch(idx, true, true);
             } else {
                 LOGI("[NFC] track binding not found: %s", entry.key.c_str());
@@ -100,6 +127,11 @@ bool player_play_artist_binding(const String& artist)
 
             const auto& playlist = player_playlist_get_current();
             if (!playlist.empty()) {
+                if (nfc_binding_should_suppress_duplicate(playlist[0])) {
+                    return true;
+                }
+                
+                player_state_mark_next_play_from_nfc();
                 (void)binding_play_track_dispatch(playlist[0], true, true);
                 LOGI("[PLAYER] artist binding success: %s, group=%d, tracks=%d",
                      key.c_str(), i, (int)playlist.size());
@@ -137,6 +169,11 @@ bool player_play_album_binding(const String& album)
 
             const auto& playlist = player_playlist_get_current();
             if (!playlist.empty()) {
+                if (nfc_binding_should_suppress_duplicate(playlist[0])) {
+                    return true;
+                }
+                
+                player_state_mark_next_play_from_nfc();
                 (void)binding_play_track_dispatch(playlist[0], true, true);
                 LOGI("[PLAYER] album binding success: %s, group=%d, tracks=%d",
                      key.c_str(), i, (int)playlist.size());
