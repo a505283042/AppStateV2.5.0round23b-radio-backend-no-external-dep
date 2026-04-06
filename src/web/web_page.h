@@ -697,7 +697,7 @@ const $ = id => document.getElementById(id);
 </script>
 </body>
 </html>
-)HTML;)HTML";
+)HTML";
 
 static const char WEBCTRL_ALBUMS_HTML[] PROGMEM = R"HTML(
 <!doctype html>
@@ -969,7 +969,7 @@ const $ = id => document.getElementById(id);
 </script>
 </body>
 </html>
-)HTML;)HTML";
+)HTML";
 
 
 static const char WEBCTRL_RADIOS_HTML[] PROGMEM = R"HTML(
@@ -1086,4 +1086,4 @@ window.addEventListener('scroll', () => {
 </script>
 </body>
 </html>
-)HTML;
+)HTML";
