@@ -445,14 +445,14 @@ void player_next_group()
     (void)control_play_track_dispatch(next, false, true);
 }
 
-namespace {
-
 bool control_mode_is_random(play_mode_t mode)
 {
     return mode == PLAY_MODE_ALL_RND ||
            mode == PLAY_MODE_ARTIST_RND ||
            mode == PLAY_MODE_ALBUM_RND;
 }
+
+namespace {
 
 play_mode_t control_make_mode(int category, bool is_random)
 {

@@ -181,9 +181,8 @@
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32s3/include/esp_hw_support/include/soc/esp32/spiram.h \
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/cores/esp32/io_pin_remap.h \
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/cores/esp32/Arduino.h \
- include/nfc/nfc_binding.h include/player_control.h \
- include/player_playlist.h include/storage/storage_types_v3.h \
- include/ui/ui.h include/player_state.h \
- include/storage/storage_catalog_v3.h include/storage/storage_view_v3.h \
- include/storage/storage_groups_v3.h include/audio/audio_service.h \
- include/ui/ui.h include/utils/log.h
+ include/nfc/nfc_binding.h include/player_control.h include/ui/ui.h \
+ include/storage/storage_types_v3.h include/player_playlist.h \
+ include/player_state.h include/storage/storage_catalog_v3.h \
+ include/storage/storage_view_v3.h include/storage/storage_groups_v3.h \
+ include/audio/audio_service.h include/ui/ui.h include/utils/log.h

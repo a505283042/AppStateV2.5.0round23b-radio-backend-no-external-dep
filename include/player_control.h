@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdint.h>
+#include "ui/ui.h"
 
 /**
  * @brief 播放控制动作层。
@@ -72,3 +73,5 @@ void player_next_group();
 void player_toggle_random();
 /** 只切换播放大类：全部 -> 歌手 -> 专辑，并保留当前小类。 */
 void player_cycle_mode_category();
+/** 检查播放模式是否为随机模式。 */
+bool control_mode_is_random(play_mode_t mode);

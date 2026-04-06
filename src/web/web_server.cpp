@@ -498,11 +498,19 @@ static void web_send_group_detail_json(const std::vector<PlaylistGroup>& groups,
 static bool web_play_group_impl(bool is_album, int group_idx) {
   const auto& groups = is_album ? player_playlist_album_groups() : player_playlist_artist_groups();
   if (group_idx < 0 || group_idx >= (int)groups.size()) return false;
-  g_play_mode = is_album ? PLAY_MODE_ALBUM_SEQ : PLAY_MODE_ARTIST_SEQ;
+
+  const bool keep_random = control_mode_is_random(g_play_mode);
+  g_play_mode = is_album
+      ? (keep_random ? PLAY_MODE_ALBUM_RND : PLAY_MODE_ALBUM_SEQ)
+      : (keep_random ? PLAY_MODE_ARTIST_RND : PLAY_MODE_ARTIST_SEQ);
+  g_random_play = keep_random;
+
   player_playlist_set_current_group_idx(group_idx);
   player_playlist_force_rebuild();
+
   const auto& playlist = player_playlist_get_current();
   if (playlist.empty()) return false;
+
   return player_play_idx_v3((uint32_t)playlist[0], true, true);
 }
 static void web_handle_artists_page() {

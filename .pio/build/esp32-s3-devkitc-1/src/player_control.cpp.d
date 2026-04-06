@@ -1,9 +1,10 @@
 .pio/build/esp32-s3-devkitc-1/src/player_control.cpp.o: \
- src/player_control.cpp include/player_control.h include/audio/audio.h \
- include/audio/audio_service.h \
+ src/player_control.cpp include/player_control.h include/ui/ui.h \
+ include/storage/storage_types_v3.h \
+ C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/cores/esp32/Arduino.h \
+ C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/cores/esp32/esp_arduino_version.h \
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32s3/include/freertos/include/freertos/FreeRTOS.h \
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32s3/include/freertos/include/esp_additions/freertos/FreeRTOSConfig.h \
- C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32s3/qio_opi/include/sdkconfig.h \
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32s3/include/esp_common/include/esp_compiler.h \
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32s3/include/freertos/port/xtensa/include/freertos/FreeRTOSConfig_arch.h \
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32s3/include/freertos/port/xtensa/include/freertos/xtensa_config.h \
@@ -18,7 +19,6 @@
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32s3/include/xtensa/include/xtensa/xtensa_context.h \
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32s3/include/xtensa/include/xtensa/corebits.h \
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32s3/include/xtensa/include/xtensa/xtruntime-frames.h \
- C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32s3/include/newlib/platform_include/assert.h \
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32s3/include/esp_rom/include/esp_rom_sys.h \
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32s3/include/soc/esp32s3/include/soc/reset_reasons.h \
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32s3/include/esp_rom/include/esp32s3/rom/ets_sys.h \
@@ -71,9 +71,6 @@
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32s3/include/freertos/include/freertos/task.h \
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32s3/include/freertos/include/freertos/list.h \
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32s3/include/freertos/include/esp_additions/freertos/task_snapshot.h \
- include/storage/storage_types_v3.h \
- C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/cores/esp32/Arduino.h \
- C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/cores/esp32/esp_arduino_version.h \
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32s3/include/freertos/include/freertos/semphr.h \
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32s3/include/freertos/include/freertos/queue.h \
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32s3/include/freertos/include/freertos/task.h \
@@ -184,8 +181,8 @@
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32s3/include/esp_hw_support/include/soc/esp32/spiram.h \
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/cores/esp32/io_pin_remap.h \
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/cores/esp32/Arduino.h \
- include/app_flags.h include/ui/ui.h include/keys/keys.h \
- include/player_playlist.h include/player_assets.h \
+ include/audio/audio.h include/audio/audio_service.h include/app_flags.h \
+ include/keys/keys.h include/player_playlist.h include/player_assets.h \
  include/radio/radio_catalog.h include/player_state.h \
  include/player_source.h include/lyrics/lyrics.h \
  include/audio/audio_radio_backend.h include/storage/storage_catalog_v3.h \
