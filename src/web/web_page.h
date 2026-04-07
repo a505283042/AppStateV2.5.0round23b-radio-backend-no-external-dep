@@ -528,7 +528,10 @@ const $ = id => document.getElementById(id);
            <div class="trackTitle">${esc(t.title||'未知标题')}</div> 
            <div class="trackSub">${esc(t.album||'-')}</div> 
          </div> 
-         <button class="secondary" onclick="event.stopPropagation(); playTrack(${t.track_idx}, ${detail.idx})">播放</button> 
+         <div style="display:flex;gap:8px;flex-wrap:wrap">
+           <button class="secondary" onclick="event.stopPropagation(); playTrack(${t.track_idx}, ${detail.idx})">播放</button>
+           <button class="secondary" onclick="event.stopPropagation(); bindTrackNfc(${t.track_idx})">绑定NFC</button>
+         </div> 
        </div> 
      `).join(''); 
    } 
@@ -578,9 +581,10 @@ const $ = id => document.getElementById(id);
 
          ${expanded ? `
            <div class="expandBox">
-             <div class="expandActions">
-               <button onclick="event.stopPropagation(); playGroup(${x.idx})" ${(x.track_count || 0) > 0 ? '' : 'disabled'}>播放这一组</button>
-             </div>
+              <div class="expandActions">
+                <button onclick="event.stopPropagation(); playGroup(${x.idx})" ${(x.track_count || 0) > 0 ? '' : 'disabled'}>播放这一组</button>
+                <button class="secondary" onclick="event.stopPropagation(); bindArtistNfc(${x.idx})">绑定歌手到NFC</button>
+              </div>
              ${detail ? renderArtistTracks(detail) : '<div class="expandEmpty">加载中...</div>'}
            </div>
          ` : ''}
@@ -673,6 +677,16 @@ const $ = id => document.getElementById(id);
    alert(j && j.ok ? '已开始播放' : '播放失败'); 
    loadArtists().catch(()=>{}); 
  } 
+
+ async function bindArtistNfc(idx){ 
+   const j = await postForm('/api/artist/bind_nfc', {idx}); 
+   alert(j && j.ok ? '请到设备前刷卡，并按播放键保存' : ((j && j.message) || '进入绑定失败')); 
+ } 
+
+ async function bindTrackNfc(trackIdx){ 
+   const j = await postForm('/api/track/bind_nfc', {idx:trackIdx}); 
+   alert(j && j.ok ? '请到设备前刷卡，并按播放键保存' : ((j && j.message) || '进入绑定失败')); 
+ }
 
  $('searchInput').addEventListener('input', renderList); 
  loadArtists().catch(e=>{ $('statusText').textContent='加载失败'; alert(e.message||'加载失败'); });
@@ -800,7 +814,10 @@ const $ = id => document.getElementById(id);
            <div class="trackTitle">${esc(t.title||'未知标题')}</div> 
            <div class="trackSub">${esc(t.artist||'-')}</div> 
          </div> 
-         <button class="secondary" onclick="event.stopPropagation(); playTrack(${t.track_idx}, ${detail.idx})">播放</button> 
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button class="secondary" onclick="event.stopPropagation(); playTrack(${t.track_idx}, ${detail.idx})">播放</button>
+            <button class="secondary" onclick="event.stopPropagation(); bindTrackNfc(${t.track_idx})">绑定NFC</button>
+          </div> 
        </div> 
      `).join(''); 
    } 
@@ -852,6 +869,7 @@ const $ = id => document.getElementById(id);
            <div class="expandBox">
              <div class="expandActions">
                <button onclick="event.stopPropagation(); playGroup(${x.idx})" ${(x.track_count || 0) > 0 ? '' : 'disabled'}>播放这一组</button>
+               <button class="secondary" onclick="event.stopPropagation(); bindAlbumNfc(${x.idx})">绑定专辑到NFC</button>
              </div>
              ${detail ? renderAlbumTracks(detail) : '<div class="expandEmpty">加载中...</div>'}
            </div>
@@ -944,6 +962,16 @@ const $ = id => document.getElementById(id);
    const j = await postForm('/api/track/play', {idx:trackIdx, mode:'album', group_idx:groupIdx}); 
    alert(j && j.ok ? '已开始播放' : '播放失败'); 
    loadAlbums().catch(()=>{}); 
+ }
+
+ async function bindAlbumNfc(idx){ 
+   const j = await postForm('/api/album/bind_nfc', {idx}); 
+   alert(j && j.ok ? '请到设备前刷卡，并按播放键保存' : ((j && j.message) || '进入绑定失败')); 
+ } 
+
+ async function bindTrackNfc(trackIdx){ 
+   const j = await postForm('/api/track/bind_nfc', {idx:trackIdx}); 
+   alert(j && j.ok ? '请到设备前刷卡，并按播放键保存' : ((j && j.message) || '进入绑定失败')); 
  } 
 
  $('searchInput').addEventListener('input', renderList); 
