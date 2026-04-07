@@ -67,6 +67,28 @@ static String web_json_escape(const String& in) {
   return out;
 }
 
+static void web_json_append_escaped(String& out, const char* s) {
+  if (!s) return;
+  for (const char* p = s; *p; ++p) {
+    const char c = *p;
+    switch (c) {
+      case '\\': out += "\\\\"; break;
+      case '"':  out += "\\\""; break;
+      case '\n': out += "\\n"; break;
+      case '\r': out += "\\r"; break;
+      case '\t': out += "\\t"; break;
+      default:   out += c; break;
+    }
+  }
+}
+
+static const char* web_track_album_name_cstr(const MusicCatalogV3& cat, const TrackRowV3& row) {
+  if (row.album_id == INVALID_ID32 || !cat.albums || row.album_id >= cat.album_count) {
+    return "";
+  }
+  return pool_str_v3(cat.pool, cat.albums[row.album_id].name_off);
+}
+
 static bool web_client_alive() {
   return s_server.client().connected();
 }
@@ -351,6 +373,12 @@ static void web_send_radio_list_json() {
   if (!web_send_chunk("]}")) return;
   web_end_stream_response();
 }
+static String web_track_album_name_string(const MusicCatalogV3& cat, const TrackRowV3& row) {
+  if (row.album_id == INVALID_ID32 || !cat.albums || row.album_id >= cat.album_count) {
+    return String("");
+  }
+  return String(pool_str_v3(cat.pool, cat.albums[row.album_id].name_off));
+}
 static void web_send_group_list_json(const std::vector<PlaylistGroup>& groups, bool is_album) {
   const WebPlayerSnapshot snap = web_snapshot_capture();
   const MusicCatalogV3& cat = storage_catalog_v3();
@@ -457,76 +485,70 @@ static void web_send_group_detail_json(const std::vector<PlaylistGroup>& groups,
   s_server.setContentLength(CONTENT_LENGTH_UNKNOWN);
   s_server.send(200, "application/json; charset=utf-8", "{");
 
-  if (!web_send_chunk("\"ok\":true")) return;
-  if (!web_send_chunk(",\"idx\":")) return;
-  if (!web_send_chunk(String(group_idx))) return;
-
-  if (!web_send_chunk(",\"name\":\"")) return;
-  if (!web_send_chunk(web_json_escape(g_name))) return;
-  if (!web_send_chunk("\"")) return;
+  String head;
+  head.reserve(256);
+  head += "\"ok\":true";
+  head += ",\"idx\":";
+  head += String(group_idx);
+  head += ",\"name\":\"";
+  head += web_json_escape(g_name);
+  head += "\"";
 
   if (is_album) {
-    if (!web_send_chunk(",\"primary_artist\":\"")) return;
-    if (!web_send_chunk(web_json_escape(g_pa))) return;
-    if (!web_send_chunk("\"")) return;
+    head += ",\"primary_artist\":\"";
+    head += web_json_escape(g_pa);
+    head += "\"";
   }
 
-  if (!web_send_chunk(",\"track_count\":")) return;
-  if (!web_send_chunk(String(total_tracks))) return;
+  head += ",\"track_count\":";
+  head += String(total_tracks);
+  head += ",\"tracks\":[";
 
-  if (!web_send_chunk(",\"offset\":")) return;
-  if (!web_send_chunk(String(offset))) return;
+  if (!web_send_chunk(head)) return;
 
-  if (!web_send_chunk(",\"limit\":")) return;
-  if (!web_send_chunk(String(limit))) return;
-
-  if (!web_send_chunk(",\"returned\":")) return;
-  if (!web_send_chunk(String(end - offset))) return;
-
-  if (!web_send_chunk(",\"tracks\":[")) return;
-
+  String chunk;
+  chunk.reserve(3072);
   bool first = true;
-  for (int i = offset; i < end; ++i) {
-    int track_idx = (int)g.track_indices[(size_t)i];
 
-    TrackViewV3 v{};
-    if (!storage_catalog_v3_get_track_view((uint32_t)track_idx, v, "/Music") || !v.valid) {
+  for (int i = offset; i < end; ++i) {
+    const int track_idx = (int)g.track_indices[(size_t)i];
+    if (!cat.tracks || track_idx < 0 || track_idx >= (int)cat.track_count) {
       continue;
     }
 
-    if (!first) {
-      if (!web_send_chunk(",")) return;
-    }
+    const TrackRowV3& row = cat.tracks[(size_t)track_idx];
+    const char* title_c  = pool_str_v3(cat.pool, row.title_off);
+    const char* artist_c = pool_str_v3(cat.pool, row.artist_off);
+    const char* album_c  = web_track_album_name_cstr(cat, row);
+
+    if (!first) chunk += ",";
     first = false;
 
-    if (!web_send_chunk("{\"track_idx\":")) return;
-    if (!web_send_chunk(String(track_idx))) return;
+    chunk += "{\"track_idx\":";
+    chunk += String(track_idx);
 
-    if (!web_send_chunk(",\"title\":\"")) return;
-    if (!web_send_chunk(web_json_escape(v.title))) return;
-    if (!web_send_chunk("\"")) return;
+    chunk += ",\"title\":\"";
+    web_json_append_escaped(chunk, title_c);
+    chunk += "\"";
 
-    if (!web_send_chunk(",\"artist\":\"")) return;
-    if (!web_send_chunk(web_json_escape(v.artist))) return;
-    if (!web_send_chunk("\"")) return;
-
-    if (!web_send_chunk(",\"album\":\"")) return;
-    if (!web_send_chunk(web_json_escape(v.album))) return;
-    if (!web_send_chunk("\"")) return;
-
-    const bool has_cover = (v.cover_source != COVER_NONE && (v.cover_size > 0 || v.cover_path.length() > 0));
-    if (!web_send_chunk(",\"has_cover\":")) return;
-    if (!web_send_chunk(has_cover ? "true" : "false")) return;
-
-    if (has_cover) {
-      if (!web_send_chunk(",\"cover_url\":\"")) return;
-      if (!web_send_chunk(web_json_escape(String("/api/cover/current?track=") + String(track_idx)))) return;
-      if (!web_send_chunk("\"")) return;
+    if (is_album) {
+      chunk += ",\"artist\":\"";
+      web_json_append_escaped(chunk, artist_c);
+      chunk += "\"";
+    } else {
+      chunk += ",\"album\":\"";
+      web_json_append_escaped(chunk, album_c);
+      chunk += "\"";
     }
 
-    if (!web_send_chunk("}")) return;
+    chunk += "}";
+
+    if (chunk.length() >= 2560) {
+      if (!web_flush_chunk_buffer(chunk)) return;
+    }
   }
 
+  if (!web_flush_chunk_buffer(chunk)) return;
   if (!web_send_chunk("]}")) return;
   web_end_stream_response();
 }
