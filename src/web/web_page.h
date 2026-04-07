@@ -67,7 +67,7 @@ static const char WEBCTRL_INDEX_HTML[] PROGMEM = R"HTML(
 
     <div class="card">
       <div class="media" id="mediaBox">
-        <div class="cover" id="coverBox"><span id="coverFallback">无封面</span><img id="coverImg" alt="封面" style="display:none"></div>
+        <div class="cover" id="coverBox"><span id="coverFallback">无封面</span><img id="coverImg" alt="封面" decoding="async" loading="eager" style="display:none"></div>
         <div>
           <div class="title" id="title">-</div>
           <div class="sub" id="artist">-</div>
@@ -236,12 +236,19 @@ function updateCover(j){
 
   if(coverKey !== lastCoverTrack){ 
     lastCoverTrack = coverKey;
-    img.onerror=()=>{ 
-      img.style.display='none';
-      fallback.style.display='block';
-      fallback.textContent='封面读取失败';
+
+    img.onerror = () => { 
+      img.style.display = 'none';
+      fallback.style.display = 'block';
+      fallback.textContent = '封面读取失败';
     };
-    img.src=`${base}${base.includes('?')?'&':'?'}t=${Date.now()}`;
+
+    img.onload = () => {
+      fallback.style.display = 'none';
+      img.style.display = 'block';
+    };
+
+    img.src = base;
   }
 }
 async function toggleViewFromCover(){ if(coverToggleBusy) return; coverToggleBusy=true; try{ await fetch('/api/view/toggle',{method:'POST'});}catch(e){} scheduleNext(120); setTimeout(()=>{coverToggleBusy=false;},250); }
