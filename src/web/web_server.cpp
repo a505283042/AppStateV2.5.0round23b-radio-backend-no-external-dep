@@ -792,6 +792,9 @@ static String web_get_current_radio_logo(bool* out_is_remote = nullptr) {
 }
 
 static void web_handle_radio_logo_current() {
+  const auto source = player_source_get();
+  const int radio_idx = source.radio_idx;
+
   bool is_remote = false;
   String logo = web_get_current_radio_logo(&is_remote);
   if (!logo.length()) {
@@ -799,9 +802,25 @@ static void web_handle_radio_logo_current() {
     return;
   }
 
+  const String etag = String("\"cover-radio-") + String(radio_idx) + "\"";
+
   if (is_remote) {
+    if (web_if_none_match_hit(etag)) {
+      LOGI("[WEB] radio logo 304 idx=%d remote=1", radio_idx);
+      web_send_not_modified(etag);
+      return;
+    }
+
+    s_server.sendHeader("Cache-Control", "public, max-age=86400, immutable", true);
+    s_server.sendHeader("ETag", etag, true);
     s_server.sendHeader("Location", logo, true);
     s_server.send(302, "text/plain; charset=utf-8", "");
+    return;
+  }
+
+  if (web_if_none_match_hit(etag)) {
+    LOGI("[WEB] radio logo 304 idx=%d remote=0", radio_idx);
+    web_send_not_modified(etag);
     return;
   }
 
@@ -825,13 +844,15 @@ static void web_handle_radio_logo_current() {
   }
 
   WiFiClient client = s_server.client();
-  web_send_no_cache_headers();
   client.print("HTTP/1.1 200 OK\r\n");
   client.print(is_png ? "Content-Type: image/png\r\n" : "Content-Type: image/jpeg\r\n");
   client.printf("Content-Length: %u\r\n", (unsigned)len);
-  client.printf("ETag: \"cover-radio-%d\"\r\n", player_source_get().radio_idx);
-  client.print("Connection: close\r\n\r\n");
+  client.print("Cache-Control: public, max-age=86400, immutable\r\n");
+  client.printf("ETag: %s\r\n", etag.c_str());
+  client.print("Connection: close\r\n");
+  client.print("\r\n");
   client.write(buf, len);
+  client.flush();
 
   free(buf);
 }
