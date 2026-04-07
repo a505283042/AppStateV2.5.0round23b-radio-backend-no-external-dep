@@ -66,7 +66,23 @@ static String web_json_escape(const String& in) {
   }
   return out;
 }
+static bool web_if_none_match_hit(const String& etag) {
+  if (!s_server.hasHeader("If-None-Match")) return false;
+  const String inm = s_server.header("If-None-Match");
+  if (inm.length() == 0) return false;
+  if (inm == "*") return true;
+  return inm.indexOf(etag) >= 0;
+}
 
+static void web_send_not_modified(const String& etag) {
+  WiFiClient client = s_server.client();
+  client.print("HTTP/1.1 304 Not Modified\r\n");
+  client.printf("ETag: %s\r\n", etag.c_str());
+  client.print("Cache-Control: public, max-age=86400, immutable\r\n");
+  client.print("Connection: close\r\n");
+  client.print("\r\n");
+  client.flush();
+}
 static void web_json_append_escaped(String& out, const char* s) {
   if (!s) return;
   for (const char* p = s; *p; ++p) {
@@ -824,23 +840,58 @@ static void web_handle_cover_current() {
   int cur = player_state_current_index();
   int req_track = -1;
   if (web_parse_int_arg("track", req_track)) cur = req_track;
-  if (cur < 0) { web_send_json_err("当前没有曲目", 404); return; }
+  if (cur < 0) {
+    web_send_json_err("当前没有曲目", 404);
+    return;
+  }
+
   TrackViewV3 v{};
-  if (!storage_catalog_v3_get_track_view((uint32_t)cur, v, "/Music") || !v.valid) { web_send_json_err("读取曲目信息失败", 404); return; }
-  if (v.cover_source == COVER_NONE || (v.cover_size == 0 && v.cover_path.length() == 0)) { web_send_json_err("当前曲目没有封面", 404); return; }
-  uint8_t* buf = nullptr; size_t len = 0; bool is_png = false;
-  const bool ok = audio_service_fetch_cover((CoverSource)v.cover_source, v.audio_path.c_str(), v.cover_path.c_str(), v.cover_offset, v.cover_size, &buf, &len, &is_png, true);
-  if (!ok || !buf || len == 0) { if (buf) free(buf); web_send_json_err("封面读取失败", 500); return; }
+  if (!storage_catalog_v3_get_track_view((uint32_t)cur, v, "/Music") || !v.valid) {
+    web_send_json_err("读取曲目信息失败", 404);
+    return;
+  }
+  if (v.cover_source == COVER_NONE || (v.cover_size == 0 && v.cover_path.length() == 0)) {
+    web_send_json_err("当前曲目没有封面", 404);
+    return;
+  }
+
+  const String etag = String("\"cover-track-") + String(cur) + "\"";
+  if (web_if_none_match_hit(etag)) {
+    LOGI("[WEB] cover 304 track=%d", cur);
+    web_send_not_modified(etag);
+    return;
+  }
+
+  uint8_t* buf = nullptr;
+  size_t len = 0;
+  bool is_png = false;
+
+  const bool ok = audio_service_fetch_cover((CoverSource)v.cover_source,
+                                            v.audio_path.c_str(),
+                                            v.cover_path.c_str(),
+                                            v.cover_offset,
+                                            v.cover_size,
+                                            &buf,
+                                            &len,
+                                            &is_png,
+                                            true);
+  if (!ok || !buf || len == 0) {
+    if (buf) free(buf);
+    web_send_json_err("封面读取失败", 500);
+    return;
+  }
+
   WiFiClient client = s_server.client();
   client.print("HTTP/1.1 200 OK\r\n");
   client.print(is_png ? "Content-Type: image/png\r\n" : "Content-Type: image/jpeg\r\n");
   client.printf("Content-Length: %u\r\n", (unsigned)len);
-  client.printf("Cache-Control: public, max-age=86400, immutable\r\n");
-  client.printf("ETag: \"cover-track-%d\"\r\n", cur);
+  client.print("Cache-Control: public, max-age=86400, immutable\r\n");
+  client.printf("ETag: %s\r\n", etag.c_str());
   client.print("Connection: close\r\n");
   client.print("\r\n");
   client.write(buf, len);
   client.flush();
+
   free(buf);
 }
 static void web_handle_artists() {
@@ -1183,7 +1234,14 @@ void web_server_start() {
   web_settings_load();
   const bool net_ok = web_try_connect_sta_from_config() || web_start_ap_fallback();
   if (!net_ok) { LOGE("[WEB] network start failed, web disabled"); s_ready = false; return; }
-  web_setup_routes(); s_server.begin(); s_ready = true; LOGI("[WEB] server started: http://%s/", web_ip_string().c_str());
+
+  static const char* kHeaderKeys[] = { "If-None-Match" };
+  s_server.collectHeaders(kHeaderKeys, 1);
+
+  web_setup_routes();
+  s_server.begin();
+  s_ready = true;
+  LOGI("[WEB] server started: http://%s/", web_ip_string().c_str());
 #else
   s_started = true; s_ready = false;
 #endif
