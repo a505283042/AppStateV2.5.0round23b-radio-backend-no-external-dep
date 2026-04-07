@@ -705,6 +705,8 @@ static void web_handle_status() {
 
   json += ",\"has_lyrics\":";
   json += (snap.has_lyrics ? "true" : "false");
+  json += ",\"lyrics_loading\":";
+  json += (snap.lyrics_loading ? "true" : "false");
   json += ",\"current_lyric\":\"" + web_json_escape(snap.current_lyric) + "\"";
   json += ",\"next_lyric\":\"" + web_json_escape(snap.next_lyric) + "\"";
   json += ",\"following_lyric\":\"" + web_json_escape(snap.following_lyric) + "\"";
@@ -736,6 +738,16 @@ static void web_handle_status() {
   const bool allow_cover_fetch_now =
       snap.has_cover &&
       (is_radio_cover || !snap.is_playing || snap.play_ms >= 600);
+
+  const bool cover_loading =
+      snap.has_cover &&
+      !allow_cover_fetch_now &&
+      !is_radio_cover &&
+      snap.track_idx >= 0 &&
+      !snap.rescanning;
+
+  json += ",\"cover_loading\":";
+  json += (cover_loading ? "true" : "false");
 
   json += ",\"has_cover\":";
   json += (allow_cover_fetch_now ? "true" : "false");

@@ -39,6 +39,7 @@ struct WebPlayerSnapshot {
 
   // 第二步网页增强：歌词摘要与封面状态
   bool has_lyrics = false;
+  bool lyrics_loading = false;
   String current_lyric;
   String next_lyric;
   bool show_next_lyric = true;
@@ -49,6 +50,7 @@ struct WebPlayerSnapshot {
   uint32_t next_lyric_start_ms = 0;
   uint32_t following_lyric_start_ms = 0;
   bool has_cover = false;
+  bool cover_loading = false;
   String cover_url;
 
   // 网络电台 / 播放源摘要（round16 scaffold）

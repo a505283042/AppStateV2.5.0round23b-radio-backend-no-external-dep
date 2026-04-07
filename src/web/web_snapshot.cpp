@@ -130,15 +130,24 @@ WebPlayerSnapshot web_snapshot_capture() {
 
   if (cur >= 0) {
     TrackViewV3 v{};
-    if (storage_catalog_v3_get_track_view((uint32_t)cur, v, "/Music") && v.valid) {
-      snap.title = v.title;
-      snap.artist = v.artist;
-      snap.album = v.album;
-      snap.has_cover = (v.cover_source != COVER_NONE && (v.cover_size > 0 || v.cover_path.length() > 0));
-      if (snap.has_cover) {
-        snap.cover_url = String("/api/cover/current?track=") + String(cur);
+      if (storage_catalog_v3_get_track_view((uint32_t)cur, v, "/Music") && v.valid) {
+        snap.title = v.title;
+        snap.artist = v.artist;
+        snap.album = v.album;
+
+        snap.has_cover = (v.cover_source != COVER_NONE && (v.cover_size > 0 || v.cover_path.length() > 0));
+        if (snap.has_cover) {
+          snap.cover_url = String("/api/cover/current?track=") + String(cur);
+        }
+
+        const bool lyrics_expected = v.lrc_path.length() > 0;
+        if (!snap.has_lyrics &&
+            lyrics_expected &&
+            !snap.rescanning &&
+            snap.play_ms < 3000) {
+          snap.lyrics_loading = true;
+        }
       }
-    }
 
     const PlayerPlaylistDisplayInfo display =
         player_playlist_get_display_info(cur, (int)storage_catalog_v3_track_count());
@@ -174,12 +183,14 @@ WebPlayerSnapshot web_snapshot_capture() {
     snap.play_ms = 0;
     snap.total_ms = 0;
     snap.has_lyrics = false;
+    snap.lyrics_loading = false;
     snap.current_lyric = "";
     snap.next_lyric = "";
     snap.following_lyric = "";
     snap.current_lyric_start_ms = 0;
     snap.next_lyric_start_ms = 0;
     snap.following_lyric_start_ms = 0;
+    snap.cover_loading = false;
     String radio_logo = source.radio_logo;
     if (radio_logo.isEmpty() && source.radio_idx >= 0) {
         const RadioItem* item = radio_catalog_get((size_t)source.radio_idx);
@@ -190,9 +201,9 @@ WebPlayerSnapshot web_snapshot_capture() {
 
     snap.has_cover = radio_logo.length() > 0;
     if (snap.has_cover) {
-        snap.cover_url = web_is_remote_image_url(radio_logo)
-            ? radio_logo
-            : String("/api/radio/logo/current");
+      snap.cover_url = web_is_remote_image_url(radio_logo)
+          ? radio_logo
+          : (String("/api/radio/logo/current?idx=") + String(source.radio_idx));
     } else {
         snap.cover_url = String();
     }

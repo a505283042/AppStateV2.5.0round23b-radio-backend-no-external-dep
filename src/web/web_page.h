@@ -149,11 +149,29 @@ function fmt(ms){ const s=Math.max(0,Math.floor((ms||0)/1000)); const m=Math.flo
 function estimatePlayMs(snap){ let play=Number(snap?.play_ms)||0; if(snap&&snap.is_playing&&!snap.is_paused&&!snap.rescanning){ play += Math.max(0, Date.now()-lastStatusAt);} return play; }
 function clearLyricTimer(){ if(lyricTimer){ clearTimeout(lyricTimer); lyricTimer=null; } }
 function updateLyricsFromState(j){
-  document.getElementById('lyricCurrent').textContent = j.has_lyrics ? (j.current_lyric || '...') : '当前曲目暂无歌词';
+  const currentNode = document.getElementById('lyricCurrent');
   const nextNode = document.getElementById('lyricNext');
-  if(j.show_next_lyric===false){ nextNode.style.display='none'; return; }
-  nextNode.style.display='block';
-  nextNode.textContent = j.has_lyrics ? ((j.next_lyric && j.next_lyric.length) ? `下一句：${j.next_lyric}` : '下一句：-') : '-';
+
+  if(j.show_next_lyric===false){
+    nextNode.style.display='none';
+  }else{
+    nextNode.style.display='block';
+  }
+
+  if(j.lyrics_loading){
+    currentNode.textContent = '歌词加载中...';
+    if(j.show_next_lyric!==false){
+      nextNode.textContent = '请稍候';
+    }
+    return;
+  }
+
+  currentNode.textContent = j.has_lyrics ? (j.current_lyric || '...') : '当前曲目暂无歌词';
+
+  if(j.show_next_lyric===false) return;
+  nextNode.textContent = j.has_lyrics
+    ? ((j.next_lyric && j.next_lyric.length) ? `下一句：${j.next_lyric}` : '下一句：-')
+    : '-';
 }
 function scheduleLyricTransition(j){
   clearLyricTimer();
@@ -218,17 +236,16 @@ function updateCover(j){
   box.classList.toggle('rotate', rotateView);
   box.classList.toggle('spin', rotateView && allowSpin && !!j.is_playing && !j.is_paused && !j.rescanning);
 
+  const coverLoading = !!j.cover_loading;
+
   if(!j.has_cover || !base){ 
     lastCoverTrack = '';
     img.style.display='none';
     img.removeAttribute('src');
     fallback.style.display='block';
-    fallback.textContent='无封面';
+    fallback.textContent = coverLoading ? '封面加载中...' : '无封面';
     return;
   }
-
-  fallback.style.display='none';
-  img.style.display='block';
 
   const coverKey = (j.source_type==='radio')
     ? `radio:${j.radio_idx||-1}:${base}`
@@ -236,6 +253,10 @@ function updateCover(j){
 
   if(coverKey !== lastCoverTrack){ 
     lastCoverTrack = coverKey;
+
+    img.style.display = 'none';
+    fallback.style.display = 'block';
+    fallback.textContent = '封面加载中...';
 
     img.onerror = () => { 
       img.style.display = 'none';
@@ -249,6 +270,16 @@ function updateCover(j){
     };
 
     img.src = base;
+    return;
+  }
+
+  if(img.complete && img.naturalWidth > 0){
+    fallback.style.display = 'none';
+    img.style.display = 'block';
+  }else{
+    fallback.style.display = 'block';
+    fallback.textContent = '封面加载中...';
+    img.style.display = 'none';
   }
 }
 async function toggleViewFromCover(){ if(coverToggleBusy) return; coverToggleBusy=true; try{ await fetch('/api/view/toggle',{method:'POST'});}catch(e){} scheduleNext(120); setTimeout(()=>{coverToggleBusy=false;},250); }
