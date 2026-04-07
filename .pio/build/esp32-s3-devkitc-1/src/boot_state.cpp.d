@@ -1,5 +1,6 @@
 .pio/build/esp32-s3-devkitc-1/src/boot_state.cpp.o: src/boot_state.cpp \
- include/boot_state.h include/app_state.h include/nfc/nfc.h \
+ include/boot_state.h include/app_state.h include/ui/ui.h \
+ include/storage/storage_types_v3.h \
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/cores/esp32/Arduino.h \
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/cores/esp32/esp_arduino_version.h \
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32s3/include/freertos/include/freertos/FreeRTOS.h \
@@ -180,13 +181,12 @@
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32s3/include/esp_hw_support/include/soc/esp32/spiram.h \
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/cores/esp32/io_pin_remap.h \
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/cores/esp32/Arduino.h \
- include/nfc/nfc_binding.h include/board/board_spi.h \
+ include/nfc/nfc.h include/nfc/nfc_binding.h include/board/board_spi.h \
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/libraries/SPI/src/SPI.h \
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/cores/esp32/esp32-hal-spi.h \
  include/storage/storage.h include/storage/storage_catalog_v3.h \
- include/storage/storage_types_v3.h include/storage/storage_view_v3.h \
- include/storage/storage_groups_v3.h include/ui/ui.h \
- include/ui/ui_cover_mem.h \
+ include/storage/storage_view_v3.h include/storage/storage_groups_v3.h \
+ include/ui/ui.h include/ui/ui_cover_mem.h \
  .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/SdFat.h \
  .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/ExFatLib/ExFatLib.h \
  .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/ExFatLib/ExFatFormatter.h \

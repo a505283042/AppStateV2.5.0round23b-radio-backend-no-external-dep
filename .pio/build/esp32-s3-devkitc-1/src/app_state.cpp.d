@@ -1,6 +1,5 @@
 .pio/build/esp32-s3-devkitc-1/src/app_state.cpp.o: src/app_state.cpp \
- include/app_state.h include/boot_state.h include/player_state.h \
- include/player_list_select.h \
+ include/app_state.h include/ui/ui.h include/storage/storage_types_v3.h \
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/cores/esp32/Arduino.h \
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/cores/esp32/esp_arduino_version.h \
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32s3/include/freertos/include/freertos/FreeRTOS.h \
@@ -181,11 +180,11 @@
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32s3/include/esp_hw_support/include/soc/esp32/spiram.h \
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/cores/esp32/io_pin_remap.h \
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/cores/esp32/Arduino.h \
- include/storage/storage_groups_v3.h include/storage/storage_types_v3.h \
- include/ui/ui.h include/player_control.h include/nfc/nfc_admin_state.h \
- include/nfc/nfc.h include/keys/keys.h include/app_flags.h \
- include/ui/ui.h include/utils/log.h include/audio/audio_service.h \
- include/audio/audio_file.h \
+ include/boot_state.h include/player_state.h include/player_list_select.h \
+ include/storage/storage_groups_v3.h include/player_control.h \
+ include/nfc/nfc_admin_state.h include/ui/ui.h include/nfc/nfc.h \
+ include/keys/keys.h include/app_flags.h include/utils/log.h \
+ include/audio/audio_service.h include/audio/audio_file.h \
  .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/SdFat.h \
  .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/ExFatLib/ExFatLib.h \
  .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/ExFatLib/ExFatFormatter.h \

@@ -2,6 +2,8 @@
 #ifndef APP_STATE_H
 #define APP_STATE_H
 
+#include "ui/ui.h"  /* 包含UI模块头文件 */
+
 /* 定义应用程序的各种状态 */
 typedef enum {
     STATE_BOOT = 0,      /* 启动状态 */
@@ -20,6 +22,8 @@ void app_state_update(void);  /* 更新应用状态 */
 /* NFC 管理状态入口函数 */
 bool app_request_enter_nfc_admin();  /* 请求进入 NFC 管理状态 */
 void app_request_exit_nfc_admin();   /* 请求退出 NFC 管理状态 */
+
+bool app_request_enter_nfc_admin_with_target(const NfcAdminTarget& target); /* 请求进入 NFC 管理状态并指定目标 */
 
 bool app_request_start_rescan();      /* 请求开始重扫（供按键 / 网页统一调用） */
 bool app_request_cancel_rescan();     /* 请求取消重扫（供按键 / 网页统一调用） */

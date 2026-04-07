@@ -127,6 +127,42 @@ bool app_request_enter_nfc_admin()
     return true;
 }
 
+/* 请求进入 NFC 管理状态并指定目标 */
+bool app_request_enter_nfc_admin_with_target(const NfcAdminTarget& target)
+{
+    if (g_app_state != STATE_PLAYER) {
+        LOGI("[APP] enter NFC admin denied: not in player state");
+        return false;
+    }
+
+    if (g_rescanning) {
+        LOGI("[APP] enter NFC admin denied: rescanning");
+        return false;
+    }
+
+    if (player_list_select_is_active()) {
+        LOGI("[APP] enter NFC admin denied: list select mode");
+        return false;
+    }
+
+    LOGI("[APP] entering NFC admin with explicit target");
+
+    ui_hold_render(true);
+    keys_sync_to_hw_state();
+
+    String dummy;
+    while (nfc_take_last_uid(dummy)) {
+    }
+
+    nfc_admin_state_set_override_target(target);
+
+    g_app_state = STATE_NFC_ADMIN;
+    nfc_admin_state_enter();
+
+    ui_hold_render(false);
+    return true;
+}
+
 /* 请求退出 NFC 管理状态 */
 void app_request_exit_nfc_admin()
 {

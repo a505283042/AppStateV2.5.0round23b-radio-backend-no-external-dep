@@ -59,6 +59,7 @@ static const char WEBCTRL_INDEX_HTML[] PROGMEM = R"HTML(
       <div class="nav" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:12px">
         <a class="linkbtn secondary" href="/artists" style="padding:10px 12px;font-size:14px">歌手页</a>
         <a class="linkbtn secondary" href="/albums" style="padding:10px 12px;font-size:14px">专辑页</a>
+        <a class="linkbtn secondary" href="/nfc" style="padding:10px 12px;font-size:14px">NFC管理</a>
         <a class="linkbtn secondary" href="/radios" style="padding:10px 12px;font-size:14px">电台页</a>
         <a class="linkbtn secondary" href="/settings" style="padding:10px 12px;font-size:14px">网页设置</a>
       </div>
@@ -479,6 +480,7 @@ static const char WEBCTRL_ARTISTS_HTML[] PROGMEM = R"HTML(
       <div class="nav" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:12px">
         <a class="secondary" href="/">控制页</a>
         <a class="secondary" href="/albums">专辑页</a>
+        <a class="secondary" href="/nfc">NFC管理</a>
         <a class="secondary" href="/radios">电台页</a>
         <a class="secondary" href="/settings">网页设置</a>
       </div>
@@ -765,6 +767,7 @@ static const char WEBCTRL_ALBUMS_HTML[] PROGMEM = R"HTML(
       <div class="nav" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:12px">
         <a class="secondary" href="/">控制页</a>
         <a class="secondary" href="/artists">歌手页</a>
+        <a class="secondary" href="/nfc">NFC管理</a>
         <a class="secondary" href="/radios">电台页</a>
         <a class="secondary" href="/settings">网页设置</a>
       </div>
@@ -999,6 +1002,225 @@ const $ = id => document.getElementById(id);
 </html>
 )HTML";
 
+static const char WEBCTRL_NFC_HTML[] PROGMEM = R"HTML(
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>ESP32S3 NFC管理</title>
+  <style>
+    body{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:#111;color:#eee}
+    .wrap{max-width:760px;margin:0 auto;padding:16px}
+    .card{background:#1b1b1b;border-radius:16px;padding:16px;margin-bottom:12px;box-shadow:0 4px 18px rgba(0,0,0,.25)}
+    .top{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}
+    .actions{display:flex;gap:8px;flex-wrap:wrap}
+    a,button{border:none;border-radius:12px;padding:10px 14px;background:#2f6feb;color:#fff;font-size:15px;font-weight:600;text-decoration:none;display:inline-flex;align-items:center;justify-content:center}
+    a.secondary,button.secondary{background:#444}
+    button.warn{background:#a04040}
+    input{width:100%;padding:12px 14px;border-radius:12px;border:1px solid #444;background:#111;color:#eee;box-sizing:border-box}
+    .muted{color:#aaa;font-size:14px}
+    .sectionTitle{font-size:20px;font-weight:800;margin:0 0 6px}
+    .toolbar{display:flex;gap:8px;flex-wrap:wrap}
+    .chipRow{display:flex;gap:8px;flex-wrap:wrap}
+    .chip{padding:8px 12px;border-radius:999px;background:#2c2c2c;color:#ddd;cursor:pointer;border:none;font-size:14px}
+    .chip.active{background:#2f6feb;color:#fff}
+    .list{display:flex;flex-direction:column;gap:10px}
+    .item{padding:14px;border:1px solid #2e2e2e;border-radius:14px;background:#151515}
+    .itemHead{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}
+    .badge{display:inline-flex;align-items:center;justify-content:center;padding:4px 10px;border-radius:999px;font-size:12px;font-weight:700}
+    .badge.track{background:#224a8a;color:#cfe3ff}
+    .badge.artist{background:#245b3d;color:#d5ffe6}
+    .badge.album{background:#5a3978;color:#f0dcff}
+    .uid{font-size:12px;color:#aaa;word-break:break-all}
+    .name{font-size:18px;font-weight:700;margin-top:10px}
+    .key{font-size:13px;color:#bdbdbd;margin-top:6px;word-break:break-all}
+    .rowActions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+    .empty{padding:30px 12px;text-align:center;color:#999}
+    .summary{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}
+    .small{font-size:12px;color:#aaa}
+    
+    /* 悬浮回到顶部按钮 */
+    .scrollToTopBtn{position:fixed;bottom:20px;right:20px;width:50px;height:50px;border-radius:50%;background:#2f6feb;color:#fff;border:none;font-size:24px;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,.3);opacity:0;transform:translateY(20px);transition:opacity 0.3s,transform 0.3s;z-index:1000;display:flex;align-items:center;justify-content:center}
+    .scrollToTopBtn.visible{opacity:1;transform:translateY(0)}
+    .scrollToTopBtn:hover{background:#1a5bd4}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card top">
+      <div>
+        <div class="sectionTitle">NFC 绑定管理</div>
+        <div class="muted" id="statusText">加载中...</div>
+      </div>
+      <div class="actions">
+        <a class="secondary" href="/">控制页</a>
+        <a class="secondary" href="/artists">歌手页</a>
+        <a class="secondary" href="/albums">专辑页</a>
+        <button onclick="loadBindings()">刷新</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="chipRow" id="filterRow">
+        <button class="chip active" data-type="all" onclick="setFilter('all')">全部</button>
+        <button class="chip" data-type="track" onclick="setFilter('track')">单曲</button>
+        <button class="chip" data-type="artist" onclick="setFilter('artist')">歌手</button>
+        <button class="chip" data-type="album" onclick="setFilter('album')">专辑</button>
+      </div>
+      <div style="margin-top:12px">
+        <input id="searchInput" placeholder="搜索 UID / 名称 / key">
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="summary">
+        <div class="muted" id="countText">-</div>
+        <div class="small">列表读取自当前内存绑定表</div>
+      </div>
+      <div class="list" id="bindingList" style="margin-top:12px"></div>
+    </div>
+  </div>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>'"]/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+let allBindings = [];
+let currentFilter = 'all';
+
+function bindTypeLabel(type){
+  if(type === 'track') return '单曲';
+  if(type === 'artist') return '歌手';
+  if(type === 'album') return '专辑';
+  return '未知';
+}
+function bindTypeClass(type){
+  if(type === 'track') return 'track';
+  if(type === 'artist') return 'artist';
+  if(type === 'album') return 'album';
+  return 'track';
+}
+function setFilter(type){
+  currentFilter = type;
+  document.querySelectorAll('#filterRow .chip').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.type === type);
+  });
+  renderBindings();
+}
+function matchSearch(x, q){
+  if(!q) return true;
+  const text = [
+    x.uid || '',
+    x.display || '',
+    x.key || '',
+    x.type_label || ''
+  ].join(' ').toLowerCase();
+  return text.includes(q);
+}
+function renderBindings(){
+  const q = ($('searchInput').value || '').trim().toLowerCase();
+  const items = allBindings.filter(x => {
+    const passType = currentFilter === 'all' || x.type === currentFilter;
+    return passType && matchSearch(x, q);
+  });
+
+  $('countText').textContent = `共 ${allBindings.length} 条绑定，当前显示 ${items.length} 条`;
+
+  const box = $('bindingList');
+  if(!items.length){
+    box.innerHTML = '<div class="empty">没有匹配的绑定</div>';
+    return;
+  }
+
+  box.innerHTML = items.map(x => `
+    <div class="item">
+      <div class="itemHead">
+        <span class="badge ${bindTypeClass(x.type)}">${esc(bindTypeLabel(x.type))}</span>
+        <div class="uid">UID：${esc(x.uid || '-')}</div>
+      </div>
+      <div class="name">${esc(x.display || '-')}</div>
+      <div class="key">${esc(x.key || '-')}</div>
+      <div class="rowActions">
+        <button class="secondary" onclick="testPlay('${esc(x.uid || '')}')">测试播放</button>
+        <button class="warn" onclick="deleteBinding('${esc(x.uid || '')}','${esc(x.display || '')}')">删除绑定</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+async function loadBindings(){
+  $('statusText').textContent = '加载中...';
+  try{
+    const r = await fetch('/api/nfc/bindings', {cache:'no-store'});
+    const j = await r.json();
+    if(!j.ok) throw new Error(j.message || '加载失败');
+    allBindings = j.items || [];
+    $('statusText').textContent = `已加载 ${allBindings.length} 条绑定`;
+    renderBindings();
+  }catch(e){
+    $('statusText').textContent = '加载失败';
+    alert(e.message || '加载失败');
+  }
+}
+
+async function deleteBinding(uid, display){
+  if(!confirm(`确认删除这条绑定？\\n\\n${display || uid}`)) return;
+  try{
+    const b = new URLSearchParams();
+    b.append('uid', uid);
+    const r = await fetch('/api/nfc/binding/delete', {
+      method:'POST',
+      headers:{'Content-Type':'application/x-www-form-urlencoded'},
+      body:b.toString()
+    });
+    const j = await r.json();
+    if(!j.ok) throw new Error(j.message || '删除失败');
+    await loadBindings();
+  }catch(e){
+    alert(e.message || '删除失败');
+  }
+}
+
+async function testPlay(uid){
+  try{
+    const b = new URLSearchParams();
+    b.append('uid', uid);
+    const r = await fetch('/api/nfc/binding/test_play', {
+      method:'POST',
+      headers:{'Content-Type':'application/x-www-form-urlencoded'},
+      body:b.toString()
+    });
+    const j = await r.json();
+    alert(j && j.ok ? (j.message || '已触发播放') : ((j && j.message) || '测试播放失败'));
+  }catch(e){
+    alert('测试播放失败');
+  }
+}
+
+$('searchInput').addEventListener('input', renderBindings);
+loadBindings();
+
+// 悬浮回到顶部按钮功能
+const scrollToTopBtn = document.createElement('button');
+scrollToTopBtn.className = 'scrollToTopBtn';
+scrollToTopBtn.innerHTML = '↑';
+scrollToTopBtn.title = '回到顶部';
+scrollToTopBtn.onclick = () => window.scrollTo({top:0,behavior:'smooth'});
+document.body.appendChild(scrollToTopBtn);
+
+// 滚动检测
+window.addEventListener('scroll', () => {
+  const scrollY = window.scrollY;
+  if (scrollY > 300) {
+    scrollToTopBtn.classList.add('visible');
+  } else {
+    scrollToTopBtn.classList.remove('visible');
+  }
+});
+</script>
+</body>
+</html>
+)HTML";
 
 static const char WEBCTRL_RADIOS_HTML[] PROGMEM = R"HTML(
 <!doctype html>

@@ -3,6 +3,7 @@
 #include "app_state.h"
 #include "nfc/nfc.h"
 #include "nfc/nfc_binding.h"
+#include "nfc/nfc_binding_commit.h"
 #include "player_control.h"
 #include "player_playlist.h"
 #include "player_state.h"
@@ -39,6 +40,8 @@ struct NfcAdminCtx {
 static NfcAdminCtx s_admin;
 static uint32_t s_remove_miss_ms = 0;
 static bool s_resume_play_on_exit = false;
+static bool s_has_override_target = false;
+static NfcAdminTarget s_override_target;
 
 // 切换 step 并更新时间戳
 static void admin_set_step(NfcAdminStep step)
@@ -117,6 +120,18 @@ static NfcUiTargetType to_ui_target_type_from_bind(NfcBindType t)
   }
 }
 
+void nfc_admin_state_set_override_target(const NfcAdminTarget& target)
+{
+    s_override_target = target;
+    s_has_override_target = true;
+}
+
+void nfc_admin_state_clear_override_target(void)
+{
+    s_has_override_target = false;
+    s_override_target = NfcAdminTarget{};
+}
+
 static NfcUiTargetType to_ui_target_type_from_target(NfcAdminTargetType t)
 {
   switch (t) {
@@ -136,11 +151,16 @@ void nfc_admin_state_enter(void)
     s_admin.enter_ms = millis();
     s_admin.step_ms = s_admin.enter_ms;
 
-    if (!build_current_bind_target(s_admin.target)) {
-        LOGI("[NFC_ADMIN] invalid bind target");
-        admin_set_step(ADMIN_ERROR);
-        ui_nfc_admin_show_error("无可绑定目标");
-        return;
+    if (s_has_override_target) {
+        s_admin.target = s_override_target;
+        nfc_admin_state_clear_override_target();
+    } else {
+        if (!build_current_bind_target(s_admin.target)) {
+            LOGI("[NFC_ADMIN] invalid bind target");
+            admin_set_step(ADMIN_ERROR);
+            ui_nfc_admin_show_error("无可绑定目标");
+            return;
+        }
     }
 
     ui_enter_nfc_admin();
@@ -152,6 +172,7 @@ void nfc_admin_state_exit(void)
 {
     LOGI("[NFC_ADMIN] exit");
     s_admin = NfcAdminCtx{};
+    nfc_admin_state_clear_override_target();
 }
 
 void nfc_admin_state_run(void)
@@ -224,44 +245,36 @@ void nfc_admin_state_run(void)
         case ADMIN_SAVING: {
             LOGI("[NFC_ADMIN] saving binding...");
 
-            // 安全方案：保存前必须停音频并等待文件关闭
-            // 如果进入保存前本来正在播放，则退出 admin 后自动恢复当前曲目。
-            if (audio_service_is_playing() && !audio_service_is_paused()) {
-                s_resume_play_on_exit = true;
-            }
-            player_control_mark_manual_stop();
-            audio_service_stop(true);
-
-            // 使用新接口保存绑定关系
+            bool was_playing_before = false;
             bool ok = false;
             switch (s_admin.target.type) {
                 case ::NFC_ADMIN_TARGET_TRACK:
-                    ok = nfc_binding_set(s_admin.pending_uid,
-                                         NFC_BIND_TRACK,
-                                         s_admin.target.key,
-                                         s_admin.target.display);
+                    ok = nfc_binding_set_and_save_safely(s_admin.pending_uid,
+                                                         NFC_BIND_TRACK,
+                                                         s_admin.target.key,
+                                                         s_admin.target.display,
+                                                         &was_playing_before);
                     break;
                 case ::NFC_ADMIN_TARGET_ARTIST:
-                    ok = nfc_binding_set(s_admin.pending_uid,
-                                         NFC_BIND_ARTIST,
-                                         s_admin.target.key,
-                                         s_admin.target.display);
+                    ok = nfc_binding_set_and_save_safely(s_admin.pending_uid,
+                                                         NFC_BIND_ARTIST,
+                                                         s_admin.target.key,
+                                                         s_admin.target.display,
+                                                         &was_playing_before);
                     break;
                 case ::NFC_ADMIN_TARGET_ALBUM:
-                    ok = nfc_binding_set(s_admin.pending_uid,
-                                         NFC_BIND_ALBUM,
-                                         s_admin.target.key,
-                                         s_admin.target.display);
+                    ok = nfc_binding_set_and_save_safely(s_admin.pending_uid,
+                                                         NFC_BIND_ALBUM,
+                                                         s_admin.target.key,
+                                                         s_admin.target.display,
+                                                         &was_playing_before);
                     break;
                 default:
                     LOGI("[NFC_ADMIN] invalid target type");
                     break;
             }
 
-            if (ok) {
-                ok = nfc_binding_save("/System/nfc_map.txt");
-            }
-
+            s_resume_play_on_exit = ok && was_playing_before;
             s_admin.save_ok = ok;
 
             if (ok) {

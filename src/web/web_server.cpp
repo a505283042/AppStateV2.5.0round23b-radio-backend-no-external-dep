@@ -13,6 +13,10 @@
 #include "player_snapshot.h"
 #include "player_state.h"
 #include "player_source.h"
+#include "nfc/nfc_binding.h"
+#include "nfc/nfc_binding_commit.h"
+#include "player_binding.h"
+#include "player_recover.h"
 #include "radio/radio_catalog.h"
 #include "player_list_select.h"
 #include "player_playlist.h"
@@ -131,6 +135,37 @@ static void web_send_json_ok_simple(const char* msg = nullptr) {
   if (msg && *msg) { json += ",\"message\":\""; json += web_json_escape(msg); json += "\""; }
   json += "}";
   s_server.send(200, "application/json; charset=utf-8", json);
+}
+
+static const char* web_nfc_type_label_cn(NfcBindType type) {
+  switch (type) {
+    case NFC_BIND_TRACK:  return "单曲";
+    case NFC_BIND_ARTIST: return "歌手";
+    case NFC_BIND_ALBUM:  return "专辑";
+    default:              return "未知";
+  }
+}
+
+static bool web_nfc_test_play_by_uid(const String& uid) {
+  NfcBindingEntry entry;
+  if (!nfc_binding_find(uid, entry)) return false;
+
+  switch (entry.type) {
+    case NFC_BIND_TRACK: {
+      const int idx = player_recover_find_track_idx_by_path(entry.key);
+      if (idx < 0) return false;
+      return player_binding_try_handle_nfc_uid(uid);
+    }
+
+    case NFC_BIND_ARTIST:
+      return player_play_artist_binding(entry.key);
+
+    case NFC_BIND_ALBUM:
+      return player_play_album_binding(entry.key);
+
+    default:
+      return false;
+  }
 }
 static void web_send_json_err(const char* msg, int code = 400) {
   web_send_no_cache_headers();
@@ -517,6 +552,10 @@ static void web_handle_artists_page() {
   web_send_no_cache_headers();
   s_server.send_P(200, "text/html; charset=utf-8", WEBCTRL_ARTISTS_HTML);
 }
+static void web_handle_nfc_page() {
+  web_send_no_cache_headers();
+  s_server.send_P(200, "text/html; charset=utf-8", WEBCTRL_NFC_HTML);
+}
 static void web_handle_albums_page() {
   web_send_no_cache_headers();
   s_server.send_P(200, "text/html; charset=utf-8", WEBCTRL_ALBUMS_HTML);
@@ -788,6 +827,95 @@ static void web_handle_artists() {
 static void web_handle_albums() {
   web_send_group_list_json(player_playlist_album_groups(), true);
 }
+static void web_handle_nfc_bindings() {
+  web_send_no_cache_headers();
+
+  const int total = nfc_binding_count();
+
+  String json;
+  json.reserve(64 + total * 180);
+  json += "{\"ok\":true,\"count\":";
+  json += String(total);
+  json += ",\"items\":[";
+
+  for (int i = 0; i < total; ++i) {
+    NfcBindingEntry entry;
+    if (!nfc_binding_get(i, entry)) continue;
+
+    if (i > 0) json += ",";
+
+    json += "{";
+
+    json += "\"uid\":\"";
+    json += web_json_escape(entry.uid);
+    json += "\",";
+
+    json += "\"type\":\"";
+    json += web_json_escape(String(nfc_binding_type_to_cstr(entry.type)));
+    json += "\",";
+
+    json += "\"type_label\":\"";
+    json += web_json_escape(String(web_nfc_type_label_cn(entry.type)));
+    json += "\",";
+
+    json += "\"display\":\"";
+    json += web_json_escape(entry.display);
+    json += "\",";
+
+    json += "\"key\":\"";
+    json += web_json_escape(entry.key);
+    json += "\"";
+
+    json += "}";
+  }
+
+  json += "]}";
+  s_server.send(200, "application/json; charset=utf-8", json);
+}
+static void web_handle_nfc_binding_delete() {
+  if (!web_require_player_state()) return;
+
+  const String uid = web_trim_copy(s_server.arg("uid"));
+  if (!uid.length()) {
+    web_send_json_err("缺少 uid 参数");
+    return;
+  }
+
+  NfcBindingEntry entry;
+  if (!nfc_binding_find(uid, entry)) {
+    web_send_json_err("绑定不存在", 404);
+    return;
+  }
+
+  if (!nfc_binding_remove_and_save_safely(uid, nullptr, true)) {
+    web_send_json_err("删除绑定失败", 500);
+    return;
+  }
+
+  web_send_json_ok_simple("binding_deleted");
+}
+static void web_handle_nfc_binding_test_play() {
+  if (!web_require_player_state()) return;
+
+  const String uid = web_trim_copy(s_server.arg("uid"));
+  if (!uid.length()) {
+    web_send_json_err("缺少 uid 参数");
+    return;
+  }
+
+  NfcBindingEntry entry;
+  if (!nfc_binding_find(uid, entry)) {
+    web_send_json_err("绑定不存在", 404);
+    return;
+  }
+
+  if (!web_nfc_test_play_by_uid(uid)) {
+    web_send_json_err("测试播放失败", 500);
+    return;
+  }
+
+  web_send_json_ok_simple("已触发播放");
+}
 static void web_handle_artist_detail() {
   int idx = -1; if (!web_parse_int_arg("idx", idx)) { web_send_json_err("缺少 idx 参数"); return; }
   web_send_group_detail_json(player_playlist_artist_groups(), idx, false);
@@ -829,6 +957,97 @@ static void web_handle_track_play() {
   player_playlist_force_rebuild();
   if (!player_play_idx_v3((uint32_t)track_idx, true, true)) { web_send_json_err("曲目播放失败", 500); return; }
   web_send_json_ok_simple("track_play_started");
+}
+static void web_handle_artist_bind_nfc() {
+  if (!web_require_player_state()) return;
+
+  int idx = -1;
+  if (!web_parse_int_arg("idx", idx)) {
+    web_send_json_err("缺少 idx 参数");
+    return;
+  }
+
+  const auto& groups = player_playlist_artist_groups();
+  if (idx < 0 || idx >= (int)groups.size()) {
+    web_send_json_err("歌手分组不存在", 404);
+    return;
+  }
+
+  const MusicCatalogV3& cat = storage_catalog_v3();
+
+  NfcAdminTarget target{};
+  target.type = NFC_ADMIN_TARGET_ARTIST;
+  target.key = playlist_group_name_string(cat, groups[idx]);
+  target.display = target.key;
+
+  if (!app_request_enter_nfc_admin_with_target(target)) {
+    web_send_json_err("进入 NFC 绑定失败", 500);
+    return;
+  }
+
+  web_send_json_ok_simple("请到设备前刷卡并按播放键保存");
+}
+static void web_handle_album_bind_nfc() {
+  if (!web_require_player_state()) return;
+
+  int idx = -1;
+  if (!web_parse_int_arg("idx", idx)) {
+    web_send_json_err("缺少 idx 参数");
+    return;
+  }
+
+  const auto& groups = player_playlist_album_groups();
+  if (idx < 0 || idx >= (int)groups.size()) {
+    web_send_json_err("专辑分组不存在", 404);
+    return;
+  }
+
+  const MusicCatalogV3& cat = storage_catalog_v3();
+
+  NfcAdminTarget target{};
+  target.type = NFC_ADMIN_TARGET_ALBUM;
+  target.key = playlist_group_display_string(cat, groups[idx]);
+  target.display = target.key;
+
+  if (!app_request_enter_nfc_admin_with_target(target)) {
+    web_send_json_err("进入 NFC 绑定失败", 500);
+    return;
+  }
+
+  web_send_json_ok_simple("请到设备前刷卡并按播放键保存");
+}
+static void web_handle_track_bind_nfc() {
+  if (!web_require_player_state()) return;
+
+  int track_idx = -1;
+  if (!web_parse_int_arg("idx", track_idx)) {
+    web_send_json_err("缺少 idx 参数");
+    return;
+  }
+
+  if (track_idx < 0 || track_idx >= (int)storage_catalog_v3_track_count()) {
+    web_send_json_err("曲目不存在", 404);
+    return;
+  }
+
+  TrackViewV3 view;
+  if (!storage_catalog_v3_get_track_view((uint32_t)track_idx, view)) {
+    web_send_json_err("读取曲目信息失败", 500);
+    return;
+  }
+
+  NfcAdminTarget target{};
+  target.type = NFC_ADMIN_TARGET_TRACK;
+  target.track_idx = track_idx;
+  target.key = view.audio_path;
+  target.display = view.title + " - " + view.artist;
+
+  if (!app_request_enter_nfc_admin_with_target(target)) {
+    web_send_json_err("进入 NFC 绑定失败", 500);
+    return;
+  }
+
+  web_send_json_ok_simple("请到设备前刷卡并按播放键保存");
 }
 static void web_handle_radios_page() {
   web_send_no_cache_headers();
@@ -897,6 +1116,7 @@ static void web_setup_routes() {
   s_server.on("/", HTTP_GET, web_handle_root);
   s_server.on("/artists", HTTP_GET, web_handle_artists_page);
   s_server.on("/albums", HTTP_GET, web_handle_albums_page);
+  s_server.on("/nfc", HTTP_GET, web_handle_nfc_page);
   s_server.on("/radios", HTTP_GET, web_handle_radios_page);
   s_server.on("/settings", HTTP_GET, web_handle_settings_page);
   s_server.on("/favicon.ico", HTTP_GET, web_handle_favicon);
@@ -913,6 +1133,12 @@ static void web_setup_routes() {
   s_server.on("/api/artist/play", HTTP_POST, web_handle_artist_play);
   s_server.on("/api/album/play", HTTP_POST, web_handle_album_play);
   s_server.on("/api/track/play", HTTP_POST, web_handle_track_play);
+  s_server.on("/api/nfc/bindings", HTTP_GET, web_handle_nfc_bindings);
+  s_server.on("/api/nfc/binding/delete", HTTP_POST, web_handle_nfc_binding_delete);
+  s_server.on("/api/nfc/binding/test_play", HTTP_POST, web_handle_nfc_binding_test_play);
+  s_server.on("/api/artist/bind_nfc", HTTP_POST, web_handle_artist_bind_nfc);
+  s_server.on("/api/album/bind_nfc", HTTP_POST, web_handle_album_bind_nfc);
+  s_server.on("/api/track/bind_nfc", HTTP_POST, web_handle_track_bind_nfc);
   s_server.on("/api/radio/play", HTTP_POST, web_handle_radio_play);
   s_server.on("/api/radio/stop", HTTP_POST, web_handle_radio_stop);
   s_server.on("/api/playpause", HTTP_POST, web_handle_playpause);

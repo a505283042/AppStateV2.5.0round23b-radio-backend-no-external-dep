@@ -1,6 +1,6 @@
 .pio/build/esp32-s3-devkitc-1/src/nfc/nfc_admin_state.cpp.o: \
  src/nfc/nfc_admin_state.cpp include/nfc/nfc_admin_state.h \
- include/app_state.h include/nfc/nfc.h \
+ include/ui/ui.h include/storage/storage_types_v3.h \
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/cores/esp32/Arduino.h \
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/cores/esp32/esp_arduino_version.h \
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32s3/include/freertos/include/freertos/FreeRTOS.h \
@@ -181,8 +181,9 @@
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32s3/include/esp_hw_support/include/soc/esp32/spiram.h \
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/cores/esp32/io_pin_remap.h \
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/cores/esp32/Arduino.h \
- include/nfc/nfc_binding.h include/player_control.h include/ui/ui.h \
- include/storage/storage_types_v3.h include/player_playlist.h \
+ include/app_state.h include/ui/ui.h include/nfc/nfc.h \
+ include/nfc/nfc_binding.h include/nfc/nfc_binding_commit.h \
+ include/player_control.h include/player_playlist.h \
  include/player_state.h include/storage/storage_catalog_v3.h \
  include/storage/storage_view_v3.h include/storage/storage_groups_v3.h \
- include/audio/audio_service.h include/ui/ui.h include/utils/log.h
+ include/audio/audio_service.h include/utils/log.h

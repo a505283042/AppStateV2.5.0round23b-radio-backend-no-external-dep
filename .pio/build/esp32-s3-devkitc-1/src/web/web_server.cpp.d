@@ -243,11 +243,13 @@
  .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/FsLib/FsNew.h \
  .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/FsLib/FsVolume.h \
  .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/FsLib/FsFormatter.h \
- include/app_state.h include/app_flags.h include/ui/ui.h \
- include/storage/storage_types_v3.h include/audio/audio_service.h \
- include/audio/audio.h include/player_control.h include/player_snapshot.h \
+ include/app_state.h include/ui/ui.h include/storage/storage_types_v3.h \
+ include/app_flags.h include/audio/audio_service.h include/audio/audio.h \
+ include/player_control.h include/player_snapshot.h \
  include/player_state.h include/player_source.h \
- include/radio/radio_catalog.h include/player_list_select.h \
+ include/radio/radio_catalog.h include/nfc/nfc_binding.h \
+ include/nfc/nfc_binding_commit.h include/player_binding.h \
+ include/player_recover.h include/player_list_select.h \
  include/storage/storage_groups_v3.h include/player_playlist.h \
  include/storage/storage_catalog_v3.h include/storage/storage_view_v3.h \
  include/storage/storage_io.h include/ui/ui.h include/utils/log.h \

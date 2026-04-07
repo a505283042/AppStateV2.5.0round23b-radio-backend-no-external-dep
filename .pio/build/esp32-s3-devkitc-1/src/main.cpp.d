@@ -216,4 +216,5 @@
  .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/FsLib/FsNew.h \
  .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/FsLib/FsVolume.h \
  .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/FsLib/FsFormatter.h \
- include/board/board_spi.h include/board/board_pins.h include/app_state.h
+ include/board/board_spi.h include/board/board_pins.h include/app_state.h \
+ include/ui/ui.h include/storage/storage_types_v3.h
