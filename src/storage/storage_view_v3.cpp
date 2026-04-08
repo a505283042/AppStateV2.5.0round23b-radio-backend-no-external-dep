@@ -90,10 +90,10 @@ bool storage_make_track_view_v3(const MusicCatalogV3& cat,
   return true;
 }
 
-bool storage_fill_legacy_trackinfo_from_v3(const MusicCatalogV3& cat,
-                                           uint32_t track_index,
-                                           TrackInfo& out,
-                                           const char* music_root)
+bool storage_fill_trackinfo_from_v3(const MusicCatalogV3& cat,
+                                    uint32_t track_index,
+                                    TrackInfo& out,
+                                    const char* music_root)
 {
   TrackViewV3 v;
   if (!storage_make_track_view_v3(cat, track_index, v, music_root)) {

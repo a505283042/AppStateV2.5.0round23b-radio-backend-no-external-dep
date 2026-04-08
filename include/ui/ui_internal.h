@@ -108,7 +108,7 @@ void ui_draw_lock();
 void ui_draw_unlock();
 void ui_request_refresh();
 
-/* 旧页面/兼容壳：仅供 ui_pages.cpp 或 UI 内部路径使用，不暴露给业务层。 */
+/* UI 内部页面接口：仅供 ui_pages.cpp 或 UI 内部路径使用，不暴露给业务层。 */
 void ui_show_message(const char* msg);
 void ui_enter_boot(void);
 void ui_show_scanning();

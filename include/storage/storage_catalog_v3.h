@@ -52,10 +52,10 @@ bool storage_catalog_v3_get_track_view(uint32_t track_index,
                                        TrackViewV3& out,
                                        const char* music_root = "/Music");
 
-/* 取兼容层 TrackInfo，供旧播放链路复用 */
-bool storage_catalog_v3_get_legacy_trackinfo(uint32_t track_index,
-                                             TrackInfo& out,
-                                             const char* music_root = "/Music");
+/* 取 TrackInfo */
+bool storage_catalog_v3_get_trackinfo(uint32_t track_index,
+                                      TrackInfo& out,
+                                      const char* music_root = "/Music");
 
 /* 输出内存统计日志，便于看 builder / catalog 占用。 */
 void storage_catalog_v3_log_memory_stats(void);

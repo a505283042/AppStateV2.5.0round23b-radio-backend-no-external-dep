@@ -57,29 +57,7 @@ static bool split4(const String& line, String& a, String& b, String& c, String& 
     return true;
 }
 
-static bool split_old_uid_path(const String& line, String& uid, String& path)
-{
-    int eq = line.indexOf('=');
-    if (eq < 0) return false;
 
-    uid = line.substring(0, eq);
-    path = line.substring(eq + 1);
-    uid.trim();
-    path.trim();
-    return !(uid.isEmpty() || path.isEmpty());
-}
-
-static String basename_no_ext(const String& path)
-{
-    int slash = path.lastIndexOf('/');
-    String name = (slash >= 0) ? path.substring(slash + 1) : path;
-
-    int dot = name.lastIndexOf('.');
-    if (dot > 0) {
-        name = name.substring(0, dot);
-    }
-    return name;
-}
 
 const char* nfc_binding_type_to_cstr(NfcBindType type)
 {
@@ -209,39 +187,22 @@ bool nfc_binding_load(const char* path)
         if (line.isEmpty()) continue;
         if (line.startsWith("#")) continue;
 
-        String uid, type_s, key, display;
-
         // 新格式：UID|TYPE|KEY|DISPLAY
-        if (line.indexOf('|') >= 0) {
-            if (!split4(line, uid, type_s, key, display)) {
-                LOGI("[NFC_BIND] skip bad line: %s", line.c_str());
-                continue;
-            }
-
-            NfcBindType type = nfc_binding_type_from_str(type_s);
-            if (type == NFC_BIND_UNKNOWN) {
-                LOGI("[NFC_BIND] skip unknown type: %s", line.c_str());
-                continue;
-            }
-
-            if (!nfc_binding_set(uid, type, key, display)) {
-                LOGI("[NFC_BIND] skip set failed: %s", line.c_str());
-                continue;
-            }
+        String uid, type_s, key, display;
+        if (!split4(line, uid, type_s, key, display)) {
+            LOGI("[NFC_BIND] skip bad line: %s", line.c_str());
+            continue;
         }
-        // 旧格式兼容：UID=PATH
-        else {
-            String old_uid, old_path;
-            if (!split_old_uid_path(line, old_uid, old_path)) {
-                LOGI("[NFC_BIND] skip legacy bad line: %s", line.c_str());
-                continue;
-            }
 
-            String legacy_display = basename_no_ext(old_path);
-            if (!nfc_binding_set(old_uid, NFC_BIND_TRACK, old_path, legacy_display)) {
-                LOGI("[NFC_BIND] skip legacy set failed: %s", line.c_str());
-                continue;
-            }
+        NfcBindType type = nfc_binding_type_from_str(type_s);
+        if (type == NFC_BIND_UNKNOWN) {
+            LOGI("[NFC_BIND] skip unknown type: %s", line.c_str());
+            continue;
+        }
+
+        if (!nfc_binding_set(uid, type, key, display)) {
+            LOGI("[NFC_BIND] skip set failed: %s", line.c_str());
+            continue;
         }
     }
 

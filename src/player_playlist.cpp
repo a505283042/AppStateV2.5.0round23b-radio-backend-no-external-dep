@@ -549,7 +549,7 @@ bool player_playlist_get_next_for_cover_prefetch(int current_idx,
 
     const int next_idx = playlist[(size_t)next_pos];
     if (next_idx < 0 || next_idx == current_idx) return false;
-    if (!storage_catalog_v3_get_legacy_trackinfo(next_idx, out_track, "/Music")) return false;
+    if (!storage_catalog_v3_get_trackinfo(next_idx, out_track, "/Music")) return false;
 
     out_track_idx = next_idx;
     return true;

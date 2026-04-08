@@ -13,7 +13,7 @@ enum CoverSource : uint8_t {
   COVER_FILE_FALLBACK
 };
 
-/* 兼容层：运行时展开后的曲目信息（供 UI / Audio / NFC 继续复用） */
+/* 运行时展开后的曲目信息（供 UI / Audio / NFC 继续复用） */
 struct TrackInfo {
   String artist;       /* 艺术家名称 */
   String album;        /* 专辑名称 */

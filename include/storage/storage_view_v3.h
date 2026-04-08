@@ -31,8 +31,8 @@ bool storage_make_track_view_v3(const MusicCatalogV3& cat,
                                 TrackViewV3& out,
                                 const char* music_root = "/Music");
 
-/* 从 V3 catalog 直接生成兼容层 TrackInfo，供现有代码复用 */
-bool storage_fill_legacy_trackinfo_from_v3(const MusicCatalogV3& cat,
-                                           uint32_t track_index,
-                                           TrackInfo& out,
-                                           const char* music_root = "/Music");
+/* 运行时 TrackInfo */
+bool storage_fill_trackinfo_from_v3(const MusicCatalogV3& cat,
+                                    uint32_t track_index,
+                                    TrackInfo& out,
+                                    const char* music_root = "/Music");

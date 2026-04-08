@@ -405,7 +405,7 @@ static const char WEBCTRL_SETTINGS_HTML[] PROGMEM = R"HTML(
         <a class="secondary" href="/">返回控制页</a>
       </div>
       <h2>网页设置</h2>
-      <div class="muted">设置会保存到设备内部配置区（更稳定），旧版 SD 配置会自动兼容导入</div>
+      <div class="muted">设置会保存到设备内部配置区（更稳定）</div>
     </div>
 
     <div class="card">

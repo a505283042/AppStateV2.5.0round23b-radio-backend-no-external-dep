@@ -181,42 +181,4 @@
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/cores/esp32/io_pin_remap.h \
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/cores/esp32/Arduino.h \
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/libraries/Preferences/src/Preferences.h \
- .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/SdFat.h \
- .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/ExFatLib/ExFatLib.h \
- .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/ExFatLib/ExFatFormatter.h \
- .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/ExFatLib/../common/FsBlockDevice.h \
- .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/SdCard/SdCard.h \
- .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/SdCard/SdSpiCard/SdSpiCard.h \
- .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/SdCard/SdSpiCard/../../common/SysCall.h \
- .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/SdCard/SdSpiCard/../../common/../SdFatConfig.h \
- .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/SdCard/SdSpiCard/../SdCardInfo.h \
- .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/SdCard/SdSpiCard/../SdCardInterface.h \
- .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/SdCard/SdSpiCard/../../common/FsBlockDeviceInterface.h \
- .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/SdCard/SdSpiCard/SpiDriver/SdSpiDriver.h \
- C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/libraries/SPI/src/SPI.h \
- C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/cores/esp32/esp32-hal-spi.h \
- .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/SdCard/SdSpiCard/SpiDriver/SdSpiArduinoDriver.h \
- .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/SdCard/SdSpiCard/SpiDriver/SdSpiLibDriver.h \
- .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/ExFatLib/ExFatVolume.h \
- .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/ExFatLib/ExFatFile.h \
- .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/ExFatLib/../common/FmtNumber.h \
- .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/ExFatLib/../common/FsApiConstants.h \
- .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/ExFatLib/../common/FsDateTime.h \
- .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/ExFatLib/../common/CompileDateTime.h \
- .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/ExFatLib/../common/FsName.h \
- .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/ExFatLib/ExFatPartition.h \
- .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/ExFatLib/../common/FsCache.h \
- .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/ExFatLib/../common/FsStructs.h \
- .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/ExFatLib/../common/ArduinoFiles.h \
- .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/FatLib/FatLib.h \
- .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/FatLib/FatFormatter.h \
- .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/FatLib/FatVolume.h \
- .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/FatLib/FatFile.h \
- .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/FatLib/FatPartition.h \
- .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/FsLib/FsLib.h \
- .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/FsLib/FsFile.h \
- .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/FsLib/FsNew.h \
- .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/FsLib/FsVolume.h \
- .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/FsLib/FsFormatter.h \
- include/storage/storage_io.h include/utils/log.h \
- include/web/web_config.h
+ include/utils/log.h

@@ -139,16 +139,16 @@ bool storage_catalog_v3_get_track_view(uint32_t track_index,
   return storage_make_track_view_v3(s_catalog_v3, track_index, out, music_root);
 }
 
-bool storage_catalog_v3_get_legacy_trackinfo(uint32_t track_index,
-                                             TrackInfo& out,
-                                             const char* music_root)
+bool storage_catalog_v3_get_trackinfo(uint32_t track_index,
+                                      TrackInfo& out,
+                                      const char* music_root)
 {
   if (!storage_catalog_v3_ready()) {
     out = TrackInfo{};
     return false;
   }
 
-  return storage_fill_legacy_trackinfo_from_v3(s_catalog_v3, track_index, out, music_root);
+  return storage_fill_trackinfo_from_v3(s_catalog_v3, track_index, out, music_root);
 }
 
 void storage_catalog_v3_log_memory_stats(void)

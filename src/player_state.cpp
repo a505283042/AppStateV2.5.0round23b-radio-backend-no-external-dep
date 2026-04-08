@@ -405,8 +405,8 @@ bool player_play_idx_v3(uint32_t idx, bool verbose, bool force_cover)
     if (idx >= total) idx = total - 1;
 
     TrackInfo t;
-    if (!storage_catalog_v3_get_legacy_trackinfo(idx, t, "/Music")) {
-        LOGE("[PLAYER] expand legacy trackinfo failed, idx=%u", (unsigned)idx);
+    if (!storage_catalog_v3_get_trackinfo(idx, t, "/Music")) {
+        LOGE("[PLAYER] expand trackinfo failed, idx=%u", (unsigned)idx);
         return false;
     }
 

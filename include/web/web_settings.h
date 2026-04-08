@@ -28,7 +28,7 @@ struct WebRuntimeSettings {
   bool show_wifi_info = true;
 };
 
-// 启动时优先从 NVS 加载网页运行设置；若不存在则兼容导入旧版 SD 配置；都没有则使用默认值。
+// 启动时从 NVS 加载网页运行设置；没有则使用默认值。
 bool web_settings_load();
 // 将当前网页运行设置保存到 NVS（避免播放中写 SD 导致网页设置保存不稳定）。
 bool web_settings_save();

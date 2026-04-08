@@ -18,7 +18,6 @@ namespace {
 
 static const char* kPrefsNs = "playerst";
 static const char* kPrefsBlobKey = "snap";
-static const char* kPrefsInit = "init";   // round14 兼容读取
 static const uint8_t kSnapshotVersion = 2;
 static const uint32_t kDeferredRestoreDelayMs = 450;
 
@@ -141,24 +140,7 @@ static bool snapshot_read_blob(Preferences& pref, PlayerPersistSnapshot& out)
     return true;
 }
 
-static bool snapshot_read_legacy_keys(Preferences& pref, PlayerPersistSnapshot& out)
-{
-    const bool inited = pref.getBool(kPrefsInit, false);
-    if (!inited) {
-        return false;
-    }
 
-    out.version = pref.getUChar("ver", 1);
-    out.volume = pref.getUChar("vol", 100);
-    out.play_mode = pref.getUChar("mode", (uint8_t)PLAY_MODE_ALL_SEQ);
-    out.current_group_idx = pref.getInt("group", -1);
-    out.track_idx = pref.getInt("track", -1);
-    out.track_path = pref.getString("path", "");
-    out.ui_view = pref.getUChar("view", (uint8_t)UI_VIEW_INFO);
-    out.user_paused = pref.getBool("paused", true);
-    snapshot_sanitize_loaded(out);
-    return true;
-}
 
 static void snapshot_apply_light_state(const PlayerPersistSnapshot& snap)
 {
@@ -197,9 +179,6 @@ bool player_snapshot_load_pending_from_nvs()
     if (snapshot_read_blob(pref, s_pending)) {
         ok = true;
         snapshot_log_loaded("pending loaded from NVS blob", s_pending);
-    } else if (snapshot_read_legacy_keys(pref, s_pending)) {
-        ok = true;
-        snapshot_log_loaded("pending loaded from legacy NVS keys", s_pending);
     }
     pref.end();
 

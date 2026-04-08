@@ -13,8 +13,6 @@
 
 > 本 README 按当前主线整理：
 > - 网络电台主线已统一为 **Audio Tools URLStream -> unified MP3 core (`audio_mp3.cpp`)**
-> - 旧的 `audio_mp3_stream*` 兼容播放链已下线或应视为历史残留
-> - 历史数据兼容层（如旧 NVS key / 旧 NFC 绑定格式）仍保留，用于平滑升级
 
 ---
 
@@ -51,7 +49,6 @@
   - 扫描 / 保存状态
 - 启动恢复：
   - NVS blob 快照恢复播放状态
-  - 兼容旧版 NVS key
 - Wi‑Fi：
   - 优先 STA 连 `wifi.conf`
   - 失败自动回退 AP 热点
@@ -246,7 +243,6 @@ player -> audio_radio_backend.cpp
     default_cover.jpg
     /config/
         wifi.conf
-        web_settings.conf   # 旧版导入源，可选
 ```
 
 ### 音乐目录
@@ -292,12 +288,6 @@ UID|TYPE|KEY|DISPLAY
 ```text
 09:76:10:05|track|/Music/周杰伦 - 忍者.flac|忍者 - 周杰伦
 F7:8C:64:06|album|王菲菲 - 那些年|王菲菲 - 那些年
-```
-
-兼容旧格式：
-
-```text
-UID=PATH
 ```
 
 系统会自动按 `track` 处理旧格式。
@@ -372,10 +362,6 @@ password=87654321
 - 是否显示下一句歌词
 - 是否显示封面
 - 旋转视图时网页封面是否旋转
-
-如果没有 NVS 设置，会尝试导入旧版 SD 文件：
-
-- `/System/config/web_settings.conf`
 
 ---
 
@@ -471,11 +457,6 @@ V3 的设计目标：
 - 启动时先读取“待恢复快照”
 - 首次进入 player 后先恢复轻量状态
 - 再延后恢复曲目，避免阻塞进入主界面
-
-兼容保留：
-
-- 旧 NVS key 读取逻辑仍在
-- 目的是让旧版本升级后仍能恢复已有状态
 
 ---
 
@@ -575,17 +556,9 @@ pio device monitor
 1. 当前稳定网络音频能力是 **HTTP MP3 电台**。  
    `m3u8/HLS` 不是当前稳定主线。
 
-2. 当前项目仍保留部分**兼容迁移层**，例如：
-   - 旧 NVS key 恢复
-   - 旧 NFC `UID=PATH` 格式导入
-   - V3 catalog 到旧 `TrackInfo` 的桥接
-
-3. 如果你的本地分支里还看到这些文件：
-   - `audio_mp3_stream.cpp`
+2. 下面这些文件/模块已下线或应视为历史残留：
    - `audio_mp3_stream_audiotools.cpp`
    - `audio_mp3_stream.h`
-
-   它们应视为历史兼容残留，而不是当前推荐主线。
 
 4. Web 页当前是轻量内嵌页面，不是独立前端工程。
 
@@ -603,7 +576,6 @@ pio device monitor
 - 继续瘦身内部 RAM
 - 统一更多播放源抽象
 - 优化 Web JSON 构造与长时间运行稳定性
-- 收口兼容桥接层
 
 ### 中期方向
 

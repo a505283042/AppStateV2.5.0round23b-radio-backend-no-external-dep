@@ -121,23 +121,7 @@ bool LyricsParser::loadFromFile(const char* path) {
     return result;
 }
 
-bool LyricsParser::parse(const String& content) {
-    clear();
 
-    const size_t len = content.length();
-    if (len == 0) {
-        return false;
-    }
-
-    char* buf = lyrics_alloc_text_buffer(len);
-    if (!buf) {
-        return false;
-    }
-
-    memcpy(buf, content.c_str(), len);
-    buf[len] = '\0';
-    return parseOwnedBuffer(buf, len);
-}
 
 bool LyricsParser::parseOwnedBuffer(char* content, size_t len) {
     clear();
@@ -419,19 +403,7 @@ bool LyricsDisplay::loadFromPath(const char* lrc_path) {
     return success;
 }
 
-bool LyricsDisplay::loadFromText(const String& content) {
-    resetStateOnly();
 
-    if (content.length() == 0) {
-        return false;
-    }
-
-    const bool success = m_parser.parse(content);
-    if (success) {
-        m_currentIndex = 0;
-    }
-    return success;
-}
 
 bool LyricsDisplay::loadFromOwnedTextBuffer(char* content, size_t len) {
     resetStateOnly();

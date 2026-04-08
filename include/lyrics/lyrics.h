@@ -19,10 +19,7 @@ public:
     // 从文件加载歌词（支持 .lrc 和 .txt）
     bool loadFromFile(const char* path);
 
-    // 兼容旧接口：传入 String，内部会复制一份缓冲
-    bool parse(const String& content);
-
-    // 新接口：直接接管一块已分配的歌词文本缓冲
+    // 直接接管一块已分配的歌词文本缓冲
     // 成功或失败后，这块缓冲都由 parser 负责释放
     bool parseOwnedBuffer(char* content, size_t len);
 
@@ -60,10 +57,7 @@ public:
     bool loadForTrack(const char* audio_path);
     bool loadFromPath(const char* lrc_path);
 
-    // 兼容旧接口
-    bool loadFromText(const String& content);
-
-    // 新接口：直接接管缓冲区
+    // 直接接管缓冲区
     bool loadFromOwnedTextBuffer(char* content, size_t len);
 
     void updateTime(uint32_t time_ms);

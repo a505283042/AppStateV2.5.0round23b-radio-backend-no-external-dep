@@ -219,4 +219,4 @@
  .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/FsLib/FsFormatter.h \
  include/storage/storage_types_v3.h \
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/cores/esp32/esp32-hal-psram.h \
- include/utils/utils_log.h include/storage/storage_io.h
+ include/utils/log.h include/storage/storage_io.h

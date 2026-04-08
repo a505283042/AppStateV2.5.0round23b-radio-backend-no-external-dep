@@ -1,6 +1,6 @@
 #include "ui/ui_cover_mem.h"
 #include "esp32-hal-psram.h"
-#include "utils/utils_log.h"
+#include "utils/log.h"
 #include "storage/storage_io.h"
 #include <freertos/task.h>
 
