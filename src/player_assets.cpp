@@ -7,6 +7,8 @@
 #include <stdlib.h>
 
 #include "ui/ui.h"
+#include "web/web_cover_cache.h"
+#include "ui/ui_internal.h"
 #include "audio/audio_service.h"
 #include "audio/audio.h"
 #include "lyrics/lyrics.h"
@@ -46,6 +48,52 @@ struct DeferredCurrentCoverApply {
 };
 // 延迟当前封面应用
 static DeferredCurrentCoverApply s_deferred_current_cover_apply{};
+
+static void player_assets_try_store_web_cover_from_ui_cache(int track_idx,
+                                                            CoverSource cover_source,
+                                                            const char* audio_path,
+                                                            const char* cover_path,
+                                                            uint32_t cover_offset,
+                                                            uint32_t cover_size)
+{
+    if (track_idx < 0) {
+        LOGI("[PLAYER] webcover skip: invalid track=%d", track_idx);
+        return;
+    }
+
+    ui_lock();
+
+    int slot = -1;
+    if (s_coverCacheReady[0] && s_coverCacheTrackIdx[0] == track_idx) {
+        slot = 0;
+    } else if (s_coverCacheReady[1] && s_coverCacheTrackIdx[1] == track_idx) {
+        slot = 1;
+    }
+
+    LOGI("[PLAYER] webcover from ui cache track=%d slot=%d ready0=%d idx0=%d ready1=%d idx1=%d",
+         track_idx,
+         slot,
+         s_coverCacheReady[0] ? 1 : 0,
+         s_coverCacheTrackIdx[0],
+         s_coverCacheReady[1] ? 1 : 0,
+         s_coverCacheTrackIdx[1]);
+
+    if (slot >= 0 && s_coverCacheSpr[slot]) {
+        const bool ok = web_cover_cache_store_from_sprite(track_idx,
+                                                          cover_source,
+                                                          audio_path,
+                                                          cover_path,
+                                                          cover_offset,
+                                                          cover_size,
+                                                          *s_coverCacheSpr[slot]);
+        LOGI("[PLAYER] webcover store track=%d slot=%d ok=%d", track_idx, slot, ok ? 1 : 0);
+    } else {
+        LOGI("[PLAYER] webcover store skip track=%d slot=%d spr0=%p spr1=%p",
+             track_idx, slot, s_coverCacheSpr[0], s_coverCacheSpr[1]);
+    }
+
+    ui_unlock();
+}
 
 // 检查播放器资源任务是否当前有效
 static bool player_assets_is_job_current(const PlayerDeferredAssetJob& job)
@@ -122,6 +170,14 @@ static void player_asset_task_entry(void*)
                 LOGI("[PLAYER] defer current cover apply track=%d", job.track_idx);
             } else if (ui_cover_apply_cached(job.track_idx)) {
                 current_cover_cache_hit = true;
+
+                player_assets_try_store_web_cover_from_ui_cache(job.track_idx,
+                                                                job.cover_source,
+                                                                job.audio_path,
+                                                                job.cover_path,
+                                                                job.cover_offset,
+                                                                job.cover_size);
+
                 if (s_hooks.on_current_cover_ready) {
                     s_hooks.on_current_cover_ready(job.track_idx);
                 }
@@ -195,6 +251,16 @@ static void player_asset_task_entry(void*)
 
         if (cover_buf && cover_len > 0 && player_assets_is_job_current(job)) {
             const bool scaled_ok = ui_cover_scale_to_cache_from_buffer(cover_buf, cover_len, cover_is_png, job.track_idx);
+
+            if (scaled_ok) {
+                player_assets_try_store_web_cover_from_ui_cache(job.track_idx,
+                                                                job.cover_source,
+                                                                job.audio_path,
+                                                                job.cover_path,
+                                                                job.cover_offset,
+                                                                job.cover_size);
+            }
+
             ui_cover_free_allocated(cover_buf);
             cover_buf = nullptr;
             t_after_cover_scale = millis();
@@ -270,6 +336,16 @@ static void player_asset_task_entry(void*)
 
                     if (fetch_ok && next_cover_buf && next_cover_len > 0 && player_assets_is_job_current(job)) {
                         const bool next_ok = ui_cover_scale_to_cache_from_buffer(next_cover_buf, next_cover_len, next_cover_is_png, next_track_idx);
+
+                        if (next_ok) {
+                            player_assets_try_store_web_cover_from_ui_cache(next_track_idx,
+                                                                            next_track.cover_source,
+                                                                            next_track.audio_path.c_str(),
+                                                                            next_track.cover_path.c_str(),
+                                                                            next_track.cover_offset,
+                                                                            next_track.cover_size);
+                        }
+
                         ui_cover_free_allocated(next_cover_buf);
                         next_cover_buf = nullptr;
                         t_after_prefetch_scale = millis();

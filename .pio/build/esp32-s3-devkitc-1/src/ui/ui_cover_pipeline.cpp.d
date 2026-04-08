@@ -343,4 +343,5 @@
  .pio/libdeps/esp32-s3-devkitc-1/SdFat/src/FsLib/FsFormatter.h \
  include/audio/audio.h include/audio/audio_service.h \
  include/storage/storage_io.h include/utils/log.h \
+ include/web/web_cover_cache.h \
  C:/Users/YCB/.platformio/packages/framework-arduinoespressif32/cores/esp32/esp32-hal-psram.h

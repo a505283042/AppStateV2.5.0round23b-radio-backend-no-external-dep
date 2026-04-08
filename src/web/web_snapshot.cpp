@@ -15,6 +15,7 @@
 #include "storage/storage_view_v3.h"
 #include "web/web_config.h"
 #include "web/web_settings.h"
+#include "web/web_cover_cache.h"
 
 static const char* web_mode_to_key(play_mode_t mode) {
   switch (mode) {
@@ -83,6 +84,45 @@ static bool web_is_remote_image_url(const String& s) {
   return s.startsWith("http://") || s.startsWith("https://");
 }
 
+static uint32_t web_fnv1a32_add_bytes(uint32_t h, const char* s) {
+  if (!s) return h;
+  const uint8_t* p = reinterpret_cast<const uint8_t*>(s);
+  while (*p) {
+    h ^= *p++;
+    h *= 16777619u;
+  }
+  return h;
+}
+
+static uint32_t web_fnv1a32_add_u32(uint32_t h, uint32_t v) {
+  for (int i = 0; i < 4; ++i) {
+    h ^= (uint8_t)((v >> (i * 8)) & 0xFF);
+    h *= 16777619u;
+  }
+  return h;
+}
+
+static String web_make_track_cover_rev(const TrackViewV3& v) {
+  uint32_t h = 2166136261u;
+  h = web_fnv1a32_add_u32(h, (uint32_t)v.cover_source);
+  h = web_fnv1a32_add_u32(h, v.cover_offset);
+  h = web_fnv1a32_add_u32(h, v.cover_size);
+  h = web_fnv1a32_add_bytes(h, v.audio_path.c_str());
+  h = web_fnv1a32_add_bytes(h, v.cover_path.c_str());
+
+  char buf[16];
+  snprintf(buf, sizeof(buf), "%08lx", (unsigned long)h);
+  return String(buf);
+}
+String web_make_radio_cover_rev(int radio_idx, const String& logo) {
+  uint32_t h = 2166136261u;
+  h = web_fnv1a32_add_u32(h, (uint32_t)(radio_idx >= 0 ? radio_idx : 0xFFFFFFFFu));
+  h = web_fnv1a32_add_bytes(h, logo.c_str());
+
+  char buf[24];
+  snprintf(buf, sizeof(buf), "radio-%08lx", (unsigned long)h);
+  return String(buf);
+}
 WebPlayerSnapshot web_snapshot_capture() {
   WebPlayerSnapshot snap{};
   snap.ok = true;
@@ -137,7 +177,19 @@ WebPlayerSnapshot web_snapshot_capture() {
 
         snap.has_cover = (v.cover_source != COVER_NONE && (v.cover_size > 0 || v.cover_path.length() > 0));
         if (snap.has_cover) {
-          snap.cover_url = String("/api/cover/current?track=") + String(cur);
+          snap.cover_rev = web_make_track_cover_rev(v);
+          snap.cover_url = String("/api/cover/current?track=") + String(cur) +
+                           "&rev=" + snap.cover_rev;
+          snap.cover_ready_for_web = web_cover_cache_has(cur,
+                                                         (CoverSource)v.cover_source,
+                                                         v.audio_path.c_str(),
+                                                         v.cover_path.c_str(),
+                                                         v.cover_offset,
+                                                         v.cover_size);
+        } else {
+          snap.cover_rev = "";
+          snap.cover_url = "";
+          snap.cover_ready_for_web = false;
         }
 
         const bool lyrics_expected = v.lrc_path.length() > 0;
@@ -201,11 +253,16 @@ WebPlayerSnapshot web_snapshot_capture() {
 
     snap.has_cover = radio_logo.length() > 0;
     if (snap.has_cover) {
+      snap.cover_rev = web_make_radio_cover_rev(source.radio_idx, radio_logo);
       snap.cover_url = web_is_remote_image_url(radio_logo)
           ? radio_logo
-          : (String("/api/radio/logo/current?idx=") + String(source.radio_idx));
+          : (String("/api/radio/logo/current?idx=") + String(source.radio_idx) +
+            "&rev=" + snap.cover_rev);
+      snap.cover_ready_for_web = snap.has_cover;
     } else {
-        snap.cover_url = String();
+      snap.cover_url = String();
+      snap.cover_rev = "";
+      snap.cover_ready_for_web = false;
     }
     snap.display_pos = -1;
     snap.display_total = (int)radio_catalog_count();

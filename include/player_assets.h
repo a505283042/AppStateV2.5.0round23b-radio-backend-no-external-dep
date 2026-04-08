@@ -97,3 +97,23 @@ void player_assets_try_apply_deferred_current_cover(int current_track_idx);
 void player_assets_clear_deferred_current_cover_apply();
 
 void player_assets_block_next_cover_prefetch_for(uint32_t delay_ms);
+
+// 网页封面缓存：缓存浏览器可直接使用的 JPEG/PNG 原始字节（PSRAM）
+bool player_assets_has_web_cover_blob(int track_idx,
+                                      CoverSource cover_source,
+                                      const char* audio_path,
+                                      const char* cover_path,
+                                      uint32_t cover_offset,
+                                      uint32_t cover_size);
+
+bool player_assets_copy_web_cover_blob(int track_idx,
+                                       CoverSource cover_source,
+                                       const char* audio_path,
+                                       const char* cover_path,
+                                       uint32_t cover_offset,
+                                       uint32_t cover_size,
+                                       uint8_t** out_buf,
+                                       size_t* out_len,
+                                       bool* out_is_png);
+
+void player_assets_clear_web_cover_cache();

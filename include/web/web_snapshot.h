@@ -51,6 +51,8 @@ struct WebPlayerSnapshot {
   uint32_t following_lyric_start_ms = 0;
   bool has_cover = false;
   bool cover_loading = false;
+  bool cover_ready_for_web = false;
+  String cover_rev;   // 当前封面的版本标识，封面源变化时必须变化
   String cover_url;
 
   // 网络电台 / 播放源摘要（round16 scaffold）
@@ -72,3 +74,6 @@ struct WebPlayerSnapshot {
 
 /** 采样当前播放器状态，供网页 API 返回。 */
 WebPlayerSnapshot web_snapshot_capture();
+
+/** 生成电台封面的版本标识。 */
+String web_make_radio_cover_rev(int radio_idx, const String& logo);

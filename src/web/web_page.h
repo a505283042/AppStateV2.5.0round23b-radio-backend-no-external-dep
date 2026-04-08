@@ -247,9 +247,10 @@ function updateCover(j){
     return;
   }
 
+  const coverRev = j.cover_rev && j.cover_rev.length ? j.cover_rev : '';
   const coverKey = (j.source_type==='radio')
-    ? `radio:${j.radio_idx||-1}:${base}`
-    : `track:${track}:${base}`;
+    ? `radio:${j.radio_idx||-1}:${coverRev}:${base}`
+    : `track:${track}:${coverRev}:${base}`;
 
   if(coverKey !== lastCoverTrack){ 
     lastCoverTrack = coverKey;

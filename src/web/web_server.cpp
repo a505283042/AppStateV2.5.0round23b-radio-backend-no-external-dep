@@ -30,6 +30,7 @@
 #include "web/web_page.h"
 #include "web/web_snapshot.h"
 #include "web/web_settings.h"
+#include "web/web_cover_cache.h"
 
 extern SdFat sd;
 
@@ -66,6 +67,39 @@ static String web_json_escape(const String& in) {
   }
   return out;
 }
+static uint32_t web_fnv1a32_add_bytes(uint32_t h, const char* s) {
+  if (!s) return h;
+  const uint8_t* p = reinterpret_cast<const uint8_t*>(s);
+  while (*p) {
+    h ^= *p++;
+    h *= 16777619u;
+  }
+  return h;
+}
+
+static uint32_t web_fnv1a32_add_u32(uint32_t h, uint32_t v) {
+  for (int i = 0; i < 4; ++i) {
+    h ^= (uint8_t)((v >> (i * 8)) & 0xFF);
+    h *= 16777619u;
+  }
+  return h;
+}
+
+static String web_make_track_cover_rev(const TrackViewV3& v) {
+  uint32_t h = 2166136261u;
+  h = web_fnv1a32_add_u32(h, (uint32_t)v.cover_source);
+  h = web_fnv1a32_add_u32(h, v.cover_offset);
+  h = web_fnv1a32_add_u32(h, v.cover_size);
+  h = web_fnv1a32_add_bytes(h, v.audio_path.c_str());
+  h = web_fnv1a32_add_bytes(h, v.cover_path.c_str());
+
+  char buf[16];
+  snprintf(buf, sizeof(buf), "%08lx", (unsigned long)h);
+  return String(buf);
+}
+
+
+
 static bool web_if_none_match_hit(const String& etag) {
   if (!s_server.hasHeader("If-None-Match")) return false;
   const String inm = s_server.header("If-None-Match");
@@ -737,7 +771,7 @@ static void web_handle_status() {
   const bool is_radio_cover = (snap.source_type == "radio");
   const bool allow_cover_fetch_now =
       snap.has_cover &&
-      (is_radio_cover || !snap.is_playing || snap.play_ms >= 600);
+      (is_radio_cover || !snap.is_playing || snap.cover_ready_for_web);
 
   const bool cover_loading =
       snap.has_cover &&
@@ -751,6 +785,10 @@ static void web_handle_status() {
 
   json += ",\"has_cover\":";
   json += (allow_cover_fetch_now ? "true" : "false");
+
+  json += ",\"cover_rev\":\"";
+  json += web_json_escape(allow_cover_fetch_now ? snap.cover_rev : String(""));
+  json += "\"";
 
   json += ",\"cover_url\":\"";
   json += web_json_escape(allow_cover_fetch_now ? snap.cover_url : String(""));
@@ -814,7 +852,8 @@ static void web_handle_radio_logo_current() {
     return;
   }
 
-  const String etag = String("\"cover-radio-") + String(radio_idx) + "\"";
+  const String radio_rev = web_make_radio_cover_rev(radio_idx, logo);
+  const String etag = String("\"cover-radio-") + String(radio_idx) + "-" + radio_rev + "\"";
 
   if (is_remote) {
     if (web_if_none_match_hit(etag)) {
@@ -857,7 +896,7 @@ static void web_handle_radio_logo_current() {
 
   WiFiClient client = s_server.client();
   client.print("HTTP/1.1 200 OK\r\n");
-  client.print(is_png ? "Content-Type: image/png\r\n" : "Content-Type: image/jpeg\r\n");
+  client.print("Content-Type: image/bmp\r\n");
   client.printf("Content-Length: %u\r\n", (unsigned)len);
   client.print("Cache-Control: public, max-age=86400, immutable\r\n");
   client.printf("ETag: %s\r\n", etag.c_str());
@@ -888,35 +927,36 @@ static void web_handle_cover_current() {
     return;
   }
 
-  const String etag = String("\"cover-track-") + String(cur) + "\"";
+  const String cover_rev = web_make_track_cover_rev(v);
+  const String etag = String("\"cover-track-") + String(cur) + "-" + cover_rev + "\"";
   if (web_if_none_match_hit(etag)) {
-    LOGI("[WEB] cover 304 track=%d", cur);
+    LOGI("[WEB] cover 304 track=%d rev=%s", cur, cover_rev.c_str());
     web_send_not_modified(etag);
     return;
   }
 
-  uint8_t* buf = nullptr;
-  size_t len = 0;
-  bool is_png = false;
+    uint8_t* buf = nullptr;
+    size_t len = 0;
 
-  const bool ok = audio_service_fetch_cover((CoverSource)v.cover_source,
+    const bool ok = web_cover_cache_copy_bmp(cur,
+                                            (CoverSource)v.cover_source,
                                             v.audio_path.c_str(),
                                             v.cover_path.c_str(),
                                             v.cover_offset,
                                             v.cover_size,
                                             &buf,
-                                            &len,
-                                            &is_png,
-                                            true);
-  if (!ok || !buf || len == 0) {
+                                            &len);
+    if (!ok || !buf || len == 0) {
     if (buf) free(buf);
-    web_send_json_err("封面读取失败", 500);
+    web_send_json_err("封面缓存尚未就绪", 404);
     return;
   }
 
+  LOGI("[WEB] cover bmp hit track=%d bytes=%u", cur, (unsigned)len);
+
   WiFiClient client = s_server.client();
   client.print("HTTP/1.1 200 OK\r\n");
-  client.print(is_png ? "Content-Type: image/png\r\n" : "Content-Type: image/jpeg\r\n");
+  client.print("Content-Type: image/bmp\r\n");
   client.printf("Content-Length: %u\r\n", (unsigned)len);
   client.print("Cache-Control: public, max-age=86400, immutable\r\n");
   client.printf("ETag: %s\r\n", etag.c_str());

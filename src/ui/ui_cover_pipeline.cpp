@@ -5,6 +5,7 @@
 #include "audio/audio_service.h"
 #include "storage/storage_io.h"
 #include "utils/log.h"
+#include "web/web_cover_cache.h"
 #undef LOG_TAG
 #define LOG_TAG "UI"
 
@@ -587,13 +588,16 @@ bool ui_cover_scale_to_cache_from_buffer(const uint8_t* ptr, size_t len, bool is
   const int slot = ui_cover_cache_choose_store_slot(track_idx);
   if (slot < 0 || slot > 1) return false;
 
+  bool ok = false;
+
   ui_lock();
-  const bool ok = cover_blit_scaled_to_pair(ptr, len, is_png, *s_coverCacheSpr[slot], *s_coverCacheMasked[slot]);
+  ok = cover_blit_scaled_to_pair(ptr, len, is_png, *s_coverCacheSpr[slot], *s_coverCacheMasked[slot]);
   if (ok) {
     s_coverCacheReady[slot] = true;
     s_coverCacheTrackIdx[slot] = track_idx;
   }
   ui_unlock();
+
   return ok;
 }
 
@@ -628,6 +632,7 @@ void ui_cover_cache_invalidate()
     s_coverCacheReady[i] = false;
     s_coverCacheTrackIdx[i] = -1;
   }
+  web_cover_cache_clear();
 }
 
 bool ui_cover_load_allocated(const TrackInfo& t, uint8_t*& out_buf, size_t& out_len, bool& out_is_png)
