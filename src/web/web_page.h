@@ -72,9 +72,8 @@ static const char WEBCTRL_INDEX_HTML[] PROGMEM = R"HTML(
       <div class="media" id="mediaBox">
         <div>
           <div class="cover" id="coverBox"><span id="coverFallback">无封面</span><img id="coverImg" alt="封面" decoding="async" loading="eager" style="display:none"></div>
-          <div class="small" style="margin-top:8px;text-align:center;line-height:1.5">
-            点击封面：切换视图<br>信息视图 / 旋转视图
-          </div>
+          <div class="small" style="margin-top:8px;text-align:center">点击封面：切换视图<br>信息视图/旋转视图</div>
+        </div>
         <div>
           <div class="title" id="title">-</div>
           <div class="sub" id="artist">-</div>
@@ -144,6 +143,8 @@ let nextPollAt = Date.now() + POLL_MS;
 let lastStatus = null;
 let lastStatusAt = 0;
 let coverToggleBusy = false;
+let pageActive = !document.hidden;
+let pagePausedByVisibility = false;
 const LOCK_STORAGE_KEY = 'webctrl_page_locked';
 let pageLocked = false;
 
@@ -211,6 +212,14 @@ function togglePageLock(){
 }
 
 function scheduleNext(ms){
+  if(!pageActive){
+    if(pollTimer){
+      clearTimeout(pollTimer);
+      pollTimer = null;
+    }
+    return;
+  }
+
   const delay = Math.max(120, Number(ms) || POLL_MS);
   if(pollTimer) clearTimeout(pollTimer);
   nextPollAt = Date.now() + delay;
@@ -266,6 +275,7 @@ function scheduleLyricTransition(j){
   }, Math.max(1, msToLyric));
 }
 async function fetchStatus(){
+  if(!pageActive) return;
   if(inFlight) return;
   inFlight = true;
   try{
@@ -280,6 +290,34 @@ async function fetchStatus(){
     scheduleNext(currentPollMs); scheduleLyricTransition(j);
   }catch(e){ document.getElementById('net').textContent = '网页状态获取失败'; scheduleNext(Math.max(POLL_MS, 1500)); }
   finally{ inFlight = false; }
+}
+function pausePagePolling(){
+  pageActive = false;
+  pagePausedByVisibility = true;
+
+  if(pollTimer){
+    clearTimeout(pollTimer);
+    pollTimer = null;
+  }
+
+  clearLyricTimer();
+}
+
+function resumePagePolling(){
+  pageActive = true;
+
+  if(pagePausedByVisibility){
+    pagePausedByVisibility = false;
+    scheduleNext(80);
+  }
+}
+
+function handleVisibilityChange(){
+  if(document.hidden){
+    pausePagePolling();
+  }else{
+    resumePagePolling();
+  }
 }
 function updateCover(j){
   const media=document.getElementById('mediaBox');
@@ -470,9 +508,11 @@ function sendVolumeDebounced(v){
 const slider=document.getElementById('volumeSlider');
 slider.addEventListener('input',(e)=>{ const v=Number(e.target.value||0); document.getElementById('volume').textContent=`${v}%`; sendVolumeDebounced(v); });
 slider.addEventListener('change',(e)=>{ const v=Number(e.target.value||0); sendVolumeDebounced(v); });
-
 document.getElementById('coverBox').addEventListener('click',toggleViewFromCover);
-document.getElementById('lockBtn').addEventListener('click', togglePageLock);
+
+document.addEventListener('visibilitychange', handleVisibilityChange);
+window.addEventListener('pageshow', ()=>{ if(!document.hidden) resumePagePolling(); });
+window.addEventListener('pagehide', pausePagePolling);
 
 loadLockState();
 applyLockState();
@@ -905,16 +945,14 @@ const $ = id => document.getElementById(id);
    } 
  } 
 
- async function playGroup(idx){ 
-   const j = await postForm('/api/artist/play', {idx}); 
-   alert(j && j.ok ? '已切到该歌手' : '播放失败'); 
-   loadArtists().catch(()=>{}); 
- } 
+  async function playGroup(idx){ 
+    const j = await postForm('/api/artist/play', {idx}); 
+    alert(j && j.ok ? '已切到该歌手' : '播放失败'); 
+  } 
 
   async function playTrack(trackIdx, groupIdx){ 
     const j = await postForm('/api/track/play', {idx:trackIdx}); 
     alert(j && j.ok ? '已开始播放' : '播放失败'); 
-    loadArtists().catch(()=>{}); 
   }
 
  async function bindArtistNfc(idx){ 
@@ -1296,16 +1334,14 @@ const $ = id => document.getElementById(id);
    } 
  } 
 
- async function playGroup(idx){ 
-   const j = await postForm('/api/album/play', {idx}); 
-   alert(j && j.ok ? '已切到该专辑' : '播放失败'); 
-   loadAlbums().catch(()=>{}); 
- } 
+  async function playGroup(idx){ 
+    const j = await postForm('/api/album/play', {idx}); 
+    alert(j && j.ok ? '已切到该专辑' : '播放失败'); 
+  } 
 
   async function playTrack(trackIdx, groupIdx){ 
     const j = await postForm('/api/track/play', {idx:trackIdx}); 
     alert(j && j.ok ? '已开始播放' : '播放失败'); 
-    loadAlbums().catch(()=>{}); 
   }
 
  async function bindAlbumNfc(idx){ 
