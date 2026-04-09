@@ -700,7 +700,8 @@ const $ = id => document.getElementById(id);
     return `normal:${idx}`;
   }
   let searchMode = 'artist';   // artist / song
-  let songSearchTimer = 0; 
+  let songSearchTimer = 0;
+  let artistSongSearchController = null; 
  
   function makeDetailState(idx, cacheKey){
     return {
@@ -771,8 +772,13 @@ const $ = id => document.getElementById(id);
     updateSearchModeUi();
     resetExpandedDetailState();
 
+    if(albumSongSearchController){
+      albumSongSearchController.abort();
+      albumSongSearchController = null;
+    }
+
     if(searchMode === 'song'){
-      scheduleArtistSongSearch();
+      scheduleAlbumSongSearch();
     }else{
       renderList();
     }
@@ -780,18 +786,41 @@ const $ = id => document.getElementById(id);
 
   async function fetchArtistSongSearch(){
     const q = ($('searchInput').value || '').trim();
+
+    if(artistSongSearchController){
+      artistSongSearchController.abort();
+      artistSongSearchController = null;
+    }
+
     if(!q){
       songSearchItems = [];
       renderList();
       return;
     }
 
-    const r = await fetch(`/api/artist/search_song?q=${encodeURIComponent(q)}`, {cache:'no-store'});
-    const j = await r.json();
-    if(!j.ok) throw new Error(j.message || 'search failed');
+    const controller = new AbortController();
+    artistSongSearchController = controller;
 
-    songSearchItems = j.items || [];
-    renderList();
+    try{
+      const r = await fetch(`/api/artist/search_song?q=${encodeURIComponent(q)}`, {
+        cache:'no-store',
+        signal: controller.signal
+      });
+      const j = await r.json();
+      if(!j.ok) throw new Error(j.message || 'search failed');
+
+      if(artistSongSearchController !== controller) return;
+
+      songSearchItems = j.items || [];
+      renderList();
+    }catch(e){
+      if(e.name === 'AbortError') return;
+      throw e;
+    }finally{
+      if(artistSongSearchController === controller){
+        artistSongSearchController = null;
+      }
+    }
   }
 
   function scheduleArtistSongSearch(){
@@ -971,7 +1000,12 @@ const $ = id => document.getElementById(id);
   $('searchInput').addEventListener('input', ()=>{
     resetExpandedDetailState();
 
-    if(searchMode === 'song') scheduleArtistSongSearch();
+    if(albumSongSearchController){
+      albumSongSearchController.abort();
+      albumSongSearchController = null;
+    }
+
+    if(searchMode === 'song') scheduleAlbumSongSearch();
     else renderList();
   });
 
@@ -1090,6 +1124,7 @@ const $ = id => document.getElementById(id);
   }
   let searchMode = 'meta';   // meta / song
   let songSearchTimer = 0;
+  let albumSongSearchController = null;
  
   function makeDetailState(idx, cacheKey){ 
     return { 
@@ -1160,8 +1195,13 @@ const $ = id => document.getElementById(id);
     updateSearchModeUi();
     resetExpandedDetailState();
 
+    if(artistSongSearchController){
+      artistSongSearchController.abort();
+      artistSongSearchController = null;
+    }
+
     if(searchMode === 'song'){
-      scheduleAlbumSongSearch();
+      scheduleArtistSongSearch();
     }else{
       renderList();
     }
@@ -1169,18 +1209,41 @@ const $ = id => document.getElementById(id);
 
   async function fetchAlbumSongSearch(){
     const q = ($('searchInput').value || '').trim();
+
+    if(albumSongSearchController){
+      albumSongSearchController.abort();
+      albumSongSearchController = null;
+    }
+
     if(!q){
       songSearchItems = [];
       renderList();
       return;
     }
 
-    const r = await fetch(`/api/album/search_song?q=${encodeURIComponent(q)}`, {cache:'no-store'});
-    const j = await r.json();
-    if(!j.ok) throw new Error(j.message || 'search failed');
+    const controller = new AbortController();
+    albumSongSearchController = controller;
 
-    songSearchItems = j.items || [];
-    renderList();
+    try{
+      const r = await fetch(`/api/album/search_song?q=${encodeURIComponent(q)}`, {
+        cache:'no-store',
+        signal: controller.signal
+      });
+      const j = await r.json();
+      if(!j.ok) throw new Error(j.message || 'search failed');
+
+      if(albumSongSearchController !== controller) return;
+
+      songSearchItems = j.items || [];
+      renderList();
+    }catch(e){
+      if(e.name === 'AbortError') return;
+      throw e;
+    }finally{
+      if(albumSongSearchController === controller){
+        albumSongSearchController = null;
+      }
+    }
   }
 
   function scheduleAlbumSongSearch(){
@@ -1360,7 +1423,12 @@ const $ = id => document.getElementById(id);
   $('searchInput').addEventListener('input', ()=>{
     resetExpandedDetailState();
 
-    if(searchMode === 'song') scheduleAlbumSongSearch();
+    if(artistSongSearchController){
+      artistSongSearchController.abort();
+      artistSongSearchController = null;
+    }
+
+    if(searchMode === 'song') scheduleArtistSongSearch();
     else renderList();
   });
 
