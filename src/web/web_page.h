@@ -51,7 +51,10 @@ static const char WEBCTRL_INDEX_HTML[] PROGMEM = R"HTML(
     <div class="card">
       <div class="status">
         <div>
-          <h1>ESP32S3 播放器</h1>
+          <h1 style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            <span>ESP32S3 播放器</span>
+            <button id="lockBtn" class="secondary" type="button" style="padding:8px 12px;font-size:13px">锁定</button>
+          </h1>
           <div class="muted" id="net">连接中...</div>
         </div>
         <div class="small" id="pollInfo">刷新：加载中...</div>
@@ -67,7 +70,10 @@ static const char WEBCTRL_INDEX_HTML[] PROGMEM = R"HTML(
 
     <div class="card">
       <div class="media" id="mediaBox">
-        <div class="cover" id="coverBox"><span id="coverFallback">无封面</span><img id="coverImg" alt="封面" decoding="async" loading="eager" style="display:none"></div>
+        <div>
+          <div class="cover" id="coverBox"><span id="coverFallback">无封面</span><img id="coverImg" alt="封面" decoding="async" loading="eager" style="display:none"></div>
+          <div class="small" style="margin-top:8px;text-align:center">点击封面：切换信息视图/旋转视图</div>
+        </div>
         <div>
           <div class="title" id="title">-</div>
           <div class="sub" id="artist">-</div>
@@ -90,7 +96,6 @@ static const char WEBCTRL_INDEX_HTML[] PROGMEM = R"HTML(
 
     <div class="card">
       <div class="k">网页音量调节</div>
-      <div class="small">点击封面：切换 信息视图 / 旋转视图</div>
       <div class="volrow">
         <span class="small">0</span>
         <input id="volumeSlider" type="range" min="0" max="100" value="0" step="1">
@@ -138,6 +143,71 @@ let nextPollAt = Date.now() + POLL_MS;
 let lastStatus = null;
 let lastStatusAt = 0;
 let coverToggleBusy = false;
+const LOCK_STORAGE_KEY = 'webctrl_page_locked';
+let pageLocked = false;
+
+function getLockTargets(){
+  return [
+    ...document.querySelectorAll('.nav a'),
+    document.getElementById('coverBox'),
+    document.getElementById('prevBtn'),
+    document.getElementById('playPauseBtn'),
+    document.getElementById('nextBtn'),
+    document.getElementById('modeToggleBtn'),
+    document.getElementById('modeCategoryBtn'),
+    document.getElementById('scanBtn'),
+    document.getElementById('radioBackBtn'),
+    document.getElementById('wifiInfoBtn'),
+    document.getElementById('volumeSlider'),
+    ...document.querySelectorAll('button.secondary[onclick="savePlayerState()"]')
+  ].filter(Boolean);
+}
+
+function applyLockState(){
+  const btn = document.getElementById('lockBtn');
+  if(btn){
+    btn.textContent = pageLocked ? '解锁' : '锁定';
+    btn.className = pageLocked ? 'warn' : 'secondary';
+  }
+
+  const targets = getLockTargets();
+  targets.forEach(el => {
+    if(!el) return;
+
+    if(el.tagName === 'BUTTON' || el.tagName === 'INPUT'){
+      el.disabled = pageLocked;
+    }else{
+      el.style.pointerEvents = pageLocked ? 'none' : '';
+      el.style.opacity = pageLocked ? '0.45' : '';
+    }
+  });
+
+  const coverBox = document.getElementById('coverBox');
+  if(coverBox){
+    coverBox.style.pointerEvents = pageLocked ? 'none' : '';
+    coverBox.style.opacity = '';
+  }
+}
+
+function saveLockState(){
+  try{
+    localStorage.setItem(LOCK_STORAGE_KEY, pageLocked ? '1' : '0');
+  }catch(e){}
+}
+
+function loadLockState(){
+  try{
+    pageLocked = localStorage.getItem(LOCK_STORAGE_KEY) === '1';
+  }catch(e){
+    pageLocked = false;
+  }
+}
+
+function togglePageLock(){
+  pageLocked = !pageLocked;
+  applyLockState();
+  saveLockState();
+}
 
 function scheduleNext(ms){
   const delay = Math.max(120, Number(ms) || POLL_MS);
@@ -283,7 +353,13 @@ function updateCover(j){
     img.style.display = 'none';
   }
 }
-async function toggleViewFromCover(){ if(coverToggleBusy) return; coverToggleBusy=true; try{ await fetch('/api/view/toggle',{method:'POST'});}catch(e){} scheduleNext(120); setTimeout(()=>{coverToggleBusy=false;},250); }
+async function toggleViewFromCover(){
+  if(pageLocked || coverToggleBusy) return;
+  coverToggleBusy=true;
+  try{ await fetch('/api/view/toggle',{method:'POST'});}catch(e){}
+  scheduleNext(120);
+  setTimeout(()=>{coverToggleBusy=false;},250);
+}
 function render(j){
   document.getElementById('title').textContent=j.title||'(无曲目)';
   document.getElementById('artist').textContent=j.artist||'-';
@@ -321,14 +397,17 @@ function render(j){
   updateCover(j);
 }
 async function handlePrev(){
+  if(pageLocked) return;
   await sendCmd('/api/prev');
 }
 
 async function handleNext(){
+  if(pageLocked) return;
   await sendCmd('/api/next');
 }
 
 async function toggleWifiInfo(){
+  if(pageLocked) return;
   try{
     const r = await fetch('/api/wifiinfo/toggle', {method:'POST'});
     const j = await r.json();
@@ -346,8 +425,13 @@ function updateWifiInfoButton(showWifiInfo) {
   }
 }
 
-async function sendCmd(path){ try{ await fetch(path,{method:'POST'});}catch(e){} scheduleNext(120); }
+async function sendCmd(path){
+  if(pageLocked) return;
+  try{ await fetch(path,{method:'POST'});}catch(e){}
+  scheduleNext(120);
+}
 async function returnFromRadio(){
+  if(pageLocked) return;
   try{
     const r = await fetch('/api/radio/stop', {method:'POST'});
     const j = await r.json();
@@ -358,6 +442,7 @@ async function returnFromRadio(){
   scheduleNext(120);
 }
 async function savePlayerState(){
+  if(pageLocked) return;
   try{
     const r = await fetch('/api/state/save', {method:'POST'});
     const j = await r.json();
@@ -367,11 +452,29 @@ async function savePlayerState(){
   }
   scheduleNext(120);
 }
-function sendVolumeDebounced(v){ if(volumeTimer) clearTimeout(volumeTimer); volumeTimer=setTimeout(async()=>{ try{ await fetch('/api/volume',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8'},body:`value=${encodeURIComponent(v)}`}); }catch(e){} scheduleNext(180); },80); }
+function sendVolumeDebounced(v){
+  if(pageLocked) return;
+  if(volumeTimer) clearTimeout(volumeTimer);
+  volumeTimer=setTimeout(async()=>{
+    try{
+      await fetch('/api/volume',{
+        method:'POST',
+        headers:{'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8'},
+        body:`value=${encodeURIComponent(v)}`
+      });
+    }catch(e){}
+    scheduleNext(180);
+  },80);
+}
 const slider=document.getElementById('volumeSlider');
 slider.addEventListener('input',(e)=>{ const v=Number(e.target.value||0); document.getElementById('volume').textContent=`${v}%`; sendVolumeDebounced(v); });
 slider.addEventListener('change',(e)=>{ const v=Number(e.target.value||0); sendVolumeDebounced(v); });
+
 document.getElementById('coverBox').addEventListener('click',toggleViewFromCover);
+document.getElementById('lockBtn').addEventListener('click', togglePageLock);
+
+loadLockState();
+applyLockState();
 fetchStatus();
 </script>
 </body>
@@ -526,6 +629,10 @@ static const char WEBCTRL_ARTISTS_HTML[] PROGMEM = R"HTML(
     </div>
 
     <div class="card">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+        <button id="modeArtistBtn" type="button">搜歌手</button>
+        <button id="modeSongBtn" class="secondary" type="button">搜歌名</button>
+      </div>
       <input id="searchInput" placeholder="搜索歌手名">
     </div>
 
@@ -539,21 +646,38 @@ const $ = id => document.getElementById(id);
  const esc = s => String(s ?? '').replace(/[&<>'"]/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); 
  async function postForm(url, obj){ const b=new URLSearchParams(); Object.keys(obj).forEach(k=>b.append(k,obj[k])); const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:b}); return r.json(); } 
  
- let allItems = []; 
- let expandedIdx = -1; 
- let detailCache = {}; 
+  let allItems = [];
+  let songSearchItems = [];
+  let expandedIdx = -1;
+  let detailCache = {};
+
+  function getDetailCacheKey(idx){
+    const q = ($('searchInput').value || '').trim().toLowerCase();
+    if(searchMode === 'song' && q){
+      return `song:${idx}:${q}`;
+    }
+    return `normal:${idx}`;
+  }
+  let searchMode = 'artist';   // artist / song
+  let songSearchTimer = 0; 
  
- function makeDetailState(idx){ 
-   return { 
-     idx, 
-     name: '', 
-     track_count: 0, 
-     tracks: [], 
-     loaded: 0, 
-     done: false, 
-     loading: false 
-   }; 
- } 
+  function makeDetailState(idx, cacheKey){
+    return {
+      idx,
+      cacheKey,
+      name: '',
+      track_count: 0,
+      tracks: [],
+      loaded: 0,
+      done: false,
+      loading: false
+    };
+  }
+
+  function resetExpandedDetailState(){
+    expandedIdx = -1;
+    detailCache = {};
+  }
  
  function renderArtistTracks(detail){ 
    const tracks = detail?.tracks || []; 
@@ -595,44 +719,105 @@ const $ = id => document.getElementById(id);
    return html; 
  } 
 
- function renderList(){ 
-   const q = ($('searchInput').value || '').trim().toLowerCase(); 
-   const box = $('artistList'); 
-   const items = allItems.filter(x => !q || (x.name || '').toLowerCase().includes(q)); 
+  function updateSearchModeUi(){
+    $('modeArtistBtn').className = searchMode === 'artist' ? '' : 'secondary';
+    $('modeSongBtn').className = searchMode === 'song' ? '' : 'secondary';
+    $('searchInput').placeholder = searchMode === 'artist' ? '搜索歌手名' : '搜索歌名';
+  }
 
-   $('countText').textContent = `共 ${allItems.length} 位歌手，当前显示 ${items.length} 位`; 
+  function setSearchMode(mode){
+    searchMode = mode;
+    updateSearchModeUi();
+    resetExpandedDetailState();
 
-   if(!items.length){ 
-     box.innerHTML = '<div class="empty">没有匹配的歌手</div>'; 
-     return; 
-   } 
+    if(searchMode === 'song'){
+      scheduleArtistSongSearch();
+    }else{
+      renderList();
+    }
+  }
 
-   box.innerHTML = items.map(x => { 
-     const expanded = x.idx === expandedIdx; 
-     const detail = detailCache[x.idx]; 
+  async function fetchArtistSongSearch(){
+    const q = ($('searchInput').value || '').trim();
+    if(!q){
+      songSearchItems = [];
+      renderList();
+      return;
+    }
 
-     return ` 
-       <div class="item ${expanded ? 'active' : ''}" onclick="toggleArtist(${x.idx})"><div class="itemHead">
-           <div class="itemMeta">
-             <div class="name">${esc(x.name || '未知歌手')}</div>
-             <div class="sub">${x.track_count || 0} 首</div>
-           </div>
-           <div class="muted">${expanded ? '▲ 收起' : '▼ 展开'}</div>
-         </div>
+    const r = await fetch(`/api/artist/search_song?q=${encodeURIComponent(q)}`, {cache:'no-store'});
+    const j = await r.json();
+    if(!j.ok) throw new Error(j.message || 'search failed');
 
-         ${expanded ? `
-           <div class="expandBox">
+    songSearchItems = j.items || [];
+    renderList();
+  }
+
+  function scheduleArtistSongSearch(){
+    if(songSearchTimer){
+      clearTimeout(songSearchTimer);
+      songSearchTimer = 0;
+    }
+    songSearchTimer = setTimeout(()=>{
+      fetchArtistSongSearch().catch(e=>{
+        $('statusText').textContent = '搜索失败';
+        alert(e.message || '搜索失败');
+      });
+    }, 220);
+  }
+
+  function renderList(){
+    const q = ($('searchInput').value || '').trim().toLowerCase();
+    const box = $('artistList');
+
+    let items = [];
+    if(searchMode === 'artist'){
+      items = allItems.filter(x => !q || (x.name || '').toLowerCase().includes(q));
+      $('countText').textContent = `共 ${allItems.length} 位歌手，当前显示 ${items.length} 位`;
+    }else{
+      items = q ? songSearchItems : allItems;
+      $('countText').textContent = q
+        ? `按歌名命中 ${items.length} 位歌手`
+        : `共 ${allItems.length} 位歌手`;
+    }
+
+    if(!items.length){
+      box.innerHTML = `<div class="empty">${searchMode === 'song' ? '没有匹配的歌曲' : '没有匹配的歌手'}</div>`;
+      return;
+    }
+
+    box.innerHTML = items.map(x => {
+      const expanded = x.idx === expandedIdx;
+      const detail = detailCache[getDetailCacheKey(x.idx)];
+
+      let subText = `${x.track_count || 0} 首`;
+      if(searchMode === 'song' && q){
+        const tip = x.matched_titles_text ? ` · ${esc(x.matched_titles_text)}` : '';
+        subText = `命中 ${x.matched_track_count || 0} 首${tip}`;
+      }
+
+      return `
+        <div class="item ${expanded ? 'active' : ''}" onclick="toggleArtist(${x.idx})"><div class="itemHead">
+            <div class="itemMeta">
+              <div class="name">${esc(x.name || '未知歌手')}</div>
+              <div class="sub">${subText}</div>
+            </div>
+            <div class="muted">${expanded ? '▲ 收起' : '▼ 展开'}</div>
+          </div>
+
+          ${expanded ? `
+            <div class="expandBox">
               <div class="expandActions">
                 <button onclick="event.stopPropagation(); playGroup(${x.idx})" ${(x.track_count || 0) > 0 ? '' : 'disabled'}>播放这一组</button>
                 <button class="secondary" onclick="event.stopPropagation(); bindArtistNfc(${x.idx})">绑定歌手到NFC</button>
               </div>
-             ${detail ? renderArtistTracks(detail) : '<div class="expandEmpty">加载中...</div>'}
-           </div>
-         ` : ''}
-       </div>
-     `; 
-   }).join(''); 
- } 
+              ${detail ? renderArtistTracks(detail) : '<div class="expandEmpty">加载中...</div>'}
+            </div>
+          ` : ''}
+        </div>
+      `;
+    }).join('');
+  } 
 
  async function loadArtists(){ 
    const r = await fetch('/api/artists', {cache:'no-store'}); 
@@ -644,41 +829,51 @@ const $ = id => document.getElementById(id);
    renderList(); 
  } 
 
- async function loadDetail(idx, append){ 
-   let state = detailCache[idx]; 
-   if(!state){ 
-     state = makeDetailState(idx); 
-     detailCache[idx] = state; 
-   } 
+  async function loadDetail(idx, append){
+    const cacheKey = getDetailCacheKey(idx);
 
-   if(state.loading || state.done) return; 
+    let state = detailCache[cacheKey];
+    if(!state){
+      state = makeDetailState(idx, cacheKey);
+      detailCache[cacheKey] = state;
+    }
 
-   state.loading = true; 
-   renderList(); 
+    if(state.loading || state.done) return;
 
-   try{ 
-     const offset = append ? state.loaded : 0; 
-     const limit = 20; 
-     const r = await fetch(`/api/artist/detail?idx=${idx}&offset=${offset}&limit=${limit}`, {cache:'no-store'}); 
-     const j = await r.json(); 
-     if(!j.ok) throw new Error(j.message || 'detail failed'); 
+    state.loading = true;
+    renderList();
 
-     state.name = j.name || ''; 
-     state.track_count = j.track_count || 0; 
+    try{
+      const offset = append ? state.loaded : 0;
+      const limit = 20;
 
-     if(append){ 
-       state.tracks = state.tracks.concat(j.tracks || []); 
-     }else{ 
-       state.tracks = j.tracks || []; 
-     } 
+      const q = ($('searchInput').value || '').trim();
+      let url = `/api/artist/detail?idx=${idx}&offset=${offset}&limit=${limit}`;
 
-     state.loaded = state.tracks.length; 
-     state.done = state.loaded >= state.track_count; 
-   } finally { 
-     state.loading = false; 
-     if(expandedIdx === idx) renderList(); 
-   } 
- } 
+      if(searchMode === 'song' && q){
+        url += `&q=${encodeURIComponent(q)}`;
+      }
+
+      const r = await fetch(url, {cache:'no-store'});
+      const j = await r.json();
+      if(!j.ok) throw new Error(j.message || 'detail failed');
+
+      state.name = j.name || '';
+      state.track_count = j.track_count || 0;
+
+      if(append){
+        state.tracks = state.tracks.concat(j.tracks || []);
+      }else{
+        state.tracks = j.tracks || [];
+      }
+
+      state.loaded = state.tracks.length;
+      state.done = state.loaded >= state.track_count;
+    } finally {
+      state.loading = false;
+      if(expandedIdx === idx) renderList();
+    }
+  }
 
  async function toggleArtist(idx){ 
    if(expandedIdx === idx){ 
@@ -690,13 +885,15 @@ const $ = id => document.getElementById(id);
    expandedIdx = idx; 
    renderList(); 
 
-   if(!detailCache[idx]){ 
-     try{ 
-       await loadDetail(idx, false); 
-     }catch(e){ 
-       alert(e.message || '加载失败'); 
-     } 
-   } 
+  const cacheKey = getDetailCacheKey(idx);
+
+  if(!detailCache[cacheKey]){
+    try{
+      await loadDetail(idx, false);
+    }catch(e){
+      alert(e.message || '加载失败');
+    }
+  }
  } 
 
  async function loadMoreArtist(idx){ 
@@ -713,11 +910,11 @@ const $ = id => document.getElementById(id);
    loadArtists().catch(()=>{}); 
  } 
 
- async function playTrack(trackIdx, groupIdx){ 
-   const j = await postForm('/api/track/play', {idx:trackIdx, mode:'artist', group_idx:groupIdx}); 
-   alert(j && j.ok ? '已开始播放' : '播放失败'); 
-   loadArtists().catch(()=>{}); 
- } 
+  async function playTrack(trackIdx, groupIdx){ 
+    const j = await postForm('/api/track/play', {idx:trackIdx}); 
+    alert(j && j.ok ? '已开始播放' : '播放失败'); 
+    loadArtists().catch(()=>{}); 
+  }
 
  async function bindArtistNfc(idx){ 
    const j = await postForm('/api/artist/bind_nfc', {idx}); 
@@ -729,8 +926,18 @@ const $ = id => document.getElementById(id);
    alert(j && j.ok ? '请到设备前刷卡，并按播放键保存' : ((j && j.message) || '进入绑定失败')); 
  }
 
- $('searchInput').addEventListener('input', renderList); 
- loadArtists().catch(e=>{ $('statusText').textContent='加载失败'; alert(e.message||'加载失败'); });
+  $('modeArtistBtn').addEventListener('click', ()=>setSearchMode('artist'));
+  $('modeSongBtn').addEventListener('click', ()=>setSearchMode('song'));
+
+  $('searchInput').addEventListener('input', ()=>{
+    resetExpandedDetailState();
+
+    if(searchMode === 'song') scheduleArtistSongSearch();
+    else renderList();
+  });
+
+  updateSearchModeUi();
+  loadArtists().catch(e=>{ $('statusText').textContent='加载失败'; alert(e.message||'加载失败'); });
  
  // 悬浮回到顶部按钮功能
  const scrollToTopBtn = document.createElement('button');
@@ -813,6 +1020,10 @@ static const char WEBCTRL_ALBUMS_HTML[] PROGMEM = R"HTML(
     </div>
 
     <div class="card">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+        <button id="modeMetaBtn" type="button">搜专辑、歌手</button>
+        <button id="modeSongBtn" class="secondary" type="button">搜歌名</button>
+      </div>
       <input id="searchInput" placeholder="搜索 专辑名 / 歌手名">
     </div>
 
@@ -826,21 +1037,38 @@ const $ = id => document.getElementById(id);
  const esc = s => String(s ?? '').replace(/[&<>'"]/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); 
  async function postForm(url, obj){ const b=new URLSearchParams(); Object.keys(obj).forEach(k=>b.append(k,obj[k])); const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:b}); return r.json(); } 
  
- let allItems = []; 
- let expandedIdx = -1; 
- let detailCache = {}; 
+  let allItems = [];
+  let songSearchItems = [];
+  let expandedIdx = -1;
+  let detailCache = {};
+
+  function getDetailCacheKey(idx){
+    const q = ($('searchInput').value || '').trim().toLowerCase();
+    if(searchMode === 'song' && q){
+      return `song:${idx}:${q}`;
+    }
+    return `normal:${idx}`;
+  }
+  let searchMode = 'meta';   // meta / song
+  let songSearchTimer = 0;
  
- function makeDetailState(idx){ 
-   return { 
-     idx, 
-     name: '', 
-     track_count: 0, 
-     tracks: [], 
-     loaded: 0, 
-     done: false, 
-     loading: false 
-   }; 
- } 
+  function makeDetailState(idx, cacheKey){ 
+    return { 
+      idx, 
+      cacheKey, 
+      name: '', 
+      track_count: 0, 
+      tracks: [], 
+      loaded: 0, 
+      done: false, 
+      loading: false 
+    }; 
+  }
+
+  function resetExpandedDetailState(){
+    expandedIdx = -1;
+    detailCache = {};
+  }
  
  function renderAlbumTracks(detail){ 
    const tracks = detail?.tracks || []; 
@@ -882,44 +1110,105 @@ const $ = id => document.getElementById(id);
    return html; 
  } 
 
- function renderList(){ 
-   const q = ($('searchInput').value || '').trim().toLowerCase(); 
-   const box = $('albumList'); 
-   const items = allItems.filter(x => !q || (x.name || '').toLowerCase().includes(q) || (x.primary_artist || '').toLowerCase().includes(q)); 
+  function updateSearchModeUi(){
+    $('modeMetaBtn').className = searchMode === 'meta' ? '' : 'secondary';
+    $('modeSongBtn').className = searchMode === 'song' ? '' : 'secondary';
+    $('searchInput').placeholder = searchMode === 'meta' ? '搜索 专辑名 / 歌手名' : '搜索歌名';
+  }   
 
-   $('countText').textContent = `共 ${allItems.length} 张专辑，当前显示 ${items.length} 张`; 
+  function setSearchMode(mode){
+    searchMode = mode;
+    updateSearchModeUi();
+    resetExpandedDetailState();
 
-   if(!items.length){ 
-     box.innerHTML = '<div class="empty">没有匹配的专辑</div>'; 
-     return; 
-   } 
+    if(searchMode === 'song'){
+      scheduleAlbumSongSearch();
+    }else{
+      renderList();
+    }
+  }
 
-   box.innerHTML = items.map(x => { 
-     const expanded = x.idx === expandedIdx; 
-     const detail = detailCache[x.idx]; 
+  async function fetchAlbumSongSearch(){
+    const q = ($('searchInput').value || '').trim();
+    if(!q){
+      songSearchItems = [];
+      renderList();
+      return;
+    }
 
-     return ` 
-       <div class="item ${expanded ? 'active' : ''}" onclick="toggleAlbum(${x.idx})"><div class="itemHead">
-           <div class="itemMeta">
-             <div class="name">${esc(x.name || '未知专辑')}</div>
-             <div class="sub">${esc(x.primary_artist || '未知歌手')} · ${x.track_count || 0} 首</div>
-           </div>
-           <div class="muted">${expanded ? '▲ 收起' : '▼ 展开'}</div>
-         </div>
+    const r = await fetch(`/api/album/search_song?q=${encodeURIComponent(q)}`, {cache:'no-store'});
+    const j = await r.json();
+    if(!j.ok) throw new Error(j.message || 'search failed');
 
-         ${expanded ? `
-           <div class="expandBox">
-             <div class="expandActions">
-               <button onclick="event.stopPropagation(); playGroup(${x.idx})" ${(x.track_count || 0) > 0 ? '' : 'disabled'}>播放这一组</button>
-               <button class="secondary" onclick="event.stopPropagation(); bindAlbumNfc(${x.idx})">绑定专辑到NFC</button>
-             </div>
-             ${detail ? renderAlbumTracks(detail) : '<div class="expandEmpty">加载中...</div>'}
-           </div>
-         ` : ''}
-       </div>
-     `; 
-   }).join(''); 
- } 
+    songSearchItems = j.items || [];
+    renderList();
+  }
+
+  function scheduleAlbumSongSearch(){
+    if(songSearchTimer){
+      clearTimeout(songSearchTimer);
+      songSearchTimer = 0;
+    }
+    songSearchTimer = setTimeout(()=>{
+      fetchAlbumSongSearch().catch(e=>{
+        $('statusText').textContent = '搜索失败';
+        alert(e.message || '搜索失败');
+      });
+    }, 220);
+  }
+
+  function renderList(){ 
+    const q = ($('searchInput').value || '').trim().toLowerCase(); 
+    const box = $('albumList'); 
+
+    let items = [];
+    if(searchMode === 'meta'){
+      items = allItems.filter(x => !q || (x.name || '').toLowerCase().includes(q) || (x.primary_artist || '').toLowerCase().includes(q));
+      $('countText').textContent = `共 ${allItems.length} 张专辑，当前显示 ${items.length} 张`;
+    }else{
+      items = q ? songSearchItems : allItems;
+      $('countText').textContent = q
+        ? `按歌名命中 ${items.length} 张专辑`
+        : `共 ${allItems.length} 张专辑`;
+    }
+
+    if(!items.length){ 
+      box.innerHTML = `<div class="empty">${searchMode === 'song' ? '没有匹配的歌曲' : '没有匹配的专辑'}</div>`; 
+      return; 
+    } 
+
+    box.innerHTML = items.map(x => { 
+      const expanded = x.idx === expandedIdx; 
+      const detail = detailCache[getDetailCacheKey(x.idx)]; 
+
+      let subText = `${esc(x.primary_artist || '未知歌手')} · ${x.track_count || 0} 首`;
+      if(searchMode === 'song' && q){
+        const tip = x.matched_titles_text ? ` · ${esc(x.matched_titles_text)}` : '';
+        subText = `${esc(x.primary_artist || '未知歌手')} · 命中 ${x.matched_track_count || 0} 首${tip}`;
+      }
+
+      return ` 
+        <div class="item ${expanded ? 'active' : ''}" onclick="toggleAlbum(${x.idx})"><div class="itemHead">
+            <div class="itemMeta">
+              <div class="name">${esc(x.name || '未知专辑')}</div>
+              <div class="sub">${subText}</div>
+            </div>
+            <div class="muted">${expanded ? '▲ 收起' : '▼ 展开'}</div>
+          </div>
+
+          ${expanded ? `
+            <div class="expandBox">
+              <div class="expandActions">
+                <button onclick="event.stopPropagation(); playGroup(${x.idx})" ${(x.track_count || 0) > 0 ? '' : 'disabled'}>播放这一组</button>
+                <button class="secondary" onclick="event.stopPropagation(); bindAlbumNfc(${x.idx})">绑定专辑到NFC</button>
+              </div>
+              ${detail ? renderAlbumTracks(detail) : '<div class="expandEmpty">加载中...</div>'}
+            </div>
+          ` : ''}
+        </div>
+      `; 
+    }).join(''); 
+  } 
 
  async function loadAlbums(){ 
    const r = await fetch('/api/albums', {cache:'no-store'}); 
@@ -931,41 +1220,51 @@ const $ = id => document.getElementById(id);
    renderList(); 
  } 
 
- async function loadDetail(idx, append){ 
-   let state = detailCache[idx]; 
-   if(!state){ 
-     state = makeDetailState(idx); 
-     detailCache[idx] = state; 
-   } 
+  async function loadDetail(idx, append){
+    const cacheKey = getDetailCacheKey(idx);
 
-   if(state.loading || state.done) return; 
+    let state = detailCache[cacheKey];
+    if(!state){
+      state = makeDetailState(idx, cacheKey);
+      detailCache[cacheKey] = state;
+    }
 
-   state.loading = true; 
-   renderList(); 
+    if(state.loading || state.done) return;
 
-   try{ 
-     const offset = append ? state.loaded : 0; 
-     const limit = 20; 
-     const r = await fetch(`/api/album/detail?idx=${idx}&offset=${offset}&limit=${limit}`, {cache:'no-store'}); 
-     const j = await r.json(); 
-     if(!j.ok) throw new Error(j.message || 'detail failed'); 
+    state.loading = true;
+    renderList();
 
-     state.name = j.name || ''; 
-     state.track_count = j.track_count || 0; 
+    try{
+      const offset = append ? state.loaded : 0;
+      const limit = 20;
 
-     if(append){ 
-       state.tracks = state.tracks.concat(j.tracks || []); 
-     }else{ 
-       state.tracks = j.tracks || []; 
-     } 
+      const q = ($('searchInput').value || '').trim();
+      let url = `/api/album/detail?idx=${idx}&offset=${offset}&limit=${limit}`;
 
-     state.loaded = state.tracks.length; 
-     state.done = state.loaded >= state.track_count; 
-   } finally { 
-     state.loading = false; 
-     if(expandedIdx === idx) renderList(); 
-   } 
- } 
+      if(searchMode === 'song' && q){
+        url += `&q=${encodeURIComponent(q)}`;
+      }
+
+      const r = await fetch(url, {cache:'no-store'});
+      const j = await r.json();
+      if(!j.ok) throw new Error(j.message || 'detail failed');
+
+      state.name = j.name || '';
+      state.track_count = j.track_count || 0;
+
+      if(append){
+        state.tracks = state.tracks.concat(j.tracks || []);
+      }else{
+        state.tracks = j.tracks || [];
+      }
+
+      state.loaded = state.tracks.length;
+      state.done = state.loaded >= state.track_count;
+    } finally {
+      state.loading = false;
+      if(expandedIdx === idx) renderList();
+    }
+  } 
 
  async function toggleAlbum(idx){ 
    if(expandedIdx === idx){ 
@@ -977,13 +1276,15 @@ const $ = id => document.getElementById(id);
    expandedIdx = idx; 
    renderList(); 
 
-   if(!detailCache[idx]){ 
-     try{ 
-       await loadDetail(idx, false); 
-     }catch(e){ 
-       alert(e.message || '加载失败'); 
-     } 
-   } 
+  const cacheKey = getDetailCacheKey(idx);
+
+  if(!detailCache[cacheKey]){
+    try{
+      await loadDetail(idx, false);
+    }catch(e){
+      alert(e.message || '加载失败');
+    }
+  }
  } 
 
  async function loadMoreAlbum(idx){ 
@@ -1000,11 +1301,11 @@ const $ = id => document.getElementById(id);
    loadAlbums().catch(()=>{}); 
  } 
 
- async function playTrack(trackIdx, groupIdx){ 
-   const j = await postForm('/api/track/play', {idx:trackIdx, mode:'album', group_idx:groupIdx}); 
-   alert(j && j.ok ? '已开始播放' : '播放失败'); 
-   loadAlbums().catch(()=>{}); 
- }
+  async function playTrack(trackIdx, groupIdx){ 
+    const j = await postForm('/api/track/play', {idx:trackIdx}); 
+    alert(j && j.ok ? '已开始播放' : '播放失败'); 
+    loadAlbums().catch(()=>{}); 
+  }
 
  async function bindAlbumNfc(idx){ 
    const j = await postForm('/api/album/bind_nfc', {idx}); 
@@ -1016,8 +1317,18 @@ const $ = id => document.getElementById(id);
    alert(j && j.ok ? '请到设备前刷卡，并按播放键保存' : ((j && j.message) || '进入绑定失败')); 
  } 
 
- $('searchInput').addEventListener('input', renderList); 
- loadAlbums().catch(e=>{ $('statusText').textContent='加载失败'; alert(e.message||'加载失败'); });
+  $('modeMetaBtn').addEventListener('click', ()=>setSearchMode('meta'));
+  $('modeSongBtn').addEventListener('click', ()=>setSearchMode('song'));
+
+  $('searchInput').addEventListener('input', ()=>{
+    resetExpandedDetailState();
+
+    if(searchMode === 'song') scheduleAlbumSongSearch();
+    else renderList();
+  });
+
+  updateSearchModeUi();
+  loadAlbums().catch(e=>{ $('statusText').textContent='加载失败'; alert(e.message||'加载失败'); });
  
  // 悬浮回到顶部按钮功能
  const scrollToTopBtn = document.createElement('button');

@@ -139,6 +139,19 @@ static const char* web_track_album_name_cstr(const MusicCatalogV3& cat, const Tr
   return pool_str_v3(cat.pool, cat.albums[row.album_id].name_off);
 }
 
+static bool web_str_icontains(const char* s, const String& q_lower) {
+  if (!s || !s[0] || q_lower.length() == 0) return false;
+  String t = String(s);
+  t.toLowerCase();
+  return t.indexOf(q_lower) >= 0;
+}
+
+static void web_json_append_match_titles(String& json, const String& titles_text) {
+  json += ",\"matched_titles_text\":\"";
+  json += web_json_escape(titles_text);
+  json += "\"";
+}
+
 static bool web_client_alive() {
   return s_server.client().connected();
 }
@@ -523,12 +536,38 @@ static void web_send_group_detail_json(const std::vector<PlaylistGroup>& groups,
   if (limit <= 0) limit = 40;
   if (limit > 80) limit = 80;
 
-  const int total_tracks = (int)g.track_indices.size();
+  String q = web_trim_copy(s_server.arg("q"));
+  q.toLowerCase();
+
+  std::vector<int> filtered_track_indices;
+  filtered_track_indices.reserve(g.track_indices.size());
+
+  for (size_t i = 0; i < g.track_indices.size(); ++i) {
+    const int track_idx = (int)g.track_indices[i];
+    if (!cat.tracks || track_idx < 0 || track_idx >= (int)cat.track_count) continue;
+
+    const TrackRowV3& row = cat.tracks[(size_t)track_idx];
+    const char* title_c = pool_str_v3(cat.pool, row.title_off);
+
+    if (q.length() > 0) {
+      if (!web_str_icontains(title_c, q)) continue;
+    }
+
+    filtered_track_indices.push_back(track_idx);
+  }
+
+  const int total_tracks = (int)filtered_track_indices.size();
   if (offset > total_tracks) offset = total_tracks;
   const int end = (offset + limit > total_tracks) ? total_tracks : (offset + limit);
 
-  LOGI("[WEB] group detail idx=%d is_album=%d offset=%d limit=%d returned=%d total=%d",
-       group_idx, is_album ? 1 : 0, offset, limit, end - offset, total_tracks);
+  LOGI("[WEB] group detail idx=%d is_album=%d q=%s offset=%d limit=%d returned=%d total=%d",
+       group_idx,
+       is_album ? 1 : 0,
+       q.c_str(),
+       offset,
+       limit,
+       end - offset,
+       total_tracks);
 
   web_send_no_cache_headers();
   s_server.sendHeader("Connection", "close");
@@ -536,7 +575,7 @@ static void web_send_group_detail_json(const std::vector<PlaylistGroup>& groups,
   s_server.send(200, "application/json; charset=utf-8", "{");
 
   String head;
-  head.reserve(256);
+  head.reserve(320);
   head += "\"ok\":true";
   head += ",\"idx\":";
   head += String(group_idx);
@@ -552,6 +591,11 @@ static void web_send_group_detail_json(const std::vector<PlaylistGroup>& groups,
 
   head += ",\"track_count\":";
   head += String(total_tracks);
+  head += ",\"filtered\":";
+  head += (q.length() > 0 ? "true" : "false");
+  head += ",\"query\":\"";
+  head += web_json_escape(q);
+  head += "\"";
   head += ",\"tracks\":[";
 
   if (!web_send_chunk(head)) return;
@@ -561,7 +605,7 @@ static void web_send_group_detail_json(const std::vector<PlaylistGroup>& groups,
   bool first = true;
 
   for (int i = offset; i < end; ++i) {
-    const int track_idx = (int)g.track_indices[(size_t)i];
+    const int track_idx = filtered_track_indices[(size_t)i];
     if (!cat.tracks || track_idx < 0 || track_idx >= (int)cat.track_count) {
       continue;
     }
@@ -973,6 +1017,144 @@ static void web_handle_artists() {
 static void web_handle_albums() {
   web_send_group_list_json(player_playlist_album_groups(), true);
 }
+
+static void web_handle_artist_song_search() {
+  web_send_no_cache_headers();
+
+  String q = web_trim_copy(s_server.arg("q"));
+  q.toLowerCase();
+
+  String json;
+  json.reserve(256);
+  json += "{\"ok\":true,\"items\":[";
+
+  if (q.length() == 0) {
+    json += "]}";
+    s_server.send(200, "application/json; charset=utf-8", json);
+    return;
+  }
+
+  const MusicCatalogV3& cat = storage_catalog_v3();
+  const auto& groups = player_playlist_artist_groups();
+
+  bool first_item = true;
+
+  for (int gi = 0; gi < (int)groups.size(); ++gi) {
+    const PlaylistGroup& g = groups[(size_t)gi];
+
+    int matched_count = 0;
+    String matched_titles_text;
+
+    for (size_t k = 0; k < g.track_indices.size(); ++k) {
+      const int track_idx = (int)g.track_indices[k];
+      if (!cat.tracks || track_idx < 0 || track_idx >= (int)cat.track_count) continue;
+
+      const TrackRowV3& row = cat.tracks[(size_t)track_idx];
+      const char* title_c = pool_str_v3(cat.pool, row.title_off);
+
+      if (!web_str_icontains(title_c, q)) continue;
+
+      matched_count++;
+
+      if (matched_count <= 3) {
+        if (matched_titles_text.length()) matched_titles_text += "、";
+        matched_titles_text += String(title_c ? title_c : "");
+      }
+    }
+
+    if (matched_count <= 0) continue;
+
+    if (!first_item) json += ",";
+    first_item = false;
+
+    json += "{";
+    json += "\"idx\":";
+    json += String(gi);
+    json += ",\"name\":\"";
+    json += web_json_escape(playlist_group_name_string(cat, g));
+    json += "\"";
+    json += ",\"track_count\":";
+    json += String((int)g.track_indices.size());
+    json += ",\"matched_track_count\":";
+    json += String(matched_count);
+    web_json_append_match_titles(json, matched_titles_text);
+    json += "}";
+  }
+
+  json += "]}";
+  s_server.send(200, "application/json; charset=utf-8", json);
+}
+
+static void web_handle_album_song_search() {
+  web_send_no_cache_headers();
+
+  String q = web_trim_copy(s_server.arg("q"));
+  q.toLowerCase();
+
+  String json;
+  json.reserve(256);
+  json += "{\"ok\":true,\"items\":[";
+
+  if (q.length() == 0) {
+    json += "]}";
+    s_server.send(200, "application/json; charset=utf-8", json);
+    return;
+  }
+
+  const MusicCatalogV3& cat = storage_catalog_v3();
+  const auto& groups = player_playlist_album_groups();
+
+  bool first_item = true;
+
+  for (int gi = 0; gi < (int)groups.size(); ++gi) {
+    const PlaylistGroup& g = groups[(size_t)gi];
+
+    int matched_count = 0;
+    String matched_titles_text;
+
+    for (size_t k = 0; k < g.track_indices.size(); ++k) {
+      const int track_idx = (int)g.track_indices[k];
+      if (!cat.tracks || track_idx < 0 || track_idx >= (int)cat.track_count) continue;
+
+      const TrackRowV3& row = cat.tracks[(size_t)track_idx];
+      const char* title_c = pool_str_v3(cat.pool, row.title_off);
+
+      if (!web_str_icontains(title_c, q)) continue;
+
+      matched_count++;
+
+      if (matched_count <= 3) {
+        if (matched_titles_text.length()) matched_titles_text += "、";
+        matched_titles_text += String(title_c ? title_c : "");
+      }
+    }
+
+    if (matched_count <= 0) continue;
+
+    if (!first_item) json += ",";
+    first_item = false;
+
+    json += "{";
+    json += "\"idx\":";
+    json += String(gi);
+    json += ",\"name\":\"";
+    json += web_json_escape(playlist_group_name_string(cat, g));
+    json += "\"";
+    json += ",\"primary_artist\":\"";
+    json += web_json_escape(playlist_group_primary_artist_string(cat, g));
+    json += "\"";
+    json += ",\"track_count\":";
+    json += String((int)g.track_indices.size());
+    json += ",\"matched_track_count\":";
+    json += String(matched_count);
+    web_json_append_match_titles(json, matched_titles_text);
+    json += "}";
+  }
+
+  json += "]}";
+  s_server.send(200, "application/json; charset=utf-8", json);
+}
+
 static void web_handle_nfc_bindings() {
   web_send_no_cache_headers();
 
@@ -1084,24 +1266,55 @@ static void web_handle_album_play() {
 }
 static void web_handle_track_play() {
   if (!web_require_player_state()) return;
-  int track_idx = -1; if (!web_parse_int_arg("idx", track_idx)) { web_send_json_err("缺少 idx 参数"); return; }
-  if (track_idx < 0 || track_idx >= (int)storage_catalog_v3_track_count()) { web_send_json_err("曲目不存在", 404); return; }
-  String mode = s_server.arg("mode"); mode.toLowerCase();
-  int group_idx = -1; web_parse_int_arg("group_idx", group_idx);
-  if (mode == "artist") {
-    g_play_mode = PLAY_MODE_ARTIST_SEQ;
-    if (group_idx >= 0) player_playlist_set_current_group_idx(group_idx);
-    else (void)player_playlist_align_group_context_for_track(track_idx, false);
-  } else if (mode == "album") {
-    g_play_mode = PLAY_MODE_ALBUM_SEQ;
-    if (group_idx >= 0) player_playlist_set_current_group_idx(group_idx);
-    else (void)player_playlist_align_group_context_for_track(track_idx, false);
-  } else {
-    g_play_mode = PLAY_MODE_ALL_SEQ;
-    player_playlist_set_current_group_idx(-1);
+
+  int track_idx = -1;
+  if (!web_parse_int_arg("idx", track_idx)) {
+    web_send_json_err("缺少 idx 参数");
+    return;
   }
+  if (track_idx < 0 || track_idx >= (int)storage_catalog_v3_track_count()) {
+    web_send_json_err("曲目不存在", 404);
+    return;
+  }
+
+  String mode = s_server.arg("mode");
+  mode.toLowerCase();
+
+  int group_idx = -1;
+  web_parse_int_arg("group_idx", group_idx);
+
+  if (mode == "artist") {
+    const bool keep_random = control_mode_is_random(g_play_mode);
+    g_play_mode = keep_random ? PLAY_MODE_ARTIST_RND : PLAY_MODE_ARTIST_SEQ;
+    g_random_play = keep_random;
+
+    if (group_idx >= 0) player_playlist_set_current_group_idx(group_idx);
+    else (void)player_playlist_align_group_context_for_track(track_idx, false);
+
+  } else if (mode == "album") {
+    const bool keep_random = control_mode_is_random(g_play_mode);
+    g_play_mode = keep_random ? PLAY_MODE_ALBUM_RND : PLAY_MODE_ALBUM_SEQ;
+    g_random_play = keep_random;
+
+    if (group_idx >= 0) player_playlist_set_current_group_idx(group_idx);
+    else (void)player_playlist_align_group_context_for_track(track_idx, false);
+
+  } else {
+    // 单曲播放：不改变当前播放大类
+    if (web_status_mode_is_artist() || web_status_mode_is_album()) {
+      (void)player_playlist_align_group_context_for_track(track_idx, false);
+    } else {
+      player_playlist_set_current_group_idx(-1);
+    }
+  }
+
   player_playlist_force_rebuild();
-  if (!player_play_idx_v3((uint32_t)track_idx, true, true)) { web_send_json_err("曲目播放失败", 500); return; }
+
+  if (!player_play_idx_v3((uint32_t)track_idx, true, true)) {
+    web_send_json_err("曲目播放失败", 500);
+    return;
+  }
+
   web_send_json_ok_simple("track_play_started");
 }
 static void web_handle_artist_bind_nfc() {
@@ -1269,6 +1482,8 @@ static void web_setup_routes() {
   s_server.on("/api/status", HTTP_GET, web_handle_status);
   s_server.on("/api/artists", HTTP_GET, web_handle_artists);
   s_server.on("/api/albums", HTTP_GET, web_handle_albums);
+  s_server.on("/api/artist/search_song", HTTP_GET, web_handle_artist_song_search);
+  s_server.on("/api/album/search_song", HTTP_GET, web_handle_album_song_search);
   s_server.on("/api/radios", HTTP_GET, web_handle_radios);
   s_server.on("/api/artist/detail", HTTP_GET, web_handle_artist_detail);
   s_server.on("/api/album/detail", HTTP_GET, web_handle_album_detail);

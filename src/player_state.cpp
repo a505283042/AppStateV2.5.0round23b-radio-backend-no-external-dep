@@ -272,7 +272,7 @@ static bool player_play_trackinfo_core(const TrackInfo& t,
         s_cur,
         true,
         t.lrc_path.length() > 0,
-        need_decode_cover,
+        need_decode_cover || cover_cache_hit,
         asset_job);
     asset_job.suppress_next_prefetch = from_nfc;
     t_after_lyrics_prefetch = millis();
