@@ -509,6 +509,7 @@ const slider=document.getElementById('volumeSlider');
 slider.addEventListener('input',(e)=>{ const v=Number(e.target.value||0); document.getElementById('volume').textContent=`${v}%`; sendVolumeDebounced(v); });
 slider.addEventListener('change',(e)=>{ const v=Number(e.target.value||0); sendVolumeDebounced(v); });
 document.getElementById('coverBox').addEventListener('click',toggleViewFromCover);
+document.getElementById('lockBtn').addEventListener('click', togglePageLock);
 
 document.addEventListener('visibilitychange', handleVisibilityChange);
 window.addEventListener('pageshow', ()=>{ if(!document.hidden) resumePagePolling(); });
@@ -772,17 +773,16 @@ const $ = id => document.getElementById(id);
     updateSearchModeUi();
     resetExpandedDetailState();
 
-    if(albumSongSearchController){
-      albumSongSearchController.abort();
-      albumSongSearchController = null;
+    if(artistSongSearchController){
+      artistSongSearchController.abort();
+      artistSongSearchController = null;
     }
 
     if(searchMode === 'song'){
-      scheduleAlbumSongSearch();
+      scheduleArtistSongSearch();
     }else{
       renderList();
     }
-  }
 
   async function fetchArtistSongSearch(){
     const q = ($('searchInput').value || '').trim();
@@ -1000,17 +1000,20 @@ const $ = id => document.getElementById(id);
   $('searchInput').addEventListener('input', ()=>{
     resetExpandedDetailState();
 
-    if(albumSongSearchController){
-      albumSongSearchController.abort();
-      albumSongSearchController = null;
+    if(artistSongSearchController){
+      artistSongSearchController.abort();
+      artistSongSearchController = null;
     }
 
-    if(searchMode === 'song') scheduleAlbumSongSearch();
+    if(searchMode === 'song') scheduleArtistSongSearch();
     else renderList();
   });
 
   updateSearchModeUi();
-  loadArtists().catch(e=>{ $('statusText').textContent='加载失败'; alert(e.message||'加载失败'); });
+  loadArtists().catch(e=>{
+    $('statusText').textContent='加载失败';
+    alert(e.message||'加载失败');
+  });
  
  // 悬浮回到顶部按钮功能
  const scrollToTopBtn = document.createElement('button');
@@ -1195,18 +1198,17 @@ const $ = id => document.getElementById(id);
     updateSearchModeUi();
     resetExpandedDetailState();
 
-    if(artistSongSearchController){
-      artistSongSearchController.abort();
-      artistSongSearchController = null;
+    if(albumSongSearchController){
+      albumSongSearchController.abort();
+      albumSongSearchController = null;
     }
 
     if(searchMode === 'song'){
-      scheduleArtistSongSearch();
+      scheduleAlbumSongSearch();
     }else{
       renderList();
     }
   }
-
   async function fetchAlbumSongSearch(){
     const q = ($('searchInput').value || '').trim();
 
@@ -1423,12 +1425,12 @@ const $ = id => document.getElementById(id);
   $('searchInput').addEventListener('input', ()=>{
     resetExpandedDetailState();
 
-    if(artistSongSearchController){
-      artistSongSearchController.abort();
-      artistSongSearchController = null;
+    if(albumSongSearchController){
+      albumSongSearchController.abort();
+      albumSongSearchController = null;
     }
 
-    if(searchMode === 'song') scheduleArtistSongSearch();
+    if(searchMode === 'song') scheduleAlbumSongSearch();
     else renderList();
   });
 
