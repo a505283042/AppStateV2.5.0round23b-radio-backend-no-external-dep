@@ -628,8 +628,24 @@ static const char WEBCTRL_ARTISTS_HTML[] PROGMEM = R"HTML(
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>ESP32S3 歌手页</title>
   <style>
-    body{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:#111;color:#eee}
-    .wrap{max-width:760px;margin:0 auto;padding:16px}
+    body{
+      font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+      margin:0;
+      background:#111;
+      color:#eee;
+      height:100dvh;
+      overflow:hidden;
+    }
+    .wrap{
+      max-width:760px;
+      margin:0 auto;
+      padding:16px;
+      height:100dvh;
+      box-sizing:border-box;
+      display:flex;
+      flex-direction:column;
+      min-height:0;
+    }
     .card{background:#1b1b1b;border-radius:16px;padding:16px;margin-bottom:12px;box-shadow:0 4px 18px rgba(0,0,0,.25)}
     .top{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}
     .actions{display:flex;gap:8px;flex-wrap:wrap}
@@ -637,7 +653,18 @@ static const char WEBCTRL_ARTISTS_HTML[] PROGMEM = R"HTML(
     a.secondary,button.secondary{background:#444}
     input{width:100%;padding:12px 14px;border-radius:12px;border:1px solid #444;background:#111;color:#eee;box-sizing:border-box}
     .muted{color:#aaa;font-size:14px}
-    .list{max-height:70vh;overflow:auto}
+    .listCard{
+      flex:1;
+      min-height:0;
+      display:flex;
+      flex-direction:column;
+    }
+    .list{
+      flex:1;
+      min-height:0;
+      overflow:auto;
+      max-height:none;
+    }
     .item{padding:12px;border:1px solid #2e2e2e;border-radius:12px;margin-bottom:8px;cursor:pointer;background:#151515}
     .item.active{border-color:#2f6feb;background:#16233d}
     .item.current{border-color:#2f6feb}
@@ -655,7 +682,9 @@ static const char WEBCTRL_ARTISTS_HTML[] PROGMEM = R"HTML(
     .expandBox{margin-top:10px;padding-top:10px;border-top:1px solid #2a2a2a}
     .expandActions{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
     .expandEmpty{padding:12px 0;color:#aaa}
-    @media (max-width:900px){.layout{grid-template-columns:1fr}.list{max-height:none}}
+    @media (max-width:900px){
+      .layout{grid-template-columns:1fr}
+    }
     
     /* 悬浮回到顶部按钮 */
     .scrollToTopBtn{position:fixed;bottom:20px;right:20px;width:50px;height:50px;border-radius:50%;background:#2f6feb;color:#fff;border:none;font-size:24px;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,.3);opacity:0;transform:translateY(20px);transition:opacity 0.3s,transform 0.3s;z-index:1000;display:flex;align-items:center;justify-content:center}
@@ -687,7 +716,7 @@ static const char WEBCTRL_ARTISTS_HTML[] PROGMEM = R"HTML(
       <input id="searchInput" placeholder="搜索歌手名">
     </div>
 
-    <div class="card">
+    <div class="card listCard">
       <div class="muted" id="countText">-</div>
       <div class="list" id="artistList"></div>
     </div>
@@ -1064,23 +1093,42 @@ const $ = id => document.getElementById(id);
     alert(e.message||'加载失败');
   });
  
- // 悬浮回到顶部按钮功能
+ // 悬浮回到顶部按钮功能，对歌手列表生效
  const scrollToTopBtn = document.createElement('button');
- scrollToTopBtn.className = 'scrollToTopBtn';
- scrollToTopBtn.innerHTML = '↑';
- scrollToTopBtn.title = '回到顶部';
- scrollToTopBtn.onclick = () => window.scrollTo({top:0,behavior:'smooth'});
- document.body.appendChild(scrollToTopBtn);
- 
- // 滚动检测
- window.addEventListener('scroll', () => {
-   const scrollY = window.scrollY;
-   if (scrollY > 300) {
-     scrollToTopBtn.classList.add('visible');
-   } else {
-     scrollToTopBtn.classList.remove('visible');
-   }
- });
+  scrollToTopBtn.className = 'scrollToTopBtn';
+  scrollToTopBtn.innerHTML = '↑';
+  scrollToTopBtn.title = '回到顶部';
+
+  function getArtistScrollTarget(){
+    return $('artistList') || window;
+  }
+
+  function updateArtistScrollBtn(){
+    const target = getArtistScrollTarget();
+    const scrollTop = target === window
+      ? (window.scrollY || document.documentElement.scrollTop || 0)
+      : target.scrollTop;
+
+    if (scrollTop > 300) {
+      scrollToTopBtn.classList.add('visible');
+    } else {
+      scrollToTopBtn.classList.remove('visible');
+    }
+  }
+
+  scrollToTopBtn.onclick = () => {
+    const target = getArtistScrollTarget();
+    if (target === window) {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    } else {
+      target.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  };
+
+  document.body.appendChild(scrollToTopBtn);
+
+  window.addEventListener('scroll', updateArtistScrollBtn);
+  $('artistList').addEventListener('scroll', updateArtistScrollBtn);
 </script>
 </body>
 </html>
@@ -1094,8 +1142,24 @@ static const char WEBCTRL_ALBUMS_HTML[] PROGMEM = R"HTML(
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>ESP32S3 专辑页</title>
   <style>
-    body{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:#111;color:#eee}
-    .wrap{max-width:760px;margin:0 auto;padding:16px}
+    body{
+      font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+      margin:0;
+      background:#111;
+      color:#eee;
+      height:100dvh;
+      overflow:hidden;
+    }
+    .wrap{
+      max-width:760px;
+      margin:0 auto;
+      padding:16px;
+      height:100dvh;
+      box-sizing:border-box;
+      display:flex;
+      flex-direction:column;
+      min-height:0;
+    }
     .card{background:#1b1b1b;border-radius:16px;padding:16px;margin-bottom:12px;box-shadow:0 4px 18px rgba(0,0,0,.25)}
     .top{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}
     .actions{display:flex;gap:8px;flex-wrap:wrap}
@@ -1103,7 +1167,18 @@ static const char WEBCTRL_ALBUMS_HTML[] PROGMEM = R"HTML(
     a.secondary,button.secondary{background:#444}
     input{width:100%;padding:12px 14px;border-radius:12px;border:1px solid #444;background:#111;color:#eee;box-sizing:border-box}
     .muted{color:#aaa;font-size:14px}
-    .list{max-height:70vh;overflow:auto}
+    .listCard{
+      flex:1;
+      min-height:0;
+      display:flex;
+      flex-direction:column;
+    }
+    .list{
+      flex:1;
+      min-height:0;
+      overflow:auto;
+      max-height:none;
+    }
     .item{padding:12px;border:1px solid #2e2e2e;border-radius:12px;margin-bottom:8px;cursor:pointer;background:#151515}
     .item.active{border-color:#2f6feb;background:#16233d}
     .item.current{border-color:#2f6feb}
@@ -1121,7 +1196,9 @@ static const char WEBCTRL_ALBUMS_HTML[] PROGMEM = R"HTML(
     .expandBox{margin-top:10px;padding-top:10px;border-top:1px solid #2a2a2a}
     .expandActions{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
     .expandEmpty{padding:12px 0;color:#aaa}
-    @media (max-width:900px){.layout{grid-template-columns:1fr}.list{max-height:none}}
+    @media (max-width:900px){
+      .layout{grid-template-columns:1fr}
+    }
     
     /* 悬浮回到顶部按钮 */
     .scrollToTopBtn{position:fixed;bottom:20px;right:20px;width:50px;height:50px;border-radius:50%;background:#2f6feb;color:#fff;border:none;font-size:24px;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,.3);opacity:0;transform:translateY(20px);transition:opacity 0.3s,transform 0.3s;z-index:1000;display:flex;align-items:center;justify-content:center}
@@ -1153,7 +1230,7 @@ static const char WEBCTRL_ALBUMS_HTML[] PROGMEM = R"HTML(
       <input id="searchInput" placeholder="搜索 专辑名 / 歌手名">
     </div>
 
-    <div class="card">
+    <div class="card listCard">
       <div class="muted" id="countText">-</div>
       <div class="list" id="albumList"></div>
     </div>
@@ -1533,23 +1610,42 @@ const $ = id => document.getElementById(id);
   updateSearchModeUi();
   loadAlbums().catch(e=>{ $('statusText').textContent='加载失败'; alert(e.message||'加载失败'); });
  
- // 悬浮回到顶部按钮功能
- const scrollToTopBtn = document.createElement('button');
- scrollToTopBtn.className = 'scrollToTopBtn';
- scrollToTopBtn.innerHTML = '↑';
- scrollToTopBtn.title = '回到顶部';
- scrollToTopBtn.onclick = () => window.scrollTo({top:0,behavior:'smooth'});
- document.body.appendChild(scrollToTopBtn);
- 
- // 滚动检测
- window.addEventListener('scroll', () => {
-   const scrollY = window.scrollY;
-   if (scrollY > 300) {
-     scrollToTopBtn.classList.add('visible');
-   } else {
-     scrollToTopBtn.classList.remove('visible');
-   }
- });
+ // 悬浮回到顶部按钮功能，对专辑列表和窗口都生效
+  const scrollToTopBtn = document.createElement('button');
+  scrollToTopBtn.className = 'scrollToTopBtn';
+  scrollToTopBtn.innerHTML = '↑';
+  scrollToTopBtn.title = '回到顶部';
+
+  function getAlbumScrollTarget(){
+    return $('albumList') || window;
+  }
+
+  function updateAlbumScrollBtn(){
+    const target = getAlbumScrollTarget();
+    const scrollTop = target === window
+      ? (window.scrollY || document.documentElement.scrollTop || 0)
+      : target.scrollTop;
+
+    if (scrollTop > 300) {
+      scrollToTopBtn.classList.add('visible');
+    } else {
+      scrollToTopBtn.classList.remove('visible');
+    }
+  }
+
+  scrollToTopBtn.onclick = () => {
+    const target = getAlbumScrollTarget();
+    if (target === window) {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    } else {
+      target.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  };
+
+  document.body.appendChild(scrollToTopBtn);
+
+  window.addEventListener('scroll', updateAlbumScrollBtn);
+  $('albumList').addEventListener('scroll', updateAlbumScrollBtn);
 </script>
 </body>
 </html>
