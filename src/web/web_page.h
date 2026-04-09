@@ -72,8 +72,9 @@ static const char WEBCTRL_INDEX_HTML[] PROGMEM = R"HTML(
       <div class="media" id="mediaBox">
         <div>
           <div class="cover" id="coverBox"><span id="coverFallback">无封面</span><img id="coverImg" alt="封面" decoding="async" loading="eager" style="display:none"></div>
-          <div class="small" style="margin-top:8px;text-align:center">点击封面：切换信息视图/旋转视图</div>
-        </div>
+          <div class="small" style="margin-top:8px;text-align:center;line-height:1.5">
+            点击封面：切换视图<br>信息视图 / 旋转视图
+          </div>
         <div>
           <div class="title" id="title">-</div>
           <div class="sub" id="artist">-</div>
