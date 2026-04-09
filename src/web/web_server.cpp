@@ -796,6 +796,9 @@ static void web_handle_status() {
   json += ",\"web_cover_spin\":";
   json += (snap.web_cover_spin ? "true" : "false");
 
+  json += ",\"show_wifi_info\":";
+  json += (ws.show_wifi_info ? "true" : "false");
+
   json += ",\"lyric_sync_mode\":\"";
   json += web_lyric_sync_mode_key(ws.lyric_sync_mode);
   json += "\"";

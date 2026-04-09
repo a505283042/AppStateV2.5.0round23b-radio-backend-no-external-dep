@@ -409,7 +409,15 @@ function render(j){
   document.getElementById('appState').textContent=`${j.app_state_label||j.app_state||'-'} · ${j.view_label||j.view||'-'}`;
   document.getElementById('time').textContent=`${fmt(j.play_ms)} / ${fmt(j.total_ms)}`;
   document.getElementById('playState').textContent=j.rescanning ? (j.can_cancel_scan ? '扫描中（可取消）' : '扫描中（取消中）') : (j.is_paused ? '已暂停' : (j.is_playing ? '播放中' : '已停止'));
-  document.getElementById('net').textContent=`${j.net_mode||'-'} · ${j.ip||'-'} · ${j.wifi_name||'-'}`;
+    if(j.show_wifi_info === false){
+    document.getElementById('net').textContent = `${j.net_mode||'-'} · WiFi信息已隐藏`;
+  }else{
+    document.getElementById('net').textContent = `${j.net_mode||'-'} · ${j.ip||'-'} · ${j.wifi_name||'-'}`;
+  }
+
+  if(j.show_wifi_info !== undefined){
+    updateWifiInfoButton(!!j.show_wifi_info);
+  }
   const total=Math.max(1,j.total_ms||0); const pct=Math.max(0,Math.min(100,Math.floor(((j.play_ms||0)*100)/total))); document.getElementById('progressFill').style.width=`${pct}%`;
   document.getElementById('scanBtn').textContent=j.scan_action_label || (j.rescanning ? '取消重扫' : '开始重扫');
   updateLyricsFromState(j);
@@ -783,6 +791,7 @@ const $ = id => document.getElementById(id);
     }else{
       renderList();
     }
+  }
 
   async function fetchArtistSongSearch(){
     const q = ($('searchInput').value || '').trim();
