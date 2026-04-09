@@ -640,6 +640,7 @@ static const char WEBCTRL_ARTISTS_HTML[] PROGMEM = R"HTML(
     .list{max-height:70vh;overflow:auto}
     .item{padding:12px;border:1px solid #2e2e2e;border-radius:12px;margin-bottom:8px;cursor:pointer;background:#151515}
     .item.active{border-color:#2f6feb;background:#16233d}
+    .item.current{border-color:#2f6feb}
     .name{font-size:16px;font-weight:700}
     .sub{font-size:13px;color:#bdbdbd;margin-top:4px}
     .sectionTitle{font-size:20px;font-weight:800;margin:0 0 6px}
@@ -700,6 +701,8 @@ const $ = id => document.getElementById(id);
   let songSearchItems = [];
   let expandedIdx = -1;
   let detailCache = {};
+  let currentTrackArtist = '';
+  let initialScrollDone = false;
 
   function getDetailCacheKey(idx){
     const q = ($('searchInput').value || '').trim().toLowerCase();
@@ -845,6 +848,32 @@ const $ = id => document.getElementById(id);
     }, 220);
   }
 
+    async function loadCurrentTrackArtist(){
+      try{
+        const r = await fetch('/api/status', {cache:'no-store'});
+        const j = await r.json();
+        currentTrackArtist = String(j.artist || '').trim();
+      }catch(e){
+        currentTrackArtist = '';
+      }
+    }
+
+  function scrollToCurrentArtist(){
+    if(initialScrollDone) return;
+    if(!currentTrackArtist) return;
+    if(searchMode !== 'artist') return;
+
+    const idx = allItems.findIndex(x => String(x.name || '').trim() === currentTrackArtist);
+    if(idx < 0) return;
+
+    const box = $('artistList');
+    const el = box.querySelector(`.item[data-idx="${idx}"]`);
+    if(!box || !el) return;
+
+    el.scrollIntoView({ behavior:'smooth', block:'center' });
+    initialScrollDone = true;
+  }
+
   function renderList(){
     const q = ($('searchInput').value || '').trim().toLowerCase();
     const box = $('artistList');
@@ -867,6 +896,9 @@ const $ = id => document.getElementById(id);
 
     box.innerHTML = items.map(x => {
       const expanded = x.idx === expandedIdx;
+      const current = searchMode === 'artist' &&
+                      currentTrackArtist &&
+                      String(x.name || '').trim() === currentTrackArtist;
       const detail = detailCache[getDetailCacheKey(x.idx)];
 
       let subText = `${x.track_count || 0} 首`;
@@ -876,7 +908,7 @@ const $ = id => document.getElementById(id);
       }
 
       return `
-        <div class="item ${expanded ? 'active' : ''}" onclick="toggleArtist(${x.idx})"><div class="itemHead">
+        <div class="item ${expanded ? 'active' : ''} ${current ? 'current' : ''}" data-idx="${x.idx}" onclick="toggleArtist(${x.idx})"><div class="itemHead">
             <div class="itemMeta">
               <div class="name">${esc(x.name || '未知歌手')}</div>
               <div class="sub">${subText}</div>
@@ -896,17 +928,25 @@ const $ = id => document.getElementById(id);
         </div>
       `;
     }).join('');
+
+    if(!q){
+      setTimeout(scrollToCurrentArtist, 0);
+    }
   } 
 
- async function loadArtists(){ 
-   const r = await fetch('/api/artists', {cache:'no-store'}); 
-   const j = await r.json(); 
-   if(!j.ok) throw new Error(j.message || 'load failed'); 
+  async function loadArtists(){ 
+    await loadCurrentTrackArtist();
 
-   allItems = j.items || []; 
-   $('statusText').textContent = `当前模式：${j.mode_label || '-'}；当前分组：${(j.current_group_idx ?? -1) >= 0 ? (j.current_group_idx + 1) : '-'}`; 
-   renderList(); 
- } 
+    const r = await fetch('/api/artists', {cache:'no-store'}); 
+    const j = await r.json(); 
+    if(!j.ok) throw new Error(j.message || 'load failed'); 
+
+    allItems = j.items || [];
+    initialScrollDone = false;
+
+    $('statusText').textContent = `当前歌曲歌手：${currentTrackArtist || '-'}；当前模式：${j.mode_label || '-'}`;
+    renderList(); 
+  }
 
   async function loadDetail(idx, append){
     const cacheKey = getDetailCacheKey(idx);
@@ -1066,6 +1106,7 @@ static const char WEBCTRL_ALBUMS_HTML[] PROGMEM = R"HTML(
     .list{max-height:70vh;overflow:auto}
     .item{padding:12px;border:1px solid #2e2e2e;border-radius:12px;margin-bottom:8px;cursor:pointer;background:#151515}
     .item.active{border-color:#2f6feb;background:#16233d}
+    .item.current{border-color:#2f6feb}
     .name{font-size:16px;font-weight:700}
     .sub{font-size:13px;color:#bdbdbd;margin-top:4px}
     .sectionTitle{font-size:20px;font-weight:800;margin:0 0 6px}
@@ -1126,6 +1167,9 @@ const $ = id => document.getElementById(id);
   let songSearchItems = [];
   let expandedIdx = -1;
   let detailCache = {};
+  let currentTrackAlbum = '';
+  let currentTrackArtist = '';
+  let initialScrollDone = false;
 
   function getDetailCacheKey(idx){
     const q = ($('searchInput').value || '').trim().toLowerCase();
@@ -1270,6 +1314,37 @@ const $ = id => document.getElementById(id);
     }, 220);
   }
 
+  async function loadCurrentTrackAlbumInfo(){
+    try{
+      const r = await fetch('/api/status', {cache:'no-store'});
+      const j = await r.json();
+      currentTrackAlbum = String(j.album || '').trim();
+      currentTrackArtist = String(j.artist || '').trim();
+    }catch(e){
+      currentTrackAlbum = '';
+      currentTrackArtist = '';
+    }
+  }
+
+  function scrollToCurrentAlbum(){
+    if(initialScrollDone) return;
+    if(!currentTrackAlbum) return;
+    if(searchMode !== 'meta') return;
+
+    const idx = allItems.findIndex(x =>
+      String(x.name || '').trim() === currentTrackAlbum &&
+      String(x.primary_artist || '').trim() === currentTrackArtist
+    );
+    if(idx < 0) return;
+
+    const box = $('albumList');
+    const el = box.querySelector(`.item[data-idx="${idx}"]`);
+    if(!box || !el) return;
+
+    el.scrollIntoView({ behavior:'smooth', block:'center' });
+    initialScrollDone = true;
+  }
+
   function renderList(){ 
     const q = ($('searchInput').value || '').trim().toLowerCase(); 
     const box = $('albumList'); 
@@ -1291,7 +1366,11 @@ const $ = id => document.getElementById(id);
     } 
 
     box.innerHTML = items.map(x => { 
-      const expanded = x.idx === expandedIdx; 
+      const expanded = x.idx === expandedIdx;
+      const current = searchMode === 'meta' &&
+                      currentTrackAlbum &&
+                      String(x.name || '').trim() === currentTrackAlbum &&
+                      String(x.primary_artist || '').trim() === currentTrackArtist;
       const detail = detailCache[getDetailCacheKey(x.idx)]; 
 
       let subText = `${esc(x.primary_artist || '未知歌手')} · ${x.track_count || 0} 首`;
@@ -1301,7 +1380,7 @@ const $ = id => document.getElementById(id);
       }
 
       return ` 
-        <div class="item ${expanded ? 'active' : ''}" onclick="toggleAlbum(${x.idx})"><div class="itemHead">
+        <div class="item ${expanded ? 'active' : ''} ${current ? 'current' : ''}" data-idx="${x.idx}" onclick="toggleAlbum(${x.idx})"><div class="itemHead">
             <div class="itemMeta">
               <div class="name">${esc(x.name || '未知专辑')}</div>
               <div class="sub">${subText}</div>
@@ -1321,17 +1400,25 @@ const $ = id => document.getElementById(id);
         </div>
       `; 
     }).join(''); 
+
+    if(!q){
+      setTimeout(scrollToCurrentAlbum, 0);
+    }
   } 
 
- async function loadAlbums(){ 
-   const r = await fetch('/api/albums', {cache:'no-store'}); 
-   const j = await r.json(); 
-   if(!j.ok) throw new Error(j.message || 'load failed'); 
+  async function loadAlbums(){ 
+    await loadCurrentTrackAlbumInfo();
 
-   allItems = j.items || []; 
-   $('statusText').textContent = `当前模式：${j.mode_label || '-'}；当前分组：${(j.current_group_idx ?? -1) >= 0 ? (j.current_group_idx + 1) : '-'}`; 
-   renderList(); 
- } 
+    const r = await fetch('/api/albums', {cache:'no-store'}); 
+    const j = await r.json(); 
+    if(!j.ok) throw new Error(j.message || 'load failed'); 
+
+    allItems = j.items || [];
+    initialScrollDone = false;
+
+    $('statusText').textContent = `当前歌曲专辑：${currentTrackAlbum || '-'} / ${currentTrackArtist || '-'}；当前模式：${j.mode_label || '-'}`;
+    renderList(); 
+  }
 
   async function loadDetail(idx, append){
     const cacheKey = getDetailCacheKey(idx);
