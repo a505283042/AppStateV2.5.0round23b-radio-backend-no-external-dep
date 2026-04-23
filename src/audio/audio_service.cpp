@@ -74,13 +74,14 @@ static volatile bool s_ready = false;
 static bool s_paused = false; // 内部暂停标志
 
 // 淡入淡出功能相关变量
-static float s_fade_gain = 1.0f; // 当前增益 (0.0 到 1.0)
-static float s_last_fade_gain = 1.0f; // 上一次的增益，用于检测淡出完成
-// 正常播放中的淡入淡出步进（暂停/恢复）
-#define FADE_STEP 0.05f
-// 切歌 stop 使用更快的淡出，尽量去掉“啪”的瞬态，同时不明显拖慢切歌
-#define STOP_FADE_STEP 0.20f
+static float s_fade_gain = 1.0f;      // 当前增益 (0.0 到 1.0)
+static float s_last_fade_gain = 1.0f; // 上一次的增益
+
+#define PAUSE_FADE_STEP   0.05f   // 暂停时淡出，保持柔和
+#define PLAY_FADE_STEP    0.12f   // 开播/切歌时淡入，加快恢复正常音量
+#define PLAY_START_GAIN   0.35f   // 新歌起播初始增益，别从 0 开始
 #define STOP_FADE_MAX_ITERS 8
+#define STOP_FADE_STEP    0.20f
 
 static inline bool detect_png_from_buffer(const uint8_t* b, size_t len) {
   return (len >= 8 && b[0] == 0x89 && b[1] == 'P' && b[2] == 'N' && b[3] == 'G' &&
@@ -105,7 +106,7 @@ static bool audio_task_soft_stop_impl(bool fast_fade)
   uint32_t fade_iters = 0;
 
   if (had_audio) {
-    const float step = fast_fade ? STOP_FADE_STEP : FADE_STEP;
+    const float step = fast_fade ? STOP_FADE_STEP : PAUSE_FADE_STEP;
     while (s_fade_gain > 0.0f && fade_iters < STOP_FADE_MAX_ITERS) {
       s_fade_gain -= step;
       if (s_fade_gain < 0.0f) s_fade_gain = 0.0f;
@@ -367,21 +368,33 @@ static void audio_task_entry(void*)
         if (audio_is_playing() || s_playing_cache || s_fade_gain > 0.0f) {
           audio_task_soft_stop_impl(true);
         } else {
-          // 即使当前看起来没在播，也从 0 增益起步，减少首包 PCM 瞬态
+          // 当前没在播时，仍清一下 DMA，但不要让新歌长期从极小音量起步
           s_fade_gain = 0.0f;
           s_last_fade_gain = 0.0f;
           s_paused = false;
           audio_i2s_zero_dma_buffer();
         }
+
         bool ok = (cmd.type == CMD_PLAY_STREAM_MP3) ? audio_play_stream_mp3(cmd.path) : audio_play(cmd.path);
         const uint32_t t_done = millis();
         ack = ok ? 1 : 0;
+
+        if (ok) {
+          // 切歌起播不要从 0 开始，避免一开始声音明显偏小
+          s_fade_gain = PLAY_START_GAIN;
+          s_last_fade_gain = PLAY_START_GAIN;
+        } else {
+          s_fade_gain = 0.0f;
+          s_last_fade_gain = 0.0f;
+        }
+
         LOGD("[AUDIO] service cmd %s exec=%lums ok=%d",
-             (cmd.type == CMD_PLAY_STREAM_MP3) ? "play_stream_mp3" : "play",
-             (unsigned long)(t_done - t_cmd), ok ? 1 : 0);
-        // 收到新歌 PLAY 命令，自动取消暂停（保持从 0 增益淡入）
+            (cmd.type == CMD_PLAY_STREAM_MP3) ? "play_stream_mp3" : "play",
+            (unsigned long)(t_done - t_cmd), ok ? 1 : 0);
+
         s_paused = false;
-      } else if (cmd.type == CMD_FETCH_TOTAL_MS) {
+      }
+       else if (cmd.type == CMD_FETCH_TOTAL_MS) {
         const uint32_t t_cmd = millis();
         bool ok = audio_task_fetch_total_ms_impl(cmd.path, cmd.out_total_ms);
         const uint32_t t_done = millis();
@@ -420,12 +433,12 @@ static void audio_task_entry(void*)
     // --- 核心：淡入淡出状态机 ---
     if (s_paused) {
       if (s_fade_gain > 0.0f) {
-        s_fade_gain -= FADE_STEP;
+        s_fade_gain -= PAUSE_FADE_STEP;
         if (s_fade_gain < 0.0f) s_fade_gain = 0.0f;
       }
     } else {
       if (s_fade_gain < 1.0f) {
-        s_fade_gain += FADE_STEP;
+        s_fade_gain += PLAY_FADE_STEP;
         if (s_fade_gain > 1.0f) s_fade_gain = 1.0f;
       }
     }

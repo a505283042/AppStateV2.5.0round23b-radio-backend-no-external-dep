@@ -274,22 +274,24 @@ static bool player_play_trackinfo_core(const TrackInfo& t,
         t.lrc_path.length() > 0,
         need_decode_cover || cover_cache_hit,
         asset_job);
-    asset_job.suppress_next_prefetch = from_nfc;
+    asset_job.need_total = true; // 获取总时间数   /true打开    /false 关闭
+    asset_job.need_lyrics = true;//  需要获取歌词   /true打开  /false 关闭
+    asset_job.suppress_next_prefetch = true;// 不要立刻探取封面，等开播后再补
     t_after_lyrics_prefetch = millis();
 
-    if (from_nfc && asset_job.need_lyrics && asset_job.lyrics_path[0]) {
-        if (audio_service_fetch_lyrics(asset_job.lyrics_path, 
-                                       &primed_lyrics_text, 
-                                       &primed_lyrics_len, 
-                                       true) && 
-            primed_lyrics_text && 
-            primed_lyrics_len > 0) { 
+    if (asset_job.need_lyrics && asset_job.lyrics_path[0]) {
+        if (audio_service_fetch_lyrics(asset_job.lyrics_path,
+                                    &primed_lyrics_text,
+                                    &primed_lyrics_len,
+                                    true) &&
+            primed_lyrics_text &&
+            primed_lyrics_len > 0) {
             if (g_lyricsDisplay.loadFromOwnedTextBuffer(primed_lyrics_text, primed_lyrics_len)) {
                 primed_lyrics_text = nullptr; // ownership moved
                 lyrics_primed = true;
                 asset_job.need_lyrics = false; // 后台不要再读一次
-                LOGI("[PLAYER] NFC lyrics primed before play track=%d len=%u", 
-                     s_cur, (unsigned)primed_lyrics_len);
+                LOGI("[PLAYER] lyrics primed before play track=%d len=%u",
+                    s_cur, (unsigned)primed_lyrics_len);
             }
         }
     }
