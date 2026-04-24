@@ -4,6 +4,7 @@
 #include "ui/ui_text_utils.h"
 #include "storage/storage_catalog_v3.h"
 #include "storage/storage_groups_v3.h"
+#include "storage/storage_view_v3.h"
 
 static String truncateByPixel(const String& text, int maxWidth)
 {
@@ -291,6 +292,15 @@ static void getListRowRect(int list_pos, int& row_top, int& row_h)
 //                  true: 正常绘制（选中项蓝色，非选中项黑色清除旧背景）
 //                  false: 滚动更新时不重绘背景，避免闪烁
 // =============================================================================
+static String track_display_name(TrackIndex16 track_idx)
+{
+  TrackInfo t;
+  if (storage_fill_trackinfo_from_v3(storage_catalog_v3(), track_idx, t)) {
+    return t.title;
+  }
+  return String("未知歌曲");
+}
+
 static void drawListItem(const PlaylistGroup& group, int idx, int list_pos,
                          bool is_selected, int scroll_offset = 0, bool draw_bg = true)
 {
@@ -385,6 +395,89 @@ static void drawListItem(const PlaylistGroup& group, int idx, int list_pos,
     tft.setTextColor(TFT_LIGHTGREY, is_selected ? 0x4208 : TFT_BLACK);
     tft.setTextDatum(middle_right);
     tft.drawString(count, list_right_edge, row_mid_y);
+  }
+
+  tft.setTextDatum(top_left);
+}
+
+static void drawTrackItem(TrackIndex16 track_idx, int idx, int list_pos,
+                          bool is_selected, int scroll_offset = 0, bool draw_bg = true)
+{
+  extern lgfx::U8g2font g_font_cjk;
+  tft.setFont(&g_font_cjk);
+  tft.setTextSize(1);
+  tft.setTextWrap(false);
+
+  const int ITEM_HEIGHT = 18;
+  const int START_Y = 60;
+  int y = START_Y + list_pos * ITEM_HEIGHT;
+
+  const int row_x = 10;
+  const int row_w = 210;
+  const int row_h = ITEM_HEIGHT;
+  const int row_r = 5;
+
+  int row_top = y - row_h / 2;
+  int row_mid_y = row_top + row_h / 2;
+  int clip_y = row_top;
+  int clip_h = row_h;
+
+  if (draw_bg) {
+    if (is_selected) {
+      tft.fillRoundRect(row_x, row_top, row_w, row_h, row_r, 0x4208);
+    } else {
+      tft.fillRoundRect(row_x, row_top, row_w, row_h, row_r, TFT_BLACK);
+    }
+  }
+
+  String name = track_display_name(track_idx);
+
+  String prefix = String(idx + 1) + ". ";
+  int prefix_width = tft.textWidth(prefix);
+
+  const int list_left_edge = 25;
+  const int list_right_edge = 210;
+
+  int text_start_x = list_left_edge + prefix_width;
+  int available_width = list_right_edge - text_start_x;
+
+  int name_width = tft.textWidth(name);
+  bool need_scroll = is_selected && (name_width > available_width);
+
+  if (need_scroll) {
+    tft.setTextColor(TFT_YELLOW, 0x4208);
+    tft.setTextDatum(middle_left);
+    tft.drawString(prefix, list_left_edge, row_mid_y);
+
+    drawScrollingTextPixel(name,
+                           text_start_x,
+                           row_mid_y,
+                           clip_y,
+                           clip_h,
+                           available_width,
+                           scroll_offset,
+                           TFT_YELLOW,
+                           0x4208);
+  } else {
+    String display_name = name;
+
+    if (name_width > available_width) {
+      display_name = truncateByPixel(name, available_width);
+      if (display_name.length() < name.length()) {
+        int ellipsis_width = tft.textWidth("...");
+        if (tft.textWidth(display_name) + ellipsis_width <= available_width) {
+          display_name += "...";
+        } else {
+          display_name = truncateByPixel(display_name, available_width - ellipsis_width);
+          display_name += "...";
+        }
+      }
+    }
+
+    tft.setTextColor(is_selected ? TFT_YELLOW : TFT_WHITE,
+                     is_selected ? 0x4208 : TFT_BLACK);
+    tft.setTextDatum(middle_left);
+    tft.drawString(prefix + display_name, list_left_edge, row_mid_y);
   }
 
   tft.setTextDatum(top_left);
@@ -499,6 +592,85 @@ void ui_draw_list_select(const std::vector<PlaylistGroup>& groups, int selected_
   }
 
   // 记录状态供下一帧对比
+  s_last_selected_idx = selected_idx;
+  s_last_start_idx = start_idx;
+  last_drawn_selected = selected_idx;
+  last_drawn_offset = s_scroll_state.scroll_offset;
+  s_first_draw = false;
+}
+
+void ui_draw_track_select(const std::vector<TrackIndex16>& tracks, int selected_idx, const char* title)
+{
+  if (tracks.empty()) return;
+
+  extern lgfx::U8g2font g_font_cjk;
+  tft.setFont(&g_font_cjk);
+  tft.setTextSize(1);
+  tft.setTextWrap(false);
+
+  const int ITEMS_VISIBLE = 5;
+  int total = (int)tracks.size();
+
+  if (selected_idx != s_scroll_state.scroll_idx) {
+    s_scroll_state.reset(selected_idx);
+  }
+
+  int current_page = selected_idx / ITEMS_VISIBLE;
+  int start_idx = current_page * ITEMS_VISIBLE;
+  int end_idx = std::min(start_idx + ITEMS_VISIBLE, total);
+
+  bool is_page_changed = (start_idx != s_last_start_idx);
+  bool is_selection_changed = (selected_idx != s_last_selected_idx);
+
+  bool is_offset_changed = false;
+  {
+    String prefix = String(selected_idx + 1) + ". ";
+    int prefix_width = tft.textWidth(prefix);
+
+    const int list_left_edge = 25;
+    const int list_right_edge = 210;
+    int text_start_x = list_left_edge + prefix_width;
+    int available_width = list_right_edge - text_start_x;
+
+    String name = track_display_name(tracks[selected_idx]);
+    int full_width = tft.textWidth(name);
+
+    is_offset_changed = s_scroll_state.update(full_width, available_width);
+  }
+
+  if (!s_first_draw && !is_page_changed && !is_selection_changed && !is_offset_changed &&
+      selected_idx == last_drawn_selected && s_scroll_state.scroll_offset == last_drawn_offset) {
+    return;
+  }
+
+  if (s_first_draw || is_page_changed) {
+    tft.fillScreen(TFT_BLACK);
+    drawListFrame(title, start_idx, total, ITEMS_VISIBLE);
+
+    for (int i = start_idx; i < end_idx; i++) {
+      int list_pos = i - start_idx;
+      bool is_selected = (i == selected_idx);
+      drawTrackItem(tracks[i], i, list_pos, is_selected,
+                    is_selected ? s_scroll_state.scroll_offset : 0, true);
+    }
+  }
+  else if (is_selection_changed) {
+    if (s_last_selected_idx >= start_idx && s_last_selected_idx < end_idx) {
+      int old_pos = s_last_selected_idx - start_idx;
+      int old_row_top, old_row_h;
+      getListRowRect(old_pos, old_row_top, old_row_h);
+      tft.fillRoundRect(10, old_row_top, 210, old_row_h, 5, TFT_BLACK);
+      drawTrackItem(tracks[s_last_selected_idx], s_last_selected_idx, old_pos, false, 0, false);
+    }
+
+    int new_pos = selected_idx - start_idx;
+    drawTrackItem(tracks[selected_idx], selected_idx, new_pos, true, 0, true);
+  }
+  else if (is_offset_changed) {
+    int list_pos = selected_idx - start_idx;
+    drawTrackItem(tracks[selected_idx], selected_idx, list_pos, true, s_scroll_state.scroll_offset, false);
+  }
+
   s_last_selected_idx = selected_idx;
   s_last_start_idx = start_idx;
   last_drawn_selected = selected_idx;

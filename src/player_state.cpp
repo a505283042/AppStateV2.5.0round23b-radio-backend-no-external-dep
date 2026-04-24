@@ -533,6 +533,8 @@ void player_state_run(void)
         }
     }
 
+    player_list_select_tick();
+
     if (player_control_should_block_idle()) {
         return;
     }

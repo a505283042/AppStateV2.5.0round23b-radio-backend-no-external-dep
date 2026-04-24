@@ -190,13 +190,20 @@ static void ui_task_entry(void*)
 
     // 检查是否处于列表选择模式
     if (player_list_select_is_active()) {
-      // 列表选择模式下持续重绘（用于滚动显示）
       ui_draw_lock();
+
       int current_idx = player_list_select_get_selected_idx();
       ListSelectState state = player_list_select_get_state();
-      const char* title = (state == ListSelectState::ARTIST) ? "选择歌手" : "选择专辑";
-      const auto& groups = player_list_select_get_groups();
-      ui_draw_list_select(groups, current_idx, title);
+
+      if (state == ListSelectState::TRACKS) {
+        const auto& tracks = player_list_select_get_tracks();
+        ui_draw_track_select(tracks, current_idx, "选择歌曲");
+      } else {
+        const char* title = (state == ListSelectState::ARTIST) ? "选择歌手" : "选择专辑";
+        const auto& groups = player_list_select_get_groups();
+        ui_draw_list_select(groups, current_idx, title);
+      }
+
       s_list_last_drawn_idx = current_idx;
       ui_draw_unlock();
       continue;
@@ -323,7 +330,7 @@ void ui_init(void)
 
   ui_draw_lock();
   tft.init();
-  tft.setRotation(0);
+  tft.setRotation(3); // 旋转 270 度
 
   tft.initDMA();
   LOGI("[UI] DMA initialized");

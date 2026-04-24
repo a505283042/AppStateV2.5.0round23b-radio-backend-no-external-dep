@@ -94,6 +94,7 @@ TaskHandle_t ui_get_task_handle(void);
 
 /* -------- 列表选择页面 -------- */
 void ui_draw_list_select(const std::vector<PlaylistGroup>& groups, int selected_idx, const char* title);
+void ui_draw_track_select(const std::vector<TrackIndex16>& tracks, int selected_idx, const char* title);
 void ui_clear_list_select();
 
 /* -------- NFC 管理页面 -------- */

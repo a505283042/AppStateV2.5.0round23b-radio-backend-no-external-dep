@@ -17,7 +17,8 @@
 enum class ListSelectState {
     NONE,
     ARTIST,
-    ALBUM
+    ALBUM,
+    TRACKS
 };
 
 /** 列表选择态内部消费的按键事件。 */
@@ -57,5 +58,9 @@ ListSelectState player_list_select_get_state();
 int player_list_select_get_selected_idx();
 /** 当前正在展示的 group 列表。 */
 const std::vector<PlaylistGroup>& player_list_select_get_groups();
+/** 当前正在展示的 track 列表。 */
+const std::vector<TrackIndex16>& player_list_select_get_tracks();
 /** 在列表选择状态下处理按键事件。 */
 void player_list_select_handle_key(key_event_t evt);
+/** 刷新列表选择界面。 */
+void player_list_select_tick();

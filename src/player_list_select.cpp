@@ -15,6 +15,32 @@ int s_list_selected_idx = 0;
 const std::vector<PlaylistGroup>* s_list_groups = nullptr;
 std::vector<PlaylistGroup> s_empty_groups;
 
+static uint32_t s_list_last_action_ms = 0;
+
+static constexpr uint32_t LIST_TIMEOUT_GROUP_MS = 30000;  // 一级列表 30 秒
+static constexpr uint32_t LIST_TIMEOUT_TRACK_MS = 60000;  // 二级列表 60 秒
+
+// 二级歌曲列表
+std::vector<TrackIndex16> s_list_tracks;
+
+// 更新列表选择活动时间戳
+static inline void list_select_touch_activity()
+{
+    s_list_last_action_ms = millis();
+}
+
+// 获取当前列表状态的超时时间
+static inline uint32_t list_select_timeout_ms()
+{
+    return (s_list_state == ListSelectState::TRACKS)
+             ? LIST_TIMEOUT_TRACK_MS
+             : LIST_TIMEOUT_GROUP_MS;
+}
+
+// 记录二级列表的父级状态
+int s_parent_group_idx = -1;
+ListSelectState s_parent_group_state = ListSelectState::NONE;
+
 // 获取当前播放列表中的组
 const std::vector<PlaylistGroup>& list_select_current_groups()
 {
@@ -27,6 +53,11 @@ void list_select_clear_state(bool clear_ui)
     s_list_state = ListSelectState::NONE;
     s_list_selected_idx = 0;
     s_list_groups = nullptr;
+    s_list_tracks.clear();
+    s_parent_group_idx = -1;
+    s_parent_group_state = ListSelectState::NONE;
+    s_list_last_action_ms = 0;
+
     if (clear_ui) {
         ui_clear_list_select();
     }
@@ -34,30 +65,52 @@ void list_select_clear_state(bool clear_ui)
 // 尝试播放选中的组
 bool list_select_try_play_selected_group(const std::vector<PlaylistGroup>& list_groups, int group_count)
 {
-    player_playlist_set_current_group_idx(s_list_selected_idx);
-    const int current_group_idx = player_playlist_get_current_group_idx();
-    if (current_group_idx < 0 || current_group_idx >= group_count) {
+    if (s_list_selected_idx < 0 || s_list_selected_idx >= group_count) {
         list_select_clear_state(true);
         return false;
     }
 
-    LOGI("[LIST] 确认选择: %s (%d/%d)",
-         playlist_group_name_cstr(storage_catalog_v3(), list_groups[current_group_idx]),
+    const int current_group_idx = s_list_selected_idx;
+    const auto& group = list_groups[current_group_idx];
+
+    LOGI("[LIST] 进入歌曲列表: %s (%d/%d)",
+         playlist_group_name_cstr(storage_catalog_v3(), group),
          current_group_idx + 1, group_count);
 
-    if (list_groups[current_group_idx].track_indices.empty()) {
+    if (group.track_indices.empty()) {
         list_select_clear_state(true);
         return false;
     }
 
-    player_playlist_force_rebuild();
-    const auto& playlist = player_playlist_get_current();
-    if (playlist.empty()) {
+    s_parent_group_idx = current_group_idx;
+    s_parent_group_state = s_list_state;
+    s_list_tracks.assign(group.track_indices.begin(), group.track_indices.end());
+    s_list_selected_idx = 0;
+    s_list_state = ListSelectState::TRACKS;
+    list_select_touch_activity();
+
+    ui_clear_list_select();
+    ui_request_refresh_now();
+
+    keys_sync_to_hw_state();
+    return true;
+}
+
+// 尝试播放选中的歌曲
+bool list_select_try_play_selected_track()
+{
+    if (s_list_selected_idx < 0 || s_list_selected_idx >= (int)s_list_tracks.size()) {
         list_select_clear_state(true);
         return false;
     }
 
-    const int next_track = (int)playlist[0];
+    const int next_track = (int)s_list_tracks[s_list_selected_idx];
+
+    if (s_parent_group_idx >= 0) {
+        player_playlist_set_current_group_idx(s_parent_group_idx);
+        player_playlist_force_rebuild();
+    }
+
     list_select_clear_state(true);
 
     if (s_hooks.play_track_dispatch) {
@@ -95,6 +148,7 @@ bool player_list_select_enter(play_mode_t mode)
         }
 
         s_list_state = ListSelectState::ARTIST;
+        list_select_touch_activity();
         keys_sync_to_hw_state();
         LOGI("[LIST] 进入歌手列表选择模式，共 %d 个歌手，当前选中: %d",
             (int)s_list_groups->size(), s_list_selected_idx + 1);
@@ -115,6 +169,7 @@ bool player_list_select_enter(play_mode_t mode)
         }
 
         s_list_state = ListSelectState::ALBUM;
+        list_select_touch_activity();
         keys_sync_to_hw_state();
         LOGI("[LIST] 进入专辑列表选择模式，共 %d 个专辑，当前选中: %d",
             (int)s_list_groups->size(), s_list_selected_idx + 1);
@@ -143,50 +198,99 @@ const std::vector<PlaylistGroup>& player_list_select_get_groups()
 {
     return list_select_current_groups();
 }
+const std::vector<TrackIndex16>& player_list_select_get_tracks()
+{
+    return s_list_tracks;
+}
 // 处理按键事件
 void player_list_select_handle_key(key_event_t evt)
 {
     if (s_list_state == ListSelectState::NONE) return;
+    list_select_touch_activity();
+
+    const bool track_level = (s_list_state == ListSelectState::TRACKS);
 
     const auto& list_groups = list_select_current_groups();
     const int group_count = (int)list_groups.size();
-    if (group_count == 0) {
+    const int item_count = track_level ? (int)s_list_tracks.size() : group_count;
+
+    if (item_count == 0) {
         list_select_clear_state(false);
         return;
     }
 
     switch (evt) {
         case KEY_NEXT_SHORT:
-            s_list_selected_idx = (s_list_selected_idx + 1) % group_count;
-            LOGI("[LIST] 选择下一项: %d/%d", s_list_selected_idx + 1, group_count);
+            s_list_selected_idx = (s_list_selected_idx + 1) % item_count;
+            LOGI("[LIST] 选择下一项: %d/%d", s_list_selected_idx + 1, item_count);
             break;
 
         case KEY_PREV_SHORT:
-            s_list_selected_idx = (s_list_selected_idx - 1 + group_count) % group_count;
-            LOGI("[LIST] 选择上一项: %d/%d", s_list_selected_idx + 1, group_count);
+            s_list_selected_idx = (s_list_selected_idx - 1 + item_count) % item_count;
+            LOGI("[LIST] 选择上一项: %d/%d", s_list_selected_idx + 1, item_count);
             break;
 
         case KEY_VOLUP_SHORT:
-            s_list_selected_idx = (s_list_selected_idx + 5) % group_count;
-            LOGI("[LIST] 向下翻页: %d/%d", s_list_selected_idx + 1, group_count);
+            s_list_selected_idx = (s_list_selected_idx + 5) % item_count;
+            LOGI("[LIST] 向下翻页: %d/%d", s_list_selected_idx + 1, item_count);
             break;
 
         case KEY_VOLDN_SHORT:
-            s_list_selected_idx = (s_list_selected_idx - 5 + group_count) % group_count;
-            LOGI("[LIST] 向上翻页: %d/%d", s_list_selected_idx + 1, group_count);
+            s_list_selected_idx = (s_list_selected_idx - 5 + item_count) % item_count;
+            LOGI("[LIST] 向上翻页: %d/%d", s_list_selected_idx + 1, item_count);
             break;
 
         case KEY_PLAY_SHORT:
+        if (track_level) {
+            (void)list_select_try_play_selected_track();
+        } else {
             (void)list_select_try_play_selected_group(list_groups, group_count);
-            break;
+        }
+        break;;
 
         case KEY_MODE_SHORT:
+            if (track_level) {
+                s_list_state = s_parent_group_state;
+                s_list_selected_idx = (s_parent_group_idx >= 0) ? s_parent_group_idx : 0;
+                s_list_tracks.clear();
+
+                list_select_touch_activity();
+
+                ui_clear_list_select();
+                ui_request_refresh_now();
+
+                keys_sync_to_hw_state();
+                LOGI("[LIST] 返回上一级列表");
+            } else {
+                LOGI("[LIST] 取消选择");
+                list_select_clear_state(true);
+            }
+            break;
+
         case KEY_MODE_LONG:
             LOGI("[LIST] 取消选择");
             list_select_clear_state(true);
-            break;
+            break;  
+        }
+}
 
-        default:
-            break;
+void player_list_select_tick()
+{
+    if (s_list_state == ListSelectState::NONE) {
+        return;
+    }
+
+    if (s_list_last_action_ms == 0) {
+        list_select_touch_activity();
+        return;
+    }
+
+    const uint32_t timeout_ms = list_select_timeout_ms();
+    if ((uint32_t)(millis() - s_list_last_action_ms) >= timeout_ms) {
+        LOGI("[LIST] 超时退出 state=%d timeout=%lu ms",
+             (int)s_list_state,
+             (unsigned long)timeout_ms);
+        list_select_clear_state(true);
+        ui_request_refresh_now();
     }
 }
