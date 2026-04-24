@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "storage/storage_groups_v3.h"
+#include "radio/radio_catalog.h"
 #include "ui/ui.h"
 
 /**
@@ -18,7 +19,8 @@ enum class ListSelectState {
     NONE,
     ARTIST,
     ALBUM,
-    TRACKS
+    TRACKS,
+    RADIO
 };
 
 /** 列表选择态内部消费的按键事件。 */
@@ -39,6 +41,7 @@ enum key_event_t {
  */
 struct PlayerListSelectHooks {
     bool (*play_track_dispatch)(int idx, bool verbose, bool force_cover) = nullptr;
+    bool (*play_radio_dispatch)(int idx) = nullptr;
 };
 
 /** 设置回调。 */
@@ -60,6 +63,8 @@ int player_list_select_get_selected_idx();
 const std::vector<PlaylistGroup>& player_list_select_get_groups();
 /** 当前正在展示的 track 列表。 */
 const std::vector<TrackIndex16>& player_list_select_get_tracks();
+/** 当前正在展示的 radio 列表。 */
+const std::vector<RadioItem>& player_list_select_get_radios();
 /** 在列表选择状态下处理按键事件。 */
 void player_list_select_handle_key(key_event_t evt);
 /** 刷新列表选择界面。 */

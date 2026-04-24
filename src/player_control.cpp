@@ -255,7 +255,7 @@ bool player_play_radio_index(int idx)
 
     ui_set_now_playing(item->name.c_str(), "网络电台");
     ui_set_album(item->region);
-    ui_set_track_pos(-1, (int)radio_catalog_count());
+    ui_set_track_pos(idx, (int)radio_catalog_count());
     control_apply_radio_cover(*item);
     ui_request_refresh_now();
 

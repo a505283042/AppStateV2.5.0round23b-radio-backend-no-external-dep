@@ -2,8 +2,10 @@
 
 #include "keys/keys.h"
 #include "player_playlist.h"
+#include "player_source.h"
 #include "storage/storage_catalog_v3.h"
 #include "storage/storage_groups_v3.h"
+#include "radio/radio_catalog.h"
 #include "utils/log.h"
 
 // 只给本文件用的内部变量和内部函数
@@ -14,6 +16,7 @@ ListSelectState s_list_state = ListSelectState::NONE;
 int s_list_selected_idx = 0;
 const std::vector<PlaylistGroup>* s_list_groups = nullptr;
 std::vector<PlaylistGroup> s_empty_groups;
+std::vector<RadioItem> s_empty_radios;
 
 static uint32_t s_list_last_action_ms = 0;
 
@@ -46,6 +49,14 @@ const std::vector<PlaylistGroup>& list_select_current_groups()
 {
     if (s_list_groups) return *s_list_groups;
     return s_empty_groups;
+}
+// 获取当前播放列表中的 radio
+const std::vector<RadioItem>& list_select_current_radios()
+{
+    if (s_list_state == ListSelectState::RADIO) {
+        return radio_catalog_items();
+    }
+    return s_empty_radios;
 }
 // 清除列表选择状态
 void list_select_clear_state(bool clear_ui)
@@ -95,7 +106,30 @@ bool list_select_try_play_selected_group(const std::vector<PlaylistGroup>& list_
     keys_sync_to_hw_state();
     return true;
 }
+// 尝试播放选中的 radio
+bool list_select_try_play_selected_radio(const std::vector<RadioItem>& radios, int radio_count)
+{
+    if (s_list_selected_idx < 0 || s_list_selected_idx >= radio_count) {
+        list_select_clear_state(true);
+        return false;
+    }
 
+    const int selected_radio_idx = s_list_selected_idx;
+    const RadioItem& item = radios[selected_radio_idx];
+
+    LOGI("[LIST] 确认电台: %s (%d/%d) idx=%d",
+         item.name.c_str(),
+         selected_radio_idx + 1,
+         radio_count,
+         selected_radio_idx);
+
+    list_select_clear_state(true);
+
+    if (s_hooks.play_radio_dispatch) {
+        return s_hooks.play_radio_dispatch(selected_radio_idx);
+    }
+    return false;
+}
 // 尝试播放选中的歌曲
 bool list_select_try_play_selected_track()
 {
@@ -134,6 +168,28 @@ void player_list_select_reset()
 // 进入列表选择模式
 bool player_list_select_enter(play_mode_t mode)
 {
+    const PlayerSourceState source = player_source_get();
+    if (source.type == PlayerSourceType::NET_RADIO) {
+        const auto& radios = radio_catalog_items();
+        if (radios.empty()) {
+            list_select_clear_state(false);
+            return false;
+        }
+
+        s_list_groups = nullptr;
+        s_list_state = ListSelectState::RADIO;
+        s_list_selected_idx = source.radio_idx;
+
+        if (s_list_selected_idx < 0 || s_list_selected_idx >= (int)radios.size()) {
+            s_list_selected_idx = 0;
+        }
+
+        keys_sync_to_hw_state();
+        LOGI("[LIST] 进入电台列表，共 %d 个，当前选中 idx=%d",
+             (int)radios.size(), s_list_selected_idx);
+        return true;
+    }
+
     if (mode == PLAY_MODE_ARTIST_SEQ || mode == PLAY_MODE_ARTIST_RND) {
         s_list_groups = &storage_catalog_v3_artist_groups();
         if (s_list_groups->empty()) {
@@ -198,6 +254,12 @@ const std::vector<PlaylistGroup>& player_list_select_get_groups()
 {
     return list_select_current_groups();
 }
+// 获取当前播放列表中的 radio
+const std::vector<RadioItem>& player_list_select_get_radios()
+{
+    return list_select_current_radios();
+}
+// 获取当前播放列表中的歌曲
 const std::vector<TrackIndex16>& player_list_select_get_tracks()
 {
     return s_list_tracks;
@@ -209,10 +271,13 @@ void player_list_select_handle_key(key_event_t evt)
     list_select_touch_activity();
 
     const bool track_level = (s_list_state == ListSelectState::TRACKS);
+    const bool is_radio = (s_list_state == ListSelectState::RADIO);
 
     const auto& list_groups = list_select_current_groups();
-    const int group_count = (int)list_groups.size();
-    const int item_count = track_level ? (int)s_list_tracks.size() : group_count;
+    const auto& list_radios = list_select_current_radios();
+
+    const int item_count = track_level ? (int)s_list_tracks.size() : 
+                         (is_radio ? (int)list_radios.size() : (int)list_groups.size());
 
     if (item_count == 0) {
         list_select_clear_state(false);
@@ -243,8 +308,10 @@ void player_list_select_handle_key(key_event_t evt)
         case KEY_PLAY_SHORT:
         if (track_level) {
             (void)list_select_try_play_selected_track();
+        } else if (is_radio) {
+            (void)list_select_try_play_selected_radio(list_radios, item_count);
         } else {
-            (void)list_select_try_play_selected_group(list_groups, group_count);
+            (void)list_select_try_play_selected_group(list_groups, item_count);
         }
         break;;
 
