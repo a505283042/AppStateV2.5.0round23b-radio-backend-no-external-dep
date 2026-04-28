@@ -197,6 +197,9 @@ static void ui_task_entry(void*)
       if (state == ListSelectState::RADIO) {
         const auto& radios = player_list_select_get_radios();
         ui_draw_radio_select(radios, current_idx, "选择电台");
+      } else if (state == ListSelectState::TRACKS) {
+        const auto& tracks = player_list_select_get_tracks();
+        ui_draw_track_select(tracks, current_idx, "选择歌曲");
       } else {
         const char* title = (state == ListSelectState::ARTIST) ? "选择歌手" : "选择专辑";
         const auto& groups = player_list_select_get_groups();

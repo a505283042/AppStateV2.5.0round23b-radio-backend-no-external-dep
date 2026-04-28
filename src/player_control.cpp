@@ -426,6 +426,15 @@ void player_volume_step(int delta)
 
 void player_next_group()
 {
+    const PlayerSourceState source = player_source_get();
+    if (source.type == PlayerSourceType::NET_RADIO) {
+        if (control_enter_list_select_dispatch()) {
+            return;
+        }
+        LOGW("[LIST] 电台播放中，但无法进入电台列表");
+        return;
+    }
+
     if (g_play_mode == PLAY_MODE_ARTIST_SEQ || g_play_mode == PLAY_MODE_ARTIST_RND ||
         g_play_mode == PLAY_MODE_ALBUM_SEQ || g_play_mode == PLAY_MODE_ALBUM_RND) {
         if (control_enter_list_select_dispatch()) {
