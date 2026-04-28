@@ -3,7 +3,10 @@
 #define UI_H
 
 #include <stdint.h>
+#include <Arduino.h>
+#include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+
 #include "storage/storage_types_v3.h"
 
 /**
