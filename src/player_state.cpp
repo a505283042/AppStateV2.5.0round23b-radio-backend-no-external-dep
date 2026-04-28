@@ -60,16 +60,6 @@ static int player_clamp_idx_for_dispatch(int idx)
     return idx;
 }
 
-static int player_album_count_for_active_source()
-{
-    return (int)storage_catalog_v3_album_count();
-}
-
-static int player_track_count_for_active_source()
-{
-    return (int)storage_catalog_v3_track_count();
-}
-
 // 当前封面缓存属于哪一首；-1 表示未知/需要重解码
 static int s_cover_idx = -1;
 
@@ -439,9 +429,9 @@ void player_state_run(void)
         player_control_init_once();
         player_list_select_reset();
 
-        int album_count = player_album_count_for_active_source();
-
-        LOGI("[SCAN] albums=%d tracks=%d", album_count, track_count);
+        LOGI("[SCAN] albums=%d tracks=%d",
+             (int)storage_catalog_v3_album_count(),
+             track_count);
 
         if (track_count <= 0) {
             LOGE("[PLAYER] no tracks");

@@ -46,8 +46,7 @@ static const char* web_app_state_to_key(app_state_t s, bool rescanning) {
   switch (s) {
     case STATE_BOOT:      return "boot";
     case STATE_PLAYER:    return "player";
-    case STATE_NFC_ADMIN: return "nfc_admin";
-    case STATE_RADIO:     return "radio";
+    case STATE_NFC_ADMIN: return "nfc_admin";    
     default:              return "unknown";
   }
 }
@@ -57,8 +56,7 @@ static const char* web_app_state_to_label(app_state_t s, bool rescanning) {
   switch (s) {
     case STATE_BOOT:      return "启动中";
     case STATE_PLAYER:    return "播放器";
-    case STATE_NFC_ADMIN: return "NFC 管理";
-    case STATE_RADIO:     return "收音机";
+    case STATE_NFC_ADMIN: return "NFC 管理";    
     default:              return "未知";
   }
 }

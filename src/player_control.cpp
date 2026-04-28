@@ -21,9 +21,7 @@ PlayerControlHooks s_hooks{};
 
 bool s_user_paused = false;
 bool s_manual_stop_latched = false;
-bool s_is_paused = false;
 uint32_t s_pause_time_ms = 0;
-uint32_t s_paused_at_ms = 0;
 
 struct RadioReturnContext {
     bool valid = false;
@@ -174,9 +172,7 @@ void player_control_reset_runtime_flags()
 {
     s_user_paused = false;
     s_manual_stop_latched = false;
-    s_is_paused = false;
     s_pause_time_ms = 0;
-    s_paused_at_ms = 0;
 }
 
 void player_control_on_track_started()
@@ -187,9 +183,7 @@ void player_control_on_track_started()
 void player_control_mark_user_paused()
 {
     s_user_paused = true;
-    s_is_paused = true;
     s_pause_time_ms = millis();
-    s_paused_at_ms = audio_get_play_ms();
 }
 
 bool player_control_is_user_paused()
@@ -385,7 +379,6 @@ void player_toggle_play()
 
     if (audio_service_is_paused()) {
         audio_service_resume();
-        s_is_paused = false;
         s_user_paused = false;
         s_pause_time_ms = 0;
         LOGI("[PLAYER] Resumed from pause");
@@ -394,11 +387,10 @@ void player_toggle_play()
 
     if (audio_service_is_playing()) {
         audio_service_pause();
-        s_is_paused = true;
         s_user_paused = true;
         s_pause_time_ms = millis();
-        s_paused_at_ms = audio_get_play_ms();
-        LOGI("[PLAYER] Paused at %u ms", s_paused_at_ms);
+        const uint32_t paused_at_ms = audio_get_play_ms();
+        LOGI("[PLAYER] Paused at %u ms", paused_at_ms);
         return;
     }
 

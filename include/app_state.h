@@ -8,8 +8,7 @@
 typedef enum {
     STATE_BOOT = 0,      /* 启动状态 */
     STATE_PLAYER,        /* 音乐播放器状态 */
-    STATE_NFC_ADMIN,     /* NFC管理状态 */
-    STATE_RADIO,         /* 收音机状态 */
+    STATE_NFC_ADMIN,     /* NFC管理状态 */   
 } app_state_t;
 
 /* 全局应用状态变量 */

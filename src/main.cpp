@@ -1,17 +1,3 @@
-// #include <Arduino.h>
-
-// void setup() {
-//   Serial.begin(115200);
-//   delay(1500);
-//   Serial.println("HELLO FROM SETUP");
-// }
-
-// void loop() {
-//   Serial.println("tick");
-//   delay(1000);
-// }
-
-
 #include <Arduino.h>           /* 包含Arduino核心库 */
 #include <SPI.h>               /* 包含SPI库 */
 #include <SdFat.h>              /* 包含SD卡库 */
