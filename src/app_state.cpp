@@ -22,7 +22,8 @@ volatile bool g_rescan_done = false; // 扫描完成标志
 volatile bool g_rescanning = false; // 扫描中标志
 volatile bool g_rescan_success = false; // 扫描成功标志
 volatile bool g_abort_scan = false; // 扫描中断标志
-volatile bool g_random_play = false; // 随机播放标志
+
+
 volatile play_mode_t g_play_mode = PLAY_MODE_ALL_SEQ;  // 播放模式
 
 static TaskHandle_t s_rescan_task = nullptr; // 扫描任务句柄

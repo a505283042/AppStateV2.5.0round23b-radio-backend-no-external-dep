@@ -79,14 +79,12 @@ static play_mode_t nfc_binding_mode_for_type(NfcBindType type)
 static void nfc_binding_apply_mode(NfcBindType type)
 {
     g_play_mode = nfc_binding_mode_for_type(type);
-    g_random_play = (g_play_mode == PLAY_MODE_ALL_RND ||
-                     g_play_mode == PLAY_MODE_ARTIST_RND ||
-                     g_play_mode == PLAY_MODE_ALBUM_RND);
+    const bool is_random = nfc_binding_keep_random_flag();
 
     LOGI("[NFC] apply mode type=%d -> mode=%d random=%d",
          (int)type,
          (int)g_play_mode,
-         g_random_play ? 1 : 0);
+         is_random ? 1 : 0);
 }
 
 } //

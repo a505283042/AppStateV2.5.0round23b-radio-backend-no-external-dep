@@ -475,7 +475,6 @@ int control_mode_category(play_mode_t mode)
 void control_apply_mode_context(play_mode_t new_mode, int current_idx, bool verbose)
 {
     g_play_mode = new_mode;
-    g_random_play = control_mode_is_random(new_mode);
 
     if (current_idx >= 0) {
         (void)player_playlist_align_group_context_for_track(current_idx, verbose);

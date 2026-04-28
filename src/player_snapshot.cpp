@@ -37,12 +37,6 @@ bool s_restore_armed = false;
 PlayerPersistSnapshot s_pending{};
 uint32_t s_restore_not_before_ms = 0;
 
-static bool snapshot_mode_is_random(play_mode_t mode)
-{
-    return mode == PLAY_MODE_ALL_RND ||
-           mode == PLAY_MODE_ARTIST_RND ||
-           mode == PLAY_MODE_ALBUM_RND;
-}
 
 static play_mode_t snapshot_sanitize_mode(int raw)
 {
@@ -154,7 +148,6 @@ static void snapshot_apply_light_state(const PlayerPersistSnapshot& snap)
     }
 
     g_play_mode = mode;
-    g_random_play = snapshot_mode_is_random(mode);
     player_playlist_set_current_group_idx(snapshot_sanitize_group_idx(mode, snap.current_group_idx));
     player_playlist_force_rebuild();
     player_playlist_get_current();

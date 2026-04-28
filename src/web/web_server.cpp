@@ -654,7 +654,7 @@ static bool web_play_group_impl(bool is_album, int group_idx) {
   g_play_mode = is_album
       ? (keep_random ? PLAY_MODE_ALBUM_RND : PLAY_MODE_ALBUM_SEQ)
       : (keep_random ? PLAY_MODE_ARTIST_RND : PLAY_MODE_ARTIST_SEQ);
-  g_random_play = keep_random;
+
 
   player_playlist_set_current_group_idx(group_idx);
   player_playlist_force_rebuild();
@@ -1289,7 +1289,6 @@ static void web_handle_track_play() {
   if (mode == "artist") {
     const bool keep_random = control_mode_is_random(g_play_mode);
     g_play_mode = keep_random ? PLAY_MODE_ARTIST_RND : PLAY_MODE_ARTIST_SEQ;
-    g_random_play = keep_random;
 
     if (group_idx >= 0) player_playlist_set_current_group_idx(group_idx);
     else (void)player_playlist_align_group_context_for_track(track_idx, false);
@@ -1297,8 +1296,7 @@ static void web_handle_track_play() {
   } else if (mode == "album") {
     const bool keep_random = control_mode_is_random(g_play_mode);
     g_play_mode = keep_random ? PLAY_MODE_ALBUM_RND : PLAY_MODE_ALBUM_SEQ;
-    g_random_play = keep_random;
-
+    
     if (group_idx >= 0) player_playlist_set_current_group_idx(group_idx);
     else (void)player_playlist_align_group_context_for_track(track_idx, false);
 
