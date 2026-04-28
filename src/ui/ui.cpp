@@ -2,6 +2,7 @@
 #include "board/board_spi.h"
 #include "ui/ui_internal.h"
 #include "ui/ui_text_utils.h"
+#include "ui/ui_list_select_view.h"
 #include "utils/log.h"
 #undef LOG_TAG
 #define LOG_TAG "UI"

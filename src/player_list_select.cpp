@@ -1,4 +1,5 @@
 #include "player_list_select.h"
+#include "ui/ui_list_select_view.h"
 
 #include "keys/keys.h"
 #include "player_playlist.h"

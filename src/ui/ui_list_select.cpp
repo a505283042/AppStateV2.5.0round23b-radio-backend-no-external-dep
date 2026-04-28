@@ -2,6 +2,7 @@
 #include <algorithm>
 #include "ui/ui_internal.h"
 #include "ui/ui_text_utils.h"
+#include "ui/ui_list_select_view.h"
 #include "storage/storage_catalog_v3.h"
 #include "storage/storage_groups_v3.h"
 #include "storage/storage_view_v3.h"

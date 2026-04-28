@@ -1,11 +1,10 @@
-#include "storage/storage_types_v3.h"
 /* 用户界面系统接口模块头文件 */
 #ifndef UI_H
 #define UI_H
 
 #include <stdint.h>
 #include <freertos/task.h>
-#include "radio/radio_catalog.h"
+#include "storage/storage_types_v3.h"
 
 /**
  * @brief UI 对外接口总头。
@@ -92,12 +91,6 @@ void ui_hold_render(bool hold);
 void ui_request_refresh_now();
 void ui_set_rotate_wait_prefetch(bool wait);
 TaskHandle_t ui_get_task_handle(void);
-
-/* -------- 列表选择页面 -------- */
-void ui_draw_list_select(const std::vector<PlaylistGroup>& groups, int selected_idx, const char* title);
-void ui_draw_track_select(const std::vector<TrackIndex16>& tracks, int selected_idx, const char* title);
-void ui_draw_radio_select(const std::vector<RadioItem>& radios, int selected_idx, const char* title);
-void ui_clear_list_select();
 
 /* -------- NFC 管理页面 -------- */
 enum NfcUiConfirmState {
