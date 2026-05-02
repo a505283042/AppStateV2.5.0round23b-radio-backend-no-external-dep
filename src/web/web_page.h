@@ -95,7 +95,10 @@ static const char WEBCTRL_INDEX_HTML[] PROGMEM = R"HTML(
     </div>
 
     <div class="card">
-      <div class="k">网页音量调节</div>
+      <div class="k" style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+        <span>网页音量调节</span>
+        <button id="volumeLockBtn" class="secondary" type="button" style="padding:8px 12px;font-size:13px">音量锁</button>
+      </div>
       <div class="volrow">
         <span class="small">0</span>
         <input id="volumeSlider" type="range" min="0" max="100" value="0" step="1">
@@ -147,6 +150,8 @@ let pageActive = !document.hidden;
 let pagePausedByVisibility = false;
 const LOCK_STORAGE_KEY = 'webctrl_page_locked';
 let pageLocked = false;
+const VOLUME_LOCK_STORAGE_KEY = 'webctrl_volume_locked';
+let volumeLocked = false;
 
 function getLockTargets(){
   return [
@@ -160,7 +165,7 @@ function getLockTargets(){
     document.getElementById('scanBtn'),
     document.getElementById('radioBackBtn'),
     document.getElementById('wifiInfoBtn'),
-    document.getElementById('volumeSlider'),
+    
     ...document.querySelectorAll('button.secondary[onclick="savePlayerState()"]')
   ].filter(Boolean);
 }
@@ -189,6 +194,8 @@ function applyLockState(){
     coverBox.style.pointerEvents = pageLocked ? 'none' : '';
     coverBox.style.opacity = '';
   }
+
+  applyVolumeLockState();
 }
 
 function saveLockState(){
@@ -209,6 +216,42 @@ function togglePageLock(){
   pageLocked = !pageLocked;
   applyLockState();
   saveLockState();
+}
+
+function applyVolumeLockState(){
+  const btn = document.getElementById('volumeLockBtn');
+  const slider = document.getElementById('volumeSlider');
+
+  if(btn){
+    btn.textContent = volumeLocked ? '音量解锁' : '音量锁';
+    btn.className = volumeLocked ? 'warn' : 'secondary';
+  }
+
+  if(slider){
+    slider.disabled = pageLocked || volumeLocked;
+    slider.style.opacity = (pageLocked || volumeLocked) ? '0.45' : '';
+  }
+}
+
+function saveVolumeLockState(){
+  try{
+    localStorage.setItem(VOLUME_LOCK_STORAGE_KEY, volumeLocked ? '1' : '0');
+  }catch(e){}
+}
+
+function loadVolumeLockState(){
+  try{
+    const saved = localStorage.getItem(VOLUME_LOCK_STORAGE_KEY);
+    volumeLocked = saved === null ? true : saved === '1';
+  }catch(e){
+    volumeLocked = true;
+  }
+}
+
+function toggleVolumeLock(){
+  volumeLocked = !volumeLocked;
+  applyVolumeLockState();
+  saveVolumeLockState();
 }
 
 function scheduleNext(ms){
@@ -500,7 +543,7 @@ async function savePlayerState(){
   scheduleNext(120);
 }
 function sendVolumeDebounced(v){
-  if(pageLocked) return;
+  if(pageLocked || volumeLocked) return;
   if(volumeTimer) clearTimeout(volumeTimer);
   volumeTimer=setTimeout(async()=>{
     try{
@@ -514,17 +557,43 @@ function sendVolumeDebounced(v){
   },80);
 }
 const slider=document.getElementById('volumeSlider');
-slider.addEventListener('input',(e)=>{ const v=Number(e.target.value||0); document.getElementById('volume').textContent=`${v}%`; sendVolumeDebounced(v); });
-slider.addEventListener('change',(e)=>{ const v=Number(e.target.value||0); sendVolumeDebounced(v); });
+slider.addEventListener('input',(e)=>{
+  if(pageLocked || volumeLocked){
+    if(lastStatus && lastStatus.volume !== undefined){
+      e.target.value = Number(lastStatus.volume || 0);
+      document.getElementById('volume').textContent = `${lastStatus.volume ?? 0}%`;
+    }
+    return;
+  }
+
+  const v = Number(e.target.value || 0);
+  document.getElementById('volume').textContent = `${v}%`;
+  sendVolumeDebounced(v);
+});
+
+slider.addEventListener('change',(e)=>{
+  if(pageLocked || volumeLocked){
+    if(lastStatus && lastStatus.volume !== undefined){
+      e.target.value = Number(lastStatus.volume || 0);
+    }
+    return;
+  }
+
+  const v = Number(e.target.value || 0);
+  sendVolumeDebounced(v);
+});
 document.getElementById('coverBox').addEventListener('click',toggleViewFromCover);
 document.getElementById('lockBtn').addEventListener('click', togglePageLock);
+document.getElementById('volumeLockBtn').addEventListener('click', toggleVolumeLock);
 
 document.addEventListener('visibilitychange', handleVisibilityChange);
 window.addEventListener('pageshow', ()=>{ if(!document.hidden) resumePagePolling(); });
 window.addEventListener('pagehide', pausePagePolling);
 
 loadLockState();
+loadVolumeLockState();
 applyLockState();
+applyVolumeLockState();
 fetchStatus();
 </script>
 </body>

@@ -89,6 +89,19 @@ void player_assets_clear_primed_current_cover();
 /** 预装当前歌曲封面原图（用于 NFC 切歌前置）。 */
 bool player_assets_prime_current_cover(int track_idx, uint8_t* buf, size_t len, bool is_png);
 
+/** 预装下一首封面原图：保存 raw buffer，缩放、生成网页封面。 */
+bool player_assets_prime_next_cover(const TrackInfo& t,
+                                    int track_idx,
+                                    uint8_t* buf,
+                                    size_t len,
+                                    bool is_png);
+
+/** 如果当前 track 命中上一轮预装的 next cover，把它提升为 current cover。 */
+bool player_assets_promote_next_cover_to_current(int track_idx);
+
+/** 丢弃预装的下一首封面原图。 */
+void player_assets_drop_primed_next_cover();
+
 /** 设置当前曲封面延后应用（用于 NFC 切歌优化）。 */
 void player_assets_set_deferred_current_cover_apply(int track_idx, uint32_t delay_ms);
 /** 尝试应用延后的当前曲封面。 */

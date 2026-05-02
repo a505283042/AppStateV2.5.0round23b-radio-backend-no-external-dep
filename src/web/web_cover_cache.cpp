@@ -245,6 +245,24 @@ bool web_cover_cache_store_from_sprite(int track_idx,
                                        LGFX_Sprite& spr) {
   if (track_idx < 0) return false;
 
+  SemaphoreHandle_t mu0 = web_cover_cache_mutex();
+  if (mu0 && xSemaphoreTake(mu0, pdMS_TO_TICKS(10)) == pdTRUE) {
+    const uint32_t key = make_key(track_idx,
+                                  cover_source,
+                                  audio_path,
+                                  cover_path,
+                                  cover_offset,
+                                  cover_size);
+    const int old_slot = find_slot(track_idx, key);
+    if (old_slot >= 0) {
+      s_slots[old_slot].last_touch_ms = millis();
+      xSemaphoreGive(mu0);
+      LOGI("[WEBCOVER] skip ready track=%d", track_idx);
+      return true;
+    }
+    xSemaphoreGive(mu0);
+  }
+
   uint8_t* bmp = nullptr;
   size_t bmp_len = 0;
   if (!build_bmp24_from_sprite(spr, &bmp, &bmp_len) || !bmp || bmp_len == 0) {

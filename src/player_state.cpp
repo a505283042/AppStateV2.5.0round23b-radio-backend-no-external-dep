@@ -277,6 +277,121 @@ static bool player_play_trackinfo_core(const TrackInfo& t,
     asset_job.suppress_next_prefetch = true;// 不要立刻探取封面，等开播后再补
     t_after_lyrics_prefetch = millis();
 
+    // 切到新歌时，先清当前 raw。next raw 不要直接清，先尝试提升。
+    player_assets_clear_primed_current_cover();
+
+    LOGI("[PLAYER] prime check track=%d cover_cache_hit=%d need_decode_cover=%d cover_source=%u cover_size=%u",
+     s_cur,
+     cover_cache_hit ? 1 : 0,
+     need_decode_cover ? 1 : 0,
+     (unsigned)asset_job.cover_source,
+     (unsigned)asset_job.cover_size);
+
+    const bool promoted_next_cover =
+        (!cover_cache_hit && need_decode_cover) ?
+        player_assets_promote_next_cover_to_current(s_cur) :
+        false;
+
+    LOGI("[PLAYER] promote next raw check track=%d promoted=%d",
+        s_cur,
+        promoted_next_cover ? 1 : 0);
+    player_assets_clear_deferred_current_cover_apply();
+
+    if (from_nfc && need_decode_cover && !cover_cache_hit) {
+        player_assets_set_deferred_current_cover_apply(s_cur, 90);
+    }
+
+    // 先读下一首 raw 封面，再读当前首 raw 封面，最后再 audio_service_play()。
+    // 这样文件访问顺序是：下一首 -> 当前首封面 -> 当前首播放。
+    TrackInfo next_cover_track;
+    int next_cover_idx = -1;
+    bool next_cover_raw_primed = false;
+
+    const uint32_t prep_before_next_ms = millis() - t_switch_begin;
+
+    const bool got_next_cover =
+        player_playlist_get_next_for_cover_prefetch(s_cur, next_cover_idx, next_cover_track);
+
+    const bool next_cache_ready =
+        got_next_cover && next_cover_idx >= 0 ?
+        ui_cover_cache_is_ready(next_cover_idx) :
+        false;
+
+    const uint32_t next_raw_prep_limit_ms = 360u;// 360ms 内完成下一首封面预取，否则不提升下一首封面到当前首封面
+    const uint32_t next_raw_size_limit = 96u * 1024u;// 96KB 最大封面大小
+
+    const bool allow_prime_next_raw =
+        prep_before_next_ms < next_raw_prep_limit_ms &&
+        got_next_cover &&
+        next_cover_idx >= 0 &&
+        next_cover_idx != s_cur &&
+        !next_cache_ready &&
+        next_cover_track.cover_source != COVER_NONE &&
+        next_cover_track.cover_size > 0 &&
+        next_cover_track.cover_size <= next_raw_size_limit;
+
+    LOGI("[PLAYER] next raw check cur=%d allow=%d got=%d target=%d from_nfc=%d prep=%lu limit=%lu cache=%d source=%u size=%u size_limit=%lu",
+        s_cur,
+        allow_prime_next_raw ? 1 : 0,
+        got_next_cover ? 1 : 0,
+        next_cover_idx,
+        from_nfc ? 1 : 0,
+        (unsigned long)prep_before_next_ms,
+        (unsigned long)next_raw_prep_limit_ms,
+        next_cache_ready ? 1 : 0,
+        got_next_cover ? (unsigned)next_cover_track.cover_source : 0,
+        got_next_cover ? (unsigned)next_cover_track.cover_size : 0,
+        (unsigned long)next_raw_size_limit);
+
+    if (allow_prime_next_raw) {
+
+        uint8_t* next_cover_buf = nullptr;
+        size_t next_cover_len = 0;
+        bool next_cover_is_png = false;
+
+        const uint32_t t_next_cover_begin = millis();
+
+        const bool next_cover_fetch_ok =
+            audio_service_fetch_cover(next_cover_track.cover_source,
+                                    next_cover_track.audio_path.c_str(),
+                                    next_cover_track.cover_path.c_str(),
+                                    next_cover_track.cover_offset,
+                                    next_cover_track.cover_size,
+                                    &next_cover_buf,
+                                    &next_cover_len,
+                                    &next_cover_is_png,
+                                    true);
+
+        const uint32_t next_cover_cost = millis() - t_next_cover_begin;
+
+        if (next_cover_fetch_ok &&
+            next_cover_buf &&
+            next_cover_len > 0 &&
+            player_assets_prime_next_cover(next_cover_track,
+                                        next_cover_idx,
+                                        next_cover_buf,
+                                        next_cover_len,
+                                        next_cover_is_png)) {
+            next_cover_buf = nullptr; // ownership moved
+            next_cover_raw_primed = true;
+        }
+
+        if (next_cover_buf) {
+            ui_cover_free_allocated(next_cover_buf);
+            next_cover_buf = nullptr;
+        }
+
+        LOGI("[PLAYER] next cover raw prime before current target=%d ok=%d len=%u cost=%lu prep=%lu",
+            next_cover_idx,
+            next_cover_raw_primed ? 1 : 0,
+            (unsigned)next_cover_len,
+            (unsigned long)next_cover_cost,
+            (unsigned long)(millis() - t_switch_begin));
+    } else {
+        // 本次不适合预读下一首，清掉旧 next，避免随机/点播/模式切换后误命中。
+        player_assets_drop_primed_next_cover();
+    }
+
     if (asset_job.need_lyrics && asset_job.lyrics_path[0]) {
         if (audio_service_fetch_lyrics(asset_job.lyrics_path,
                                     &primed_lyrics_text,
@@ -298,46 +413,68 @@ static bool player_play_trackinfo_core(const TrackInfo& t,
     size_t primed_cover_len = 0;
     bool primed_cover_is_png = false;
     bool cover_primed = false;
-    
-    player_assets_clear_primed_current_cover();
-    player_assets_clear_deferred_current_cover_apply();
-    
-    if (from_nfc && need_decode_cover && !cover_cache_hit) {
-        player_assets_set_deferred_current_cover_apply(s_cur, 90);
-    }
-    
-    if (from_nfc && 
-        asset_job.need_cover && 
-        !cover_cache_hit && 
-        asset_job.cover_source != COVER_NONE && 
-        asset_job.cover_size > 0 && 
-        asset_job.cover_size <= 96 * 1024) {
-        if (audio_service_fetch_cover(asset_job.cover_source,
-                                      asset_job.audio_path,
-                                      asset_job.cover_path,
-                                      asset_job.cover_offset,
-                                      asset_job.cover_size,
-                                      &primed_cover_buf,
-                                      &primed_cover_len,
-                                      &primed_cover_is_png,
-                                      true) &&
-            primed_cover_buf && 
-            primed_cover_len > 0) {
-            if (player_assets_prime_current_cover(s_cur,
-                                                  primed_cover_buf,
-                                                  primed_cover_len,
-                                                  primed_cover_is_png)) {
-                primed_cover_buf = nullptr; // ownership moved
-                cover_primed = true;
-                LOGI("[PLAYER] NFC cover primed before play track=%d len=%u", 
-                     s_cur, (unsigned)primed_cover_len);
-            }
+
+    // 再读当前首 raw 封面。当前首一定马上要播放，所以放在 audio_service_play() 前面最后做。
+    const bool allow_prime_current_cover_before_play =
+        !promoted_next_cover &&
+        asset_job.need_cover &&
+        !cover_cache_hit &&
+        asset_job.cover_source != COVER_NONE &&
+        asset_job.cover_size > 0 &&
+        asset_job.cover_size <= 96 * 1024;
+
+    LOGI("[PLAYER] current raw check track=%d allow=%d promoted=%d need_cover=%d cache=%d source=%u size=%u",
+        s_cur,
+        allow_prime_current_cover_before_play ? 1 : 0,
+        promoted_next_cover ? 1 : 0,
+        asset_job.need_cover ? 1 : 0,
+        cover_cache_hit ? 1 : 0,
+        (unsigned)asset_job.cover_source,
+        (unsigned)asset_job.cover_size);
+        
+    if (allow_prime_current_cover_before_play) {
+        const uint32_t t_prime_cover_begin = millis();
+
+        const bool primed_cover_fetch_ok =
+            audio_service_fetch_cover(asset_job.cover_source,
+                                    asset_job.audio_path,
+                                    asset_job.cover_path,
+                                    asset_job.cover_offset,
+                                    asset_job.cover_size,
+                                    &primed_cover_buf,
+                                    &primed_cover_len,
+                                    &primed_cover_is_png,
+                                    true);
+
+        const uint32_t prime_cover_cost = millis() - t_prime_cover_begin;
+
+        if (primed_cover_fetch_ok &&
+            primed_cover_buf &&
+            primed_cover_len > 0 &&
+            player_assets_prime_current_cover(s_cur,
+                                            primed_cover_buf,
+                                            primed_cover_len,
+                                            primed_cover_is_png)) {
+            primed_cover_buf = nullptr; // ownership moved
+            cover_primed = true;
+
+            LOGI("[PLAYER] current cover primed before play track=%d len=%u cost=%lu from_nfc=%d",
+                s_cur,
+                (unsigned)primed_cover_len,
+                (unsigned long)prime_cover_cost,
+                from_nfc ? 1 : 0);
+        }
+
+        if (primed_cover_buf) {
+            ui_cover_free_allocated(primed_cover_buf);
+            primed_cover_buf = nullptr;
         }
     }
 
     if (!audio_service_play(t.audio_path.c_str(), true)) {
         LOGE("[AUDIO] play failed");
         player_assets_clear_primed_current_cover();
+        player_assets_drop_primed_next_cover();
         if (primed_cover_buf) {
             ui_cover_free_allocated(primed_cover_buf);
             primed_cover_buf = nullptr;

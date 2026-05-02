@@ -37,9 +37,17 @@ struct PrimedCurrentCover {
     uint8_t* buf = nullptr;
     size_t len = 0;
     bool is_png = false;
-};
 
+    // 用于 next raw 缩放后生成 webcover 的 key。
+    bool has_meta = false;
+    CoverSource cover_source = COVER_NONE;
+    char audio_path[PLAYER_ASSET_PATH_MAX] = {0};
+    char cover_path[PLAYER_ASSET_PATH_MAX] = {0};
+    uint32_t cover_offset = 0;
+    uint32_t cover_size = 0;
+};
 static PrimedCurrentCover s_primed_current_cover{};
+static PrimedCurrentCover s_primed_next_cover{};
 // 延迟当前封面应用描述
 struct DeferredCurrentCoverApply {
     bool active = false;
@@ -48,6 +56,8 @@ struct DeferredCurrentCoverApply {
 };
 // 延迟当前封面应用
 static DeferredCurrentCoverApply s_deferred_current_cover_apply{};
+
+static void player_assets_try_scale_primed_next_cover_after_current(const PlayerDeferredAssetJob& owner_job);
 
 static void player_assets_try_store_web_cover_from_ui_cache(int track_idx,
                                                             CoverSource cover_source,
@@ -58,6 +68,18 @@ static void player_assets_try_store_web_cover_from_ui_cache(int track_idx,
 {
     if (track_idx < 0) {
         LOGI("[PLAYER] webcover skip: invalid track=%d", track_idx);
+        return;
+    }
+
+    // 已经提前预生成过 webcover，就不要再从 UI cache 转 BMP。
+    // 这一步可以避免 current cover cache hit 时重复生成 172KB BMP。
+    if (web_cover_cache_has(track_idx,
+                        cover_source,
+                        audio_path,
+                        cover_path,
+                        cover_offset,
+                        cover_size)) {
+        LOGI("[PLAYER] webcover skip cached track=%d", track_idx);
         return;
     }
 
@@ -284,6 +306,10 @@ static void player_asset_task_entry(void*)
             }
             t_after_cover_scale = t_after_fetch_cover;
         }
+
+        // 当前封面和当前 webcover 都处理完成后，再尝试把下一首 raw 缩放进 UI cache。
+        // 这里只做下一首 UI cache，不生成 webcover，不刷新屏幕。
+        player_assets_try_scale_primed_next_cover_after_current(job);
 
         t_after_prefetch_fetch = t_after_cover_scale;
         t_after_prefetch_scale = t_after_cover_scale;
@@ -550,20 +576,36 @@ void player_assets_invalidate_requests()
     ++s_asset_req_id;
     player_assets_discard_pending_jobs();
     player_assets_clear_primed_current_cover();
+    player_assets_drop_primed_next_cover();
     player_assets_clear_deferred_current_cover_apply();
 }
+
 // 释放当前封面
+static void player_assets_free_primed_cover(PrimedCurrentCover& c)
+{
+    if (c.buf) {
+        ui_cover_free_allocated(c.buf);
+        c.buf = nullptr;
+    }
+
+    c.valid = false;
+    c.track_idx = -1;
+    c.len = 0;
+    c.is_png = false;
+
+    c.has_meta = false;
+    c.cover_source = COVER_NONE;
+    c.audio_path[0] = '\0';
+    c.cover_path[0] = '\0';
+    c.cover_offset = 0;
+    c.cover_size = 0;
+}
+
 static void player_assets_free_primed_current_cover()
 {
-    if (s_primed_current_cover.buf) {
-        ui_cover_free_allocated(s_primed_current_cover.buf);
-        s_primed_current_cover.buf = nullptr;
-    }
-    s_primed_current_cover.valid = false;
-    s_primed_current_cover.track_idx = -1;
-    s_primed_current_cover.len = 0;
-    s_primed_current_cover.is_png = false;
+    player_assets_free_primed_cover(s_primed_current_cover);
 }
+
 // 清除当前封面
 void player_assets_clear_primed_current_cover()
 {
@@ -582,6 +624,174 @@ bool player_assets_prime_current_cover(int track_idx, uint8_t* buf, size_t len, 
     s_primed_current_cover.is_png = is_png;
     return true;
 }
+
+bool player_assets_prime_next_cover(const TrackInfo& t,
+                                    int track_idx,
+                                    uint8_t* buf,
+                                    size_t len,
+                                    bool is_png)
+{
+    player_assets_free_primed_cover(s_primed_next_cover);
+
+    if (!buf || len == 0 || track_idx < 0) {
+        return false;
+    }
+
+    s_primed_next_cover.valid = true;
+    s_primed_next_cover.track_idx = track_idx;
+    s_primed_next_cover.buf = buf;
+    s_primed_next_cover.len = len;
+    s_primed_next_cover.is_png = is_png;
+
+    s_primed_next_cover.has_meta = true;
+    s_primed_next_cover.cover_source = t.cover_source;
+
+    strncpy(s_primed_next_cover.audio_path,
+            t.audio_path.c_str(),
+            sizeof(s_primed_next_cover.audio_path) - 1);
+    s_primed_next_cover.audio_path[sizeof(s_primed_next_cover.audio_path) - 1] = '\0';
+
+    strncpy(s_primed_next_cover.cover_path,
+            t.cover_path.c_str(),
+            sizeof(s_primed_next_cover.cover_path) - 1);
+    s_primed_next_cover.cover_path[sizeof(s_primed_next_cover.cover_path) - 1] = '\0';
+
+    s_primed_next_cover.cover_offset = t.cover_offset;
+    s_primed_next_cover.cover_size = t.cover_size;
+
+    LOGI("[PLAYER] next cover primed raw track=%d len=%u source=%u size=%u",
+         track_idx,
+         (unsigned)len,
+         (unsigned)t.cover_source,
+         (unsigned)t.cover_size);
+
+    return true;
+}
+
+bool player_assets_promote_next_cover_to_current(int track_idx)
+{
+    if (!s_primed_next_cover.valid ||
+        s_primed_next_cover.track_idx != track_idx ||
+        !s_primed_next_cover.buf ||
+        s_primed_next_cover.len == 0) {
+        return false;
+    }
+
+    player_assets_free_primed_current_cover();
+
+    s_primed_current_cover = s_primed_next_cover;
+
+    s_primed_next_cover.valid = false;
+    s_primed_next_cover.track_idx = -1;
+    s_primed_next_cover.buf = nullptr;
+    s_primed_next_cover.len = 0;
+    s_primed_next_cover.is_png = false;
+
+    LOGI("[PLAYER] next cover promoted to current track=%d len=%u",
+         track_idx,
+         (unsigned)s_primed_current_cover.len);
+
+    return true;
+}
+
+void player_assets_drop_primed_next_cover()
+{
+    player_assets_free_primed_cover(s_primed_next_cover);
+}
+
+static void player_assets_try_scale_primed_next_cover_after_current(const PlayerDeferredAssetJob& owner_job)
+{
+    if (!player_assets_is_job_current(owner_job)) {
+        return;
+    }
+
+    if (!s_primed_next_cover.valid ||
+        !s_primed_next_cover.buf ||
+        s_primed_next_cover.len == 0 ||
+        s_primed_next_cover.track_idx < 0) {
+        return;
+    }
+
+    const int target_idx = s_primed_next_cover.track_idx;
+
+    if (ui_cover_cache_is_ready(target_idx)) {
+        LOGI("[PLAYER] next cover scale skip ready target=%d", target_idx);
+
+        if (s_primed_next_cover.has_meta) {
+            player_assets_try_store_web_cover_from_ui_cache(target_idx,
+                                                            s_primed_next_cover.cover_source,
+                                                            s_primed_next_cover.audio_path,
+                                                            s_primed_next_cover.cover_path,
+                                                            s_primed_next_cover.cover_offset,
+                                                            s_primed_next_cover.cover_size);
+        }
+
+        player_assets_drop_primed_next_cover();
+        return;
+    }
+
+    // 下一首后台缩放 + webcover 都比较吃 CPU/PSRAM，先限制小封面。
+    // 96KB 最大封面大小
+    if (s_primed_next_cover.len > 96 * 1024) {
+        LOGI("[PLAYER] next cover scale/web skip large target=%d len=%u",
+             target_idx,
+             (unsigned)s_primed_next_cover.len);
+        return;
+    }
+
+    // 当前封面和当前 webcover 完成后，再稍微让一让。
+    vTaskDelay(pdMS_TO_TICKS(350));
+
+    if (!player_assets_is_job_current(owner_job)) {
+        return;
+    }
+
+    if (!s_primed_next_cover.valid ||
+        !s_primed_next_cover.buf ||
+        s_primed_next_cover.len == 0 ||
+        s_primed_next_cover.track_idx != target_idx) {
+        return;
+    }
+
+    const uint32_t t0 = millis();
+
+    LOGI("[PLAYER] next cover scale begin target=%d len=%u",
+         target_idx,
+         (unsigned)s_primed_next_cover.len);
+
+    const bool scaled_ok =
+        ui_cover_scale_to_cache_from_buffer(s_primed_next_cover.buf,
+                                            s_primed_next_cover.len,
+                                            s_primed_next_cover.is_png,
+                                            target_idx);
+
+    const uint32_t scale_cost = millis() - t0;
+
+    LOGI("[PLAYER] next cover scale done target=%d ok=%d cost=%lu",
+         target_idx,
+         scaled_ok ? 1 : 0,
+         (unsigned long)scale_cost);
+
+    if (scaled_ok && s_primed_next_cover.has_meta) {
+        const uint32_t t_web0 = millis();
+
+        player_assets_try_store_web_cover_from_ui_cache(target_idx,
+                                                        s_primed_next_cover.cover_source,
+                                                        s_primed_next_cover.audio_path,
+                                                        s_primed_next_cover.cover_path,
+                                                        s_primed_next_cover.cover_offset,
+                                                        s_primed_next_cover.cover_size);
+
+        LOGI("[PLAYER] next webcover prebuilt target=%d cost=%lu",
+             target_idx,
+             (unsigned long)(millis() - t_web0));
+    }
+
+    if (scaled_ok) {
+        player_assets_drop_primed_next_cover();
+    }
+}
+
 // 设置延迟应用当前封面
 void player_assets_set_deferred_current_cover_apply(int track_idx, uint32_t delay_ms)
 {
