@@ -319,14 +319,21 @@ static void player_asset_task_entry(void*)
         const ui_player_view_t view_now = ui_get_view();
         const uint32_t play_ms_before_prefetch = audio_get_play_ms();
 
-        const bool allow_next_prefetch = player_assets_is_job_current(job) &&
-                                        (view_now == UI_VIEW_ROTATE || view_now == UI_VIEW_INFO || view_now == UI_VIEW_COVER_PANEL) &&
-                                        !job.suppress_next_prefetch;
+        const bool allow_next_prefetch =
+            player_assets_is_job_current(job) &&
+            (view_now == UI_VIEW_ROTATE ||
+            view_now == UI_VIEW_INFO ||
+            view_now == UI_VIEW_COVER_PANEL) &&
+            !job.suppress_next_prefetch;
+
         if (allow_next_prefetch) {
             TrackInfo next_track;
             int next_track_idx = -1;
-            if (s_hooks.get_next_track_for_cover_prefetch &&
-                s_hooks.get_next_track_for_cover_prefetch(job.track_idx, next_track_idx, next_track)) {
+
+            if (!s_hooks.get_next_track_for_cover_prefetch) {
+                prefetch_reason = "no_hook";
+                LOGW("[PLAYER] next cover prefetch skipped: no hook track=%d", job.track_idx);
+            } else if (s_hooks.get_next_track_for_cover_prefetch(job.track_idx, next_track_idx, next_track)) {
                 prefetched_track_idx = next_track_idx;
                 if (ui_cover_cache_is_ready(next_track_idx)) {
                     prefetch_reason = "cache_hit";

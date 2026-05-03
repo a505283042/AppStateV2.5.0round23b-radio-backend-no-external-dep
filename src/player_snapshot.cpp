@@ -6,6 +6,9 @@
 #include "app_flags.h"
 #include "audio/audio.h"
 #include "audio/audio_service.h"
+#include "lyrics/lyrics.h"
+#include "player_source.h"
+#include "player_assets.h"
 #include "player_control.h"
 #include "player_playlist.h"
 #include "player_recover.h"
@@ -277,21 +280,108 @@ PlayerSnapshotRestorePollResult player_snapshot_poll_restore()
         return PLAYER_SNAPSHOT_RESTORE_FAILED;
     }
 
-    if (!player_play_idx_v3((uint32_t)track_idx, true, true)) {
-        LOGE("[SNAPSHOT] deferred restore play failed: idx=%d", track_idx);
+    TrackInfo t;
+    if (!storage_catalog_v3_get_trackinfo((uint32_t)track_idx, t, "/Music")) {
+        LOGE("[SNAPSHOT] deferred UI-only restore expand trackinfo failed: idx=%d", track_idx);
         return PLAYER_SNAPSHOT_RESTORE_FAILED;
     }
 
-    // 启动恢复时默认停在暂停态，避免上电立即出声。
+    // 开机恢复只恢复 UI，不启动音频。
+    // 关键：不要调用 player_play_idx_v3()，否则会先出声再被暂停。
     player_control_mark_user_paused();
-    audio_service_pause();
 
-    LOGI("[SNAPSHOT] deferred restore done: mode=%d group=%d track=%d path=%s vol=%u view=%u",
-         (int)g_play_mode,
-         player_playlist_get_current_group_idx(),
-         track_idx,
-         snap.track_path.c_str(),
-         (unsigned)snap.volume,
-         (unsigned)snap.ui_view);
+    // 同步当前索引，保证后续按 PLAY 能从这首歌开始。
+    player_state_set_current_index(track_idx);
+
+    player_source_set_local_track(track_idx);
+
+    (void)player_playlist_align_group_context_for_track(track_idx, true);
+    player_playlist_update_for_current_track(track_idx, true);
+
+    // 恢复标题 / 歌手 / 专辑 / 模式 / 音量
+    ui_set_now_playing(t.title.c_str(), t.artist.c_str());
+    ui_set_album(t.album);
+    ui_set_play_mode(g_play_mode);
+    ui_set_volume(audio_get_volume());
+
+    // 恢复曲目位置显示
+    {
+        const int total = (int)storage_catalog_v3_track_count();
+        int display_pos = track_idx;
+        int display_total = total;
+
+        if (g_play_mode == PLAY_MODE_ARTIST_SEQ || g_play_mode == PLAY_MODE_ARTIST_RND ||
+            g_play_mode == PLAY_MODE_ALBUM_SEQ || g_play_mode == PLAY_MODE_ALBUM_RND) {
+            const PlayerPlaylistDisplayInfo display =
+                player_playlist_get_display_info(track_idx, total);
+            display_total = display.display_total;
+            display_pos = display.display_pos;
+        }
+
+        ui_set_track_pos(display_pos, display_total);
+    }
+
+    // 清空旧歌词，避免残留上一首
+    g_lyricsDisplay.clear();
+
+    // 先尝试应用封面缓存
+    const bool cover_cache_hit = ui_cover_apply_cached(track_idx);
+    if (cover_cache_hit) {
+        ui_request_refresh_now();
+    }
+
+    // 只补当前歌曲的歌词 / 封面，不取总时长，不预读下一首
+    PlayerDeferredAssetJob asset_job{};
+    const bool need_decode_cover = !cover_cache_hit;
+
+    const bool has_deferred_assets = player_assets_prepare_deferred_request(
+        t,
+        track_idx,
+        false,                         // need_total：不开音频，不取总时长
+        t.lrc_path.length() > 0,        // need_lyrics
+        need_decode_cover,              // need_cover
+        asset_job);
+
+    const bool allow_boot_next_prefetch =
+        storage_catalog_v3_track_count() > 1;
+
+    asset_job.need_total = false;
+    asset_job.need_lyrics = (t.lrc_path.length() > 0);
+    asset_job.need_cover = need_decode_cover;
+
+    // 开机没有播放音频，可以允许预读下一首封面。
+    // 但仍然由 PlayerAssetTask 异步执行，不要在恢复流程里同步解码。
+    asset_job.suppress_next_prefetch = !allow_boot_next_prefetch;
+
+    if (has_deferred_assets) {
+        player_assets_schedule(asset_job);
+    } else if (allow_boot_next_prefetch) {
+        // 当前首没有封面/歌词需要补，也仍然发一个空 job，
+        // 目的只是进入 PlayerAssetTask，让它执行“下一首封面预读”。
+        player_assets_reset_job(asset_job);
+        asset_job.track_idx = track_idx;
+        asset_job.need_total = false;
+        asset_job.need_lyrics = false;
+        asset_job.need_cover = false;
+        asset_job.suppress_next_prefetch = false;
+
+        player_assets_schedule(asset_job);
+
+        LOGI("[SNAPSHOT] boot next-cover-only prefetch job armed track=%d", track_idx);
+    }
+
+    ui_request_refresh_now();
+
+    LOGI("[SNAPSHOT] deferred UI-only restore done: mode=%d group=%d track=%d path=%s vol=%u view=%u cover_hit=%d lyrics=%d cover=%d",
+        (int)g_play_mode,
+        player_playlist_get_current_group_idx(),
+        track_idx,
+        snap.track_path.c_str(),
+        (unsigned)snap.volume,
+        (unsigned)snap.ui_view,
+        cover_cache_hit ? 1 : 0,
+        asset_job.need_lyrics ? 1 : 0,
+        asset_job.need_cover ? 1 : 0);
+
     return PLAYER_SNAPSHOT_RESTORE_DONE;
 }

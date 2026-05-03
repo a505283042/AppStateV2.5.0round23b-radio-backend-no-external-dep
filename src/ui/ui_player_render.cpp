@@ -135,12 +135,16 @@ static void draw_cover_panel_status_icons(LGFX_Sprite* dst, int center_y, uint16
 // 数值越大：上半封面越多，下面板越少。
 // 建议调节范围：104 ~ 116。
 static constexpr int COVER_PANEL_Y = 124;
+
+// 面板皮肤贴图起始 Y
+static constexpr int COVER_PANEL_SKIN_Y = 100;
+
 // 文本安全边距。
 // 给时间等中部内容用。
 static constexpr int COVER_PANEL_SAFE_PAD = 12;
 
 // 第一行基础 Y：音量模式，上下一曲，播放按键位置 控制区参考线
-static constexpr int COVER_PANEL_CTRL_Y = 131;
+static constexpr int COVER_PANEL_CTRL_Y = 127;
 
 // 控制按钮尺寸
 static constexpr int COVER_PANEL_PLAY_R = 16;
@@ -156,8 +160,8 @@ static constexpr int COVER_PANEL_SIDE_Y =
 
 // 上一曲 / 下一曲 X 坐标。
 // 数值越靠近 120，按钮越靠中间。
-static constexpr int COVER_PANEL_PREV_X = 89;
-static constexpr int COVER_PANEL_NEXT_X = 151;
+static constexpr int COVER_PANEL_PREV_X = 93;
+static constexpr int COVER_PANEL_NEXT_X = 147;
 
 // 播放按钮 X 坐标。
 static constexpr int COVER_PANEL_PLAY_X = 120;
@@ -186,16 +190,16 @@ void ui_notify_cover_panel_nav_feedback(int8_t dir)
 static constexpr int COVER_PANEL_STATUS_Y = COVER_PANEL_SIDE_Y;
 
 // 第二行：时间
-static constexpr int COVER_PANEL_TIME_Y = 152;
+static constexpr int COVER_PANEL_TIME_Y = 148;
 
 // 第三行：歌名
-static constexpr int COVER_PANEL_TITLE_Y = 170;
+static constexpr int COVER_PANEL_TITLE_Y = 166;
 
 // 第四行：当前歌词
-static constexpr int COVER_PANEL_LYRIC_CUR_Y = 188;
+static constexpr int COVER_PANEL_LYRIC_CUR_Y = 184;
 
 // 第五行：下一句歌词
-static constexpr int COVER_PANEL_LYRIC_NEXT_Y = 206;
+static constexpr int COVER_PANEL_LYRIC_NEXT_Y = 202;
 
 // 歌名 / 歌词专用安全边距。
 // 给未来外圈进度弧预留空间。
@@ -230,6 +234,26 @@ static constexpr int COVER_PANEL_BUMP_CY = COVER_PANEL_Y + 1;
 static constexpr int COVER_PANEL_BUMP_R = 28;
 // 中间唱片孔半径。
 static constexpr int COVER_PANEL_HUB_R = 14;
+
+// =============================================================================
+// COVER_PANEL record overlay
+// 封面前、面板后的一层半透明唱片圆。
+// =============================================================================
+
+// 唱片圆心：跟面板凸起中心一致。
+// 这样面板盖住下半部分后，只露出上半圆。
+static constexpr int COVER_PANEL_RECORD_CX = 120;
+static constexpr int COVER_PANEL_RECORD_CY = COVER_PANEL_BUMP_CY;
+
+// 唱片半径。
+// 42~50 都可以，先用 47。
+static constexpr int COVER_PANEL_RECORD_R = 40;// 唱片外圈半径，半透明混合
+
+// 半透明强度。
+// 0 完全透明，255 完全不透明。
+// 100~130 比较合适。
+static constexpr uint8_t COVER_PANEL_RECORD_ALPHA = 155;
+static constexpr int COVER_PANEL_RECORD_INNER_R = 25;// 最内圈半径，不参与半透明混合
 
 
 static void draw_upper_rotated_cover_sampled(LGFX_Sprite* dst, LGFX_Sprite* src, float angle_deg)
@@ -274,6 +298,93 @@ static void draw_upper_rotated_cover_sampled(LGFX_Sprite* dst, LGFX_Sprite* src,
       else      dst->drawPixel(x, y, color);
     }
   }
+}
+
+static uint16_t blend_rgb565(uint16_t bg, uint16_t fg, uint8_t alpha)
+{
+  const uint8_t inv = 255 - alpha;
+
+  const int br = (bg >> 11) & 0x1F;
+  const int bgc = (bg >> 5) & 0x3F;
+  const int bb = bg & 0x1F;
+
+  const int fr = (fg >> 11) & 0x1F;
+  const int fgc = (fg >> 5) & 0x3F;
+  const int fb = fg & 0x1F;
+
+  const int r = (br * inv + fr * alpha) / 255;
+  const int g = (bgc * inv + fgc * alpha) / 255;
+  const int b = (bb * inv + fb * alpha) / 255;
+
+  return (uint16_t)((r << 11) | (g << 5) | b);
+}
+
+static void fill_blend_circle_rgb565(LGFX_Sprite* dst,
+                                     int cx,
+                                     int cy,
+                                     int r,
+                                     int skip_inner_r,
+                                     uint16_t color,
+                                     uint8_t alpha)
+{
+  if (!dst || r <= 0 || alpha == 0) return;
+
+  const int skip_inner_r2 = skip_inner_r * skip_inner_r;
+
+  for (int y = cy - r; y <= cy + r; ++y) {
+    if ((unsigned)y >= 240) continue;
+
+    const int dy = y - cy;
+    const int xx = r * r - dy * dy;
+    if (xx < 0) continue;
+
+    const int half = (int)sqrtf((float)xx);
+
+    int x0 = cx - half;
+    int x1 = cx + half;
+
+    if (x0 < 0) x0 = 0;
+    if (x1 > 239) x1 = 239;
+
+    for (int x = x0; x <= x1; ++x) {
+      const int dx = x - cx;
+
+      // 关键：最内圈不参与半透明混合
+      if (skip_inner_r > 0 && (dx * dx + dy * dy) <= skip_inner_r2) {
+        continue;
+      }
+
+      const uint16_t bg = dst->readPixel(x, y);
+      const uint16_t out = blend_rgb565(bg, color, alpha);
+      dst->drawPixel(x, y, out);
+    }
+  }
+}
+
+static void draw_cover_panel_record_overlay(LGFX_Sprite* dst)
+{
+  if (!dst) return;
+
+  const int cx = COVER_PANEL_RECORD_CX;
+  const int cy = COVER_PANEL_RECORD_CY;
+  const int r  = COVER_PANEL_RECORD_R;
+
+  // 大唱片圆：半透明，但跳过最内圈
+  fill_blend_circle_rgb565(dst,
+                           cx,
+                           cy,
+                           r,
+                           COVER_PANEL_RECORD_INNER_R,
+                           TFT_BLACK,
+                           COVER_PANEL_RECORD_ALPHA);
+
+  // 内部弱环纹，保留一条
+  dst->drawCircle(cx, cy, r - 7, 0x8430);
+
+  // 最内圈：实心，不参与半透明混合
+  const uint16_t inner_fill = 0x0841;
+
+  dst->fillCircle(cx, cy, COVER_PANEL_RECORD_INNER_R, inner_fill);
 }
 
 static void draw_cover_panel_button(LGFX_Sprite* dst,
@@ -379,7 +490,36 @@ static bool is_cover_panel_skin_transparent(uint16_t c)
   return false;
 }
 
-static constexpr int COVER_PANEL_SKIN_Y = 100;
+static bool cover_panel_skin_transparent_at_screen(int sx, int sy)
+{
+  const int lx = sx;
+  const int ly = sy - COVER_PANEL_SKIN_Y;
+
+  if (lx < 0 || lx >= COVER_PANEL_SKIN_W ||
+      ly < 0 || ly >= COVER_PANEL_SKIN_H) {
+    return true;
+  }
+
+  const uint16_t c =
+      pgm_read_word(&g_cover_panel_skin_240x140[ly * COVER_PANEL_SKIN_W + lx]);
+
+  return is_cover_panel_skin_transparent(c);
+}
+
+static void draw_pixel_if_skin_transparent(LGFX_Sprite* dst,
+                                           int x,
+                                           int y,
+                                           uint16_t color)
+{
+  if (!dst) return;
+  if ((unsigned)x >= 240 || (unsigned)y >= 240) return;
+
+  if (!cover_panel_skin_transparent_at_screen(x, y)) {
+    return;
+  }
+
+  dst->drawPixel(x, y, color);
+}
 
 static void draw_cover_panel_skin(LGFX_Sprite* dst)
 {
@@ -747,12 +887,13 @@ static void draw_cover_panel_info(LGFX_Sprite* dst)
                           false,
                           next_active);
 
-  draw_cover_panel_button(dst,
-                          COVER_PANEL_PLAY_X,
-                          y_play,
-                          COVER_PANEL_PLAY_R,
-                          true,
-                          false);
+  // 播放按钮底圈由皮肤图提供，这里不再画圆形按钮
+  // draw_cover_panel_button(dst,
+  //                         COVER_PANEL_PLAY_X,
+  //                         y_play,
+  //                         COVER_PANEL_PLAY_R,
+  //                         true,
+  //                         false);
 
   draw_cover_panel_prev_next(dst,
                             COVER_PANEL_PREV_X,
@@ -1052,13 +1193,16 @@ void cover_panel_draw(float angle_deg)
   // 1. 只画上半圆旋转封面
   draw_upper_rotated_cover_sampled(dst, s_src, angle_deg);
 
-  // 2. 下半固定面板覆盖
+  // 2. 半透明唱片圆：封面前、面板后
+  draw_cover_panel_record_overlay(dst);   
+  
+  // 3. 下半固定面板覆盖
   draw_cover_panel_skin(dst);
 
-  // 3. 面板文字和按钮
+  // 4. 面板文字和按钮
   draw_cover_panel_info(dst);
 
-  // 最后画外圈进度弧，避免被面板覆盖
+  // 5. 最后画外圈进度弧，避免被面板覆盖
   draw_cover_panel_progress_ring(dst);
 
   dst->pushSprite(0, 0);

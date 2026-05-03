@@ -562,6 +562,7 @@ void player_state_run(void)
         LOGI("[PLAYER] enter");
         ui_enter_player();
         s_cover_idx = -1;
+        player_assets_init_once();
         player_list_select_init_once();
         player_control_init_once();
         player_list_select_reset();
