@@ -66,6 +66,7 @@ static const char* web_view_to_key(ui_player_view_t v) {
   switch (v) {
     case UI_VIEW_ROTATE: return "rotate";
     case UI_VIEW_INFO:   return "info";
+    case UI_VIEW_COVER_PANEL: return "cover_panel";
     default:             return "unknown";
   }
 }
@@ -74,6 +75,7 @@ static const char* web_view_to_label(ui_player_view_t v) {
   switch (v) {
     case UI_VIEW_ROTATE: return "旋转视图";
     case UI_VIEW_INFO:   return "信息视图";
+    case UI_VIEW_COVER_PANEL: return "封面面板";
     default:             return "未知视图";
   }
 }

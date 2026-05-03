@@ -202,6 +202,7 @@ static bool cover_blit_scaled_to_pair(const uint8_t* ptr, size_t len, bool is_pn
     dst_cover.fillScreen(TFT_BLACK);
     bool ok = is_png ? dst_cover.drawPng(ptr, len, 0, 0, COVER_SIZE, COVER_SIZE)
                     : dst_cover.drawJpg(ptr, len, 0, 0, COVER_SIZE, COVER_SIZE);
+    cover_downscale_bilinear(tmp, dst_cover, COVER_SIZE, true);
     if (ok) {
       dst_masked.fillScreen(TFT_BLACK);
       dst_cover.pushSprite(&dst_masked, 0, 0);
@@ -243,7 +244,7 @@ void cover_cache_sprite_init_once();
 
 static void ui_arm_rotate_start_after_audio_if_needed()
 {
-  if (s_view == UI_VIEW_ROTATE) {
+  if (s_view == UI_VIEW_ROTATE || s_view == UI_VIEW_COVER_PANEL) {
     const uint32_t now_ms = millis();
     s_rot_last_ms = now_ms;
     s_angle_deg = 0.0f;

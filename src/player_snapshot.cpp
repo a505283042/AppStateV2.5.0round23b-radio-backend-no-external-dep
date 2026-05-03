@@ -85,7 +85,9 @@ static int snapshot_resolve_track_idx(const PlayerPersistSnapshot& snap)
 static void snapshot_sanitize_loaded(PlayerPersistSnapshot& snap)
 {
     if (snap.volume > 100) snap.volume = 100;
-    if (snap.ui_view != (uint8_t)UI_VIEW_ROTATE && snap.ui_view != (uint8_t)UI_VIEW_INFO) {
+    if (snap.ui_view != (uint8_t)UI_VIEW_ROTATE &&
+        snap.ui_view != (uint8_t)UI_VIEW_INFO &&
+        snap.ui_view != (uint8_t)UI_VIEW_COVER_PANEL) {
         snap.ui_view = (uint8_t)UI_VIEW_INFO;
     }
 }
@@ -144,7 +146,7 @@ static void snapshot_apply_light_state(const PlayerPersistSnapshot& snap)
     ui_set_volume(snap.volume);
 
     if ((uint8_t)ui_get_view() != snap.ui_view) {
-        ui_toggle_view();
+        ui_set_view((ui_player_view_t)snap.ui_view);
     }
 
     g_play_mode = mode;

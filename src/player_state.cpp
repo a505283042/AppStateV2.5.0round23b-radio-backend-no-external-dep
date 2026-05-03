@@ -493,7 +493,7 @@ static bool player_play_trackinfo_core(const TrackInfo& t,
     if (has_deferred_assets) {
         const bool req_lyrics = asset_job.need_lyrics;
         const bool req_cover = asset_job.need_cover;
-        if (ui_get_view() == UI_VIEW_ROTATE) {
+        if (ui_get_view() == UI_VIEW_ROTATE || ui_get_view() == UI_VIEW_COVER_PANEL) {
             ui_set_rotate_wait_prefetch(true);
         }
         player_assets_schedule(asset_job);
@@ -502,7 +502,7 @@ static bool player_play_trackinfo_core(const TrackInfo& t,
              req_lyrics ? 1 : 0,
              req_cover ? 1 : 0);
     } else {
-        if (ui_get_view() == UI_VIEW_ROTATE) {
+        if (ui_get_view() == UI_VIEW_ROTATE || ui_get_view() == UI_VIEW_COVER_PANEL) {
             ui_set_rotate_wait_prefetch(false);
         }
         player_assets_invalidate_requests();

@@ -320,7 +320,7 @@ static void player_asset_task_entry(void*)
         const uint32_t play_ms_before_prefetch = audio_get_play_ms();
 
         const bool allow_next_prefetch = player_assets_is_job_current(job) &&
-                                        (view_now == UI_VIEW_ROTATE || view_now == UI_VIEW_INFO) &&
+                                        (view_now == UI_VIEW_ROTATE || view_now == UI_VIEW_INFO || view_now == UI_VIEW_COVER_PANEL) &&
                                         !job.suppress_next_prefetch;
         if (allow_next_prefetch) {
             TrackInfo next_track;
@@ -418,7 +418,8 @@ static void player_asset_task_entry(void*)
         }
     }
 
-        if (player_assets_is_job_current(job) && view_now == UI_VIEW_ROTATE) {
+        if (player_assets_is_job_current(job) &&
+        (view_now == UI_VIEW_ROTATE || view_now == UI_VIEW_COVER_PANEL)) {
             ui_set_rotate_wait_prefetch(false);
             LOGD("[PLAYER] rotate prefetch complete audio_ms=%lu prefetch=%s state=%s next=%d",
                  (unsigned long)audio_get_play_ms(),

@@ -22,6 +22,7 @@
 static constexpr int COVER_SIZE = 240;
 static constexpr float COVER_DEG_PER_SEC = 15.0f;
 static constexpr uint32_t UI_FPS_ROTATE = 20;
+static constexpr uint32_t UI_FPS_COVER_PANEL = 12;
 static constexpr uint32_t UI_FPS_INFO_ACTIVE = 12;
 static constexpr uint32_t UI_FPS_INFO_IDLE = 5;
 static constexpr uint32_t UI_FPS_OTHER = 1;
@@ -120,4 +121,5 @@ void cover_cache_sprite_init_once();
 void cover_frames_init_once();
 bool cover_decode_to_sprite_from_track(const TrackInfo& t);
 void cover_rotate_draw(float angle_deg);
+void cover_panel_draw(float angle_deg);
 void cover_info_draw();

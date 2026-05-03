@@ -161,6 +161,7 @@ static inline TickType_t ui_period_ticks()
   // PLAYER 界面：按视图区分帧率
   if (s_screen == UI_SCREEN_PLAYER) {
     if (s_view == UI_VIEW_ROTATE) return pdMS_TO_TICKS(1000 / UI_FPS_ROTATE);
+    if (s_view == UI_VIEW_COVER_PANEL) return pdMS_TO_TICKS(1000 / UI_FPS_COVER_PANEL);
 
     const bool info_active = audio_service_is_playing() && !audio_service_is_paused();
     const uint32_t fps = info_active ? UI_FPS_INFO_ACTIVE : UI_FPS_INFO_IDLE;
@@ -226,7 +227,7 @@ static void ui_task_entry(void*)
       uint32_t play_ms = audio_get_play_ms();
       g_lyricsDisplay.updateTime(play_ms);
 
-      if (s_view == UI_VIEW_ROTATE && s_src) {
+      if ((s_view == UI_VIEW_ROTATE || s_view == UI_VIEW_COVER_PANEL) && s_src) {
         if (s_rot_last_ms == 0) s_rot_last_ms = now_ms;
 
         if (s_rotate_wait_audio_start || s_rotate_wait_prefetch_done) {
@@ -242,7 +243,11 @@ static void ui_task_entry(void*)
             LOGI("[UI] rotate release audio_ms=%lu cover_age=%lums", (unsigned long)audio_ms_now, (unsigned long)(now_ms - s_cover_apply_ms));
           } else {
             s_rot_last_ms = now_ms;
-            s_coverSpr.pushSprite(0, 0);
+            if (s_view == UI_VIEW_COVER_PANEL) {
+              cover_panel_draw(s_angle_deg);
+            } else {
+              s_coverSpr.pushSprite(0, 0);
+            }
             ui_draw_unlock();
             continue;
           }
@@ -261,7 +266,11 @@ static void ui_task_entry(void*)
         }
 
         const uint32_t rotate_frame_begin = millis();
-        cover_rotate_draw(s_angle_deg);
+        if (s_view == UI_VIEW_COVER_PANEL) {
+          cover_panel_draw(s_angle_deg);
+        } else {
+          cover_rotate_draw(s_angle_deg);
+        }
         const uint32_t rotate_frame_end = millis();
         if (s_rotate_probe_frames_left > 0) {
           const uint32_t audio_ms_now = audio_get_play_ms();

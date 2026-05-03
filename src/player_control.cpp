@@ -303,8 +303,16 @@ void player_next_track()
     if (source.type == PlayerSourceType::NET_RADIO) {
         const int count = (int)radio_catalog_count();
         if (count <= 0) return;
+
         int next_radio = source.radio_idx >= 0 ? (source.radio_idx + 1) % count : 0;
-        (void)player_play_radio_index(next_radio);
+
+        ui_notify_cover_panel_nav_feedback(1);
+
+        const bool ok = player_play_radio_index(next_radio);
+        if (!ok) {
+            ui_notify_cover_panel_nav_feedback(0);
+        }
+
         return;
     }
 
@@ -324,7 +332,13 @@ void player_next_track()
     }
 
     LOGI("[PLAYER] NEXT -> #%d", next);
-    (void)control_play_track_dispatch(next, false, true);
+
+    ui_notify_cover_panel_nav_feedback(1);
+
+    const bool ok = control_play_track_dispatch(next, false, true);
+    if (!ok) {
+        ui_notify_cover_panel_nav_feedback(0);
+    }
 }
 
 void player_prev_track()
@@ -333,8 +347,16 @@ void player_prev_track()
     if (source.type == PlayerSourceType::NET_RADIO) {
         const int count = (int)radio_catalog_count();
         if (count <= 0) return;
+
         int prev_radio = source.radio_idx >= 0 ? (source.radio_idx - 1 + count) % count : 0;
-        (void)player_play_radio_index(prev_radio);
+
+        ui_notify_cover_panel_nav_feedback(-1);
+
+        const bool ok = player_play_radio_index(prev_radio);
+        if (!ok) {
+            ui_notify_cover_panel_nav_feedback(0);
+        }
+
         return;
     }
 
@@ -354,7 +376,13 @@ void player_prev_track()
     }
 
     LOGI("[PLAYER] PREV -> #%d", prev);
-    (void)control_play_track_dispatch(prev, false, true);
+
+    ui_notify_cover_panel_nav_feedback(-1);
+
+    const bool ok = control_play_track_dispatch(prev, false, true);
+    if (!ok) {
+        ui_notify_cover_panel_nav_feedback(0);
+    }
 }
 
 void player_toggle_play()

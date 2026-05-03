@@ -30,7 +30,11 @@ typedef enum {
 } ui_screen_t;
 
 /* 播放器视图类型 */
-enum ui_player_view_t : uint8_t { UI_VIEW_ROTATE = 0, UI_VIEW_INFO = 1 };
+enum ui_player_view_t : uint8_t {
+    UI_VIEW_ROTATE = 0,
+    UI_VIEW_INFO = 1,
+    UI_VIEW_COVER_PANEL = 2,   /* 旋转封面上半圆 + 下半固定信息面板 */
+};
 
 /* 播放模式类型（大类 + 小类组合后的 6 个实际状态） */
 typedef enum {
@@ -81,6 +85,7 @@ void ui_scan_abort();
 /* -------- 播放器视图 / 状态 -------- */
 void ui_toggle_view();
 enum ui_player_view_t ui_get_view();
+void ui_set_view(ui_player_view_t view);
 void ui_set_now_playing(const char* title, const char* artist);
 void ui_set_album(const String& album);
 void ui_set_volume(uint8_t vol);
@@ -88,6 +93,8 @@ void ui_volume_key_pressed();
 void ui_set_play_mode(play_mode_t mode);
 void ui_mode_switch_highlight();
 void ui_set_track_pos(int idx, int total);
+// 通知封面面板导航反馈（上/下）
+void ui_notify_cover_panel_nav_feedback(int8_t dir);
 
 /* -------- UiTask 协调 -------- */
 void ui_hold_render(bool hold);
