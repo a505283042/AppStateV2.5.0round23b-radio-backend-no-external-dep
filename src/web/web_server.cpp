@@ -50,6 +50,7 @@ static bool s_ready = false;
 static bool s_ap_mode = false;
 static String s_hostname_runtime = WEBCTRL_HOSTNAME_DEFAULT;
 static String s_wifi_source = "ap_fallback";
+static volatile bool s_web_volume_locked = true;
 
 static String web_trim_copy(const String& in) { String s = in; s.trim(); return s; }
 static String web_json_escape(const String& in) {
@@ -222,12 +223,19 @@ static void web_send_no_cache_headers() {
   s_server.sendHeader("Pragma", "no-cache");
   s_server.sendHeader("Expires", "0");
 }
+
 static void web_send_json_ok_simple(const char* msg = nullptr) {
   web_send_no_cache_headers();
+
   String json = "{\"ok\":true";
-  if (msg && *msg) { json += ",\"message\":\""; json += web_json_escape(msg); json += "\""; }
+  if (msg && *msg) {
+    json += ",\"message\":\"";
+    json += web_json_escape(msg);
+    json += "\"";
+  }
   json += "}";
-  s_server.send(200, "application/json; charset=utf-8", json);
+
+  s_server.send(200, "application/json; charset=utf-8", json);  
 }
 
 static const char* web_nfc_type_label_cn(NfcBindType type) {
@@ -262,10 +270,12 @@ static bool web_nfc_test_play_by_uid(const String& uid) {
 }
 static void web_send_json_err(const char* msg, int code = 400) {
   web_send_no_cache_headers();
+
   String json = "{\"ok\":false,\"message\":\"";
   json += web_json_escape(msg ? String(msg) : String("error"));
   json += "\"}";
-  s_server.send(code, "application/json; charset=utf-8", json);
+
+  s_server.send(code, "application/json; charset=utf-8", json);  
 }
 static bool web_require_player_state() {
   if (g_app_state != STATE_PLAYER) { web_send_json_err("当前不在播放器主界面"); return false; }
@@ -746,7 +756,7 @@ static void web_handle_status() {
   const auto& ws = web_settings_get();
 
   String json;
-  json.reserve(2600);
+  json.reserve(3200);
 
   json += "{\"ok\":";
   json += (snap.ok ? "true" : "false");
@@ -768,7 +778,10 @@ static void web_handle_status() {
 
   json += ",\"play_ms\":" + String(snap.play_ms);
   json += ",\"total_ms\":" + String(snap.total_ms);
-  json += ",\"volume\":" + String(snap.volume);
+  json += ",\"volume\":";
+  json += String(snap.volume);
+
+  json += (s_web_volume_locked ? ",\"volume_locked\":true" : ",\"volume_locked\":false");
 
   json += ",\"mode\":\"" + web_json_escape(snap.mode) + "\"";
   json += ",\"mode_label\":\"" + web_json_escape(snap.mode_label) + "\"";
@@ -866,7 +879,7 @@ static void web_handle_status() {
   json += "}";
 
   web_send_no_cache_headers();
-  s_server.send(200, "application/json; charset=utf-8", json);
+  s_server.send(200, "application/json; charset=utf-8", json);  
 }
 
 static bool web_is_remote_image_url(const String& s) {
@@ -1461,6 +1474,43 @@ static void web_handle_volume() {
   uint8_t v = 0; if (!web_parse_volume_arg(v)) { web_send_json_err("缺少音量参数 value"); return; }
   audio_set_volume(v); ui_set_volume(v); ui_volume_key_pressed(); web_send_json_ok_simple();
 }
+
+static bool web_parse_lock_value(bool& out_value, bool current_value) {
+  String s = s_server.arg("value");
+  if (s.length() == 0) s = s_server.arg("locked");
+  if (s.length() == 0) s = s_server.arg("v");
+
+  if (s.length() == 0) {
+    out_value = !current_value;
+    return true;
+  }
+
+  out_value = web_parse_bool(s, current_value);
+  return true;
+}
+
+static void web_send_volume_lock_state_json() {
+  web_send_no_cache_headers();
+
+  String json = "{\"ok\":true";
+  json += ",\"volume_locked\":";
+  json += (s_web_volume_locked ? "true" : "false");
+  json += "}";
+
+  s_server.send(200, "application/json; charset=utf-8", json);
+}
+
+static void web_handle_volume_lock() {
+  bool v = false;
+  if (!web_parse_lock_value(v, s_web_volume_locked)) {
+    web_send_json_err("音量锁参数错误");
+    return;
+  }
+
+  s_web_volume_locked = v;
+  web_send_volume_lock_state_json();
+}
+
 static void web_handle_state_save() {
   if (!web_require_player_state()) return;
   if (!player_snapshot_save_to_nvs()) { web_send_json_err("保存当前状态失败", 500); return; }
@@ -1526,6 +1576,7 @@ static void web_setup_routes() {
   s_server.on("/api/mode/category", HTTP_POST, web_handle_mode_category);
   s_server.on("/api/view/toggle", HTTP_POST, web_handle_view_toggle);
   s_server.on("/api/volume", HTTP_POST, web_handle_volume);
+  s_server.on("/api/ui/volume_lock", HTTP_POST, web_handle_volume_lock);
   s_server.on("/api/state/save", HTTP_POST, web_handle_state_save);
   s_server.on("/api/scan", HTTP_POST, web_handle_scan);
   s_server.on("/api/wifiinfo/toggle", HTTP_POST, web_handle_wifiinfo_toggle);

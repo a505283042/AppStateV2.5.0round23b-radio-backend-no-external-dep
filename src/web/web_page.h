@@ -37,6 +37,61 @@ static const char WEBCTRL_INDEX_HTML[] PROGMEM = R"HTML(
     .cover.rotate{border-radius:50%;padding:4px;background:#202020}
     .cover.rotate img{border-radius:50%}
     .cover.spin img{animation:webCoverSpin 12s linear infinite}
+    .cover.coverPanel{
+    position:relative;
+    border-radius:16px;
+    background:#181818;
+    box-shadow:inset 0 0 0 1px rgba(255,255,255,.06),0 8px 22px rgba(0,0,0,.28);
+  }
+
+  .cover.coverPanel img{
+    position:absolute;
+    left:4px;
+    top:4px;
+    width:104px;
+    height:104px;
+    border-radius:50%;
+    object-fit:cover;
+  }
+
+  .cover.coverPanel.coverReady::after{
+    content:"";
+    position:absolute;
+    left:0;
+    right:0;
+    bottom:0;
+    height:48px;
+    background:linear-gradient(
+      180deg,
+      rgba(24,24,24,0) 0%,
+      rgba(24,24,24,.35) 16%,
+      #181818 34%,
+      #181818 100%
+    );
+    box-shadow:0 -10px 18px rgba(0,0,0,.22) inset;
+    z-index:2;
+    pointer-events:none;
+  }
+
+  .cover.coverPanel.coverReady::before{
+    content:"";
+    position:absolute;
+    left:50%;
+    top:56px;
+    width:13px;
+    height:13px;
+    transform:translate(-50%,-50%);
+    border-radius:50%;
+    background:#151515;
+    box-shadow:0 0 0 2px rgba(255,255,255,.08);
+    z-index:3;
+    pointer-events:none;
+  }
+
+  .cover.coverPanel span{
+    position:relative;
+    z-index:4;
+  }
     @keyframes webCoverSpin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
     .lyrics{line-height:1.5}
     .lyrics .line{font-size:18px;font-weight:700;margin:0 0 8px}
@@ -72,7 +127,7 @@ static const char WEBCTRL_INDEX_HTML[] PROGMEM = R"HTML(
       <div class="media" id="mediaBox">
         <div>
           <div class="cover" id="coverBox"><span id="coverFallback">无封面</span><img id="coverImg" alt="封面" decoding="async" loading="eager" style="display:none"></div>
-          <div class="small" style="margin-top:8px;text-align:center">点击封面：切换视图<br>信息视图/旋转视图</div>
+          <div class="small" style="margin-top:8px;text-align:center">点击封面：切换显示样式</div>
         </div>
         <div>
           <div class="title" id="title">-</div>
@@ -135,6 +190,8 @@ static const char WEBCTRL_INDEX_HTML[] PROGMEM = R"HTML(
 
 <script>
 let POLL_MS = 1000;
+const MIN_STATUS_POLL_MS = 1500;
+const STATUS_POLL_JITTER_MS = 700;
 let LYRIC_WAIT_POLL_THRESHOLD_MS = 150;
 let lastCoverTrack = '';
 let pollTimer = null;
@@ -152,8 +209,7 @@ let pageActive = !document.hidden;
 let pagePausedByVisibility = false;
 const LOCK_STORAGE_KEY = 'webctrl_page_locked';
 let pageLocked = false;
-const VOLUME_LOCK_STORAGE_KEY = 'webctrl_volume_locked';
-let volumeLocked = false;
+let volumeLocked = true;
 
 function getLockTargets(){
   return [
@@ -235,25 +291,40 @@ function applyVolumeLockState(){
   }
 }
 
-function saveVolumeLockState(){
-  try{
-    localStorage.setItem(VOLUME_LOCK_STORAGE_KEY, volumeLocked ? '1' : '0');
-  }catch(e){}
-}
-
-function loadVolumeLockState(){
-  try{
-    const saved = localStorage.getItem(VOLUME_LOCK_STORAGE_KEY);
-    volumeLocked = saved === null ? true : saved === '1';
-  }catch(e){
-    volumeLocked = true;
+function webBoolValue(v, fallback){
+  if(typeof v === 'boolean') return v;
+  if(typeof v === 'number') return v !== 0;
+  if(typeof v === 'string'){
+    const s = v.toLowerCase();
+    if(s === '1' || s === 'true' || s === 'on' || s === 'yes') return true;
+    if(s === '0' || s === 'false' || s === 'off' || s === 'no') return false;
   }
+  return fallback;
 }
 
-function toggleVolumeLock(){
-  volumeLocked = !volumeLocked;
+function syncVolumeLockFromStatus(j){
+  if(!j || !Object.prototype.hasOwnProperty.call(j, 'volume_locked')) return;
+  const nextLocked = webBoolValue(j.volume_locked, volumeLocked);
+  volumeLocked = nextLocked;
   applyVolumeLockState();
-  saveVolumeLockState();
+}
+
+async function toggleVolumeLock(){
+  try{
+    const r = await fetch('/api/ui/volume_lock', {
+      method:'POST',
+      headers:{'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8'},
+      body:`value=${volumeLocked ? 0 : 1}`
+    });
+    const j = await r.json();
+    if(!j || !j.ok){
+      throw new Error((j && j.message) ? j.message : 'volume lock update failed');
+    }
+    syncVolumeLockFromStatus(j);
+    scheduleNext(500);
+  }catch(e){
+    alert('音量锁状态同步失败');
+  }
 }
 
 function scheduleNext(ms){
@@ -265,7 +336,8 @@ function scheduleNext(ms){
     return;
   }
 
-  const delay = Math.max(120, Number(ms) || POLL_MS);
+  const baseDelay = Math.max(MIN_STATUS_POLL_MS, Number(ms) || POLL_MS);
+  const delay = baseDelay + Math.floor(Math.random() * STATUS_POLL_JITTER_MS);
   if(pollTimer) clearTimeout(pollTimer);
   nextPollAt = Date.now() + delay;
   pollTimer = setTimeout(fetchStatus, delay);
@@ -331,10 +403,10 @@ async function fetchStatus(){
   if(!pageActive) return;
 
   if(inFlight){
-    if(statusFetchStartedAt && Date.now() - statusFetchStartedAt > 5000){
+    if(statusFetchStartedAt && Date.now() - statusFetchStartedAt > 10000){
       abortStatusFetch();
     }else{
-      scheduleNext(800);
+      scheduleNext(1500);
       return;
     }
   }
@@ -344,7 +416,7 @@ async function fetchStatus(){
 
   const controller = new AbortController();
   statusController = controller;
-  const timeoutId = setTimeout(() => controller.abort(), 3000);
+  const timeoutId = setTimeout(() => controller.abort(), 8000);
 
   try{
     const r = await fetch(`/api/status?t=${Date.now()}`, {
@@ -352,7 +424,10 @@ async function fetchStatus(){
       signal: controller.signal
     });
     const j = await r.json();
-    lastStatusAt = Date.now(); lastStatus = j; render(j);
+    lastStatusAt = Date.now();
+    lastStatus = j;
+    syncVolumeLockFromStatus(j);
+    render(j);
     currentPollMs = Math.max(120, Number(j.next_poll_ms) || POLL_MS);
     if(Number(j.refresh_poll_ms) > 0) POLL_MS = Number(j.refresh_poll_ms);
     if(Number(j.lyric_wait_poll_threshold_ms) > 0) LYRIC_WAIT_POLL_THRESHOLD_MS = Number(j.lyric_wait_poll_threshold_ms);
@@ -361,7 +436,7 @@ async function fetchStatus(){
     scheduleNext(currentPollMs); scheduleLyricTransition(j);
   }catch(e){
     document.getElementById('net').textContent = e.name === 'AbortError' ? '网页请求超时，正在重试' : '网页状态获取失败';
-    scheduleNext(Math.max(POLL_MS, 1500));
+    scheduleNext(Math.max(POLL_MS, 3000));
   }finally{
     clearTimeout(timeoutId);
     if(statusController === controller){
@@ -408,6 +483,7 @@ function updateCover(j){
 
   const track=Number.isInteger(j.track_idx)?j.track_idx:-1;
   const rotateView=(j.view==='rotate');
+  const coverPanelView=(j.view==='cover_panel');
   const allowCover = j.show_cover !== false;
   const allowSpin = j.web_cover_spin !== false;
   const base = j.cover_url && j.cover_url.length ? j.cover_url : '';
@@ -416,6 +492,7 @@ function updateCover(j){
   media.classList.toggle('noCover', !allowCover);
   if(!allowCover){ 
     // 不显示封面图片，但保持封面区域
+    box.classList.remove('coverPanel','coverReady');
     img.style.display='none';
     img.removeAttribute('src');
     fallback.style.display='block';
@@ -424,12 +501,14 @@ function updateCover(j){
   }
 
   box.classList.toggle('rotate', rotateView);
-  box.classList.toggle('spin', rotateView && allowSpin && !!j.is_playing && !j.is_paused && !j.rescanning);
+  box.classList.toggle('coverPanel', coverPanelView);
+  box.classList.toggle('spin', (rotateView || coverPanelView) && allowSpin && !!j.is_playing && !j.is_paused && !j.rescanning);
 
   const coverLoading = !!j.cover_loading;
 
   if(!j.has_cover || !base){ 
     lastCoverTrack = '';
+    box.classList.remove('coverReady');
     img.style.display='none';
     img.removeAttribute('src');
     fallback.style.display='block';
@@ -445,17 +524,20 @@ function updateCover(j){
   if(coverKey !== lastCoverTrack){ 
     lastCoverTrack = coverKey;
 
+    box.classList.remove('coverReady');
     img.style.display = 'none';
     fallback.style.display = 'block';
     fallback.textContent = '封面加载中...';
 
     img.onerror = () => { 
+      box.classList.remove('coverReady');
       img.style.display = 'none';
       fallback.style.display = 'block';
       fallback.textContent = '封面读取失败';
     };
 
     img.onload = () => {
+      box.classList.add('coverReady');
       fallback.style.display = 'none';
       img.style.display = 'block';
     };
@@ -465,9 +547,11 @@ function updateCover(j){
   }
 
   if(img.complete && img.naturalWidth > 0){
+    box.classList.add('coverReady');
     fallback.style.display = 'none';
     img.style.display = 'block';
   }else{
+    box.classList.remove('coverReady');
     fallback.style.display = 'block';
     fallback.textContent = '封面加载中...';
     img.style.display = 'none';
@@ -477,7 +561,7 @@ async function toggleViewFromCover(){
   if(pageLocked || coverToggleBusy) return;
   coverToggleBusy=true;
   try{ await fetch('/api/view/toggle',{method:'POST'});}catch(e){}
-  scheduleNext(120);
+  scheduleNext(500);
   setTimeout(()=>{coverToggleBusy=false;},250);
 }
 function render(j){
@@ -543,7 +627,7 @@ async function toggleWifiInfo(){
       updateWifiInfoButton(j.show_wifi_info);
     }
   }catch(e){}
-  scheduleNext(120);
+  scheduleNext(500);
 }
 
 function updateWifiInfoButton(showWifiInfo) {
@@ -556,7 +640,7 @@ function updateWifiInfoButton(showWifiInfo) {
 async function sendCmd(path){
   if(pageLocked) return;
   try{ await fetch(path,{method:'POST'});}catch(e){}
-  scheduleNext(120);
+  scheduleNext(500);
 }
 async function returnFromRadio(){
   if(pageLocked) return;
@@ -567,7 +651,7 @@ async function returnFromRadio(){
   }catch(e){
     alert('操作失败');
   }
-  scheduleNext(120);
+  scheduleNext(500);
 }
 async function savePlayerState(){
   if(pageLocked) return;
@@ -578,7 +662,7 @@ async function savePlayerState(){
   }catch(e){
     alert('保存失败');
   }
-  scheduleNext(120);
+  scheduleNext(500);
 }
 function sendVolumeDebounced(v){
   if(pageLocked || volumeLocked) return;
@@ -591,7 +675,7 @@ function sendVolumeDebounced(v){
         body:`value=${encodeURIComponent(v)}`
       });
     }catch(e){}
-    scheduleNext(180);
+    scheduleNext(500);
   },80);
 }
 const slider=document.getElementById('volumeSlider');
@@ -629,10 +713,10 @@ window.addEventListener('pageshow', ()=>{ if(!document.hidden) resumePagePolling
 window.addEventListener('pagehide', pausePagePolling);
 
 loadLockState();
-loadVolumeLockState();
 applyLockState();
 applyVolumeLockState();
-fetchStatus();
+
+setTimeout(fetchStatus, 200 + Math.floor(Math.random() * 900));
 </script>
 </body>
 </html>
@@ -695,6 +779,16 @@ static const char WEBCTRL_SETTINGS_HTML[] PROGMEM = R"HTML(
   </div>
 
 <script>
+async function fetchWithTimeout(url, options={}, timeoutMs=3500){
+  const controller = new AbortController();
+  const timer = setTimeout(()=>controller.abort(), timeoutMs);
+  try{
+    return await fetch(url, {...options, signal: controller.signal});
+  }finally{
+    clearTimeout(timer);
+  }
+}
+
 async function loadSettings(){
   try{
     const r = await fetch('/api/settings', {cache:'no-store'});
@@ -715,7 +809,11 @@ async function saveSettings(){
   params.set('show_cover', document.getElementById('show_cover').checked ? '1' : '0');
   params.set('web_cover_spin', document.getElementById('web_cover_spin').checked ? '1' : '0');
   try{
-    const r = await fetch('/api/settings', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8'}, body:params.toString()});
+    const r = await fetchWithTimeout('/api/settings', {
+      method:'POST',
+      headers:{'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8'},
+      body:params.toString()
+    }, 3500);
     const j = await r.json();
     alert(j && j.ok ? '保存成功' : ((j && j.message) ? j.message : '保存失败'));
   }catch(e){ alert('保存失败'); }
