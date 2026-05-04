@@ -678,8 +678,8 @@ static void draw_cover_panel_title(LGFX_Sprite* dst, int y, uint16_t color)
     s_cover_panel_title_scroll_last_ms = now;
   }
 
-  while (now - s_cover_panel_title_scroll_last_ms >= 30) {
-    s_cover_panel_title_scroll_last_ms += 30;
+  if (now - s_cover_panel_title_scroll_last_ms > 30) {
+    s_cover_panel_title_scroll_last_ms = now;
     s_cover_panel_title_scroll_x += SCROLL_SPEED;
   }
 

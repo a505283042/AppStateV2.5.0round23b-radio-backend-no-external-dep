@@ -156,6 +156,38 @@ static bool player_try_prepare_default_cover_cache(int track_idx)
     return scaled_ok;
 }
 
+static bool player_assets_apply_default_cover_for_current(const PlayerDeferredAssetJob& job)
+{
+    if (!player_assets_is_job_current(job)) {
+        return false;
+    }
+
+    const bool default_ok = player_try_prepare_default_cover_cache(job.track_idx);
+    if (!default_ok) {
+        LOGW("[PLAYER] current cover default prepare failed track=%d", job.track_idx);
+        return false;
+    }
+
+    if (!player_assets_is_job_current(job)) {
+        return false;
+    }
+
+    const bool apply_ok = ui_cover_apply_cached(job.track_idx);
+    if (!apply_ok) {
+        LOGW("[PLAYER] current cover default apply failed track=%d", job.track_idx);
+        return false;
+    }
+
+    if (s_hooks.on_current_cover_ready) {
+        s_hooks.on_current_cover_ready(job.track_idx);
+    }
+
+    ui_request_refresh_now();
+
+    LOGI("[PLAYER] current cover fallback default track=%d", job.track_idx);
+    return true;
+}
+
 // 播放器资源任务入口
 static void player_asset_task_entry(void*)
 {
@@ -240,11 +272,15 @@ static void player_asset_task_entry(void*)
         uint8_t* cover_buf = nullptr;
         size_t cover_len = 0;
         bool cover_is_png = false;
+
         if (job.need_cover && !current_cover_cache_hit) {
-            if (s_primed_current_cover.valid && 
-                s_primed_current_cover.track_idx == job.track_idx && 
-                s_primed_current_cover.buf && 
-                s_primed_current_cover.len > 0) {
+            if (job.cover_source == COVER_NONE) {
+                // 当前歌曲明确没有封面：直接准备并应用默认封面
+                current_cover_cache_hit = player_assets_apply_default_cover_for_current(job);
+            } else if (s_primed_current_cover.valid && 
+                    s_primed_current_cover.track_idx == job.track_idx && 
+                    s_primed_current_cover.buf && 
+                    s_primed_current_cover.len > 0) {
                 cover_buf = s_primed_current_cover.buf;
                 cover_len = s_primed_current_cover.len;
                 cover_is_png = s_primed_current_cover.is_png;
@@ -256,7 +292,7 @@ static void player_asset_task_entry(void*)
                 s_primed_current_cover.is_png = false;
 
                 LOGI("[PLAYER] primed current cover hit track=%d len=%u", 
-                     job.track_idx, (unsigned)cover_len);
+                    job.track_idx, (unsigned)cover_len);
             } else {
                 (void)audio_service_fetch_cover(job.cover_source,
                                                 job.audio_path,
@@ -304,6 +340,13 @@ static void player_asset_task_entry(void*)
                 ui_cover_free_allocated(cover_buf);
                 cover_buf = nullptr;
             }
+
+            // 当前封面读取/缩放失败，也不能继续显示上一首封面。
+            // 当前任务仍有效时，回退到默认封面。
+            if (job.need_cover && !current_cover_cache_hit && player_assets_is_job_current(job)) {
+                current_cover_cache_hit = player_assets_apply_default_cover_for_current(job);
+            }
+
             t_after_cover_scale = t_after_fetch_cover;
         }
 
@@ -524,16 +567,35 @@ bool player_assets_prepare_deferred_request(const TrackInfo& t,
         job.lyrics_path[sizeof(job.lyrics_path) - 1] = '\0';
     }
 
-    if (need_cover && (t.cover_source == COVER_FILE_FALLBACK ||
-                       ((t.cover_source == COVER_MP3_APIC || t.cover_source == COVER_FLAC_PICTURE) && t.cover_size > 0))) {
-        job.need_cover = true;
-        job.cover_source = t.cover_source;
-        job.cover_offset = t.cover_offset;
-        job.cover_size = t.cover_size;
-        strncpy(job.audio_path, t.audio_path.c_str(), sizeof(job.audio_path) - 1);
-        job.audio_path[sizeof(job.audio_path) - 1] = '\0';
-        strncpy(job.cover_path, t.cover_path.c_str(), sizeof(job.cover_path) - 1);
-        job.cover_path[sizeof(job.cover_path) - 1] = '\0';
+    if (need_cover) {
+        const bool has_real_cover =
+            t.cover_source == COVER_FILE_FALLBACK ||
+            ((t.cover_source == COVER_MP3_APIC || t.cover_source == COVER_FLAC_PICTURE) &&
+            t.cover_size > 0);
+
+        if (has_real_cover) {
+            job.need_cover = true;
+            job.cover_source = t.cover_source;
+            job.cover_offset = t.cover_offset;
+            job.cover_size = t.cover_size;
+
+            strncpy(job.audio_path, t.audio_path.c_str(), sizeof(job.audio_path) - 1);
+            job.audio_path[sizeof(job.audio_path) - 1] = '\0';
+
+            strncpy(job.cover_path, t.cover_path.c_str(), sizeof(job.cover_path) - 1);
+            job.cover_path[sizeof(job.cover_path) - 1] = '\0';
+        } else if (t.cover_source == COVER_NONE) {
+            // 当前歌曲明确没有封面，也要发一个 cover job，
+            // 让 PlayerAssetTask 给当前 track 准备默认封面。
+            job.need_cover = true;
+            job.cover_source = COVER_NONE;
+            job.cover_offset = 0;
+            job.cover_size = 0;
+
+            strncpy(job.audio_path, t.audio_path.c_str(), sizeof(job.audio_path) - 1);
+            job.audio_path[sizeof(job.audio_path) - 1] = '\0';
+            job.cover_path[0] = '\0';
+        }
     }
 
     return job.need_total || job.need_lyrics || job.need_cover;

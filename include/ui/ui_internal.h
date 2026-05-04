@@ -19,17 +19,17 @@
  * - 列表选择页绘图状态
  */
 
-static constexpr int COVER_SIZE = 240;
-static constexpr float COVER_DEG_PER_SEC = 15.0f;
-static constexpr uint32_t UI_FPS_ROTATE = 20;
-static constexpr uint32_t UI_FPS_COVER_PANEL = 12;
-static constexpr uint32_t UI_FPS_INFO_ACTIVE = 12;
-static constexpr uint32_t UI_FPS_INFO_IDLE = 5;
-static constexpr uint32_t UI_FPS_OTHER = 1;
-static constexpr int SCROLL_SPEED = 1;
-static constexpr int SCROLL_GAP = 20;
-static constexpr uint32_t VOLUME_ACTIVE_TIMEOUT_MS = 2000;
-static constexpr uint32_t MODE_SWITCH_HIGHLIGHT_MS = 2000;
+static constexpr int COVER_SIZE = 240;                      // 封面大小
+static constexpr float COVER_DEG_PER_SEC = 15.0f;           // 封面旋转角度 FPS
+static constexpr uint32_t UI_FPS_ROTATE = 20;               // 封面旋转 FPS
+static constexpr uint32_t UI_FPS_COVER_PANEL = 12;          // 封面面板滚动 FPS
+static constexpr uint32_t UI_FPS_INFO_ACTIVE = 12;          // 信息面板滚动 FPS
+static constexpr uint32_t UI_FPS_INFO_IDLE = 5;             // 信息面板空闲滚动 FPS 
+static constexpr uint32_t UI_FPS_OTHER = 1;                 // 其他元素滚动 FPS
+static constexpr int SCROLL_SPEED = 1;                      // 滚动 FPS
+static constexpr int SCROLL_GAP = 20;                       // 滚动间隔
+static constexpr uint32_t VOLUME_ACTIVE_TIMEOUT_MS = 200;   // 音量激活超时时间
+static constexpr uint32_t MODE_SWITCH_HIGHLIGHT_MS = 2000;  // 模式切换高亮时间
 
 extern lgfx::U8g2font g_font_cjk;
 extern TaskHandle_t s_ui_task;
