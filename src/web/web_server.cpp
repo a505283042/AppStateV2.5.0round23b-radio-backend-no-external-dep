@@ -110,12 +110,13 @@ static bool web_if_none_match_hit(const String& etag) {
 
 static void web_send_not_modified(const String& etag) {
   WiFiClient client = s_server.client();
+  client.setTimeout(300);
   client.print("HTTP/1.1 304 Not Modified\r\n");
   client.printf("ETag: %s\r\n", etag.c_str());
   client.print("Cache-Control: public, max-age=86400, immutable\r\n");
   client.print("Connection: close\r\n");
   client.print("\r\n");
-  client.flush();
+  client.stop();
 }
 static void web_json_append_escaped(String& out, const char* s) {
   if (!s) return;
@@ -152,24 +153,96 @@ static void web_json_append_match_titles(String& json, const String& titles_text
   json += "\"";
 }
 
+static void web_abort_client() {
+  WiFiClient client = s_server.client();
+  client.stop();
+}
+
 static bool web_client_alive() {
-  return s_server.client().connected();
+  WiFiClient client = s_server.client();
+  return client.connected();
 }
 
 static bool web_send_chunk(const char* s) {
-  if (!web_client_alive()) return false;
+  if (!web_client_alive()) { web_abort_client(); return false; }
   s_server.sendContent(s);
-  return web_client_alive();
+  if (!web_client_alive()) { web_abort_client(); return false; }
+  return true;
 }
 
 static bool web_send_chunk(const String& s) {
-  if (!web_client_alive()) return false;
+  if (!web_client_alive()) { web_abort_client(); return false; }
   s_server.sendContent(s);
-  return web_client_alive();
+  if (!web_client_alive()) { web_abort_client(); return false; }
+  return true;
 }
 
 static void web_end_stream_response() {
-  s_server.sendContent("");
+  if (web_client_alive()) {
+    s_server.sendContent("");
+  }
+  web_abort_client();
+}
+
+static bool web_write_all_with_idle_timeout(WiFiClient& client,
+                                            const uint8_t* data,
+                                            size_t len,
+                                            uint32_t idle_timeout_ms = 2500) {
+  if (!data || len == 0) return false;
+
+  size_t off = 0;
+  uint32_t last_progress_ms = millis();
+
+  while (off < len) {
+    if (!client.connected()) return false;
+
+    const uint32_t now = millis();
+    if (now - last_progress_ms > idle_timeout_ms) {
+      return false;
+    }
+
+    int room = client.availableForWrite();
+    if (room <= 0) {
+      delay(1);
+      continue;
+    }
+
+    size_t chunk = len - off;
+    if (chunk > 1460) chunk = 1460;
+    if (chunk > (size_t)room) chunk = (size_t)room;
+
+    const size_t n = client.write(data + off, chunk);
+    if (n > 0) {
+      off += n;
+      last_progress_ms = millis();
+    } else {
+      delay(1);
+    }
+  }
+
+  return true;
+}
+
+static bool web_send_bmp_buffer_with_etag(const uint8_t* buf,
+                                          size_t len,
+                                          const String& etag,
+                                          const char* log_tag) {
+  WiFiClient client = s_server.client();
+  client.setTimeout(300);
+  client.print("HTTP/1.1 200 OK\r\n");
+  client.print("Content-Type: image/bmp\r\n");
+  client.printf("Content-Length: %u\r\n", (unsigned)len);
+  client.print("Cache-Control: public, max-age=86400, immutable\r\n");
+  client.printf("ETag: %s\r\n", etag.c_str());
+  client.print("Connection: close\r\n");
+  client.print("\r\n");
+
+  const bool ok = web_write_all_with_idle_timeout(client, buf, len, 2500);
+  if (!ok) {
+    LOGW("[WEB] %s send aborted/timeout bytes=%u", log_tag ? log_tag : "image", (unsigned)len);
+  }
+  client.stop();
+  return ok;
 }
 
 static bool web_flush_chunk_buffer(String& buf) {
@@ -941,16 +1014,7 @@ static void web_handle_radio_logo_current() {
     return;
   }
 
-  WiFiClient client = s_server.client();
-  client.print("HTTP/1.1 200 OK\r\n");
-  client.print("Content-Type: image/bmp\r\n");
-  client.printf("Content-Length: %u\r\n", (unsigned)len);
-  client.print("Cache-Control: public, max-age=86400, immutable\r\n");
-  client.printf("ETag: %s\r\n", etag.c_str());
-  client.print("Connection: close\r\n");
-  client.print("\r\n");
-  client.write(buf, len);
-  client.flush();
+  web_send_bmp_buffer_with_etag(buf, len, etag, "radio logo");
 
   free(buf);
 }
@@ -1001,16 +1065,7 @@ static void web_handle_cover_current() {
 
   LOGI("[WEB] cover bmp hit track=%d bytes=%u", cur, (unsigned)len);
 
-  WiFiClient client = s_server.client();
-  client.print("HTTP/1.1 200 OK\r\n");
-  client.print("Content-Type: image/bmp\r\n");
-  client.printf("Content-Length: %u\r\n", (unsigned)len);
-  client.print("Cache-Control: public, max-age=86400, immutable\r\n");
-  client.printf("ETag: %s\r\n", etag.c_str());
-  client.print("Connection: close\r\n");
-  client.print("\r\n");
-  client.write(buf, len);
-  client.flush();
+  web_send_bmp_buffer_with_etag(buf, len, etag, "cover");
 
   free(buf);
 }

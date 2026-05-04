@@ -141,6 +141,8 @@ let pollTimer = null;
 let lyricTimer = null;
 let volumeTimer = null;
 let inFlight = false;
+let statusController = null;
+let statusFetchStartedAt = 0;
 let currentPollMs = POLL_MS;
 let nextPollAt = Date.now() + POLL_MS;
 let lastStatus = null;
@@ -270,6 +272,14 @@ function scheduleNext(ms){
 }
 function fmt(ms){ const s=Math.max(0,Math.floor((ms||0)/1000)); const m=Math.floor(s/60); const r=s%60; return `${m}:${String(r).padStart(2,'0')}`; }
 function estimatePlayMs(snap){ let play=Number(snap?.play_ms)||0; if(snap&&snap.is_playing&&!snap.is_paused&&!snap.rescanning){ play += Math.max(0, Date.now()-lastStatusAt);} return play; }
+function abortStatusFetch(){
+  if(statusController){
+    try{ statusController.abort(); }catch(e){}
+    statusController = null;
+  }
+  inFlight = false;
+  statusFetchStartedAt = 0;
+}
 function clearLyricTimer(){ if(lyricTimer){ clearTimeout(lyricTimer); lyricTimer=null; } }
 function updateLyricsFromState(j){
   const currentNode = document.getElementById('lyricCurrent');
@@ -319,10 +329,28 @@ function scheduleLyricTransition(j){
 }
 async function fetchStatus(){
   if(!pageActive) return;
-  if(inFlight) return;
+
+  if(inFlight){
+    if(statusFetchStartedAt && Date.now() - statusFetchStartedAt > 5000){
+      abortStatusFetch();
+    }else{
+      scheduleNext(800);
+      return;
+    }
+  }
+
   inFlight = true;
+  statusFetchStartedAt = Date.now();
+
+  const controller = new AbortController();
+  statusController = controller;
+  const timeoutId = setTimeout(() => controller.abort(), 3000);
+
   try{
-    const r = await fetch('/api/status', {cache:'no-store'});
+    const r = await fetch(`/api/status?t=${Date.now()}`, {
+      cache:'no-store',
+      signal: controller.signal
+    });
     const j = await r.json();
     lastStatusAt = Date.now(); lastStatus = j; render(j);
     currentPollMs = Math.max(120, Number(j.next_poll_ms) || POLL_MS);
@@ -331,8 +359,17 @@ async function fetchStatus(){
     const lyricThreshold = (typeof j.lyric_wait_poll_threshold_ms !== 'undefined' && Number(j.lyric_wait_poll_threshold_ms) > 0) ? Number(j.lyric_wait_poll_threshold_ms) : LYRIC_WAIT_POLL_THRESHOLD_MS;
     document.getElementById('pollInfo').textContent = `刷新：${currentPollMs} ms / 歌词：${j.lyric_sync_mode_label||'平衡'} / 阈值：${lyricThreshold}ms`;
     scheduleNext(currentPollMs); scheduleLyricTransition(j);
-  }catch(e){ document.getElementById('net').textContent = '网页状态获取失败'; scheduleNext(Math.max(POLL_MS, 1500)); }
-  finally{ inFlight = false; }
+  }catch(e){
+    document.getElementById('net').textContent = e.name === 'AbortError' ? '网页请求超时，正在重试' : '网页状态获取失败';
+    scheduleNext(Math.max(POLL_MS, 1500));
+  }finally{
+    clearTimeout(timeoutId);
+    if(statusController === controller){
+      statusController = null;
+    }
+    inFlight = false;
+    statusFetchStartedAt = 0;
+  }
 }
 function pausePagePolling(){
   pageActive = false;
@@ -344,6 +381,7 @@ function pausePagePolling(){
   }
 
   clearLyricTimer();
+  abortStatusFetch();
 }
 
 function resumePagePolling(){
