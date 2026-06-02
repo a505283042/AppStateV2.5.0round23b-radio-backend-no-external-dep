@@ -11,6 +11,7 @@
 #include "player_source.h"
 #include "lyrics/lyrics.h"
 #include "audio/audio_radio_backend.h"
+#include "storage/storage.h"
 #include "storage/storage_catalog_v3.h"
 #include "ui/ui.h"
 #include "utils/log.h"
@@ -210,6 +211,13 @@ bool player_control_try_auto_next(bool entered, bool started)
     if (audio_service_is_playing()) return false;
     const PlayerSourceState source = player_source_get();
     if (source.type == PlayerSourceType::NET_RADIO) return false;
+
+    // SD 疑似拔卡/读卡异常时，不要自动切到下一首。
+    // 否则会在无卡状态下连续尝试打开下一首、歌词、封面，形成失败风暴。
+    if (!storage_is_ready() || storage_has_recent_io_error()) {
+        LOGW("[PLAYER] auto next blocked: storage not ready or IO error pending");
+        return false;
+    }
 
     const int cur = control_current_track_idx();
     int next = 0;

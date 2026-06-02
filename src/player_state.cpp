@@ -18,6 +18,7 @@
 #include "audio/audio_radio_backend.h"
 #include "storage/storage_catalog_v3.h"
 #include "storage/storage_types_v3.h"
+#include "storage/storage.h"
 #include "ui/ui.h"
 #include "utils/log.h"
 
@@ -573,6 +574,13 @@ void player_state_run(void)
 
         if (track_count <= 0) {
             LOGE("[PLAYER] no tracks");
+
+            if (!storage_is_ready()) {
+                ui_show_player_placeholder("未插入TF卡", "插卡后自动加载");
+            } else {
+                ui_show_player_placeholder("没有歌曲", "请检查 /Music 目录");
+            }
+
             return;
         }
 

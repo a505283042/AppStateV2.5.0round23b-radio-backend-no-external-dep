@@ -13,3 +13,9 @@ void web_server_start();
 void web_server_poll();
 bool web_server_started();
 bool web_server_ready();
+
+/**
+ * 重新从 TF 卡 /System/config/wifi.conf 读取 WiFi 配置。
+ * 用于开机无卡进入 AP 后，插卡时切换到 STA。
+ */
+bool web_server_retry_sta_from_config();

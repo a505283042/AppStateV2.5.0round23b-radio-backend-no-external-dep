@@ -13,6 +13,7 @@
 #include "player_playlist.h"
 #include "player_recover.h"
 #include "player_state.h"
+#include "storage/storage.h"
 #include "storage/storage_catalog_v3.h"
 #include "ui/ui.h"
 #include "utils/log.h"
@@ -20,7 +21,6 @@
 namespace {
 
 static const char* kPrefsNs = "playerst";
-static const char* kPrefsBlobKey = "snap";
 static const uint8_t kSnapshotVersion = 2;
 static const uint32_t kDeferredRestoreDelayMs = 450;
 
@@ -110,13 +110,19 @@ static void snapshot_log_loaded(const char* prefix, const PlayerPersistSnapshot&
 
 static bool snapshot_read_blob(Preferences& pref, PlayerPersistSnapshot& out)
 {
-    const size_t len = pref.getBytesLength(kPrefsBlobKey);
+    const char* key = storage_card_snapshot_key();
+
+    if (!pref.isKey(key)) {
+        return false;
+    }
+
+    const size_t len = pref.getBytesLength(key);
     if (len != sizeof(PlayerPersistSnapshotBlob)) {
         return false;
     }
 
     PlayerPersistSnapshotBlob blob{};
-    const size_t read_len = pref.getBytes(kPrefsBlobKey, &blob, sizeof(blob));
+    const size_t read_len = pref.getBytes(key, &blob, sizeof(blob));
     if (read_len != sizeof(blob)) {
         LOGW("[SNAPSHOT] blob read size mismatch: got=%u expect=%u",
              (unsigned)read_len, (unsigned)sizeof(blob));
@@ -167,6 +173,8 @@ bool player_snapshot_load_pending_from_nvs()
     s_restore_not_before_ms = 0;
     s_pending = PlayerPersistSnapshot{};
 
+    const char* key = storage_card_snapshot_key();
+
     Preferences pref;
     if (!pref.begin(kPrefsNs, true)) {
         LOGW("[SNAPSHOT] load skipped: open NVS namespace failed");
@@ -176,12 +184,13 @@ bool player_snapshot_load_pending_from_nvs()
     bool ok = false;
     if (snapshot_read_blob(pref, s_pending)) {
         ok = true;
+        LOGI("[SNAPSHOT] load key=%s", key);
         snapshot_log_loaded("pending loaded from NVS blob", s_pending);
     }
     pref.end();
 
     if (!ok) {
-        LOGI("[SNAPSHOT] no saved player snapshot in NVS");
+        LOGI("[SNAPSHOT] no saved player snapshot in NVS key=%s", key);
         return false;
     }
 
@@ -215,13 +224,15 @@ bool player_snapshot_save_to_nvs()
     blob.user_paused = snap.user_paused ? 1 : 0;
     snap.track_path.toCharArray(blob.track_path, sizeof(blob.track_path));
 
+    const char* key = storage_card_snapshot_key();
+
     Preferences pref;
     if (!pref.begin(kPrefsNs, false)) {
         LOGE("[SNAPSHOT] save failed: open NVS namespace");
         return false;
     }
 
-    const size_t written = pref.putBytes(kPrefsBlobKey, &blob, sizeof(blob));
+    const size_t written = pref.putBytes(key, &blob, sizeof(blob));
     pref.end();
     if (written != sizeof(blob)) {
         LOGE("[SNAPSHOT] save failed: blob write size=%u expect=%u",
@@ -231,6 +242,7 @@ bool player_snapshot_save_to_nvs()
 
     s_pending = snap;
     s_has_pending = true;
+    LOGD("[SNAPSHOT] save key=%s", key);
     snapshot_log_loaded("saved to NVS blob", snap);
     return true;
 }
@@ -357,7 +369,7 @@ PlayerSnapshotRestorePollResult player_snapshot_poll_restore()
         player_assets_schedule(asset_job);
     } else if (allow_boot_next_prefetch) {
         // 当前首没有封面/歌词需要补，也仍然发一个空 job，
-        // 目的只是进入 PlayerAssetTask，让它执行“下一首封面预读”。
+        // 目的只是进入 PlayerAssetTask，让它执行"下一首封面预读"。
         player_assets_reset_job(asset_job);
         asset_job.track_idx = track_idx;
         asset_job.need_total = false;

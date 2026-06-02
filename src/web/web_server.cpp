@@ -1582,6 +1582,45 @@ static void web_setup_routes() {
   s_server.on("/api/wifiinfo/toggle", HTTP_POST, web_handle_wifiinfo_toggle);
   s_server.onNotFound([](){ web_send_json_err("not_found", 404); });
 }
+
+bool web_server_retry_sta_from_config()
+{
+#if WEBCTRL_ENABLED
+  if (!s_started) {
+    web_server_start();
+    return s_ready && !s_ap_mode;
+  }
+
+  if (!s_ready) {
+    return false;
+  }
+
+  // 如果已经是 STA 且连接正常，不重复切换。
+  if (!s_ap_mode && WiFi.status() == WL_CONNECTED) {
+    LOGI("[WEB] STA already connected ip=%s", WiFi.localIP().toString().c_str());
+    return true;
+  }
+
+  LOGI("[WEB] retry STA from config");
+
+  const bool ok = web_try_connect_sta_from_config();
+
+  if (ok) {
+    // s_server 已经 begin 过，WiFi 从 AP 切 STA 后一般不需要重新注册路由。
+    LOGI("[WEB] switched to STA ip=%s", WiFi.localIP().toString().c_str());
+    return true;
+  }
+
+  // 注意：web_try_connect_sta_from_config 失败后会 WiFi.disconnect，
+  // 如果不重新拉起 AP，网页控制入口会丢失。
+  LOGW("[WEB] retry STA failed, restore AP fallback");
+  web_start_ap_fallback();
+  return false;
+#else
+  return false;
+#endif
+}
+
 void web_server_start() {
 #if WEBCTRL_ENABLED
   if (s_started) return;

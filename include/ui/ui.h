@@ -56,6 +56,8 @@ void ui_set_screen(ui_screen_t screen);    /* 切换当前显示页面 */
 void ui_enter_player(void);                /* 进入播放器页 */
 void ui_return_to_player(void);            /* 从 NFC admin / 扫描页轻量返回播放器 */
 void ui_enter_nfc_admin(void);             /* 进入 NFC 管理页 */
+/* 播放器占位页：无卡 / 空曲库 / 已就绪但未播放 */
+void ui_show_player_placeholder(const char* line1, const char* line2);
 
 /* -------- 封面主图 / 缓存 -------- */
 bool ui_draw_cover_for_track(const TrackInfo& t, bool force_redraw = false);

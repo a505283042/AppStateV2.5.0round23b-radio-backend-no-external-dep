@@ -38,7 +38,7 @@ void boot_state_run(void)
     Serial.begin(115200);
     delay(300);
     Serial.println("[BOOT] start");
-    
+
     Serial.printf("[MEM] psramFound=%d, PsramSize=%u, FreePsram=%u\n",
               (int)psramFound(), (unsigned)ESP.getPsramSize(), (unsigned)ESP.getFreePsram());
     Serial.printf("[MEM] FreeHeap=%u\n", (unsigned)ESP.getFreeHeap());
@@ -46,14 +46,20 @@ void boot_state_run(void)
     // 1) 初始化两条 SPI：默认SPI=UI，SPI_SD=SD
     board_spi_init();
 
-    storage_init();
-    audio_file_prepare_music_root_cache();
+    const bool sd_ok = storage_init();
+    if (sd_ok) {
+        audio_file_prepare_music_root_cache();
 
-    // 加载 NFC 绑定文件
-    if (nfc_binding_load("/System/nfc_map.txt")) {
-        LOGI("[BOOT] NFC bindings loaded: %d entries", nfc_binding_count());
+        // 加载 NFC 绑定文件
+        if (nfc_binding_load("/System/nfc_map.txt")) {
+            LOGI("[BOOT] NFC bindings loaded: %d entries", nfc_binding_count());
+        } else {
+            LOGI("[BOOT] No NFC bindings found");
+        }
     } else {
-        LOGI("[BOOT] No NFC bindings found");
+        LOGW("[BOOT] no TF card, start without local library");
+        nfc_binding_clear();
+        storage_catalog_v3_clear();
     }
 
     // 初始化封面缓冲区（固定大小，避免 PSRAM 碎片）
@@ -73,18 +79,25 @@ void boot_state_run(void)
     // 让用户看到"启动中..."界面
     // delay(1000);
 
-    prepare_music_catalogs();
+    if (storage_is_ready()) {
+        prepare_music_catalogs();
+    } else {
+        LOGW("[BOOT] skip local catalog: storage not ready");
+    }
 
     // 预加载电台列表到内存中
     #include "radio/radio_catalog.h"
-    if (radio_catalog_load()) {
+    if (storage_is_ready() && radio_catalog_load()) {
         LOGI("[BOOT] Radio catalog loaded: %d stations", (int)radio_catalog_count());
     } else {
-        LOGW("[BOOT] Radio catalog load failed");
+        LOGW("[BOOT] Radio catalog load skipped or failed");
     }
 
     // 提前从 NVS 读取待恢复快照；真正恢复播放在首次进入 player 状态时执行。
-    player_snapshot_load_pending_from_nvs();
+    // 注意：只有存储就绪时才读取 snapshot，因为 snapshot key 依赖卡身份。
+    if (storage_is_ready()) {
+        player_snapshot_load_pending_from_nvs();
+    }
 
     // 启动网页控制 MVP（优先连已配置 Wi-Fi，失败则回退到 AP 热点模式）
     web_server_start();

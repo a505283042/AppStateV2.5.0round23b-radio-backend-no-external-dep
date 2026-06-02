@@ -1,0 +1,2775 @@
+diff -ruN "/mnt/data/esp_hotplug_orig/AppStateV2.5.0round23b-radio-backend-no-external-dep - #U526f#U672c/include/storage/storage.h" "/mnt/data/esp_hotplug/AppStateV2.5.0round23b-radio-backend-no-external-dep - #U526f#U672c/include/storage/storage.h"
+--- "/mnt/data/esp_hotplug_orig/AppStateV2.5.0round23b-radio-backend-no-external-dep - #U526f#U672c/include/storage/storage.h"	2026-05-04 18:17:58.000000000 +0000
++++ "/mnt/data/esp_hotplug/AppStateV2.5.0round23b-radio-backend-no-external-dep - #U526f#U672c/include/storage/storage.h"	2026-06-02 12:21:54.954325609 +0000
+@@ -1,16 +1,31 @@
+-/* 存储系统(SD/文件系统)模块头文件 */
+-#ifndef STORAGE_H
+-#define STORAGE_H
+-
+-#include <stdbool.h>
+-
+-/* 存储系统初始化 */
+-bool storage_init(void);
+-
+-/* 存储状态 */
+-bool storage_is_ready(void);
+-
+-/* 调试用：列出根目录 */
+-void storage_list_root(void);
+-
+-#endif // STORAGE_H
++/* 存储系统(SD/文件系统)模块头文件 */
++#ifndef STORAGE_H
++#define STORAGE_H
++
++#include <stdbool.h>
++
++/* 存储系统初始化 */
++bool storage_init(void);
++
++/* 挂载 / 卸载 TF 卡。storage_init() 保持兼容，内部等价于 storage_mount()。 */
++bool storage_mount(void);
++bool storage_unmount(void);
++
++/* 存储状态 */
++bool storage_is_ready(void);
++
++/* 立即标记 TF 不可用，用于拔卡确认后阻止新的文件访问。 */
++void storage_mark_not_ready(void);
++
++/* 没有 CD 脚时的软件探测：轻量打开根目录，判断当前挂载是否还可用。 */
++bool storage_probe_alive(void);
++
++/* SD 访问失败上报。热插拔状态机会据此缩短确认拔卡的探测间隔。 */
++void storage_report_io_error(const char* where);
++bool storage_has_recent_io_error(void);
++void storage_clear_io_error(void);
++
++/* 调试用：列出根目录 */
++void storage_list_root(void);
++
++#endif // STORAGE_H
+diff -ruN "/mnt/data/esp_hotplug_orig/AppStateV2.5.0round23b-radio-backend-no-external-dep - #U526f#U672c/include/storage/storage_hotplug.h" "/mnt/data/esp_hotplug/AppStateV2.5.0round23b-radio-backend-no-external-dep - #U526f#U672c/include/storage/storage_hotplug.h"
+--- "/mnt/data/esp_hotplug_orig/AppStateV2.5.0round23b-radio-backend-no-external-dep - #U526f#U672c/include/storage/storage_hotplug.h"	1970-01-01 00:00:00.000000000 +0000
++++ "/mnt/data/esp_hotplug/AppStateV2.5.0round23b-radio-backend-no-external-dep - #U526f#U672c/include/storage/storage_hotplug.h"	2026-06-02 12:22:15.750189369 +0000
+@@ -0,0 +1,25 @@
++#pragma once
++
++#include <stdint.h>
++
++/**
++ * @brief 无 CD 脚版本的 TF 热插拔事件。
++ *
++ * CARD_MOUNTED：从无卡/未挂载状态探测到可挂载。
++ * CARD_REMOVED：已挂载状态下确认 TF 不可访问。
++ */
++enum class StorageHotplugEvent : uint8_t {
++    NONE = 0,
++    CARD_MOUNTED,
++    CARD_REMOVED,
++};
++
++void storage_hotplug_init(void);
++
++/**
++ * @brief 轮询软件热插拔状态机。
++ *
++ * @param allow_sd_probe 为 false 时不主动访问 SD，只保留状态。
++ *        本地播放/重扫期间建议传 false，避免和高频 SD 读竞争。
++ */
++StorageHotplugEvent storage_hotplug_poll(bool allow_sd_probe);
+diff -ruN "/mnt/data/esp_hotplug_orig/AppStateV2.5.0round23b-radio-backend-no-external-dep - #U526f#U672c/src/app_state.cpp" "/mnt/data/esp_hotplug/AppStateV2.5.0round23b-radio-backend-no-external-dep - #U526f#U672c/src/app_state.cpp"
+--- "/mnt/data/esp_hotplug_orig/AppStateV2.5.0round23b-radio-backend-no-external-dep - #U526f#U672c/src/app_state.cpp"	2026-05-04 18:17:58.000000000 +0000
++++ "/mnt/data/esp_hotplug/AppStateV2.5.0round23b-radio-backend-no-external-dep - #U526f#U672c/src/app_state.cpp"	2026-06-02 12:24:07.929672951 +0000
+@@ -1,241 +1,348 @@
+-#include "app_state.h"         /* 包含应用状态管理模块 */
+-#include "boot_state.h"         /* 包含启动状态模块 */
+-#include "player_state.h"       /* 包含播放器状态模块 */
+-#include "player_list_select.h" /* 包含列表选择模块 */
+-#include "player_control.h"
+-#include <Arduino.h>
+-#include "nfc/nfc_admin_state.h" /* 包含NFC管理状态模块 */
+-#include "nfc/nfc.h"           /* 包含NFC模块 */
+-#include "keys/keys.h"                /* 包含按键处理模块 */
+-#include "app_flags.h"
+-#include "ui/ui.h"
+-#include "utils/log.h"
+-#include "audio/audio_service.h"
+-#include "audio/audio_file.h"
+-#include "storage/storage_catalog_v3.h"
+-#include "player_recover.h"
+-#include "web/web_server.h"
+-#include <freertos/FreeRTOS.h>
+-#include <freertos/task.h>
+-
+-volatile bool g_rescan_done = false; // 扫描完成标志
+-volatile bool g_rescanning = false; // 扫描中标志
+-volatile bool g_rescan_success = false; // 扫描成功标志
+-volatile bool g_abort_scan = false; // 扫描中断标志
+-
+-
+-volatile play_mode_t g_play_mode = PLAY_MODE_ALL_SEQ;  // 播放模式
+-
+-static TaskHandle_t s_rescan_task = nullptr; // 扫描任务句柄
+-
+-// 扫描任务入口
+-static void app_rescan_task_entry(void* )
+-{
+-    bool success = false;
+-
+-    player_control_mark_manual_stop();
+-    audio_service_stop(true);
+-
+-    uint32_t start = millis();
+-    while (audio_service_is_playing() && (millis() - start) < 1000) {
+-        vTaskDelay(pdMS_TO_TICKS(10));
+-    }
+-
+-    audio_file_invalidate_dir_cache();
+-    success = storage_catalog_v3_rebuild("/Music", "/System/music_index_v3.bin");
+-
+-    g_rescan_success = success;
+-    g_rescan_done = true;
+-    s_rescan_task = nullptr;
+-    vTaskDelete(nullptr);
+-}
+-
+-/* 全局应用状态变量，初始值为启动状态 */
+-app_state_t g_app_state = STATE_BOOT;
+-
+-/* 初始化应用状态为启动状态 */
+-void app_state_init(void)
+-{
+-    g_app_state = STATE_BOOT;
+-    keys_init(); /* 初始化按键处理模块 */
+-}
+-
+-/* 根据当前应用状态执行相应的状态处理函数 */
+-void app_state_update(void)
+-{
+-    // 按键处理也需要高频调用，确保响应及时
+-    keys_update();
+-    web_server_poll();
+-
+-    switch (g_app_state) {
+-        case STATE_BOOT:        /* 如果是启动状态，则运行启动状态处理函数 */
+-            boot_state_run();
+-            break;
+-
+-        case STATE_PLAYER:      /* 如果是播放器状态，则运行播放器状态处理函数 */
+-            player_state_run();
+-            break;
+-
+-        case STATE_NFC_ADMIN:   /* 如果是NFC管理状态，则运行NFC管理状态处理函数 */
+-            nfc_admin_state_run();
+-            break;
+-
+-        default:                /* 默认情况下不执行任何操作 */
+-            break;
+-    }
+-}
+-
+-/* 请求进入 NFC 管理状态 */
+-bool app_request_enter_nfc_admin()
+-{
+-    // 只允许从播放器主状态进入
+-    if (g_app_state != STATE_PLAYER) {
+-        LOGI("[APP] enter NFC admin denied: not in player state");
+-        return false;
+-    }
+-
+-    // 扫描中不允许进入
+-    if (g_rescanning) {
+-        LOGI("[APP] enter NFC admin denied: rescanning");
+-        return false;
+-    }
+-
+-    // 列表选择模式不允许进入
+-    if (player_list_select_is_active()) {
+-        LOGI("[APP] enter NFC admin denied: list select mode");
+-        return false;
+-    }
+-
+-    LOGI("[APP] entering NFC admin");
+-
+-    // 冻结一下 UI 渲染，避免切页时和旧界面打架
+-    ui_hold_render(true);
+-
+-    // 同步按键状态到硬件，避免"长按进入后，松手又触发别的键行为"
+-    keys_sync_to_hw_state();
+-
+-    // 清理旧的 NFC 待处理事件，防止刚进 admin 就吃到上一次遗留 UID
+-    String dummy;
+-    while (nfc_take_last_uid(dummy)) {
+-        // drain pending uid
+-    }
+-
+-    // 先切状态，再调用 nfc_admin_state_enter() 让它自己处理 UI
+-    g_app_state = STATE_NFC_ADMIN;
+-    nfc_admin_state_enter();
+-
+-    ui_hold_render(false);
+-    return true;
+-}
+-
+-/* 请求进入 NFC 管理状态并指定目标 */
+-bool app_request_enter_nfc_admin_with_target(const NfcAdminTarget& target)
+-{
+-    if (g_app_state != STATE_PLAYER) {
+-        LOGI("[APP] enter NFC admin denied: not in player state");
+-        return false;
+-    }
+-
+-    if (g_rescanning) {
+-        LOGI("[APP] enter NFC admin denied: rescanning");
+-        return false;
+-    }
+-
+-    if (player_list_select_is_active()) {
+-        LOGI("[APP] enter NFC admin denied: list select mode");
+-        return false;
+-    }
+-
+-    LOGI("[APP] entering NFC admin with explicit target");
+-
+-    ui_hold_render(true);
+-    keys_sync_to_hw_state();
+-
+-    String dummy;
+-    while (nfc_take_last_uid(dummy)) {
+-    }
+-
+-    nfc_admin_state_set_override_target(target);
+-
+-    g_app_state = STATE_NFC_ADMIN;
+-    nfc_admin_state_enter();
+-
+-    ui_hold_render(false);
+-    return true;
+-}
+-
+-/* 请求退出 NFC 管理状态 */
+-void app_request_exit_nfc_admin()
+-{
+-    LOGI("[APP] exiting NFC admin");
+-
+-    ui_hold_render(true);
+-
+-    keys_sync_to_hw_state();
+-
+-    nfc_admin_state_exit();
+-    g_app_state = STATE_PLAYER;
+-
+-    ui_return_to_player();
+-
+-    ui_hold_render(false);
+-
+-    if (nfc_admin_state_consume_resume_request()) {
+-        LOGI("[APP] NFC admin exit: resume current track");
+-        player_toggle_play();
+-    }
+-}
+-
+-// 请求启动扫描
+-bool app_request_start_rescan()
+-{
+-    if (g_app_state != STATE_PLAYER) {
+-        LOGI("[APP] start rescan denied: not in player state");
+-        return false;
+-    }
+-    if (g_rescanning || s_rescan_task != nullptr) {
+-        LOGI("[APP] start rescan denied: already rescanning");
+-        return false;
+-    }
+-    if (player_list_select_is_active()) {
+-        LOGI("[APP] start rescan denied: list select mode");
+-        return false;
+-    }
+-
+-    player_recover_prepare_rescan_restore_current();
+-    g_abort_scan = false;
+-    g_rescan_done = false;
+-    g_rescan_success = false;
+-    g_rescanning = true;
+-
+-    BaseType_t ok = xTaskCreate(
+-        app_rescan_task_entry,
+-        "rescan_v3",
+-        8192,
+-        nullptr,
+-        1,
+-        &s_rescan_task);
+-
+-    if (ok != pdPASS) {
+-        LOGE("[APP] Failed to create rescan task");
+-        s_rescan_task = nullptr;
+-        g_rescanning = false;
+-        return false;
+-    }
+-
+-    return true;
+-}
+-
+-// 请求取消扫描
+-bool app_request_cancel_rescan()
+-{
+-    if (!g_rescanning) {
+-        LOGI("[APP] cancel rescan ignored: not rescanning");
+-        return false;
+-    }
+-    if (!g_abort_scan) {
+-        g_abort_scan = true;
+-        LOGI("[APP] rescan cancel requested");
+-    }
+-    return true;
+-}
++#include "app_state.h"         /* 包含应用状态管理模块 */
++#include "boot_state.h"         /* 包含启动状态模块 */
++#include "player_state.h"       /* 包含播放器状态模块 */
++#include "player_list_select.h" /* 包含列表选择模块 */
++#include "player_control.h"
++#include <Arduino.h>
++#include "nfc/nfc_admin_state.h" /* 包含NFC管理状态模块 */
++#include "nfc/nfc.h"           /* 包含NFC模块 */
++#include "keys/keys.h"                /* 包含按键处理模块 */
++#include "app_flags.h"
++#include "ui/ui.h"
++#include "utils/log.h"
++#include "audio/audio_service.h"
++#include "audio/audio_file.h"
++#include "lyrics/lyrics.h"
++#include "nfc/nfc_binding.h"
++#include "radio/radio_catalog.h"
++#include "storage/storage.h"
++#include "storage/storage_catalog_v3.h"
++#include "storage/storage_hotplug.h"
++#include "player_assets.h"
++#include "player_playlist.h"
++#include "player_recover.h"
++#include "player_source.h"
++#include "web/web_server.h"
++#include <freertos/FreeRTOS.h>
++#include <freertos/task.h>
++
++volatile bool g_rescan_done = false; // 扫描完成标志
++volatile bool g_rescanning = false; // 扫描中标志
++volatile bool g_rescan_success = false; // 扫描成功标志
++volatile bool g_abort_scan = false; // 扫描中断标志
++
++
++volatile play_mode_t g_play_mode = PLAY_MODE_ALL_SEQ;  // 播放模式
++
++static TaskHandle_t s_rescan_task = nullptr; // 扫描任务句柄
++
++static void app_handle_tf_removed();
++static void app_handle_tf_mounted();
++
++// 扫描任务入口
++static void app_rescan_task_entry(void* )
++{
++    bool success = false;
++
++    player_control_mark_manual_stop();
++    audio_service_stop(true);
++
++    uint32_t start = millis();
++    while (audio_service_is_playing() && (millis() - start) < 1000) {
++        vTaskDelay(pdMS_TO_TICKS(10));
++    }
++
++    audio_file_invalidate_dir_cache();
++    if (storage_is_ready()) {
++        success = storage_catalog_v3_rebuild("/Music", "/System/music_index_v3.bin");
++    } else {
++        LOGW("[APP] rescan skipped: storage not ready");
++        success = false;
++    }
++
++    g_rescan_success = success;
++    g_rescan_done = true;
++    s_rescan_task = nullptr;
++    vTaskDelete(nullptr);
++}
++
++/* 全局应用状态变量，初始值为启动状态 */
++app_state_t g_app_state = STATE_BOOT;
++
++/* 初始化应用状态为启动状态 */
++void app_state_init(void)
++{
++    g_app_state = STATE_BOOT;
++    keys_init(); /* 初始化按键处理模块 */
++    storage_hotplug_init();
++}
++
++static void app_handle_tf_removed()
++{
++    LOGW("[APP] TF removed");
++
++    storage_mark_not_ready();
++    g_abort_scan = true;
++
++    player_list_select_reset();
++
++    player_assets_invalidate_requests();
++    player_assets_cancel_pending_cover_prefetch();
++    player_assets_clear_primed_current_cover();
++    player_assets_drop_primed_next_cover();
++    player_assets_clear_deferred_current_cover_apply();
++    player_assets_clear_web_cover_cache();
++
++    const PlayerSourceState source = player_source_get();
++
++    // 本地音乐依赖 TF，必须停；网络电台不依赖 TF，可以继续播放。
++    if (source.type != PlayerSourceType::NET_RADIO) {
++        player_control_mark_manual_stop();
++        audio_service_stop(true);
++        player_source_reset();
++        player_state_set_current_index(-1);
++    }
++
++    g_lyricsDisplay.clear();
++    ui_cover_cache_invalidate();
++
++    audio_file_invalidate_dir_cache();
++    storage_catalog_v3_clear();
++    player_playlist_reset_state();
++    nfc_binding_clear();
++
++    storage_unmount();
++    storage_clear_io_error();
++
++    ui_request_refresh_now();
++}
++
++static void app_handle_tf_mounted()
++{
++    LOGI("[APP] TF mounted");
++
++    audio_file_prepare_music_root_cache();
++
++    if (nfc_binding_load("/System/nfc_map.txt")) {
++        LOGI("[APP] NFC bindings reloaded: %d entries", nfc_binding_count());
++    } else {
++        LOGI("[APP] no NFC bindings after TF mounted");
++    }
++
++    if (radio_catalog_load()) {
++        LOGI("[APP] radio catalog reloaded: %d stations", (int)radio_catalog_count());
++    } else {
++        LOGW("[APP] radio catalog reload failed");
++    }
++
++    if (!storage_catalog_v3_load_or_rebuild("/Music", "/System/music_index_v3.bin")) {
++        LOGE("[APP] catalog reload failed after TF mounted");
++        ui_request_refresh_now();
++        return;
++    }
++
++    player_playlist_reset_state();
++    player_playlist_force_rebuild();
++    ui_request_refresh_now();
++}
++
++/* 根据当前应用状态执行相应的状态处理函数 */
++void app_state_update(void)
++{
++    // 按键处理也需要高频调用，确保响应及时
++    keys_update();
++    web_server_poll();
++
++    const PlayerSourceState source = player_source_get();
++    const bool local_audio_active =
++        source.type == PlayerSourceType::LOCAL_TRACK &&
++        (audio_service_is_playing() || audio_service_is_paused());
++
++    const bool allow_sd_probe =
++        g_app_state != STATE_BOOT &&
++        !g_rescanning &&
++        !local_audio_active;
++
++    const StorageHotplugEvent hotplug_event = storage_hotplug_poll(allow_sd_probe);
++    if (hotplug_event == StorageHotplugEvent::CARD_REMOVED) {
++        app_handle_tf_removed();
++    } else if (hotplug_event == StorageHotplugEvent::CARD_MOUNTED) {
++        app_handle_tf_mounted();
++    }
++
++    switch (g_app_state) {
++        case STATE_BOOT:        /* 如果是启动状态，则运行启动状态处理函数 */
++            boot_state_run();
++            break;
++
++        case STATE_PLAYER:      /* 如果是播放器状态，则运行播放器状态处理函数 */
++            player_state_run();
++            break;
++
++        case STATE_NFC_ADMIN:   /* 如果是NFC管理状态，则运行NFC管理状态处理函数 */
++            nfc_admin_state_run();
++            break;
++
++        default:                /* 默认情况下不执行任何操作 */
++            break;
++    }
++}
++
++/* 请求进入 NFC 管理状态 */
++bool app_request_enter_nfc_admin()
++{
++    // 只允许从播放器主状态进入
++    if (g_app_state != STATE_PLAYER) {
++        LOGI("[APP] enter NFC admin denied: not in player state");
++        return false;
++    }
++
++    // 扫描中不允许进入
++    if (g_rescanning) {
++        LOGI("[APP] enter NFC admin denied: rescanning");
++        return false;
++    }
++
++    // 列表选择模式不允许进入
++    if (player_list_select_is_active()) {
++        LOGI("[APP] enter NFC admin denied: list select mode");
++        return false;
++    }
++
++    LOGI("[APP] entering NFC admin");
++
++    // 冻结一下 UI 渲染，避免切页时和旧界面打架
++    ui_hold_render(true);
++
++    // 同步按键状态到硬件，避免"长按进入后，松手又触发别的键行为"
++    keys_sync_to_hw_state();
++
++    // 清理旧的 NFC 待处理事件，防止刚进 admin 就吃到上一次遗留 UID
++    String dummy;
++    while (nfc_take_last_uid(dummy)) {
++        // drain pending uid
++    }
++
++    // 先切状态，再调用 nfc_admin_state_enter() 让它自己处理 UI
++    g_app_state = STATE_NFC_ADMIN;
++    nfc_admin_state_enter();
++
++    ui_hold_render(false);
++    return true;
++}
++
++/* 请求进入 NFC 管理状态并指定目标 */
++bool app_request_enter_nfc_admin_with_target(const NfcAdminTarget& target)
++{
++    if (g_app_state != STATE_PLAYER) {
++        LOGI("[APP] enter NFC admin denied: not in player state");
++        return false;
++    }
++
++    if (g_rescanning) {
++        LOGI("[APP] enter NFC admin denied: rescanning");
++        return false;
++    }
++
++    if (player_list_select_is_active()) {
++        LOGI("[APP] enter NFC admin denied: list select mode");
++        return false;
++    }
++
++    LOGI("[APP] entering NFC admin with explicit target");
++
++    ui_hold_render(true);
++    keys_sync_to_hw_state();
++
++    String dummy;
++    while (nfc_take_last_uid(dummy)) {
++    }
++
++    nfc_admin_state_set_override_target(target);
++
++    g_app_state = STATE_NFC_ADMIN;
++    nfc_admin_state_enter();
++
++    ui_hold_render(false);
++    return true;
++}
++
++/* 请求退出 NFC 管理状态 */
++void app_request_exit_nfc_admin()
++{
++    LOGI("[APP] exiting NFC admin");
++
++    ui_hold_render(true);
++
++    keys_sync_to_hw_state();
++
++    nfc_admin_state_exit();
++    g_app_state = STATE_PLAYER;
++
++    ui_return_to_player();
++
++    ui_hold_render(false);
++
++    if (nfc_admin_state_consume_resume_request()) {
++        LOGI("[APP] NFC admin exit: resume current track");
++        player_toggle_play();
++    }
++}
++
++// 请求启动扫描
++bool app_request_start_rescan()
++{
++    if (g_app_state != STATE_PLAYER) {
++        LOGI("[APP] start rescan denied: not in player state");
++        return false;
++    }
++    if (g_rescanning || s_rescan_task != nullptr) {
++        LOGI("[APP] start rescan denied: already rescanning");
++        return false;
++    }
++    if (player_list_select_is_active()) {
++        LOGI("[APP] start rescan denied: list select mode");
++        return false;
++    }
++    if (!storage_is_ready()) {
++        LOGI("[APP] start rescan denied: storage not ready");
++        return false;
++    }
++
++    player_recover_prepare_rescan_restore_current();
++    g_abort_scan = false;
++    g_rescan_done = false;
++    g_rescan_success = false;
++    g_rescanning = true;
++
++    BaseType_t ok = xTaskCreate(
++        app_rescan_task_entry,
++        "rescan_v3",
++        8192,
++        nullptr,
++        1,
++        &s_rescan_task);
++
++    if (ok != pdPASS) {
++        LOGE("[APP] Failed to create rescan task");
++        s_rescan_task = nullptr;
++        g_rescanning = false;
++        return false;
++    }
++
++    return true;
++}
++
++// 请求取消扫描
++bool app_request_cancel_rescan()
++{
++    if (!g_rescanning) {
++        LOGI("[APP] cancel rescan ignored: not rescanning");
++        return false;
++    }
++    if (!g_abort_scan) {
++        g_abort_scan = true;
++        LOGI("[APP] rescan cancel requested");
++    }
++    return true;
++}
+diff -ruN "/mnt/data/esp_hotplug_orig/AppStateV2.5.0round23b-radio-backend-no-external-dep - #U526f#U672c/src/audio/audio_file.cpp" "/mnt/data/esp_hotplug/AppStateV2.5.0round23b-radio-backend-no-external-dep - #U526f#U672c/src/audio/audio_file.cpp"
+--- "/mnt/data/esp_hotplug_orig/AppStateV2.5.0round23b-radio-backend-no-external-dep - #U526f#U672c/src/audio/audio_file.cpp"	2026-05-04 18:17:58.000000000 +0000
++++ "/mnt/data/esp_hotplug/AppStateV2.5.0round23b-radio-backend-no-external-dep - #U526f#U672c/src/audio/audio_file.cpp"	2026-06-02 12:22:24.535412037 +0000
+@@ -1,272 +1,296 @@
+-#include "audio/audio_file.h"
+-#include "utils/log.h"
+-#include "storage/storage_io.h"
+-
+-#include <string.h>
+-
+-extern SdFat sd;
+-
+-namespace {
+-constexpr size_t AUDIO_PATH_BUF = 300;
+-static File32 s_cached_dir;
+-static char s_cached_dir_path[AUDIO_PATH_BUF] = {0};
+-static bool s_cached_dir_valid = false;
+-
+-static File32 s_music_root_dir;
+-static bool s_music_root_valid = false;
+-
+-static bool is_music_root_path(const char* dir_path) {
+-  return dir_path && strcmp(dir_path, "/Music") == 0;
+-}
+-
+-static void close_cached_dir_locked() {
+-  if (s_cached_dir) {
+-    s_cached_dir.close();
+-  }
+-  s_cached_dir_path[0] = '\0';
+-  s_cached_dir_valid = false;
+-}
+-
+-static void close_music_root_locked() {
+-  if (s_music_root_dir) {
+-    s_music_root_dir.close();
+-  }
+-  s_music_root_valid = false;
+-}
+-
+-static bool split_parent_dir(const char* path, char* out_dir, size_t out_dir_cap, const char** out_name) {
+-  if (!path || !out_dir || out_dir_cap == 0 || !out_name) return false;
+-
+-  const char* slash = strrchr(path, '/');
+-  if (!slash) {
+-    out_dir[0] = '/';
+-    out_dir[1] = '\0';
+-    *out_name = path;
+-    return true;
+-  }
+-
+-  *out_name = slash + 1;
+-  if (**out_name == '\0') return false;
+-
+-  size_t dir_len = (size_t)(slash - path);
+-  if (dir_len == 0) {
+-    if (out_dir_cap < 2) return false;
+-    out_dir[0] = '/';
+-    out_dir[1] = '\0';
+-    return true;
+-  }
+-
+-  if (dir_len + 1 > out_dir_cap) return false;
+-  memcpy(out_dir, path, dir_len);
+-  out_dir[dir_len] = '\0';
+-  return true;
+-}
+-
+-static bool open_music_root_locked(SdFat& sd_ref) {
+-  if (s_music_root_valid && s_music_root_dir) return true;
+-  close_music_root_locked();
+-  if (!s_music_root_dir.open(&sd_ref, "/Music", O_RDONLY)) {
+-    return false;
+-  }
+-  s_music_root_valid = true;
+-  return true;
+-}
+-
+-static bool ensure_cached_dir_locked(SdFat& sd_ref, const char* dir_path, AudioFileOpenStats& stats) {
+-  const uint32_t t0 = millis();
+-
+-  if (is_music_root_path(dir_path) && open_music_root_locked(sd_ref)) {
+-    stats.used_dir_cache = 1;
+-    stats.dir_cache_reason = AUDIO_DIRCACHE_HIT_MUSIC_ROOT;
+-    stats.dir_prepare_ms = millis() - t0;
+-    return true;
+-  }
+-
+-  if (s_cached_dir_valid && strcmp(s_cached_dir_path, dir_path) == 0 && s_cached_dir) {
+-    stats.used_dir_cache = 1;
+-    stats.dir_cache_reason = AUDIO_DIRCACHE_HIT_LAST;
+-    stats.dir_prepare_ms = millis() - t0;
+-    return true;
+-  }
+-
+-  const bool had_prev = s_cached_dir_valid;
+-  const bool had_invalid = (s_cached_dir_valid && !s_cached_dir);
+-  close_cached_dir_locked();
+-  if (!s_cached_dir.open(&sd_ref, dir_path, O_RDONLY)) {
+-    stats.dir_cache_reason = AUDIO_DIRCACHE_MISS_OPEN_FAILED;
+-    stats.dir_prepare_ms = millis() - t0;
+-    return false;
+-  }
+-
+-  strncpy(s_cached_dir_path, dir_path, sizeof(s_cached_dir_path) - 1);
+-  s_cached_dir_path[sizeof(s_cached_dir_path) - 1] = '\0';
+-  s_cached_dir_valid = true;
+-  stats.used_dir_cache = 0;
+-  if (had_invalid) {
+-    stats.dir_cache_reason = AUDIO_DIRCACHE_MISS_INVALID;
+-  } else if (had_prev) {
+-    stats.dir_cache_reason = AUDIO_DIRCACHE_MISS_CHANGED;
+-  } else {
+-    stats.dir_cache_reason = AUDIO_DIRCACHE_MISS_FIRST;
+-  }
+-  stats.dir_prepare_ms = millis() - t0;
+-  return true;
+-}
+-}
+-
+-const char* audio_file_dir_cache_reason_str(AudioFileDirCacheReason reason) {
+-  switch (reason) {
+-    case AUDIO_DIRCACHE_HIT_LAST: return "hit_last";
+-    case AUDIO_DIRCACHE_HIT_MUSIC_ROOT: return "hit_music_root";
+-    case AUDIO_DIRCACHE_MISS_FIRST: return "miss_first";
+-    case AUDIO_DIRCACHE_MISS_CHANGED: return "miss_changed";
+-    case AUDIO_DIRCACHE_MISS_INVALID: return "miss_invalid";
+-    case AUDIO_DIRCACHE_MISS_OPEN_FAILED: return "miss_open_failed";
+-    default: return "unknown";
+-  }
+-}
+-
+-bool audio_file_prepare_music_root_cache() {
+-  StorageSdLockGuard sd_lock(500);
+-  if (!sd_lock) {
+-    LOGW("[AudioFile] prepare music root cache lock timeout");
+-    return false;
+-  }
+-  const bool ok = open_music_root_locked(sd);
+-  LOGI("[AudioFile] prepare music root cache ok=%d", ok ? 1 : 0);
+-  return ok;
+-}
+-
+-void audio_file_invalidate_dir_cache() {
+-  StorageSdLockGuard sd_lock(500);
+-  if (!sd_lock) {
+-    LOGW("[AudioFile] invalidate dir cache lock timeout");
+-    return;
+-  }
+-  close_cached_dir_locked();
+-  close_music_root_locked();
+-}
+-
+-bool AudioFile::open(SdFat& sd_ref, const char* path) {
+-  _last_open_stats = {};
+-  const uint32_t t_lock_begin = millis();
+-  StorageSdLockGuard sd_lock(500);
+-  const uint32_t t_after_lock = millis();
+-  _last_open_stats.lock_wait_ms = t_after_lock - t_lock_begin;
+-  if (!sd_lock) {
+-    LOGE("[AudioFile] open lock timeout");
+-    return false;
+-  }
+-
+-  if (f) {
+-    f.close();
+-  }
+-
+-  char dir_path[AUDIO_PATH_BUF];
+-  const char* file_name = nullptr;
+-  if (!split_parent_dir(path, dir_path, sizeof(dir_path), &file_name)) {
+-    LOGE("[AudioFile] split path failed: %s", path ? path : "(null)");
+-    return false;
+-  }
+-
+-  if (!ensure_cached_dir_locked(sd_ref, dir_path, _last_open_stats)) {
+-    LOGE("[AudioFile] open dir failed: %s", dir_path);
+-    return false;
+-  }
+-
+-  File32* parent = nullptr;
+-  if (is_music_root_path(dir_path) && s_music_root_valid && s_music_root_dir) {
+-    parent = &s_music_root_dir;
+-  } else {
+-    parent = &s_cached_dir;
+-  }
+-
+-  const uint32_t t_before_open = millis();
+-  if (!f.open(parent, file_name, O_RDONLY)) {
+-    _last_open_stats.file_open_ms = millis() - t_before_open;
+-    return false;
+-  }
+-  _last_open_stats.file_open_ms = millis() - t_before_open;
+-
+-  const uint32_t t_before_size = millis();
+-  _cached_size = f.fileSize();
+-  _last_open_stats.file_size_ms = millis() - t_before_size;
+-
+-  return true;
+-}
+-
+-void AudioFile::close() {
+-  if (!f) return;
+-  StorageSdLockGuard sd_lock(500);
+-  if (!sd_lock) {
+-    LOGW("[AudioFile] close lock timeout");
+-    return;
+-  }
+-  f.close();
+-}
+-
+-ssize_t AudioFile::read(void* dst, size_t bytes) {
+-  if (!f) return -1;
+-
+-  StorageSdLockGuard sd_lock(500);
+-  if (!sd_lock) {
+-    LOGE("[AudioFile] 获取 SD 锁超时");
+-    return -1;
+-  }
+-
+-  uint32_t current_pos = f.curPosition();
+-
+-  if (current_pos >= _cached_size) {
+-    return 0;
+-  }
+-
+-  uint32_t remaining = _cached_size - current_pos;
+-  if (remaining > bytes) {
+-    remaining = bytes;
+-  }
+-
+-  int n = f.read(dst, remaining);
+-
+-  if (n < 0) {
+-    return -1;
+-  } else if (n == 0 && remaining > 0) {
+-    LOGE("[AudioFile] 读取异常：期望 %u 字节但返回 0", remaining);
+-    return -1;
+-  }
+-
+-  return n;
+-}
+-
+-bool AudioFile::seek(uint32_t pos) {
+-  if (!f) {
+-    LOGE("[AudioFile] Seek 失败：文件未打开");
+-    return false;
+-  }
+-
+-  StorageSdLockGuard sd_lock(500);
+-  if (!sd_lock) {
+-    LOGE("[AudioFile] 获取 SD 锁超时");
+-    return false;
+-  }
+-
+-  if (pos > _cached_size) {
+-    LOGW("[AudioFile] Seek 超出范围：请求 %u，文件大小 %u", pos, _cached_size);
+-    pos = _cached_size;
+-  }
+-
+-  bool result = f.seekSet(pos);
+-
+-  if (!result) {
+-    LOGE("[AudioFile] Seek 失败：位置 %u，文件大小 %u", pos, _cached_size);
+-  }
+-
+-  return result;
+-}
+-
+-uint32_t AudioFile::tell() {
+-  return f ? (uint32_t)f.curPosition() : 0;
+-}
+-
+-uint32_t AudioFile::size() {
+-  return f ? _cached_size : 0;
+-}
++#include "audio/audio_file.h"
++#include "utils/log.h"
++#include "storage/storage.h"
++#include "storage/storage_io.h"
++
++#include <string.h>
++
++extern SdFat sd;
++
++namespace {
++constexpr size_t AUDIO_PATH_BUF = 300;
++static File32 s_cached_dir;
++static char s_cached_dir_path[AUDIO_PATH_BUF] = {0};
++static bool s_cached_dir_valid = false;
++
++static File32 s_music_root_dir;
++static bool s_music_root_valid = false;
++
++static bool is_music_root_path(const char* dir_path) {
++  return dir_path && strcmp(dir_path, "/Music") == 0;
++}
++
++static void close_cached_dir_locked() {
++  if (s_cached_dir) {
++    s_cached_dir.close();
++  }
++  s_cached_dir_path[0] = '\0';
++  s_cached_dir_valid = false;
++}
++
++static void close_music_root_locked() {
++  if (s_music_root_dir) {
++    s_music_root_dir.close();
++  }
++  s_music_root_valid = false;
++}
++
++static bool split_parent_dir(const char* path, char* out_dir, size_t out_dir_cap, const char** out_name) {
++  if (!path || !out_dir || out_dir_cap == 0 || !out_name) return false;
++
++  const char* slash = strrchr(path, '/');
++  if (!slash) {
++    out_dir[0] = '/';
++    out_dir[1] = '\0';
++    *out_name = path;
++    return true;
++  }
++
++  *out_name = slash + 1;
++  if (**out_name == '\0') return false;
++
++  size_t dir_len = (size_t)(slash - path);
++  if (dir_len == 0) {
++    if (out_dir_cap < 2) return false;
++    out_dir[0] = '/';
++    out_dir[1] = '\0';
++    return true;
++  }
++
++  if (dir_len + 1 > out_dir_cap) return false;
++  memcpy(out_dir, path, dir_len);
++  out_dir[dir_len] = '\0';
++  return true;
++}
++
++static bool open_music_root_locked(SdFat& sd_ref) {
++  if (s_music_root_valid && s_music_root_dir) return true;
++  close_music_root_locked();
++  if (!s_music_root_dir.open(&sd_ref, "/Music", O_RDONLY)) {
++    return false;
++  }
++  s_music_root_valid = true;
++  return true;
++}
++
++static bool ensure_cached_dir_locked(SdFat& sd_ref, const char* dir_path, AudioFileOpenStats& stats) {
++  const uint32_t t0 = millis();
++
++  if (is_music_root_path(dir_path) && open_music_root_locked(sd_ref)) {
++    stats.used_dir_cache = 1;
++    stats.dir_cache_reason = AUDIO_DIRCACHE_HIT_MUSIC_ROOT;
++    stats.dir_prepare_ms = millis() - t0;
++    return true;
++  }
++
++  if (s_cached_dir_valid && strcmp(s_cached_dir_path, dir_path) == 0 && s_cached_dir) {
++    stats.used_dir_cache = 1;
++    stats.dir_cache_reason = AUDIO_DIRCACHE_HIT_LAST;
++    stats.dir_prepare_ms = millis() - t0;
++    return true;
++  }
++
++  const bool had_prev = s_cached_dir_valid;
++  const bool had_invalid = (s_cached_dir_valid && !s_cached_dir);
++  close_cached_dir_locked();
++  if (!s_cached_dir.open(&sd_ref, dir_path, O_RDONLY)) {
++    stats.dir_cache_reason = AUDIO_DIRCACHE_MISS_OPEN_FAILED;
++    stats.dir_prepare_ms = millis() - t0;
++    return false;
++  }
++
++  strncpy(s_cached_dir_path, dir_path, sizeof(s_cached_dir_path) - 1);
++  s_cached_dir_path[sizeof(s_cached_dir_path) - 1] = '\0';
++  s_cached_dir_valid = true;
++  stats.used_dir_cache = 0;
++  if (had_invalid) {
++    stats.dir_cache_reason = AUDIO_DIRCACHE_MISS_INVALID;
++  } else if (had_prev) {
++    stats.dir_cache_reason = AUDIO_DIRCACHE_MISS_CHANGED;
++  } else {
++    stats.dir_cache_reason = AUDIO_DIRCACHE_MISS_FIRST;
++  }
++  stats.dir_prepare_ms = millis() - t0;
++  return true;
++}
++}
++
++const char* audio_file_dir_cache_reason_str(AudioFileDirCacheReason reason) {
++  switch (reason) {
++    case AUDIO_DIRCACHE_HIT_LAST: return "hit_last";
++    case AUDIO_DIRCACHE_HIT_MUSIC_ROOT: return "hit_music_root";
++    case AUDIO_DIRCACHE_MISS_FIRST: return "miss_first";
++    case AUDIO_DIRCACHE_MISS_CHANGED: return "miss_changed";
++    case AUDIO_DIRCACHE_MISS_INVALID: return "miss_invalid";
++    case AUDIO_DIRCACHE_MISS_OPEN_FAILED: return "miss_open_failed";
++    default: return "unknown";
++  }
++}
++
++bool audio_file_prepare_music_root_cache() {
++  if (!storage_is_ready()) {
++    LOGW("[AudioFile] prepare skipped: storage not ready");
++    return false;
++  }
++
++  StorageSdLockGuard sd_lock(500);
++  if (!sd_lock) {
++    LOGW("[AudioFile] prepare music root cache lock timeout");
++    return false;
++  }
++  const bool ok = open_music_root_locked(sd);
++  LOGI("[AudioFile] prepare music root cache ok=%d", ok ? 1 : 0);
++  return ok;
++}
++
++void audio_file_invalidate_dir_cache() {
++  StorageSdLockGuard sd_lock(500);
++  if (!sd_lock) {
++    LOGW("[AudioFile] invalidate dir cache lock timeout");
++    return;
++  }
++  close_cached_dir_locked();
++  close_music_root_locked();
++}
++
++bool AudioFile::open(SdFat& sd_ref, const char* path) {
++  if (!storage_is_ready()) {
++    LOGW("[AudioFile] open skipped: storage not ready path=%s", path ? path : "(null)");
++    return false;
++  }
++
++  _last_open_stats = {};
++  const uint32_t t_lock_begin = millis();
++  StorageSdLockGuard sd_lock(500);
++  const uint32_t t_after_lock = millis();
++  _last_open_stats.lock_wait_ms = t_after_lock - t_lock_begin;
++  if (!sd_lock) {
++    LOGE("[AudioFile] open lock timeout");
++    return false;
++  }
++
++  if (f) {
++    f.close();
++  }
++
++  char dir_path[AUDIO_PATH_BUF];
++  const char* file_name = nullptr;
++  if (!split_parent_dir(path, dir_path, sizeof(dir_path), &file_name)) {
++    LOGE("[AudioFile] split path failed: %s", path ? path : "(null)");
++    return false;
++  }
++
++  if (!ensure_cached_dir_locked(sd_ref, dir_path, _last_open_stats)) {
++    LOGE("[AudioFile] open dir failed: %s", dir_path);
++    storage_report_io_error("AudioFile::open_dir");
++    return false;
++  }
++
++  File32* parent = nullptr;
++  if (is_music_root_path(dir_path) && s_music_root_valid && s_music_root_dir) {
++    parent = &s_music_root_dir;
++  } else {
++    parent = &s_cached_dir;
++  }
++
++  const uint32_t t_before_open = millis();
++  if (!f.open(parent, file_name, O_RDONLY)) {
++    _last_open_stats.file_open_ms = millis() - t_before_open;
++    storage_report_io_error("AudioFile::open_file");
++    return false;
++  }
++  _last_open_stats.file_open_ms = millis() - t_before_open;
++
++  const uint32_t t_before_size = millis();
++  _cached_size = f.fileSize();
++  _last_open_stats.file_size_ms = millis() - t_before_size;
++
++  return true;
++}
++
++void AudioFile::close() {
++  if (!f) return;
++  StorageSdLockGuard sd_lock(500);
++  if (!sd_lock) {
++    LOGW("[AudioFile] close lock timeout");
++    return;
++  }
++  f.close();
++}
++
++ssize_t AudioFile::read(void* dst, size_t bytes) {
++  if (!storage_is_ready()) {
++    return -1;
++  }
++
++  if (!f) return -1;
++
++  StorageSdLockGuard sd_lock(500);
++  if (!sd_lock) {
++    LOGE("[AudioFile] 获取 SD 锁超时");
++    return -1;
++  }
++
++  uint32_t current_pos = f.curPosition();
++
++  if (current_pos >= _cached_size) {
++    return 0;
++  }
++
++  uint32_t remaining = _cached_size - current_pos;
++  if (remaining > bytes) {
++    remaining = bytes;
++  }
++
++  int n = f.read(dst, remaining);
++
++  if (n < 0) {
++    storage_report_io_error("AudioFile::read_negative");
++    return -1;
++  } else if (n == 0 && remaining > 0) {
++    LOGE("[AudioFile] 读取异常：期望 %u 字节但返回 0", remaining);
++    storage_report_io_error("AudioFile::read_zero_unexpected");
++    return -1;
++  }
++
++  return n;
++}
++
++bool AudioFile::seek(uint32_t pos) {
++  if (!storage_is_ready()) {
++    return false;
++  }
++
++  if (!f) {
++    LOGE("[AudioFile] Seek 失败：文件未打开");
++    return false;
++  }
++
++  StorageSdLockGuard sd_lock(500);
++  if (!sd_lock) {
++    LOGE("[AudioFile] 获取 SD 锁超时");
++    return false;
++  }
++
++  if (pos > _cached_size) {
++    LOGW("[AudioFile] Seek 超出范围：请求 %u，文件大小 %u", pos, _cached_size);
++    pos = _cached_size;
++  }
++
++  bool result = f.seekSet(pos);
++
++  if (!result) {
++    LOGE("[AudioFile] Seek 失败：位置 %u，文件大小 %u", pos, _cached_size);
++    storage_report_io_error("AudioFile::seek");
++  }
++
++  return result;
++}
++
++uint32_t AudioFile::tell() {
++  return f ? (uint32_t)f.curPosition() : 0;
++}
++
++uint32_t AudioFile::size() {
++  return f ? _cached_size : 0;
++}
+diff -ruN "/mnt/data/esp_hotplug_orig/AppStateV2.5.0round23b-radio-backend-no-external-dep - #U526f#U672c/src/boot_state.cpp" "/mnt/data/esp_hotplug/AppStateV2.5.0round23b-radio-backend-no-external-dep - #U526f#U672c/src/boot_state.cpp"
+--- "/mnt/data/esp_hotplug_orig/AppStateV2.5.0round23b-radio-backend-no-external-dep - #U526f#U672c/src/boot_state.cpp"	2026-05-04 18:17:58.000000000 +0000
++++ "/mnt/data/esp_hotplug/AppStateV2.5.0round23b-radio-backend-no-external-dep - #U526f#U672c/src/boot_state.cpp"	2026-06-02 12:22:34.242690904 +0000
+@@ -1,95 +1,105 @@
+-#include "boot_state.h"
+-#include "app_state.h"
+-#include "nfc/nfc.h"
+-#include "nfc/nfc_binding.h"
+-#include "board/board_spi.h"
+-#include "storage/storage.h"
+-#include "storage/storage_catalog_v3.h"
+-#include "ui/ui.h"
+-#include "ui/ui_cover_mem.h"
+-#include "utils/log.h"
+-#include "audio/audio_service.h"
+-#include "audio/audio_file.h"
+-#include "utils/runtime_monitor.h"
+-#include "web/web_server.h"
+-#include "player_snapshot.h"
+-
+-static void prepare_music_catalogs()
+-{
+-    if (storage_catalog_v3_load_or_rebuild("/Music",
+-                                           "/System/music_index_v3.bin")) {
+-        LOGI("[BOOT] V3 ready: tracks=%lu albums=%lu artists=%lu",
+-             (unsigned long)storage_catalog_v3_track_count(),
+-             (unsigned long)storage_catalog_v3_album_count(),
+-             (unsigned long)storage_catalog_v3_artist_count());
+-
+-        storage_catalog_v3_log_memory_stats();
+-    } else {
+-        LOGE("[BOOT] V3 load/rebuild failed");
+-    }
+-}
+-
+-void boot_state_run(void)
+-{
+-    static bool done = false;
+-    if (done) return;
+-    done = true;
+-
+-    Serial.begin(115200);
+-    delay(300);
+-    Serial.println("[BOOT] start");
+-    
+-    Serial.printf("[MEM] psramFound=%d, PsramSize=%u, FreePsram=%u\n",
+-              (int)psramFound(), (unsigned)ESP.getPsramSize(), (unsigned)ESP.getFreePsram());
+-    Serial.printf("[MEM] FreeHeap=%u\n", (unsigned)ESP.getFreeHeap());
+-
+-    // 1) 初始化两条 SPI：默认SPI=UI，SPI_SD=SD
+-    board_spi_init();
+-
+-    storage_init();
+-    audio_file_prepare_music_root_cache();
+-
+-    // 加载 NFC 绑定文件
+-    if (nfc_binding_load("/System/nfc_map.txt")) {
+-        LOGI("[BOOT] NFC bindings loaded: %d entries", nfc_binding_count());
+-    } else {
+-        LOGI("[BOOT] No NFC bindings found");
+-    }
+-
+-    // 初始化封面缓冲区（固定大小，避免 PSRAM 碎片）
+-    if (!cover_init_buffer()) {
+-        Serial.println("[BOOT] 封面缓冲区初始化失败");
+-    }
+-
+-    // 2) 先点亮屏幕  启动 UI（TFT_eSPI 用默认 SPI，不会再打架）
+-    ui_init();
+-
+-    // ✅ 启动音频专用任务（双核：音频与UI分离，避免旋转推屏导致卡顿）
+-    audio_service_start();
+-    runtime_monitor_start();
+-
+-    nfc_init();
+-
+-    // 让用户看到"启动中..."界面
+-    // delay(1000);
+-
+-    prepare_music_catalogs();
+-
+-    // 预加载电台列表到内存中
+-    #include "radio/radio_catalog.h"
+-    if (radio_catalog_load()) {
+-        LOGI("[BOOT] Radio catalog loaded: %d stations", (int)radio_catalog_count());
+-    } else {
+-        LOGW("[BOOT] Radio catalog load failed");
+-    }
+-
+-    // 提前从 NVS 读取待恢复快照；真正恢复播放在首次进入 player 状态时执行。
+-    player_snapshot_load_pending_from_nvs();
+-
+-    // 启动网页控制 MVP（优先连已配置 Wi-Fi，失败则回退到 AP 热点模式）
+-    web_server_start();
+-
+-    Serial.println("[BOOT] -> PLAYER");
+-
+-    g_app_state = STATE_PLAYER;
+-}
++#include "boot_state.h"
++#include "app_state.h"
++#include "nfc/nfc.h"
++#include "nfc/nfc_binding.h"
++#include "board/board_spi.h"
++#include "storage/storage.h"
++#include "storage/storage_catalog_v3.h"
++#include "ui/ui.h"
++#include "ui/ui_cover_mem.h"
++#include "utils/log.h"
++#include "audio/audio_service.h"
++#include "audio/audio_file.h"
++#include "utils/runtime_monitor.h"
++#include "web/web_server.h"
++#include "player_snapshot.h"
++
++static void prepare_music_catalogs()
++{
++    if (storage_catalog_v3_load_or_rebuild("/Music",
++                                           "/System/music_index_v3.bin")) {
++        LOGI("[BOOT] V3 ready: tracks=%lu albums=%lu artists=%lu",
++             (unsigned long)storage_catalog_v3_track_count(),
++             (unsigned long)storage_catalog_v3_album_count(),
++             (unsigned long)storage_catalog_v3_artist_count());
++
++        storage_catalog_v3_log_memory_stats();
++    } else {
++        LOGE("[BOOT] V3 load/rebuild failed");
++    }
++}
++
++void boot_state_run(void)
++{
++    static bool done = false;
++    if (done) return;
++    done = true;
++
++    Serial.begin(115200);
++    delay(300);
++    Serial.println("[BOOT] start");
++    
++    Serial.printf("[MEM] psramFound=%d, PsramSize=%u, FreePsram=%u\n",
++              (int)psramFound(), (unsigned)ESP.getPsramSize(), (unsigned)ESP.getFreePsram());
++    Serial.printf("[MEM] FreeHeap=%u\n", (unsigned)ESP.getFreeHeap());
++
++    // 1) 初始化两条 SPI：默认SPI=UI，SPI_SD=SD
++    board_spi_init();
++
++    const bool sd_ok = storage_init();
++    if (sd_ok) {
++        audio_file_prepare_music_root_cache();
++
++        // 加载 NFC 绑定文件
++        if (nfc_binding_load("/System/nfc_map.txt")) {
++            LOGI("[BOOT] NFC bindings loaded: %d entries", nfc_binding_count());
++        } else {
++            LOGI("[BOOT] No NFC bindings found");
++        }
++    } else {
++        LOGW("[BOOT] no TF card, start without local library");
++        nfc_binding_clear();
++        storage_catalog_v3_clear();
++    }
++
++    // 初始化封面缓冲区（固定大小，避免 PSRAM 碎片）
++    if (!cover_init_buffer()) {
++        Serial.println("[BOOT] 封面缓冲区初始化失败");
++    }
++
++    // 2) 先点亮屏幕  启动 UI（TFT_eSPI 用默认 SPI，不会再打架）
++    ui_init();
++
++    // ✅ 启动音频专用任务（双核：音频与UI分离，避免旋转推屏导致卡顿）
++    audio_service_start();
++    runtime_monitor_start();
++
++    nfc_init();
++
++    // 让用户看到"启动中..."界面
++    // delay(1000);
++
++    if (storage_is_ready()) {
++        prepare_music_catalogs();
++    } else {
++        LOGW("[BOOT] skip local catalog: storage not ready");
++    }
++
++    // 预加载电台列表到内存中
++    #include "radio/radio_catalog.h"
++    if (storage_is_ready() && radio_catalog_load()) {
++        LOGI("[BOOT] Radio catalog loaded: %d stations", (int)radio_catalog_count());
++    } else {
++        LOGW("[BOOT] Radio catalog load skipped or failed");
++    }
++
++    // 提前从 NVS 读取待恢复快照；真正恢复播放在首次进入 player 状态时执行。
++    player_snapshot_load_pending_from_nvs();
++
++    // 启动网页控制 MVP（优先连已配置 Wi-Fi，失败则回退到 AP 热点模式）
++    web_server_start();
++
++    Serial.println("[BOOT] -> PLAYER");
++
++    g_app_state = STATE_PLAYER;
++}
+diff -ruN "/mnt/data/esp_hotplug_orig/AppStateV2.5.0round23b-radio-backend-no-external-dep - #U526f#U672c/src/storage/storage.cpp" "/mnt/data/esp_hotplug/AppStateV2.5.0round23b-radio-backend-no-external-dep - #U526f#U672c/src/storage/storage.cpp"
+--- "/mnt/data/esp_hotplug_orig/AppStateV2.5.0round23b-radio-backend-no-external-dep - #U526f#U672c/src/storage/storage.cpp"	2026-05-04 18:17:58.000000000 +0000
++++ "/mnt/data/esp_hotplug/AppStateV2.5.0round23b-radio-backend-no-external-dep - #U526f#U672c/src/storage/storage.cpp"	2026-06-02 12:22:06.438807450 +0000
+@@ -1,99 +1,176 @@
+-#include "storage/storage.h"
+-#include "board/board_pins.h"
+-#include "board/board_spi.h"
+-#include "storage/storage_io.h"
+-
+-#include <Arduino.h>
+-#include <FS.h>
+-#include <SdFat.h>
+-
+-// 全局 SD 文件系统对象（SdFat = FAT16/32，足够用）
+-SdFat sd;
+-static bool storage_ready = false;
+-
+-
+-bool storage_init(void)
+-{
+-    Serial.println("[STORAGE] init (SdFat)");
+-
+-    // 初始化 SD 卡访问互斥锁，在 sd.begin() 之前
+-    if (!storage_sd_init_mutex()) {
+-        Serial.println("[STORAGE] 创建 SD 互斥锁失败");
+-        return false;
+-    }
+-
+-    pinMode(PIN_SD_CS, OUTPUT);
+-    digitalWrite(PIN_SD_CS, HIGH);
+-    
+-    // 用独立 SPI_SD 初始化 SdFat
+-    // DEDICATED_SPI：SdFat 会更积极地管理 SPI（更稳）
+-    // 提高时钟频率至 24MHz 以提升性能，特别是在解析 FLAC 封面图时
+-    SdSpiConfig cfg(PIN_SD_CS, DEDICATED_SPI, SD_SCK_MHZ(24), &SPI_SD);
+-
+-    // 检查是否已经挂载，如果是则先卸载
+-    if (storage_ready) {
+-        Serial.println("[STORAGE] 检测到已有挂载，尝试重新挂载");
+-        sd.end();
+-        storage_ready = false;
+-    }
+-
+-    // 检查卡的错误状态
+-    if (sd.card()) {
+-        uint8_t err = sd.card()->errorCode();
+-        if (err != 0) {
+-            Serial.printf("[STORAGE] 卡错误代码: %d\n", err);
+-        }
+-    }
+-
+-    if (!sd.begin(cfg)) {
+-        Serial.println("[STORAGE] SdFat mount FAILED");
+-        storage_ready = false;
+-        return false;
+-    }
+-
+-    Serial.println("[STORAGE] SdFat mount OK");
+-    storage_ready = true;
+-
+-    storage_list_root();
+-    return true;
+-}
+-
+-
+-
+-bool storage_is_ready(void)
+-{
+-    return storage_ready;
+-}
+-
+-void storage_list_root(void)
+-{
+-    if (!storage_ready) return;
+-
+-    StorageSdLockGuard sd_lock(1000);
+-    if (!sd_lock) {
+-        Serial.println("[STORAGE] 无法获取 SD 互斥锁");
+-        return;
+-    }
+-
+-    SdFile root;
+-    if (!root.open("/")) {
+-        Serial.println("[STORAGE] open / FAILED");
+-        return;
+-    }
+-
+-    Serial.println("[STORAGE] list /");
+-    SdFile f;
+-    while (f.openNext(&root, O_RDONLY)) {
+-        char name[128];
+-        f.getName(name, sizeof(name));
+-
+-        if (f.isDir()) {
+-            Serial.printf("  %s <DIR>\n", name);
+-        } else {
+-            Serial.printf("  %s  %lu bytes\n", name, (unsigned long)f.fileSize());
+-        }
+-        f.close();
+-    }
+-    root.close();
+-
+-}
++#include "storage/storage.h"
++#include "board/board_pins.h"
++#include "board/board_spi.h"
++#include "storage/storage_io.h"
++
++#include <Arduino.h>
++#include <FS.h>
++#include <SdFat.h>
++
++// 全局 SD 文件系统对象（SdFat = FAT16/32，足够用）
++SdFat sd;
++static volatile bool storage_ready = false;
++static volatile bool s_recent_io_error = false;
++
++
++bool storage_mount(void)
++{
++    Serial.println("[STORAGE] mount (SdFat)");
++
++    // 初始化 SD 卡访问互斥锁，在 sd.begin() 之前
++    if (!storage_sd_init_mutex()) {
++        Serial.println("[STORAGE] 创建 SD 互斥锁失败");
++        storage_ready = false;
++        return false;
++    }
++
++    StorageSdLockGuard sd_lock(2000);
++    if (!sd_lock) {
++        Serial.println("[STORAGE] mount lock timeout");
++        storage_ready = false;
++        return false;
++    }
++
++    pinMode(PIN_SD_CS, OUTPUT);
++    digitalWrite(PIN_SD_CS, HIGH);
++    
++    // 用独立 SPI_SD 初始化 SdFat
++    // DEDICATED_SPI：SdFat 会更积极地管理 SPI（更稳）
++    // 提高时钟频率至 24MHz 以提升性能，特别是在解析 FLAC 封面图时
++    SdSpiConfig cfg(PIN_SD_CS, DEDICATED_SPI, SD_SCK_MHZ(24), &SPI_SD);
++
++    // 检查是否已经挂载，如果是则先卸载
++    if (storage_ready) {
++        Serial.println("[STORAGE] 检测到已有挂载，尝试重新挂载");
++        sd.end();
++        storage_ready = false;
++    }
++
++    // 检查卡的错误状态
++    if (sd.card()) {
++        uint8_t err = sd.card()->errorCode();
++        if (err != 0) {
++            Serial.printf("[STORAGE] 卡错误代码: %d\n", err);
++        }
++    }
++
++    if (!sd.begin(cfg)) {
++        Serial.println("[STORAGE] SdFat mount FAILED");
++        storage_ready = false;
++        digitalWrite(PIN_SD_CS, HIGH);
++        return false;
++    }
++
++    Serial.println("[STORAGE] SdFat mount OK");
++    storage_ready = true;
++    s_recent_io_error = false;
++
++    storage_list_root();
++    return true;
++}
++
++bool storage_init(void)
++{
++    return storage_mount();
++}
++
++void storage_mark_not_ready(void)
++{
++    storage_ready = false;
++}
++
++bool storage_unmount(void)
++{
++    storage_mark_not_ready();
++
++    StorageSdLockGuard sd_lock(2000);
++    if (!sd_lock) {
++        Serial.println("[STORAGE] unmount lock timeout");
++        return false;
++    }
++
++    sd.end();
++
++    pinMode(PIN_SD_CS, OUTPUT);
++    digitalWrite(PIN_SD_CS, HIGH);
++
++    Serial.println("[STORAGE] unmounted");
++    return true;
++}
++
++
++
++bool storage_is_ready(void)
++{
++    return storage_ready;
++}
++
++bool storage_probe_alive(void)
++{
++    if (!storage_ready) {
++        return false;
++    }
++
++    StorageSdLockGuard sd_lock(80);
++    if (!sd_lock) {
++        // 锁超时不代表 TF 卡异常，可能只是音频/扫描正在访问 SD。
++        return true;
++    }
++
++    SdFile root;
++    bool ok = root.open("/");
++    if (root) {
++        root.close();
++    }
++
++    return ok;
++}
++
++void storage_report_io_error(const char* where)
++{
++    s_recent_io_error = true;
++    Serial.printf("[STORAGE] IO error reported: %s\n", where ? where : "(unknown)");
++}
++
++bool storage_has_recent_io_error(void)
++{
++    return s_recent_io_error;
++}
++
++void storage_clear_io_error(void)
++{
++    s_recent_io_error = false;
++}
++
++void storage_list_root(void)
++{
++    if (!storage_ready) return;
++
++    StorageSdLockGuard sd_lock(1000);
++    if (!sd_lock) {
++        Serial.println("[STORAGE] 无法获取 SD 互斥锁");
++        return;
++    }
++
++    SdFile root;
++    if (!root.open("/")) {
++        Serial.println("[STORAGE] open / FAILED");
++        return;
++    }
++
++    Serial.println("[STORAGE] list /");
++    SdFile f;
++    while (f.openNext(&root, O_RDONLY)) {
++        char name[128];
++        f.getName(name, sizeof(name));
++
++        if (f.isDir()) {
++            Serial.printf("  %s <DIR>\n", name);
++        } else {
++            Serial.printf("  %s  %lu bytes\n", name, (unsigned long)f.fileSize());
++        }
++        f.close();
++    }
++    root.close();
++
++}
+diff -ruN "/mnt/data/esp_hotplug_orig/AppStateV2.5.0round23b-radio-backend-no-external-dep - #U526f#U672c/src/storage/storage_hotplug.cpp" "/mnt/data/esp_hotplug/AppStateV2.5.0round23b-radio-backend-no-external-dep - #U526f#U672c/src/storage/storage_hotplug.cpp"
+--- "/mnt/data/esp_hotplug_orig/AppStateV2.5.0round23b-radio-backend-no-external-dep - #U526f#U672c/src/storage/storage_hotplug.cpp"	1970-01-01 00:00:00.000000000 +0000
++++ "/mnt/data/esp_hotplug/AppStateV2.5.0round23b-radio-backend-no-external-dep - #U526f#U672c/src/storage/storage_hotplug.cpp"	2026-06-02 12:22:15.758209696 +0000
+@@ -0,0 +1,72 @@
++#include "storage/storage_hotplug.h"
++#include "storage/storage.h"
++#include "utils/log.h"
++
++#include <Arduino.h>
++
++namespace {
++uint32_t s_last_probe_ms = 0;
++uint8_t s_fail_count = 0;
++
++constexpr uint32_t kMountedProbeIntervalMs = 1500;
++constexpr uint32_t kSuspectProbeIntervalMs = 250;
++constexpr uint32_t kUnmountedMountIntervalMs = 2500;
++}
++
++void storage_hotplug_init(void)
++{
++    s_last_probe_ms = millis();
++    s_fail_count = 0;
++}
++
++StorageHotplugEvent storage_hotplug_poll(bool allow_sd_probe)
++{
++    if (!allow_sd_probe) {
++        return StorageHotplugEvent::NONE;
++    }
++
++    const uint32_t now = millis();
++
++    if (!storage_is_ready()) {
++        if ((uint32_t)(now - s_last_probe_ms) < kUnmountedMountIntervalMs) {
++            return StorageHotplugEvent::NONE;
++        }
++
++        s_last_probe_ms = now;
++
++        if (storage_mount()) {
++            s_fail_count = 0;
++            storage_clear_io_error();
++            LOGI("[SD_HOTPLUG] card mounted");
++            return StorageHotplugEvent::CARD_MOUNTED;
++        }
++
++        return StorageHotplugEvent::NONE;
++    }
++
++    const bool suspect = storage_has_recent_io_error();
++    const uint32_t interval = suspect ? kSuspectProbeIntervalMs : kMountedProbeIntervalMs;
++
++    if ((uint32_t)(now - s_last_probe_ms) < interval) {
++        return StorageHotplugEvent::NONE;
++    }
++
++    s_last_probe_ms = now;
++
++    if (storage_probe_alive()) {
++        s_fail_count = 0;
++        storage_clear_io_error();
++        return StorageHotplugEvent::NONE;
++    }
++
++    ++s_fail_count;
++    LOGW("[SD_HOTPLUG] probe failed count=%u suspect=%d", (unsigned)s_fail_count, suspect ? 1 : 0);
++
++    if (suspect || s_fail_count >= 2) {
++        s_fail_count = 0;
++        LOGW("[SD_HOTPLUG] card removed confirmed");
++        return StorageHotplugEvent::CARD_REMOVED;
++    }
++
++    return StorageHotplugEvent::NONE;
++}
+diff -ruN "/mnt/data/esp_hotplug_orig/AppStateV2.5.0round23b-radio-backend-no-external-dep - #U526f#U672c/src/storage/storage_scan_v3.cpp" "/mnt/data/esp_hotplug/AppStateV2.5.0round23b-radio-backend-no-external-dep - #U526f#U672c/src/storage/storage_scan_v3.cpp"
+--- "/mnt/data/esp_hotplug_orig/AppStateV2.5.0round23b-radio-backend-no-external-dep - #U526f#U672c/src/storage/storage_scan_v3.cpp"	2026-05-04 18:17:58.000000000 +0000
++++ "/mnt/data/esp_hotplug/AppStateV2.5.0round23b-radio-backend-no-external-dep - #U526f#U672c/src/storage/storage_scan_v3.cpp"	2026-06-02 12:23:08.062653790 +0000
+@@ -1,472 +1,495 @@
+-#include "storage/storage_scan_v3.h"
+-#include <FS.h>
+-#include <SdFat.h>
+-#include <Arduino.h>
+-#include <freertos/FreeRTOS.h>
+-#include <freertos/task.h>
+-
+-#include "utils/log.h"
+-#include "storage/storage_io.h"
+-#include "meta/meta_id3.h"
+-#include "meta/meta_flac.h"
+-#include "meta/meta_id3_cover.h"
+-#include "meta/meta_flac_cover.h"
+-#include "ui/ui.h"
+-#include "app_flags.h"
+-
+-/*
+- * V3 音乐扫描模块。
+- *
+- * 这一版额外做了两件对稳定性很重要的事：
+- * - 扫描时周期性 vTaskDelay(1)，避免 rescan_v3 长时间占用 CPU 触发 WDT
+- * - 封面搜索先查固定候选名，再做轻量回退枚举，减少目录扫描压力
+- */
+-
+-extern SdFat sd;
+-
+-static uint32_t s_scan_v3_last_yield_ms = 0;
+-static uint32_t s_scan_v3_last_progress_log_ms = 0;
+-
+-static inline void scan_v3_reset_coop_state()
+-{
+-    s_scan_v3_last_yield_ms = millis();
+-    s_scan_v3_last_progress_log_ms = s_scan_v3_last_yield_ms;
+-}
+-
+-/* 扫描期间主动让出 CPU，避免长目录扫描饿死 IDLE0。 */
+-static inline void scan_v3_cooperate_wdt()
+-{
+-    uint32_t now = millis();
+-    if ((uint32_t)(now - s_scan_v3_last_yield_ms) >= 8) {
+-        s_scan_v3_last_yield_ms = now;
+-        vTaskDelay(1);
+-    }
+-}
+-
+-static inline void scan_v3_maybe_log_progress(int scanned, const String& where)
+-{
+-    uint32_t now = millis();
+-    if ((uint32_t)(now - s_scan_v3_last_progress_log_ms) >= 1500) {
+-        s_scan_v3_last_progress_log_ms = now;
+-        LOGI("[SCAN_V3] progress: tracks=%d dir=%s", scanned, where.c_str());
+-    }
+-}
+-
+-/* =========================
+- * 小工具
+- * ========================= */
+-
+-static String basename_no_ext_v3(const String& filename)
+-{
+-    int dot = filename.lastIndexOf('.');
+-    if (dot <= 0) return filename;
+-    return filename.substring(0, dot);
+-}
+-
+-static String parent_dir_of_v3(const String& full_path)
+-{
+-    int slash = full_path.lastIndexOf('/');
+-    if (slash <= 0) return "/";
+-    return full_path.substring(0, slash);
+-}
+-
+-static bool file_exists_v3(const String& path)
+-{
+-    StorageSdLockGuard sd_lock(500);
+-    if (!sd_lock) return false;
+-
+-    File32 f = sd.open(path.c_str(), O_RDONLY);
+-    bool ok = (bool)f;
+-    if (f) f.close();
+-    return ok;
+-}
+-
+-static String to_music_relative_path_v3(const String& abs_path)
+-{
+-    if (abs_path.isEmpty()) return String();
+-    if (abs_path.startsWith("/Music/")) return abs_path.substring(7);
+-    return abs_path;
+-}
+-
+-static uint8_t ext_to_code_v3(const String& ext)
+-{
+-    String e = ext;
+-    e.toLowerCase();
+-    if (e == ".mp3")  return EXT_MP3;
+-    if (e == ".flac") return EXT_FLAC;
+-    return EXT_UNKNOWN;
+-}
+-
+-static uint16_t make_flags_v3(const TrackBuildTempV3& t)
+-{
+-    uint16_t flags = TF_NONE;
+-
+-    if (!t.lrc_rel.isEmpty()) flags |= TF_HAS_LRC;
+-
+-    if (t.cover_source == COVER_MP3_APIC || t.cover_source == COVER_FLAC_PICTURE) {
+-        flags |= TF_HAS_EMBED_COVER;
+-    }
+-    if (t.cover_source == COVER_FILE_FALLBACK && !t.cover_path_rel.isEmpty()) {
+-        flags |= TF_HAS_FILE_COVER;
+-    }
+-
+-    if (t.ext_code == EXT_MP3)  flags |= TF_IS_MP3;
+-    if (t.ext_code == EXT_FLAC) flags |= TF_IS_FLAC;
+-
+-    return flags;
+-}
+-
+-/*
+- * 目录封面选择策略：
+- * 1) 先查固定候选名（cover/folder/front.*）
+- * 2) 未命中时再做轻量枚举，优先名字里带 cover/folder/front/album/art 的图片
+- */
+-static String pick_cover_in_folder_v3(const String& folder)
+-{
+-    static const char* fixed[] = {
+-        "cover.jpg", "cover.jpeg", "cover.png",
+-        "folder.jpg", "folder.jpeg", "folder.png",
+-        "front.jpg", "front.jpeg", "front.png"
+-    };
+-
+-    for (auto name : fixed) {
+-        scan_v3_cooperate_wdt();
+-        String p = folder + "/" + name;
+-        if (file_exists_v3(p)) return p;
+-    }
+-
+-    StorageSdLockGuard sd_lock(500);
+-    if (!sd_lock) {
+-        return String();
+-    }
+-
+-    SdFile dir;
+-    if (!dir.open(folder.c_str(), O_RDONLY) || !dir.isDir()) {
+-        dir.close();
+-        return String();
+-    }
+-
+-    String fallback_image;
+-    int image_seen = 0;
+-    int entries_seen = 0;
+-
+-    SdFile f;
+-    while (f.openNext(&dir, O_RDONLY)) {
+-        scan_v3_cooperate_wdt();
+-
+-        if (g_abort_scan) {
+-            LOGI("[SCAN_V3] cover scan aborted: %s", folder.c_str());
+-            f.close();
+-            break;
+-        }
+-
+-        entries_seen++;
+-
+-        if (!f.isDir()) {
+-            char name[256];
+-            f.getName(name, sizeof(name));
+-            String n(name);
+-            String lower = n;
+-            lower.toLowerCase();
+-
+-            bool is_image = lower.endsWith(".jpg") || lower.endsWith(".jpeg") || lower.endsWith(".png");
+-            if (is_image) {
+-                image_seen++;
+-                String full = folder + "/" + n;
+-
+-                if (fallback_image.isEmpty()) {
+-                    fallback_image = full;
+-                }
+-
+-                bool preferred = (lower.indexOf("cover") >= 0) ||
+-                                 (lower.indexOf("folder") >= 0) ||
+-                                 (lower.indexOf("front") >= 0) ||
+-                                 (lower.indexOf("album") >= 0) ||
+-                                 (lower.indexOf("art") >= 0);
+-                if (preferred) {
+-                    f.close();
+-                    dir.close();
+-                    return full;
+-                }
+-
+-                if (image_seen >= 12 || entries_seen >= 64) {
+-                    f.close();
+-                    dir.close();
+-                    return fallback_image;
+-                }
+-            }
+-        }
+-        f.close();
+-    }
+-
+-    dir.close();
+-    return fallback_image;
+-}
+-
+-static bool should_skip_dir_v3(const String& dir_name)
+-{
+-    if (dir_name.isEmpty()) return true;
+-    if (dir_name == "." || dir_name == "..") return true;
+-    if (dir_name.startsWith(".")) return true;
+-    return false;
+-}
+-
+-static void derive_dir_hints_v3(const String& dir_path,
+-                                const char* music_root,
+-                                String& out_artist,
+-                                String& out_album)
+-{
+-    out_artist = "";
+-    out_album = "";
+-
+-    String root = music_root ? String(music_root) : String("/Music");
+-    String rel = dir_path;
+-
+-    if (rel.startsWith(root)) {
+-        rel = rel.substring(root.length());
+-    }
+-
+-    while (rel.startsWith("/")) {
+-        rel.remove(0, 1);
+-    }
+-
+-    if (rel.isEmpty()) {
+-        return;
+-    }
+-
+-    std::vector<String> parts;
+-    int start = 0;
+-    while (start < rel.length()) {
+-        int slash = rel.indexOf('/', start);
+-        String seg = (slash < 0) ? rel.substring(start) : rel.substring(start, slash);
+-        seg.trim();
+-        if (!seg.isEmpty()) {
+-            parts.push_back(seg);
+-        }
+-        if (slash < 0) break;
+-        start = slash + 1;
+-    }
+-
+-    if (parts.empty()) {
+-        return;
+-    }
+-
+-    if (parts.size() >= 2) {
+-        out_artist = parts.front();
+-        out_album = parts.back();
+-    } else {
+-        // 单层子目录时优先把目录名当作专辑名；artist 留空，交给元数据覆盖
+-        out_album = parts.front();
+-    }
+-}
+-
+-/* =========================
+- * 单曲扫描核心
+- * ========================= */
+-
+-static bool scan_one_audio_file_core_v3(const String& full_path,
+-                                        const String& fn,
+-                                        const String& fallback_artist,
+-                                        const String& fallback_album,
+-                                        const String& fallback_cover_path,
+-                                        TrackBuildTempV3& out_track)
+-{
+-    String lower = fn;
+-    lower.toLowerCase();
+-
+-    if (!(lower.endsWith(".mp3") || lower.endsWith(".flac"))) {
+-        return false;
+-    }
+-
+-    out_track = TrackBuildTempV3{};
+-
+-    int dot = fn.lastIndexOf('.');
+-    String ext = (dot >= 0) ? fn.substring(dot) : "";
+-    ext.toLowerCase();
+-    out_track.ext_code = ext_to_code_v3(ext);
+-
+-    out_track.title  = basename_no_ext_v3(fn);
+-    out_track.artist = fallback_artist;
+-    out_track.album  = fallback_album;
+-    out_track.audio_rel = to_music_relative_path_v3(full_path);
+-
+-    String base_no_ext = basename_no_ext_v3(fn);
+-    String parent_dir = parent_dir_of_v3(full_path);
+-
+-    String lrc_abs = parent_dir + "/" + base_no_ext + ".lrc";
+-    if (file_exists_v3(lrc_abs)) {
+-        out_track.lrc_rel = to_music_relative_path_v3(lrc_abs);
+-    }
+-
+-    out_track.cover_source = COVER_NONE;
+-    out_track.cover_offset = 0;
+-    out_track.cover_size = 0;
+-    out_track.cover_mime = "";
+-    out_track.cover_path_rel = "";
+-
+-    if (!fallback_cover_path.isEmpty()) {
+-        out_track.cover_source = COVER_FILE_FALLBACK;
+-        out_track.cover_path_rel = to_music_relative_path_v3(fallback_cover_path);
+-    }
+-
+-    if (lower.endsWith(".mp3")) {
+-        Mp3CoverLoc loc;
+-        if (id3_find_apic(sd, full_path.c_str(), loc) && loc.found) {
+-            out_track.cover_source = COVER_MP3_APIC;
+-            out_track.cover_offset = loc.offset;
+-            out_track.cover_size = loc.size;
+-            out_track.cover_mime = loc.mime;
+-            out_track.cover_path_rel = "";
+-        }
+-
+-        Id3BasicInfo meta;
+-        if (id3_read_basic(sd, full_path.c_str(), meta)) {
+-            if (meta.title.length())  out_track.title  = meta.title;
+-            if (meta.artist.length()) out_track.artist = meta.artist;
+-            if (meta.album.length())  out_track.album  = meta.album;
+-        }
+-    } else {
+-        FlacCoverLoc loc;
+-        if (flac_find_picture(sd, full_path.c_str(), loc) && loc.found) {
+-            out_track.cover_source = COVER_FLAC_PICTURE;
+-            out_track.cover_offset = loc.offset;
+-            out_track.cover_size = loc.size;
+-            out_track.cover_mime = loc.mime;
+-            out_track.cover_path_rel = "";
+-        }
+-
+-        FlacBasicInfo meta;
+-        if (flac_read_vorbis_basic(sd, full_path.c_str(), meta)) {
+-            if (meta.title.length())  out_track.title  = meta.title;
+-            if (meta.artist.length()) out_track.artist = meta.artist;
+-            if (meta.album.length())  out_track.album  = meta.album;
+-        }
+-    }
+-
+-    out_track.flags = make_flags_v3(out_track);
+-    return true;
+-}
+-
+-bool storage_scan_one_audio_file_v3(const String& full_path,
+-                                    const String& fallback_artist,
+-                                    const String& fallback_album,
+-                                    const String& fallback_cover_path,
+-                                    TrackBuildTempV3& out_track)
+-{
+-    String fn = full_path.substring(full_path.lastIndexOf('/') + 1);
+-    return scan_one_audio_file_core_v3(full_path,
+-                                       fn,
+-                                       fallback_artist,
+-                                       fallback_album,
+-                                       fallback_cover_path,
+-                                       out_track);
+-}
+-
+-/* =========================
+- * 递归扫描
+- * ========================= */
+-
+-static bool scan_dir_recursive_v3(const String& dir_path,
+-                                  const char* music_root,
+-                                  const String& inherited_cover_path,
+-                                  std::vector<TrackBuildTempV3>& out_tracks,
+-                                  int& scanned)
+-{
+-    scan_v3_cooperate_wdt();
+-
+-    SdFile dir;
+-    if (!dir.open(dir_path.c_str(), O_RDONLY) || !dir.isDir()) {
+-        LOGE("[SCAN_V3] open dir failed: %s", dir_path.c_str());
+-        dir.close();
+-        return false;
+-    }
+-
+-    String local_cover = pick_cover_in_folder_v3(dir_path);
+-    String effective_cover = local_cover.isEmpty() ? inherited_cover_path : local_cover;
+-
+-    String fallback_artist;
+-    String fallback_album;
+-    derive_dir_hints_v3(dir_path, music_root, fallback_artist, fallback_album);
+-
+-    SdFile f;
+-    while (f.openNext(&dir, O_RDONLY)) {
+-        scan_v3_cooperate_wdt();
+-
+-        if (g_abort_scan) {
+-            LOGI("[SCAN_V3] scan aborted by user");
+-            f.close();
+-            break;
+-        }
+-
+-        scan_v3_maybe_log_progress(scanned, dir_path);
+-
+-        char name[256];
+-        f.getName(name, sizeof(name));
+-        String entry_name(name);
+-
+-        if (f.isDir()) {
+-            String child_dir = dir_path + "/" + entry_name;
+-            f.close();
+-
+-            if (should_skip_dir_v3(entry_name)) {
+-                continue;
+-            }
+-
+-            if (!scan_dir_recursive_v3(child_dir, music_root, effective_cover, out_tracks, scanned)) {
+-                dir.close();
+-                return false;
+-            }
+-            continue;
+-        }
+-
+-        String full_path = dir_path + "/" + entry_name;
+-
+-        TrackBuildTempV3 t;
+-        if (storage_scan_one_audio_file_v3(full_path,
+-                                           fallback_artist,
+-                                           fallback_album,
+-                                           effective_cover,
+-                                           t)) {
+-            out_tracks.push_back(std::move(t));
+-            scanned++;
+-            ui_scan_tick(scanned);
+-        }
+-
+-        delay(0);
+-        f.close();
+-    }
+-
+-    dir.close();
+-    return !g_abort_scan;
+-}
+-
+-bool storage_scan_music_v3(std::vector<TrackBuildTempV3>& out_tracks,
+-                           const char* music_root)
+-{
+-    StorageSdLockGuard sd_lock(2000);
+-    if (!sd_lock) {
+-        LOGE("[SCAN_V3] lock timeout");
+-        return false;
+-    }
+-
+-    g_abort_scan = false;
+-    scan_v3_reset_coop_state();
+-    ui_scan_begin();
+-
+-    out_tracks.clear();
+-    int scanned = 0;
+-
+-    if (!scan_dir_recursive_v3(String(music_root), music_root, "", out_tracks, scanned)) {
+-        if (g_abort_scan) {
+-            ui_scan_abort();
+-        } else {
+-            ui_scan_end();
+-        }
+-        return false;
+-    }
+-
+-    ui_scan_end();
+-
+-    LOGI("[SCAN_V3] recursive done: tracks=%d", (int)out_tracks.size());
+-    return !out_tracks.empty();
+-}
++#include "storage/storage_scan_v3.h"
++#include <FS.h>
++#include <SdFat.h>
++#include <Arduino.h>
++#include <freertos/FreeRTOS.h>
++#include <freertos/task.h>
++
++#include "utils/log.h"
++#include "storage/storage.h"
++#include "storage/storage_io.h"
++#include "meta/meta_id3.h"
++#include "meta/meta_flac.h"
++#include "meta/meta_id3_cover.h"
++#include "meta/meta_flac_cover.h"
++#include "ui/ui.h"
++#include "app_flags.h"
++
++/*
++ * V3 音乐扫描模块。
++ *
++ * 这一版额外做了两件对稳定性很重要的事：
++ * - 扫描时周期性 vTaskDelay(1)，避免 rescan_v3 长时间占用 CPU 触发 WDT
++ * - 封面搜索先查固定候选名，再做轻量回退枚举，减少目录扫描压力
++ */
++
++extern SdFat sd;
++
++static uint32_t s_scan_v3_last_yield_ms = 0;
++static uint32_t s_scan_v3_last_progress_log_ms = 0;
++
++static inline void scan_v3_reset_coop_state()
++{
++    s_scan_v3_last_yield_ms = millis();
++    s_scan_v3_last_progress_log_ms = s_scan_v3_last_yield_ms;
++}
++
++/* 扫描期间主动让出 CPU，避免长目录扫描饿死 IDLE0。 */
++static inline void scan_v3_cooperate_wdt()
++{
++    uint32_t now = millis();
++    if ((uint32_t)(now - s_scan_v3_last_yield_ms) >= 8) {
++        s_scan_v3_last_yield_ms = now;
++        vTaskDelay(1);
++    }
++}
++
++static inline void scan_v3_maybe_log_progress(int scanned, const String& where)
++{
++    uint32_t now = millis();
++    if ((uint32_t)(now - s_scan_v3_last_progress_log_ms) >= 1500) {
++        s_scan_v3_last_progress_log_ms = now;
++        LOGI("[SCAN_V3] progress: tracks=%d dir=%s", scanned, where.c_str());
++    }
++}
++
++/* =========================
++ * 小工具
++ * ========================= */
++
++static String basename_no_ext_v3(const String& filename)
++{
++    int dot = filename.lastIndexOf('.');
++    if (dot <= 0) return filename;
++    return filename.substring(0, dot);
++}
++
++static String parent_dir_of_v3(const String& full_path)
++{
++    int slash = full_path.lastIndexOf('/');
++    if (slash <= 0) return "/";
++    return full_path.substring(0, slash);
++}
++
++static bool file_exists_v3(const String& path)
++{
++    if (!storage_is_ready()) return false;
++
++    StorageSdLockGuard sd_lock(500);
++    if (!sd_lock) return false;
++
++    File32 f = sd.open(path.c_str(), O_RDONLY);
++    bool ok = (bool)f;
++    if (f) f.close();
++    return ok;
++}
++
++static String to_music_relative_path_v3(const String& abs_path)
++{
++    if (abs_path.isEmpty()) return String();
++    if (abs_path.startsWith("/Music/")) return abs_path.substring(7);
++    return abs_path;
++}
++
++static uint8_t ext_to_code_v3(const String& ext)
++{
++    String e = ext;
++    e.toLowerCase();
++    if (e == ".mp3")  return EXT_MP3;
++    if (e == ".flac") return EXT_FLAC;
++    return EXT_UNKNOWN;
++}
++
++static uint16_t make_flags_v3(const TrackBuildTempV3& t)
++{
++    uint16_t flags = TF_NONE;
++
++    if (!t.lrc_rel.isEmpty()) flags |= TF_HAS_LRC;
++
++    if (t.cover_source == COVER_MP3_APIC || t.cover_source == COVER_FLAC_PICTURE) {
++        flags |= TF_HAS_EMBED_COVER;
++    }
++    if (t.cover_source == COVER_FILE_FALLBACK && !t.cover_path_rel.isEmpty()) {
++        flags |= TF_HAS_FILE_COVER;
++    }
++
++    if (t.ext_code == EXT_MP3)  flags |= TF_IS_MP3;
++    if (t.ext_code == EXT_FLAC) flags |= TF_IS_FLAC;
++
++    return flags;
++}
++
++/*
++ * 目录封面选择策略：
++ * 1) 先查固定候选名（cover/folder/front.*）
++ * 2) 未命中时再做轻量枚举，优先名字里带 cover/folder/front/album/art 的图片
++ */
++static String pick_cover_in_folder_v3(const String& folder)
++{
++    static const char* fixed[] = {
++        "cover.jpg", "cover.jpeg", "cover.png",
++        "folder.jpg", "folder.jpeg", "folder.png",
++        "front.jpg", "front.jpeg", "front.png"
++    };
++
++    for (auto name : fixed) {
++        scan_v3_cooperate_wdt();
++        String p = folder + "/" + name;
++        if (file_exists_v3(p)) return p;
++    }
++
++    StorageSdLockGuard sd_lock(500);
++    if (!sd_lock) {
++        return String();
++    }
++
++    SdFile dir;
++    if (!dir.open(folder.c_str(), O_RDONLY) || !dir.isDir()) {
++        storage_report_io_error("SCAN_V3::open_cover_dir");
++        dir.close();
++        return String();
++    }
++
++    String fallback_image;
++    int image_seen = 0;
++    int entries_seen = 0;
++
++    SdFile f;
++    while (f.openNext(&dir, O_RDONLY)) {
++        scan_v3_cooperate_wdt();
++
++        if (g_abort_scan) {
++            LOGI("[SCAN_V3] cover scan aborted: %s", folder.c_str());
++            f.close();
++            break;
++        }
++
++        entries_seen++;
++
++        if (!f.isDir()) {
++            char name[256];
++            f.getName(name, sizeof(name));
++            String n(name);
++            String lower = n;
++            lower.toLowerCase();
++
++            bool is_image = lower.endsWith(".jpg") || lower.endsWith(".jpeg") || lower.endsWith(".png");
++            if (is_image) {
++                image_seen++;
++                String full = folder + "/" + n;
++
++                if (fallback_image.isEmpty()) {
++                    fallback_image = full;
++                }
++
++                bool preferred = (lower.indexOf("cover") >= 0) ||
++                                 (lower.indexOf("folder") >= 0) ||
++                                 (lower.indexOf("front") >= 0) ||
++                                 (lower.indexOf("album") >= 0) ||
++                                 (lower.indexOf("art") >= 0);
++                if (preferred) {
++                    f.close();
++                    dir.close();
++                    return full;
++                }
++
++                if (image_seen >= 12 || entries_seen >= 64) {
++                    f.close();
++                    dir.close();
++                    return fallback_image;
++                }
++            }
++        }
++        f.close();
++    }
++
++    dir.close();
++    return fallback_image;
++}
++
++static bool should_skip_dir_v3(const String& dir_name)
++{
++    if (dir_name.isEmpty()) return true;
++    if (dir_name == "." || dir_name == "..") return true;
++    if (dir_name.startsWith(".")) return true;
++    return false;
++}
++
++static void derive_dir_hints_v3(const String& dir_path,
++                                const char* music_root,
++                                String& out_artist,
++                                String& out_album)
++{
++    out_artist = "";
++    out_album = "";
++
++    String root = music_root ? String(music_root) : String("/Music");
++    String rel = dir_path;
++
++    if (rel.startsWith(root)) {
++        rel = rel.substring(root.length());
++    }
++
++    while (rel.startsWith("/")) {
++        rel.remove(0, 1);
++    }
++
++    if (rel.isEmpty()) {
++        return;
++    }
++
++    std::vector<String> parts;
++    int start = 0;
++    while (start < rel.length()) {
++        int slash = rel.indexOf('/', start);
++        String seg = (slash < 0) ? rel.substring(start) : rel.substring(start, slash);
++        seg.trim();
++        if (!seg.isEmpty()) {
++            parts.push_back(seg);
++        }
++        if (slash < 0) break;
++        start = slash + 1;
++    }
++
++    if (parts.empty()) {
++        return;
++    }
++
++    if (parts.size() >= 2) {
++        out_artist = parts.front();
++        out_album = parts.back();
++    } else {
++        // 单层子目录时优先把目录名当作专辑名；artist 留空，交给元数据覆盖
++        out_album = parts.front();
++    }
++}
++
++/* =========================
++ * 单曲扫描核心
++ * ========================= */
++
++static bool scan_one_audio_file_core_v3(const String& full_path,
++                                        const String& fn,
++                                        const String& fallback_artist,
++                                        const String& fallback_album,
++                                        const String& fallback_cover_path,
++                                        TrackBuildTempV3& out_track)
++{
++    String lower = fn;
++    lower.toLowerCase();
++
++    if (!(lower.endsWith(".mp3") || lower.endsWith(".flac"))) {
++        return false;
++    }
++
++    out_track = TrackBuildTempV3{};
++
++    int dot = fn.lastIndexOf('.');
++    String ext = (dot >= 0) ? fn.substring(dot) : "";
++    ext.toLowerCase();
++    out_track.ext_code = ext_to_code_v3(ext);
++
++    out_track.title  = basename_no_ext_v3(fn);
++    out_track.artist = fallback_artist;
++    out_track.album  = fallback_album;
++    out_track.audio_rel = to_music_relative_path_v3(full_path);
++
++    String base_no_ext = basename_no_ext_v3(fn);
++    String parent_dir = parent_dir_of_v3(full_path);
++
++    String lrc_abs = parent_dir + "/" + base_no_ext + ".lrc";
++    if (file_exists_v3(lrc_abs)) {
++        out_track.lrc_rel = to_music_relative_path_v3(lrc_abs);
++    }
++
++    out_track.cover_source = COVER_NONE;
++    out_track.cover_offset = 0;
++    out_track.cover_size = 0;
++    out_track.cover_mime = "";
++    out_track.cover_path_rel = "";
++
++    if (!fallback_cover_path.isEmpty()) {
++        out_track.cover_source = COVER_FILE_FALLBACK;
++        out_track.cover_path_rel = to_music_relative_path_v3(fallback_cover_path);
++    }
++
++    if (lower.endsWith(".mp3")) {
++        Mp3CoverLoc loc;
++        if (id3_find_apic(sd, full_path.c_str(), loc) && loc.found) {
++            out_track.cover_source = COVER_MP3_APIC;
++            out_track.cover_offset = loc.offset;
++            out_track.cover_size = loc.size;
++            out_track.cover_mime = loc.mime;
++            out_track.cover_path_rel = "";
++        }
++
++        Id3BasicInfo meta;
++        if (id3_read_basic(sd, full_path.c_str(), meta)) {
++            if (meta.title.length())  out_track.title  = meta.title;
++            if (meta.artist.length()) out_track.artist = meta.artist;
++            if (meta.album.length())  out_track.album  = meta.album;
++        }
++    } else {
++        FlacCoverLoc loc;
++        if (flac_find_picture(sd, full_path.c_str(), loc) && loc.found) {
++            out_track.cover_source = COVER_FLAC_PICTURE;
++            out_track.cover_offset = loc.offset;
++            out_track.cover_size = loc.size;
++            out_track.cover_mime = loc.mime;
++            out_track.cover_path_rel = "";
++        }
++
++        FlacBasicInfo meta;
++        if (flac_read_vorbis_basic(sd, full_path.c_str(), meta)) {
++            if (meta.title.length())  out_track.title  = meta.title;
++            if (meta.artist.length()) out_track.artist = meta.artist;
++            if (meta.album.length())  out_track.album  = meta.album;
++        }
++    }
++
++    out_track.flags = make_flags_v3(out_track);
++    return true;
++}
++
++bool storage_scan_one_audio_file_v3(const String& full_path,
++                                    const String& fallback_artist,
++                                    const String& fallback_album,
++                                    const String& fallback_cover_path,
++                                    TrackBuildTempV3& out_track)
++{
++    String fn = full_path.substring(full_path.lastIndexOf('/') + 1);
++    return scan_one_audio_file_core_v3(full_path,
++                                       fn,
++                                       fallback_artist,
++                                       fallback_album,
++                                       fallback_cover_path,
++                                       out_track);
++}
++
++/* =========================
++ * 递归扫描
++ * ========================= */
++
++static bool scan_dir_recursive_v3(const String& dir_path,
++                                  const char* music_root,
++                                  const String& inherited_cover_path,
++                                  std::vector<TrackBuildTempV3>& out_tracks,
++                                  int& scanned)
++{
++    scan_v3_cooperate_wdt();
++
++    if (!storage_is_ready()) {
++        LOGW("[SCAN_V3] aborted: storage not ready before dir=%s", dir_path.c_str());
++        g_abort_scan = true;
++        return false;
++    }
++
++    SdFile dir;
++    if (!dir.open(dir_path.c_str(), O_RDONLY) || !dir.isDir()) {
++        LOGE("[SCAN_V3] open dir failed: %s", dir_path.c_str());
++        storage_report_io_error("SCAN_V3::open_dir");
++        dir.close();
++        return false;
++    }
++
++    String local_cover = pick_cover_in_folder_v3(dir_path);
++    String effective_cover = local_cover.isEmpty() ? inherited_cover_path : local_cover;
++
++    String fallback_artist;
++    String fallback_album;
++    derive_dir_hints_v3(dir_path, music_root, fallback_artist, fallback_album);
++
++    SdFile f;
++    while (f.openNext(&dir, O_RDONLY)) {
++        scan_v3_cooperate_wdt();
++
++        if (g_abort_scan) {
++            LOGI("[SCAN_V3] scan aborted by user");
++            f.close();
++            break;
++        }
++
++        if (!storage_is_ready()) {
++            LOGW("[SCAN_V3] scan aborted: storage removed");
++            g_abort_scan = true;
++            f.close();
++            break;
++        }
++
++        scan_v3_maybe_log_progress(scanned, dir_path);
++
++        char name[256];
++        f.getName(name, sizeof(name));
++        String entry_name(name);
++
++        if (f.isDir()) {
++            String child_dir = dir_path + "/" + entry_name;
++            f.close();
++
++            if (should_skip_dir_v3(entry_name)) {
++                continue;
++            }
++
++            if (!scan_dir_recursive_v3(child_dir, music_root, effective_cover, out_tracks, scanned)) {
++                dir.close();
++                return false;
++            }
++            continue;
++        }
++
++        String full_path = dir_path + "/" + entry_name;
++
++        TrackBuildTempV3 t;
++        if (storage_scan_one_audio_file_v3(full_path,
++                                           fallback_artist,
++                                           fallback_album,
++                                           effective_cover,
++                                           t)) {
++            out_tracks.push_back(std::move(t));
++            scanned++;
++            ui_scan_tick(scanned);
++        }
++
++        delay(0);
++        f.close();
++    }
++
++    dir.close();
++    return !g_abort_scan;
++}
++
++bool storage_scan_music_v3(std::vector<TrackBuildTempV3>& out_tracks,
++                           const char* music_root)
++{
++    if (!storage_is_ready()) {
++        LOGE("[SCAN_V3] skipped: storage not ready");
++        return false;
++    }
++
++    StorageSdLockGuard sd_lock(2000);
++    if (!sd_lock) {
++        LOGE("[SCAN_V3] lock timeout");
++        return false;
++    }
++
++    g_abort_scan = false;
++    scan_v3_reset_coop_state();
++    ui_scan_begin();
++
++    out_tracks.clear();
++    int scanned = 0;
++
++    if (!scan_dir_recursive_v3(String(music_root), music_root, "", out_tracks, scanned)) {
++        if (g_abort_scan) {
++            ui_scan_abort();
++        } else {
++            ui_scan_end();
++        }
++        return false;
++    }
++
++    ui_scan_end();
++
++    LOGI("[SCAN_V3] recursive done: tracks=%d", (int)out_tracks.size());
++    return !out_tracks.empty();
++}

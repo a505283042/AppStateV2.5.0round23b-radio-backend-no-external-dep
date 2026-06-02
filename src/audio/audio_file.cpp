@@ -1,5 +1,6 @@
 #include "audio/audio_file.h"
 #include "utils/log.h"
+#include "storage/storage.h"
 #include "storage/storage_io.h"
 
 #include <string.h>
@@ -127,6 +128,11 @@ const char* audio_file_dir_cache_reason_str(AudioFileDirCacheReason reason) {
 }
 
 bool audio_file_prepare_music_root_cache() {
+  if (!storage_is_ready()) {
+    LOGW("[AudioFile] prepare skipped: storage not ready");
+    return false;
+  }
+
   StorageSdLockGuard sd_lock(500);
   if (!sd_lock) {
     LOGW("[AudioFile] prepare music root cache lock timeout");
@@ -148,6 +154,11 @@ void audio_file_invalidate_dir_cache() {
 }
 
 bool AudioFile::open(SdFat& sd_ref, const char* path) {
+  if (!storage_is_ready()) {
+    LOGW("[AudioFile] open skipped: storage not ready path=%s", path ? path : "(null)");
+    return false;
+  }
+
   _last_open_stats = {};
   const uint32_t t_lock_begin = millis();
   StorageSdLockGuard sd_lock(500);
@@ -171,6 +182,7 @@ bool AudioFile::open(SdFat& sd_ref, const char* path) {
 
   if (!ensure_cached_dir_locked(sd_ref, dir_path, _last_open_stats)) {
     LOGE("[AudioFile] open dir failed: %s", dir_path);
+    storage_report_io_error("AudioFile::open_dir");
     return false;
   }
 
@@ -184,6 +196,7 @@ bool AudioFile::open(SdFat& sd_ref, const char* path) {
   const uint32_t t_before_open = millis();
   if (!f.open(parent, file_name, O_RDONLY)) {
     _last_open_stats.file_open_ms = millis() - t_before_open;
+    storage_report_io_error("AudioFile::open_file");
     return false;
   }
   _last_open_stats.file_open_ms = millis() - t_before_open;
@@ -206,6 +219,10 @@ void AudioFile::close() {
 }
 
 ssize_t AudioFile::read(void* dst, size_t bytes) {
+  if (!storage_is_ready()) {
+    return -1;
+  }
+
   if (!f) return -1;
 
   StorageSdLockGuard sd_lock(500);
@@ -228,9 +245,11 @@ ssize_t AudioFile::read(void* dst, size_t bytes) {
   int n = f.read(dst, remaining);
 
   if (n < 0) {
+    storage_report_io_error("AudioFile::read_negative");
     return -1;
   } else if (n == 0 && remaining > 0) {
     LOGE("[AudioFile] 读取异常：期望 %u 字节但返回 0", remaining);
+    storage_report_io_error("AudioFile::read_zero_unexpected");
     return -1;
   }
 
@@ -238,6 +257,10 @@ ssize_t AudioFile::read(void* dst, size_t bytes) {
 }
 
 bool AudioFile::seek(uint32_t pos) {
+  if (!storage_is_ready()) {
+    return false;
+  }
+
   if (!f) {
     LOGE("[AudioFile] Seek 失败：文件未打开");
     return false;
@@ -258,6 +281,7 @@ bool AudioFile::seek(uint32_t pos) {
 
   if (!result) {
     LOGE("[AudioFile] Seek 失败：位置 %u，文件大小 %u", pos, _cached_size);
+    storage_report_io_error("AudioFile::seek");
   }
 
   return result;

@@ -84,6 +84,46 @@ void ui_return_to_player(void)
   ui_request_refresh();
 }
 
+void ui_show_player_placeholder(const char* line1, const char* line2)
+{
+  if (!line1) line1 = "";
+  if (!line2) line2 = "";
+
+  ui_draw_lock();
+
+  ui_set_screen(UI_SCREEN_PLAYER);
+
+  // 关键：这是一个稳定占位页，不要再触发“5秒后加载中”兜底
+  s_player_enter_time = 0;
+
+  // 清掉旧封面状态，避免无卡时旧封面继续转
+  s_coverSprReady = false;
+  s_src = nullptr;
+  s_angle_deg = 0.0f;
+  s_rot_last_ms = millis();
+
+  tft.fillScreen(TFT_BLACK);
+  tft.setFont(&g_font_cjk);
+  tft.setTextWrap(false);
+
+  // 简单画一个唱片占位图
+  tft.drawCircle(120, 82, 38, TFT_DARKGREY);
+  tft.drawCircle(120, 82, 39, TFT_DARKGREY);
+  tft.fillCircle(120, 82, 5, TFT_WHITE);
+
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  draw_center_text(line1, 142);
+
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  draw_center_text(line2, 168);
+
+  s_screen_cleared = true;
+
+  ui_draw_unlock();
+  ui_request_refresh();
+}
+
 void ui_enter_nfc_admin(void)
 {
   ui_draw_lock();

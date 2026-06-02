@@ -300,8 +300,14 @@ static void ui_task_entry(void*)
         tft.fillCircle(120, 88, 4, TFT_WHITE);
 
         tft.setTextColor(TFT_WHITE, TFT_BLACK);
-        draw_center_text("加载中...", 142);
-        draw_center_text("请稍候", 166);
+
+        if (audio_service_is_playing() || audio_service_is_paused()) {
+          draw_center_text("正在播放", 142);
+          draw_center_text("封面加载中", 166);
+        } else {
+          draw_center_text("加载中...", 142);
+          draw_center_text("请稍候", 166);
+        }
         
         s_screen_cleared = true;
         ui_draw_unlock();

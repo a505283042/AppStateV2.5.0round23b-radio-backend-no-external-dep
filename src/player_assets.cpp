@@ -15,6 +15,7 @@
 #include "utils/log.h"
 
 static constexpr uint32_t kPlayerAssetTaskStackBytes = 5120; // 播放器资源任务栈大小
+static constexpr const char* kDefaultCoverPath = "/System/default_cover.jpg";
 
 #ifndef PLAYER_ASSET_TASK_PRIO // 播放器资源任务优先级
 #define PLAYER_ASSET_TASK_PRIO 1 // 播放器资源任务优先级，1 表示普通任务，0 表示实时任务
@@ -138,7 +139,7 @@ static bool player_try_prepare_default_cover_cache(int track_idx)
     bool is_png = false;
     const bool ok = audio_service_fetch_cover(COVER_FILE_FALLBACK,
                                               nullptr,
-                                              "/System/default_cover.jpg",
+                                              kDefaultCoverPath,
                                               0,
                                               0,
                                               &buf,
@@ -898,4 +899,7 @@ void player_assets_try_apply_deferred_current_cover(int current_track_idx)
     }
 }
 
-
+void player_assets_clear_web_cover_cache()
+{
+    web_cover_cache_clear();
+}
