@@ -1,0 +1,17 @@
+# PlatformIO build artifacts
+.pio/
+
+# VS Code settings
+.vscode/
+
+# Build outputs
+*.bin
+*.elf
+*.map
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Log files
+*.log
