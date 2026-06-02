@@ -1,17 +1,5 @@
-# PlatformIO build artifacts
+# PlatformIO build directory
 .pio/
 
-# VS Code settings
-.vscode/
-
-# Build outputs
-*.bin
-*.elf
-*.map
-
-# OS files
-.DS_Store
-Thumbs.db
-
-# Log files
-*.log
+# TF card structure folder
+TF卡结构/
