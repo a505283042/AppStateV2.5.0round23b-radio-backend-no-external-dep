@@ -200,6 +200,19 @@ bool player_snapshot_load_pending_from_nvs()
 
 bool player_snapshot_save_to_nvs()
 {
+    const PlayerSourceState source = player_source_get();
+
+    if (source.type != PlayerSourceType::LOCAL_TRACK) {
+        LOGW("[SNAPSHOT] save skipped: unsupported source=%s",
+             player_source_type_key(source.type));
+        return false;
+    }
+
+    if (player_state_current_index() < 0) {
+        LOGW("[SNAPSHOT] save skipped: no current local track");
+        return false;
+    }
+
     PlayerPersistSnapshot snap{};
     snap.version = kSnapshotVersion;
     snap.volume = audio_get_volume();

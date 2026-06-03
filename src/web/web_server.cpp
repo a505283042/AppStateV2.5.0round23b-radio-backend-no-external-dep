@@ -1513,9 +1513,28 @@ static void web_handle_volume_lock() {
 
 static void web_handle_state_save() {
   if (!web_require_player_state()) return;
-  if (!player_snapshot_save_to_nvs()) { web_send_json_err("保存当前状态失败", 500); return; }
+
+  const PlayerSourceState source = player_source_get();
+
+  if (source.type == PlayerSourceType::NET_RADIO) {
+    web_send_json_err("当前是网络电台，暂不支持保存为本地歌曲快照", 400);
+    return;
+  }
+
+  if (source.type != PlayerSourceType::LOCAL_TRACK ||
+      player_state_current_index() < 0) {
+    web_send_json_err("当前没有可保存的本地歌曲状态", 400);
+    return;
+  }
+
+  if (!player_snapshot_save_to_nvs()) {
+    web_send_json_err("保存当前状态失败", 500);
+    return;
+  }
+
   web_send_json_ok_simple("player_state_saved");
 }
+
 static void web_handle_scan() {
   if (g_rescanning) {
     if (!app_request_cancel_rescan()) { web_send_json_err("当前没有正在进行的重扫"); return; }

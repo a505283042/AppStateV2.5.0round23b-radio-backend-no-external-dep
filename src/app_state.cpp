@@ -135,6 +135,12 @@ static void app_handle_tf_mounted()
 {
     LOGI("[APP] TF mounted");
 
+    const PlayerSourceState source_before_mount = player_source_get();
+
+    const bool radio_active =
+        source_before_mount.type == PlayerSourceType::NET_RADIO &&
+        (audio_service_is_playing() || audio_service_is_paused());
+
     audio_file_prepare_music_root_cache();
 
     if (nfc_binding_load("/System/nfc_map.txt")) {
@@ -165,6 +171,15 @@ static void app_handle_tf_mounted()
 
     player_playlist_reset_state();
     player_playlist_force_rebuild();
+
+    // 关键修复：
+    // 网络电台播放中插卡，只加载 TF 资源，不恢复本地歌曲快照。
+    if (radio_active) {
+        LOGI("[APP] TF mounted while radio active: skip local snapshot restore");
+        s_tf_mount_restore_pending = false;
+        ui_request_refresh_now();
+        return;
+    }
 
     // 插卡后重新从内部 NVS 读取播放器快照。
     // 因为开机无卡时，player_state 已经 enter 过一次，
@@ -216,6 +231,14 @@ void app_state_update(void)
     }
 
     if (s_tf_mount_restore_pending) {
+        const PlayerSourceState restore_source = player_source_get();
+
+        if (restore_source.type == PlayerSourceType::NET_RADIO) {
+            LOGW("[APP] cancel local snapshot restore: radio is active");
+            s_tf_mount_restore_pending = false;
+            return;
+        }
+
         const PlayerSnapshotRestorePollResult restore_res =
             player_snapshot_poll_restore();
 
