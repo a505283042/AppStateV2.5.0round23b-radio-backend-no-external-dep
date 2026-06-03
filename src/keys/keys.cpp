@@ -9,6 +9,7 @@
 #include "player_list_select.h"
 #include "nfc/nfc_admin_state.h"
 #include "utils/log.h"
+#include "web/web_server.h"
 
 /*
  * 按键输入模块。
@@ -38,11 +39,25 @@ static KeyCtx k_next  { PIN_KEY_NEXT,  HIGH, 0, false, 0 };
 static KeyCtx k_voldn { PIN_KEY_VOLDN, HIGH, 0, false, 0 };
 static KeyCtx k_volup { PIN_KEY_VOLUP, HIGH, 0, false, 0 };
 
+// VOLDN 双击检测
+static bool s_voldn_click_pending = false;
+static uint32_t s_voldn_click_deadline = 0;
+static constexpr uint32_t VOLDN_DOUBLE_CLICK_MS = 320;
+
 static bool s_rescan_cancel_armed = false;
 
 static bool s_mode_click_pending = false;
 static uint32_t s_mode_click_deadline = 0;
 static constexpr uint32_t MODE_DOUBLE_CLICK_MS = 320;
+
+/* VOLDN 双击提交：切换 WiFi */
+static void voldn_click_commit_double()
+{
+  web_wifi_toggle();
+  LOGW("[APP] WiFi toggled: %s", web_wifi_is_enabled() ? "ON" : "OFF");
+  s_voldn_click_pending = false;
+  s_voldn_click_deadline = 0;
+}
 
 static void mode_click_reset()
 {
@@ -209,6 +224,66 @@ static void handle_mode_key_normal()
   yield();
 }
 
+/*
+ * VOLDN 正常态处理：
+ * - 双击=切换 WiFi
+ * - 按住连发=音量-
+ */
+static void handle_voldn_key_normal()
+{
+  uint32_t now = millis();
+  int s = digitalRead(k_voldn.pin);
+
+  // 边沿检测
+  if (s != k_voldn.last) {
+    k_voldn.last = s;
+    if (pressed(s)) {
+      k_voldn.t_down = now;
+      k_voldn.long_fired = false;
+      k_voldn.t_repeat = now;
+      ui_volume_key_pressed();
+    } else {
+      // 松开：检查是否是短按
+      if (!k_voldn.long_fired && (now - k_voldn.t_down) > 25 && (now - k_voldn.t_down) < 500) {
+        // 短按：进入双击判定窗口
+        if (s_voldn_click_pending && now <= s_voldn_click_deadline) {
+          // 双击
+          voldn_click_commit_double();
+        } else {
+          // 第一次单击，等待双击
+          s_voldn_click_pending = true;
+          s_voldn_click_deadline = now + VOLDN_DOUBLE_CLICK_MS;
+        }
+      }
+    }
+  }
+
+  // 双击超时：说明是单击（但 VOLDN 单击不做任何事）
+  if (s_voldn_click_pending && (int32_t)(now - s_voldn_click_deadline) >= 0) {
+    s_voldn_click_pending = false;
+    s_voldn_click_deadline = 0;
+  }
+
+  // 按住连发（音量）
+  // ✅ 渐进式连发：按住时间越长，音量变动越快
+  if (pressed(k_voldn.last)) {
+    uint32_t hold_time = now - k_voldn.t_down;
+    uint32_t repeat_interval = 150; // 默认 150ms 间隔
+    
+    // 按住超过 2 秒后加速到 50ms 间隔
+    if (hold_time > 2000) {
+      repeat_interval = 50;
+    }
+    
+    if (now - k_voldn.t_repeat >= repeat_interval) {
+      k_voldn.t_repeat = now;
+      player_volume_step(-5);
+    }
+  }
+
+  yield();
+}
+
 void keys_update()
 {
   // --- NFC 管理状态下，按键转给 admin 状态机处理 ---
@@ -277,6 +352,6 @@ void keys_update()
   handle_key(k_next,  player_next_track, player_next_group);
 
   // VOL：按住连发
-  handle_key(k_voldn, nullptr, nullptr, true, [](){ player_volume_step(-5); });
-  handle_key(k_volup, nullptr, nullptr, true, [](){ player_volume_step(+5); });
+handle_voldn_key_normal();
+handle_key(k_volup, nullptr, nullptr, true, [](){ player_volume_step(+5); });
 }

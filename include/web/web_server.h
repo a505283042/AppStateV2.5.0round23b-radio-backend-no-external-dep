@@ -19,3 +19,7 @@ bool web_server_ready();
  * 用于开机无卡进入 AP 后，插卡时切换到 STA。
  */
 bool web_server_retry_sta_from_config();
+
+bool web_wifi_is_enabled();
+void web_wifi_set_enabled(bool enabled);
+void web_wifi_toggle();

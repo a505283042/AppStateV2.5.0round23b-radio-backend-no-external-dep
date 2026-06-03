@@ -44,6 +44,8 @@ struct WebWifiNetwork {
   String bssid_text;
 };
 
+static bool s_wifi_enabled = true;
+
 static WebServer s_server(80);
 static bool s_started = false;
 static bool s_ready = false;
@@ -51,6 +53,53 @@ static bool s_ap_mode = false;
 static String s_hostname_runtime = WEBCTRL_HOSTNAME_DEFAULT;
 static String s_wifi_source = "ap_fallback";
 static volatile bool s_web_volume_locked = true;
+
+bool web_wifi_is_enabled()
+{
+    return s_wifi_enabled;
+}
+
+void web_wifi_set_enabled(bool enabled)
+{
+#if WEBCTRL_ENABLED
+    if (s_wifi_enabled == enabled) {
+        return;
+    }
+
+    s_wifi_enabled = enabled;
+
+    if (!enabled) {
+        LOGW("[WEB] WiFi disabled by user");
+
+        // 停止 Web 服务
+        if (s_started) {
+            s_server.stop();
+        }
+
+        s_started = false;
+        s_ready = false;
+        s_ap_mode = false;
+
+        WiFi.softAPdisconnect(true);
+        WiFi.disconnect(true, true);
+        WiFi.mode(WIFI_OFF);
+
+        return;
+    }
+
+    LOGI("[WEB] WiFi enabled by user");
+
+    WiFi.mode(WIFI_STA);
+
+    // 重新启动 Web/WiFi 流程
+    web_server_start();
+#endif
+}
+
+void web_wifi_toggle()
+{
+    web_wifi_set_enabled(!s_wifi_enabled);
+}
 
 static String web_trim_copy(const String& in) { String s = in; s.trim(); return s; }
 static String web_json_escape(const String& in) {
@@ -1605,6 +1654,11 @@ static void web_setup_routes() {
 bool web_server_retry_sta_from_config()
 {
 #if WEBCTRL_ENABLED
+  if (!s_wifi_enabled) {
+    LOGW("[WEB] retry STA skipped: WiFi disabled");
+    return false;
+  }
+
   if (!s_started) {
     web_server_start();
     return s_ready && !s_ap_mode;
@@ -1642,6 +1696,11 @@ bool web_server_retry_sta_from_config()
 
 void web_server_start() {
 #if WEBCTRL_ENABLED
+  if (!s_wifi_enabled) {
+    LOGW("[WEB] start skipped: WiFi disabled");
+    return;
+  }
+
   if (s_started) return;
   s_started = true;
   WiFi.persistent(false); WiFi.setAutoReconnect(true);
