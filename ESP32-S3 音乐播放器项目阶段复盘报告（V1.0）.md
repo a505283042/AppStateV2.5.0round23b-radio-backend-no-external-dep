@@ -244,6 +244,263 @@
 **处理方法**：逐步将音量、当前曲目、播放模式等高频状态迁移到 NVS。
 **复盘结论**：持久化策略需要按"更新频率"和"介质特性"分别设计。
 
+### 3.11 TF 卡热插拔与状态恢复改造
+
+#### 问题背景
+原项目默认 TF 卡在开机阶段挂载成功，并假设运行过程中 TF 卡一直存在。随着项目加入本地音乐、网络电台、NFC、Web 控制、NVS 状态恢复等功能，TF 卡不再只是普通文件存储，而是承担了音乐库、索引、NFC 绑定、电台列表、WiFi 配置、默认封面等多个资源入口。
+
+实际使用中会遇到以下场景：
+- 开机前没有插 TF 卡
+- 开机后再插 TF 卡
+- 本地音乐播放中拔卡
+- 网络电台播放中拔卡
+- 网络电台播放中重新插卡
+- 多张 TF 卡切换使用
+- WiFi 常开导致芯片轻微发热
+
+#### 关键约束
+当前硬件没有 TF 卡 Card Detect 引脚，因此软件无法在物理层立即知道卡是否插入或拔出。这带来几个限制：
+- 不能依赖 GPIO 中断判断插拔
+- 无卡状态只能周期性尝试 mount
+- 拔卡只能通过 SD IO error 或 probe 失败推断
+- 插拔瞬间可能出现 SdFat 错误码
+- 不能保证物理拔卡瞬间立即响应
+
+因此本次方案的核心目标不是"瞬间识别插拔"，而是：
+- 不崩溃
+- 不 WDT
+- 不连续跳歌
+- 不破坏网络电台播放
+- 插卡后可重新加载 TF 资源
+- 本地音乐和网络电台状态不互相污染
+
+#### 主要改造内容
+
+**3.11.1 Storage 层重构**
+
+新增和完善以下接口：
+
+```cpp
+bool storage_mount(void);
+bool storage_unmount(void);
+void storage_mark_not_ready(void);
+
+bool storage_probe_alive(void);
+
+void storage_report_io_error(const char* where);
+bool storage_has_recent_io_error(void);
+void storage_clear_io_error(void);
+
+uint32_t storage_card_hash(void);
+const char* storage_card_snapshot_key(void);
+void storage_clear_card_identity(void);
+```
+
+改造后，`storage_init()` 作为兼容入口，内部走 `storage_mount()`。
+
+**3.11.2 新增无 CD 脚热插拔状态机**
+
+新增：
+
+```text
+include/storage/storage_hotplug.h
+src/storage/storage_hotplug.cpp
+```
+
+核心策略：
+- storage not ready 时，低频尝试 `storage_mount()`
+- storage ready 时，低频执行 `storage_probe_alive()`
+- 本地音乐播放中不主动 probe，避免打扰音频读卡
+- 一旦 AudioFile 上报 IO error，缩短 probe 间隔并允许抢占确认
+- 确认拔卡后发出 `CARD_REMOVED`
+- mount 成功后发出 `CARD_MOUNTED`
+
+**3.11.3 AudioFile 失败上报**
+
+在 `AudioFile::open/read/seek` 中加入 storage ready 判断和 IO error 上报。播放中拔卡时，`AudioFile::read()` 会返回错误并上报：
+
+```text
+[STORAGE] IO error reported: AudioFile::read_negative
+```
+
+这样 APP 层可以区分"单曲播放失败"和"TF 卡疑似拔出"。
+
+**3.11.4 阻止播放中拔卡后的连续 auto next**
+
+初版问题是：播放中拔卡后，播放器把读文件失败当成单曲播放失败，然后自动跳下一首，导致连续 `open_file failed`。
+
+修复方式：
+- `AudioFile` 上报 storage IO error
+- `app_state_update()` 在 storage suspect 状态下允许 hotplug probe 抢占
+- `player_control` 在 `storage_has_recent_io_error()` 时阻止 auto next
+
+验证日志：
+
+```text
+[STORAGE] IO error reported: AudioFile::read_negative
+[PLAYER] auto next blocked: storage not ready or IO error pending
+[SD_HOTPLUG] card removed confirmed
+[APP] TF removed
+```
+
+**3.11.5 SdFat SPI 模式修正**
+
+曾经出现 FreeRTOS mutex assert，回溯显示崩在：
+
+```text
+SPI.endTransaction()
+SdSpiCard::readStop()
+AudioFile::open()
+```
+
+根因判断：
+- 当前工程有多个任务访问 SD：AudioTask、PlayerAssetTask、loopTask 等
+- `DEDICATED_SPI` 可能让 SdFat 的 SPI transaction 在不同任务间收尾
+- 导致当前任务释放了不属于自己的 SPI mutex
+
+修复方式：
+
+```cpp
+SdSpiConfig cfg(PIN_SD_CS, SHARED_SPI, SD_SCK_MHZ(16), &SPI_SD);
+```
+
+并在每次 mount 前显式初始化 SD SPI：
+
+```cpp
+SPI_SD.begin(PIN_SPI_SD_SCK, PIN_SPI_SD_MISO, PIN_SPI_SD_MOSI, PIN_SD_CS);
+```
+
+**3.11.6 开机无卡支持**
+
+开机无卡时，系统不再因为 SD 挂载失败而阻塞启动。
+
+无卡启动行为：
+- 跳过本地 catalog
+- 跳过 TF 上的 radio list / NFC / WiFi 配置
+- Web 进入 AP fallback
+- UI 显示无卡或占位状态
+- 后续插卡时自动重新加载 TF 资源
+
+**3.11.7 插卡后重新加载 TF 资源**
+
+插卡并 mount 成功后，系统重新加载：
+- `/System/nfc_map.txt`
+- `/System/radio_list.txt`
+- `/System/config/wifi.conf`
+- `/System/music_index_v3.bin`
+- `/Music` 曲库信息
+- V3 artist / album groups
+
+**3.11.8 按 TF 卡区分 NVS snapshot**
+
+原本本地播放 snapshot 使用固定 NVS key，多张卡会互相覆盖。
+
+修复方式：
+- mount 成功后读取 TF 卡 CID
+- 对 CID 计算 hash
+- 生成卡专属 snapshot key
+
+示例：
+
+```text
+[STORAGE] card hash=BE61B111 snapshot_key=snap_BE61B111
+```
+
+这样不同 TF 卡可以保存不同的播放状态。
+
+**3.11.9 修正 snapshot 高频保存问题**
+
+曾出现 `player_snapshot_save_to_nvs()` 被放在 `app_state_update()` 高频循环中，导致同一份 snapshot 反复写入 NVS。
+
+修复方式：
+- 从 `app_state_update()` 高频循环中移除 snapshot 保存
+- 只在明确事件中保存：
+  - Web 手动保存
+  - 本地播放中拔卡前
+  - 后续可扩展到切歌、暂停、音量变化等事件
+- 建议在 `player_snapshot_save_to_nvs()` 内部增加内容去重，避免重复写同一份 blob
+
+**3.11.10 网络电台与本地 snapshot 隔离**
+
+发现问题：
+- 网络电台播放时点击 Web 保存，会误调用本地歌曲 snapshot
+- 网络电台播放中插卡后，会恢复本地歌曲 snapshot
+- 导致"音频还在播电台，但 UI 显示本地歌曲"
+
+修复方式：
+- `player_snapshot_save_to_nvs()` 自身检查 source 类型，只允许 `LOCAL_TRACK`
+- Web 保存状态时，网络电台拒绝保存为本地歌曲 snapshot
+- 网络电台播放中插卡时，跳过本地 snapshot 恢复
+
+验证日志：
+
+```text
+[APP] TF mounted while radio active: skip local snapshot restore
+```
+
+**3.11.11 WiFi 手动开关**
+
+测试发现关闭 WiFi 后芯片温度略有下降。因此新增 WiFi 临时开关。
+
+行为：
+- 双击 `VOL-` 切换 WiFi
+- 关闭时停止 Web Server
+- 关闭 STA / AP
+- 执行 `WiFi.mode(WIFI_OFF)`
+- WiFi 关闭后插拔 TF 卡不会重新打开 WiFi
+
+验证日志：
+
+```text
+[WEB] WiFi disabled by user
+[APP] WiFi toggled: OFF
+```
+
+#### 验证结果
+
+**本地音乐**：
+- 开机有卡，正常加载曲库并播放
+- 开机无卡，系统正常进入播放器
+- 开机无卡后插卡，自动挂载并加载曲库
+- 本地音乐播放中拔卡，成功阻止 auto next
+- 本地音乐拔卡前保存当前卡对应的 snapshot
+- 重新插卡后可恢复对应卡的本地播放状态
+
+**网络电台**：
+- 网络电台播放中网页保存，不再写入本地歌曲 snapshot
+- 网络电台播放中拔卡，不保存本地歌曲 snapshot
+- 网络电台播放中插卡，跳过本地歌曲 snapshot 恢复
+- 网络电台不再出现"音频是电台但 UI 是本地歌"的错乱
+
+**WiFi**：
+- 开机有卡时可读取 `/System/config/wifi.conf` 并连接 STA
+- 开机无卡时进入 AP fallback
+- 开机无卡后插卡，可重新读取 WiFi 配置
+- 双击 `VOL-` 可关闭 WiFi
+- 关闭 WiFi 后芯片温度有所下降
+- WiFi 关闭状态下插拔 TF 卡不会自动打开 WiFi
+
+#### 当前仍需注意的问题
+
+**无卡状态日志较多**：由于无 CD 脚，系统会周期性尝试 mount。无卡时会出现反复 mount failed 日志。这是当前方案的正常行为。后续可以拉长无卡 mount 间隔、对重复失败日志做节流，或在下一版硬件增加 Card Detect 引脚。
+
+**网络电台播放中插卡可能短暂卡顿**：当前网络电台播放中插卡后，仍会同步加载本地 music index 和 groups。虽然已经跳过本地 snapshot 恢复，但加载索引仍可能造成短暂卡顿。后续可以优化为电台播放中插卡只 mount + reload radio list，本地 music index 延迟到切回本地音乐或空闲时加载。
+
+**网络电台 snapshot 尚未实现**：当前只修复了"网络电台不误写本地 snapshot"。如果需要恢复上次电台，应新增独立 radio snapshot，保存 radio index、name、URL、volume、paused、UI view 等信息，不要复用本地歌曲 snapshot。
+
+**默认封面兜底仍需完善**：建议继续完善 `/System/default_cover.jpg`、内置 NO COVER 占位图，确保封面失败时不阻塞播放器 UI。
+
+#### 经验沉淀
+
+1. 无 CD 脚热插拔不应追求瞬时识别，应优先保证失败路径稳定。
+2. SD IO error 不等于单曲失败，需要和"卡被拔出"区分处理。
+3. 多任务访问 SdFat 时，`DEDICATED_SPI` 有跨任务 transaction 风险，当前项目应使用 `SHARED_SPI`。
+4. 本地音乐 snapshot 和网络电台 snapshot 不能混用。
+5. 插卡事件不能无条件恢复本地 snapshot，需要看当前 source 是否为 radio。
+6. 高频循环里不能写 NVS，snapshot 保存必须绑定明确事件。
+7. WiFi 是 ESP32-S3 发热来源之一，保留手动开关有实际价值。
+8. 下一版硬件应优先增加 TF Card Detect 引脚。
+
 ## 四、当前阶段的主要成果
 
 经过这一轮问题排查和修正，项目当前已具备以下较稳定基础：
@@ -255,6 +512,9 @@
 - ✅ **NFC 流程基本闭环**：NFC 绑定、删除、保存、退出等流程基本闭环
 - ✅ **网页端问题得到处理**：网页端的歌手页、专辑页、滚动容器、搜索请求等问题得到针对性处理
 - ✅ **问题定位方式改进**：通过日志与监控手段，项目的问题定位方式从"凭感觉"转向"看数据"
+- ✅ **TF 卡热插拔支持**：实现无 CD 脚情况下的稳定热插拔，支持开机无卡、插卡重加载、按卡区分 snapshot
+- ✅ **网络电台与本地状态隔离**：网络电台播放与本地音乐状态不再互相污染
+- ✅ **WiFi 手动开关**：双击 `VOL-` 可临时关闭 WiFi，降低芯片发热
 
 ## 五、当前仍未完全收口的事项
 
@@ -265,6 +525,10 @@
 3. **歌词相关内存与显示逻辑还有进一步优化空间**：当前已比早期更轻，但仍可能成为后续优化目标
 4. **个别网页接口还可继续瘦身**：尤其在多设备同时连接时，仍需继续控制轮询和大响应压力
 5. **某些优化策略还需继续按场景细分**：例如普通切歌、NFC 起播、电台切台，不一定适合同一套时序
+6. **无卡状态日志需要优化**：当前无 CD 脚导致周期性 mount 失败日志较多，需要做日志节流
+7. **网络电台播放中插卡体验可优化**：当前会同步加载本地 music index，可能造成短暂卡顿
+8. **网络电台 snapshot 尚未实现**：当前只实现了本地歌曲 snapshot，电台状态持久化需后续补充
+9. **默认封面兜底逻辑需完善**：`/System/default_cover.jpg` 和内置 NO COVER 占位图需进一步优化
 
 ## 六、经验总结
 
@@ -276,6 +540,12 @@
 4. **同一个优化不一定适合所有入口**：普通切歌有效的优化，在 NFC、开机首播、电台切换中未必成立
 5. **复杂问题必须靠日志和阶段打点**：没有阶段耗时、内存监控、栈水位数据，很多问题只会反复猜测
 6. **小步修改比大范围重构更适合当前阶段**：在主线尚未彻底稳定时，"最小正式补丁"比一次性大改更安全
+7. **无 CD 脚热插拔不应追求瞬时识别**：应优先保证失败路径稳定，避免崩溃、WDT、连续跳歌
+8. **SD IO error 不等于单曲失败**：需要和"卡被拔出"区分处理，避免误触发 auto next
+9. **多任务访问 SdFat 时慎用 DEDICATED_SPI**：跨任务 transaction 可能导致 mutex assert，应使用 `SHARED_SPI`
+10. **不同播放源的 snapshot 不能混用**：本地音乐和网络电台应使用独立的状态持久化策略
+11. **高频循环里不能写 NVS**：snapshot 保存必须绑定明确事件，避免反复写入
+12. **硬件约束需要软件层面妥协**：无 CD 脚时接受周期性 mount 尝试，通过日志节流优化体验
 
 ## 七、下一阶段建议
 
@@ -302,8 +572,18 @@
 - **电台切换**
 - **网页端多设备连接**
 - **扫描与播放并发**
+- **TF 卡热插拔场景**（开机无卡、播放中拔卡、插卡重加载、多卡切换）
 
 这样后续每做一项改动，都能更快验证是否影响稳定性。
+
+### 7.6 热插拔相关优化
+- 优化无卡状态下的 mount 日志频率，减少日志噪声
+- 实现网络电台播放中插卡的延迟加载策略，避免卡顿
+- 新增独立的网络电台 snapshot 机制
+- 完善默认封面兜底逻辑和内置 NO COVER 占位图
+
+### 7.7 硬件建议
+下一版硬件应优先增加 TF 卡座 Card Detect 引脚，从根本上改善热插拔体验。
 
 ## 八、结语
 

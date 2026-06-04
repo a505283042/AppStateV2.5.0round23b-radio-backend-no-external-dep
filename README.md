@@ -49,9 +49,16 @@
   - 扫描 / 保存状态
 - 启动恢复：
   - NVS blob 快照恢复播放状态
+  - **按 TF 卡区分 snapshot**（不同卡保存独立播放状态）
 - Wi‑Fi：
   - 优先 STA 连 `wifi.conf`
   - 失败自动回退 AP 热点
+  - **双击 VOL- 手动开关 WiFi**
+- **无 Card Detect 引脚 TF 卡热插拔**：
+  - 开机无卡可正常进入系统
+  - 开机后插卡自动挂载 TF 卡
+  - 本地播放中拔卡不连续跳歌、不 WDT
+  - 网络电台播放中拔卡不主动停止电台
 - 运行时监控：
   - heap / internal / dma / psram
   - 任务栈高水位
@@ -213,18 +220,35 @@ player -> audio_radio_backend.cpp
 系统启动大致顺序如下：
 
 1. 初始化串口与 SPI 总线
-2. 初始化 SD 卡
-3. 读取 NFC 绑定表 `/System/nfc_map.txt`
-4. 初始化固定封面缓冲区（优先 PSRAM）
-5. 初始化 UI
-6. 启动 `audio_service` 音频任务
-7. 启动运行时监控任务
-8. 初始化 NFC
-9. 加载或重建 `V3` 音乐索引 `/System/music_index_v3.bin`
-10. 预加载电台列表 `/System/radio_list.txt`
-11. 从 NVS 读取待恢复快照
-12. 启动 Web 服务器
-13. 进入 `STATE_PLAYER`
+2. 初始化 SD / TF 卡
+3. 如果 TF 卡挂载成功：
+   - 读取 TF 卡 CID
+   - 生成当前卡的 snapshot key，例如 `snap_BE61B111`
+   - 读取 NFC 绑定表 `/System/nfc_map.txt`
+   - 加载或重建 V3 音乐索引 `/System/music_index_v3.bin`
+   - 加载电台列表 `/System/radio_list.txt`
+   - 读取 WiFi 配置 `/System/config/wifi.conf`
+4. 如果开机无卡：
+   - 系统仍继续启动
+   - 本地曲库为空
+   - Web 进入 AP fallback
+   - 后续插卡时自动重新加载 TF 卡资源
+5. 初始化固定封面缓冲区
+6. 初始化 UI
+7. 启动 `audio_service` 音频任务
+8. 启动运行时监控任务
+9. 初始化 NFC
+10. 从当前卡对应的 NVS key 读取待恢复快照
+11. 启动 Web 服务器
+12. 进入 `STATE_PLAYER`
+
+无卡启动不是异常状态。此时出现类似日志属于预期行为：
+
+```text
+[STORAGE] SdFat mount FAILED
+[BOOT] no TF card, start without local library
+[BOOT] skip local catalog: storage not ready
+```
 
 ---
 
@@ -233,10 +257,11 @@ player -> audio_radio_backend.cpp
 推荐最小目录：
 
 ```text
-/ Music/
+/Music/
     xxx.mp3
     xxx.flac
-/ System/
+
+/System/
     music_index_v3.bin
     radio_list.txt
     nfc_map.txt
@@ -315,6 +340,26 @@ password=87654321
   - SSID: `ESP32S3-Player`
   - Password: `12345678`
 
+### 默认封面
+
+文件：
+
+```text
+/System/default_cover.jpg
+```
+
+用途：
+
+- 歌曲没有内嵌封面时使用
+- 封面读取失败时使用
+- 避免播放器因封面资源失败一直停留在“加载中”占位页
+
+建议：
+
+- JPG 格式
+- 240×240
+- 文件大小小于 100KB
+
 ---
 
 ## 7. Web 控制
@@ -381,7 +426,28 @@ password=87654321
 | NEXT | 短按 | 下一首 |
 | NEXT | 长按 | 歌手/专辑模式下进入列表选择；全部模式下大步前进 |
 | VOL- | 按住连发 | 音量减 |
+| VOL- | 双击 | WiFi 开关 |
 | VOL+ | 按住连发 | 音量加 |
+
+### WiFi 开关说明
+
+双击 `VOL-` 可临时关闭或开启 WiFi。
+
+WiFi 关闭时：
+
+- 停止 Web Server
+- 断开 STA
+- 关闭 AP 热点
+- 执行 `WiFi.mode(WIFI_OFF)`
+- 插拔 TF 卡不会自动重新打开 WiFi
+
+WiFi 重新开启时：
+
+- 重新读取 `/System/config/wifi.conf`
+- 优先连接 STA
+- STA 失败时进入 AP fallback
+
+当前 WiFi 开关默认不写入 NVS，重启后默认 WiFi 开启。
 
 ### 扫描中
 
@@ -452,6 +518,41 @@ V3 的设计目标：
 - 当前 UI view
 - 用户是否处于暂停态
 
+### 按 TF 卡区分 snapshot
+
+当前版本会在 TF 卡 mount 成功后读取 TF 卡 CID，并生成卡专属 snapshot key，例如：
+
+```text
+snap_BE61B111
+```
+
+这样可以实现：
+
+```text
+TF卡A -> 恢复 TF卡A 的上次播放记录
+TF卡B -> 恢复 TF卡B 的上次播放记录
+```
+
+保存和恢复逻辑：
+
+- 开机有卡：挂载成功后读取当前卡对应的 snapshot
+- 开机无卡：不提前恢复本地歌曲 snapshot
+- 后续插卡：挂载成功后读取当前卡对应的 snapshot
+- 本地播放中拔卡：拔卡处理前保存当前卡对应的 snapshot
+
+### 网络电台与本地 snapshot 隔离
+
+`player_snapshot_save_to_nvs()` 只保存本地歌曲状态。
+
+网络电台播放时：
+
+- 网页点击“保存当前状态”不会写入本地歌曲 snapshot
+- 拔卡时不会保存本地歌曲 snapshot
+- 插卡后不会恢复本地歌曲 snapshot
+- 网络电台播放状态不会被本地歌曲 UI 覆盖
+
+如果未来需要恢复网络电台状态，应新增独立的 radio snapshot，而不是复用本地歌曲 snapshot。
+
 恢复策略：
 
 - 启动时先读取“待恢复快照”
@@ -460,7 +561,125 @@ V3 的设计目标：
 
 ---
 
-## 12. 内存设计（当前版本重点）
+## 12. TF 卡热插拔
+
+当前硬件没有 TF 卡 Card Detect 引脚，因此热插拔采用软件探测方案。
+
+### 实现方式
+
+- 无卡状态下周期性尝试 `storage_mount()`
+- 有卡状态下低频执行 `storage_probe_alive()`
+- 本地播放中不主动 probe，避免影响音频读取
+- `AudioFile::read/open/seek` 失败时上报 `storage_report_io_error()`
+- 疑似拔卡后通过 `readSector(0)` 快速确认卡是否仍存在
+
+### 本地音乐播放中拔卡
+
+流程：
+
+```text
+AudioFile read/open/seek 失败
+    ↓
+上报 storage IO error
+    ↓
+阻止 player auto next
+    ↓
+probe 确认 TF removed
+    ↓
+保存本地 snapshot
+    ↓
+停止本地音频
+    ↓
+清理歌词 / 封面 / 资源任务 / 曲库 / playlist / NFC
+    ↓
+storage_unmount()
+```
+
+预期日志：
+
+```text
+[STORAGE] IO error reported: AudioFile::read_negative
+[PLAYER] auto next blocked: storage not ready or IO error pending
+[SD_HOTPLUG] card removed confirmed
+[APP] TF removed
+[STORAGE] unmounted
+```
+
+### 网络电台播放中拔卡
+
+流程：
+
+```text
+probe 确认 TF removed
+    ↓
+APP 处理 TF removed
+    ↓
+不保存本地歌曲 snapshot
+    ↓
+不主动停止网络电台
+    ↓
+清理本地曲库和 TF 相关资源
+    ↓
+storage_unmount()
+```
+
+网络电台播放中重新插卡时，只重新加载 TF 卡资源，不恢复本地歌曲 snapshot。
+
+预期日志：
+
+```text
+[APP] TF mounted while radio active: skip local snapshot restore
+```
+
+### 正常失败码说明
+
+由于无 CD 脚，系统无法提前知道卡是否真的存在。无卡状态下周期性 mount 失败属于正常现象：
+
+```text
+[STORAGE] mount (SdFat)
+[STORAGE] 卡错误代码: 1
+[STORAGE] SdFat mount FAILED
+```
+
+热插拔瞬间也可能出现：
+
+```text
+卡错误代码: 12
+卡错误代码: 23
+```
+
+只要后续可以重新 `SdFat mount OK`，一般不属于致命问题。
+
+### SPI 配置说明
+
+热插拔版本中，SdFat 使用：
+
+```cpp
+SdSpiConfig cfg(PIN_SD_CS, SHARED_SPI, SD_SCK_MHZ(16), &SPI_SD);
+```
+
+原因：
+
+- 当前工程存在 AudioTask、PlayerAssetTask、loopTask 等多任务访问 SD 的情况
+- `DEDICATED_SPI` 在部分场景下可能导致 SPI transaction 跨任务收尾
+- 可能触发 FreeRTOS mutex assert
+- `SHARED_SPI` 更适合当前多任务访问模型
+
+每次重新 mount 前必须显式初始化 SD SPI 引脚：
+
+```cpp
+SPI_SD.begin(PIN_SPI_SD_SCK, PIN_SPI_SD_MISO, PIN_SPI_SD_MOSI, PIN_SD_CS);
+```
+
+否则 ESP32-S3 可能出现：
+
+```text
+HSPI Does not have default pins on ESP32S3
+```
+
+---
+
+## 13. 内存设计（当前版本重点）
 
 ### 已明确放到 PSRAM 的大头
 
@@ -529,6 +748,58 @@ pio device monitor
 
 ## 15. 关键日志参考
 
+### TF 卡识别
+
+```text
+[STORAGE] SdFat mount OK
+[STORAGE] card hash=BE61B111 snapshot_key=snap_BE61B111
+```
+
+### 开机无卡
+
+```text
+[STORAGE] SdFat mount FAILED
+[BOOT] no TF card, start without local library
+```
+
+### 插卡成功
+
+```text
+[SD_HOTPLUG] card mounted
+[APP] TF mounted
+[CATALOG_V3] load ok
+```
+
+### 本地播放中拔卡
+
+```text
+[STORAGE] IO error reported: AudioFile::read_negative
+[PLAYER] auto next blocked: storage not ready or IO error pending
+[SD_HOTPLUG] card removed confirmed
+[APP] TF removed
+[STORAGE] unmounted
+```
+
+### 网络电台播放中插卡
+
+```text
+[APP] TF mounted while radio active: skip local snapshot restore
+```
+
+### WiFi 开关
+
+```text
+[WEB] WiFi disabled by user
+[APP] WiFi toggled: OFF
+```
+
+重新打开时：
+
+```text
+[WEB] WiFi enabled by user
+[WEB] STA connected ip=...
+```
+
 启动时建议关注这些日志：
 
 - `psramFound / FreePsram / FreeHeap`
@@ -553,19 +824,24 @@ pio device monitor
 
 ## 16. 已知边界与注意事项
 
-1. 当前稳定网络音频能力是 **HTTP MP3 电台**。  
+1. 当前稳定网络音频能力仍是 **HTTP MP3 电台**。  
    `m3u8/HLS` 不是当前稳定主线。
 
-2. 下面这些文件/模块已下线或应视为历史残留：
+2. 当前硬件没有 TF 卡 Card Detect 引脚。  
+   热插拔采用软件探测，因此无卡状态下周期性 mount 失败日志属于正常现象。
+
+3. 网络电台播放中插卡会重新加载 TF 卡资源。  
+   当前会同步加载本地 music index，可能造成短暂卡顿。后续可优化为“电台播放中延迟加载本地曲库”。
+
+4. 本地歌曲 snapshot 和网络电台 snapshot 不共用。  
+   当前仅本地歌曲支持 snapshot 保存/恢复。网络电台如果需要持久化，应新增独立 radio snapshot。
+
+5. WiFi 关闭后 Web 控制不可用。  
+   需要再次双击 `VOL-` 打开 WiFi。
+
+6. 下面这些文件/模块已下线或应视为历史残留：
    - `audio_mp3_stream_audiotools.cpp`
    - `audio_mp3_stream.h`
-
-4. Web 页当前是轻量内嵌页面，不是独立前端工程。
-
-5. 目前重点优化方向仍然是：
-   - 内部 RAM 压力
-   - String / 队列对象瘦身
-   - 歌词 / playlist 索引进一步外移到 PSRAM
 
 ---
 
@@ -573,22 +849,24 @@ pio device monitor
 
 ### 较近目标
 
-- 继续瘦身内部 RAM
-- 统一更多播放源抽象
-- 优化 Web JSON 构造与长时间运行稳定性
+- 网络电台播放中插卡时，延迟加载本地 `music_index_v3.bin`，降低卡顿
+- 为网络电台增加独立 radio snapshot
+- 完善 `/System/default_cover.jpg` 与内置 NO COVER 兜底逻辑
+- 降低无卡状态下周期 mount 的日志频率
+- 给 WiFi 默认策略增加配置项：开机开启 / 默认关闭 / 自动超时关闭
 
 ### 中期方向
 
+- 继续瘦身内部 RAM
+- 统一更多播放源抽象
+- 优化 Web JSON 构造与长时间运行稳定性
 - 远程 MP3 文件播放
 - WebDAV / NAS 文件源
-- 更完整的列表页与筛选页
-- 更细的播放状态 / 电台元数据展示
 
-### 更远方向
+### 硬件建议
 
-- HLS / m3u8
-- 网络 FLAC
-- 更通用的 media source 抽象
+下一版硬件建议增加 TF 卡座 Card Detect 引脚。  
+有 CD 脚后，可以减少无卡状态下的周期 mount，降低日志噪声和无效 SD 初始化开销。
 
 ---
 
