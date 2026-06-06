@@ -87,6 +87,7 @@ static bool parse_line(const String& raw, NetMusicItem* out) {
   const int p2 = line.indexOf('|', p1 + 1);
   const int p3 = p2 >= 0 ? line.indexOf('|', p2 + 1) : -1;
   const int p4 = p3 >= 0 ? line.indexOf('|', p3 + 1) : -1;
+  const int p5 = p4 >= 0 ? line.indexOf('|', p4 + 1) : -1;
 
   NetMusicItem item{};
   item.title = trim_copy(line.substring(0, p1));
@@ -105,7 +106,14 @@ static bool parse_line(const String& raw, NetMusicItem* out) {
         item.artist = trim_copy(line.substring(p3 + 1));
       } else {
         item.artist = trim_copy(line.substring(p3 + 1, p4));
-        item.album = trim_copy(line.substring(p4 + 1));
+
+        if (p5 < 0) {
+          item.album = trim_copy(line.substring(p4 + 1));
+        } else {
+          item.album = trim_copy(line.substring(p4 + 1, p5));
+          String duration = trim_copy(line.substring(p5 + 1));
+          item.duration_ms = (uint32_t)duration.toInt();
+        }
       }
     }
   }

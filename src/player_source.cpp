@@ -30,6 +30,7 @@ void player_source_set_local_track(int track_idx) {
   s_state.net_track_format = "";
   s_state.net_track_artist = "";
   s_state.net_track_album = "";
+  s_state.net_track_duration_ms = 0;
   s_state.net_track_active = false;
   s_state.net_track_state = "idle";
   s_state.net_track_error = "";
@@ -57,6 +58,7 @@ void player_source_set_radio_stub(int radio_idx, const RadioItem& item, const St
   s_state.net_track_format = "";
   s_state.net_track_artist = "";
   s_state.net_track_album = "";
+  s_state.net_track_duration_ms = 0;
   s_state.net_track_active = false;
   s_state.net_track_state = "idle";
   s_state.net_track_error = "";
@@ -112,6 +114,7 @@ void player_source_set_net_track_stub(int idx,
   s_state.net_track_format = item.format;
   s_state.net_track_artist = item.artist;
   s_state.net_track_album = item.album;
+  s_state.net_track_duration_ms = item.duration_ms;
   s_state.net_track_active = false;
   s_state.net_track_state = state;
   s_state.net_track_error = err;

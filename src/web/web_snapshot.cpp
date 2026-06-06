@@ -228,6 +228,7 @@ WebPlayerSnapshot web_snapshot_capture() {
   snap.net_track_format = source.net_track_format;
   snap.net_track_artist = source.net_track_artist;
   snap.net_track_album = source.net_track_album;
+  snap.net_track_duration_ms = source.net_track_duration_ms;
   snap.net_track_state = source.net_track_state;
   snap.net_track_error = source.net_track_error;
 
@@ -294,7 +295,7 @@ WebPlayerSnapshot web_snapshot_capture() {
                    ? source.net_track_album
                    : String("网络音乐");
 
-    snap.total_ms = 0;
+    snap.total_ms = source.net_track_duration_ms;
 
     snap.has_lyrics = false;
     snap.lyrics_loading = false;

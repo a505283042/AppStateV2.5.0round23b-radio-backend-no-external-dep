@@ -15,6 +15,7 @@ struct NetMusicItem {
   String format;
   String artist;
   String album;
+  uint32_t duration_ms = 0;
   bool valid = false;
 };
 

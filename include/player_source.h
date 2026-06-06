@@ -35,6 +35,7 @@ struct PlayerSourceState {
   String net_track_format;
   String net_track_artist;
   String net_track_album;
+  uint32_t net_track_duration_ms = 0;
   bool net_track_active = false;
   String net_track_state;   // idle / connecting / playing / paused / error / stopped
   String net_track_error;

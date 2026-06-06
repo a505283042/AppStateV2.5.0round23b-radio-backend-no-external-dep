@@ -2283,6 +2283,15 @@ function clearNode(el){
   while(el && el.firstChild) el.removeChild(el.firstChild);
 }
 
+function formatDuration(ms){
+  ms = Number(ms || 0);
+  if(!ms || ms < 0) return '';
+  const totalSec = Math.floor(ms / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
 async function loadNetMusic(){
   try{
     const r = await fetch(`/api/netmusic?offset=${offset}&limit=${limit}`, {cache:'no-store'});
@@ -2325,6 +2334,9 @@ async function loadNetMusic(){
       if (artist && artist !== 'NAS') metaParts.push(artist);
       if (album && album !== 'NAS') metaParts.push(album);
       metaParts.push(format.toUpperCase());
+
+      const dur = formatDuration(it.duration_ms);
+      if (dur) metaParts.push(dur);
 
       meta.textContent = metaParts.join(' · ');
 

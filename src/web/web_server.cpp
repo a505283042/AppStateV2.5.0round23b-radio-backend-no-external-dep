@@ -952,6 +952,9 @@ static void web_handle_status() {
   json += web_json_escape(snap.net_track_album);
   json += "\"";
 
+  json += ",\"net_track_duration_ms\":";
+  json += String((unsigned long)snap.net_track_duration_ms);
+
   json += ",\"net_track_state\":\"";
   json += web_json_escape(snap.net_track_state);
   json += "\"";
@@ -1635,6 +1638,9 @@ static void web_handle_netmusic() {
     json += ",\"format\":\"";
     json += web_json_escape(item.format);
     json += "\"";
+
+    json += ",\"duration_ms\":";
+    json += String((unsigned long)item.duration_ms);
 
     if (detail != 0) {
       json += ",\"path\":\"";

@@ -640,6 +640,7 @@ static bool control_play_net_track_index_impl(int idx, bool reset_shuffle)
     ui_set_track_pos(idx, (int)net_music_catalog_count());
     ui_set_play_mode(g_play_mode);
     ui_set_volume(audio_get_volume());
+    
 
     // 第一版先使用默认封面，避免引入网络封面和歌词复杂度。
     (void)control_apply_cover_file("/System/default_cover.jpg");
@@ -649,15 +650,21 @@ static bool control_play_net_track_index_impl(int idx, bool reset_shuffle)
     if (ok) {
         player_source_set_net_track_status(true, String("playing"), String());
 
+        // NAS/HTTP 文件播放路径会先把 audio total 清零。
+        // 这里用 net_music.txt 预生成的 duration_ms 写回 audio 层，
+        // 这样屏幕 UI 里 audio_get_total_ms() 才能拿到总时长。
+        audio_set_total_ms(item.duration_ms);
+
         if (reset_shuffle && control_is_net_track_random_mode()) {
             control_reset_net_track_shuffle(idx);
         }
 
         control_reset_net_track_eof_watch(idx);
 
-        LOGI("[NETTRACK] PLAY idx=%d title=%s url=%s",
+        LOGI("[NETTRACK] PLAY idx=%d title=%s duration=%lums url=%s",
             idx,
             item.title.c_str(),
+            (unsigned long)item.duration_ms,
             url.c_str());
         return true;
     }
