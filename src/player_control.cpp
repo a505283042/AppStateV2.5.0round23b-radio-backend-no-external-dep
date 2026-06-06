@@ -1,4 +1,5 @@
 #include "player_control.h"
+#include <esp_system.h>
 
 #include "audio/audio.h"
 #include "audio/audio_service.h"
@@ -188,7 +189,125 @@ static bool control_prepare_net_track_item(int idx, NetMusicItem& item, String& 
     return true;
 }
 
-static int control_next_net_track_index(int current_idx, int step)
+struct NetTrackShuffleState {
+    uint32_t start = 0;
+    uint32_t step = 1;
+    uint32_t pos = 0;
+    uint32_t count = 0;
+    bool ready = false;
+};
+
+NetTrackShuffleState s_net_track_shuffle;
+
+struct NetTrackEofWatchState {
+    int idx = -1;
+    uint32_t last_play_ms = 0;
+    uint32_t last_change_ms = 0;
+    bool armed = false;
+};
+
+NetTrackEofWatchState s_net_track_eof_watch;
+
+static constexpr uint32_t NET_TRACK_EOF_MIN_PLAY_MS = 5000;
+static constexpr uint32_t NET_TRACK_EOF_STALL_MS = 8000;
+
+static bool control_is_net_track_random_mode()
+{
+    return g_play_mode == PLAY_MODE_ALL_RND ||
+           g_play_mode == PLAY_MODE_ARTIST_RND ||
+           g_play_mode == PLAY_MODE_ALBUM_RND;
+}
+
+static uint32_t control_gcd_u32(uint32_t a, uint32_t b)
+{
+    while (b != 0) {
+        const uint32_t t = a % b;
+        a = b;
+        b = t;
+    }
+    return a;
+}
+
+static uint32_t control_choose_coprime_step(uint32_t count)
+{
+    if (count <= 1) return 1;
+
+    for (int i = 0; i < 24; ++i) {
+        uint32_t step = (esp_random() % (count - 1)) + 1;
+        if (control_gcd_u32(step, count) == 1) {
+            return step;
+        }
+    }
+
+    for (uint32_t step = 1; step < count; ++step) {
+        if (control_gcd_u32(step, count) == 1) {
+            return step;
+        }
+    }
+
+    return 1;
+}
+
+static int control_net_track_shuffle_index_at(uint32_t pos)
+{
+    if (!s_net_track_shuffle.ready || s_net_track_shuffle.count == 0) {
+        return -1;
+    }
+
+    const uint32_t idx =
+        (s_net_track_shuffle.start + pos * s_net_track_shuffle.step) %
+        s_net_track_shuffle.count;
+
+    return (int)idx;
+}
+
+static void control_reset_net_track_shuffle(int start_idx)
+{
+    const uint32_t count = net_music_catalog_count();
+
+    if (count == 0) {
+        s_net_track_shuffle = NetTrackShuffleState{};
+        return;
+    }
+
+    uint32_t start = 0;
+    if (start_idx >= 0 && (uint32_t)start_idx < count) {
+        start = (uint32_t)start_idx;
+    } else {
+        start = esp_random() % count;
+    }
+
+    s_net_track_shuffle.count = count;
+    s_net_track_shuffle.start = start;
+    s_net_track_shuffle.step = control_choose_coprime_step(count);
+    s_net_track_shuffle.pos = 0;
+    s_net_track_shuffle.ready = true;
+
+    LOGI("[NETTRACK] shuffle reset start=%lu step=%lu count=%lu",
+         (unsigned long)s_net_track_shuffle.start,
+         (unsigned long)s_net_track_shuffle.step,
+         (unsigned long)s_net_track_shuffle.count);
+}
+
+static bool control_sync_net_track_shuffle_to_current(int current_idx)
+{
+    const uint32_t count = net_music_catalog_count();
+    if (count == 0) return false;
+
+    if (!s_net_track_shuffle.ready || s_net_track_shuffle.count != count) {
+        control_reset_net_track_shuffle(current_idx);
+        return s_net_track_shuffle.ready;
+    }
+
+    const int expected = control_net_track_shuffle_index_at(s_net_track_shuffle.pos);
+    if (expected != current_idx) {
+        control_reset_net_track_shuffle(current_idx);
+    }
+
+    return s_net_track_shuffle.ready;
+}
+
+static int control_next_net_track_index_sequential(int current_idx, int step)
 {
     const int count = (int)net_music_catalog_count();
     if (count <= 0) return -1;
@@ -201,7 +320,107 @@ static int control_next_net_track_index(int current_idx, int step)
     if (next < 0) next += count;
     return next;
 }
+
+static int control_resolve_next_net_track_index(int current_idx, int step)
+{
+    const int count = (int)net_music_catalog_count();
+    if (count <= 0) return -1;
+
+    if (!control_is_net_track_random_mode()) {
+        return control_next_net_track_index_sequential(current_idx, step);
+    }
+
+    if (count == 1) return 0;
+
+    if (!control_sync_net_track_shuffle_to_current(current_idx)) {
+        return -1;
+    }
+
+    const int move_count = step >= 0 ? step : -step;
+    const bool forward = step >= 0;
+
+    for (int i = 0; i < move_count; ++i) {
+        if (forward) {
+            s_net_track_shuffle.pos++;
+
+            if (s_net_track_shuffle.pos >= s_net_track_shuffle.count) {
+                // 一轮随机播放完，重新生成一轮随机序列。
+                control_reset_net_track_shuffle(-1);
+            }
+        } else {
+            if (s_net_track_shuffle.pos == 0) {
+                s_net_track_shuffle.pos = s_net_track_shuffle.count - 1;
+            } else {
+                s_net_track_shuffle.pos--;
+            }
+        }
+    }
+
+    const int next = control_net_track_shuffle_index_at(s_net_track_shuffle.pos);
+
+    LOGI("[NETTRACK] shuffle resolve cur=%d step=%d pos=%lu -> %d",
+         current_idx,
+         step,
+         (unsigned long)s_net_track_shuffle.pos,
+         next);
+
+    return next;
+}
+
+static void control_reset_net_track_eof_watch(int idx)
+{
+    s_net_track_eof_watch.idx = idx;
+    s_net_track_eof_watch.last_play_ms = audio_get_play_ms();
+    s_net_track_eof_watch.last_change_ms = millis();
+    s_net_track_eof_watch.armed = true;
+
+    LOGD("[NETTRACK] eof watch reset idx=%d play_ms=%lu",
+         idx,
+         (unsigned long)s_net_track_eof_watch.last_play_ms);
+}
+
+static bool control_net_track_eof_watch_triggered(const PlayerSourceState& source)
+{
+    if (source.type != PlayerSourceType::NET_TRACK) return false;
+    if (source.net_track_idx < 0) return false;
+    if (audio_service_is_paused()) return false;
+    if (!audio_service_is_playing()) return false;
+
+    const uint32_t now = millis();
+    const uint32_t play_ms = audio_get_play_ms();
+
+    if (!s_net_track_eof_watch.armed ||
+        s_net_track_eof_watch.idx != source.net_track_idx) {
+        control_reset_net_track_eof_watch(source.net_track_idx);
+        return false;
+    }
+
+    if (play_ms != s_net_track_eof_watch.last_play_ms) {
+        s_net_track_eof_watch.last_play_ms = play_ms;
+        s_net_track_eof_watch.last_change_ms = now;
+        return false;
+    }
+
+    if (play_ms < NET_TRACK_EOF_MIN_PLAY_MS) {
+        return false;
+    }
+
+    const uint32_t stalled_ms = now - s_net_track_eof_watch.last_change_ms;
+    if (stalled_ms < NET_TRACK_EOF_STALL_MS) {
+        return false;
+    }
+
+    LOGW("[NETTRACK] EOF watchdog triggered idx=%d play_ms=%lu stalled=%lums",
+         source.net_track_idx,
+         (unsigned long)play_ms,
+         (unsigned long)stalled_ms);
+
+    s_net_track_eof_watch.armed = false;
+    return true;
+}
 } // namespace
+
+static bool control_play_net_track_index_impl(int idx, bool reset_shuffle);
 
 void player_control_setup_hooks(const PlayerControlHooks& hooks)
 {
@@ -246,21 +465,33 @@ bool player_control_try_auto_next(bool entered, bool started)
 {
     if (!entered) return false;
     if (s_user_paused) return false;
-    if (audio_service_is_playing()) return false;
 
     const PlayerSourceState source = player_source_get();
 
-    // 网络电台是连续流，不做播完自动下一台。
+    // 网络电台是连续流，不做自动下一台。
     if (source.type == PlayerSourceType::NET_RADIO) {
         return false;
     }
 
-    // NAS/HTTP 网络歌曲：文件播放结束后，自动播放下一首。
-    // 这里不要依赖 started，因为 NAS 歌曲可能是通过 Web API 直接启动的，
-    // player_state.cpp 里的 s_started 不一定会被本地播放流程置 true。
+    // NAS/HTTP 网络歌曲：先处理 URLStream 不报 EOF 的情况。
     if (source.type == PlayerSourceType::NET_TRACK) {
+        bool should_advance = false;
+
+        if (!audio_service_is_playing()) {
+            should_advance = true;
+        } else if (control_net_track_eof_watch_triggered(source)) {
+            // URLStream 对普通 HTTP 文件播完后可能不返回 EOF，
+            // 这里主动停掉当前流，再切下一首。
+            audio_service_stop(true);
+            should_advance = true;
+        }
+
+        if (!should_advance) {
+            return false;
+        }
+
         if (!net_music_catalog_is_loaded() || net_music_catalog_count() == 0) {
-            LOGW("[NETTRACK] auto next blocked: catalog not loaded or empty");
+            LOGW("[NETTRACK] auto next blocked: catalog empty");
             return false;
         }
 
@@ -269,18 +500,19 @@ bool player_control_try_auto_next(bool entered, bool started)
             return false;
         }
 
-        const int next = control_next_net_track_index(source.net_track_idx, +1);
+        const int next = control_resolve_next_net_track_index(source.net_track_idx, +1);
         if (next < 0) {
             LOGW("[NETTRACK] auto next failed: invalid next index");
             return false;
         }
 
         LOGI("[NETTRACK] AUTO NEXT %d -> %d", source.net_track_idx, next);
-        return player_play_net_track_index(next);
+        return control_play_net_track_index_impl(next, false);
     }
 
-    // 本地歌曲仍然保留原来的 started 保护，避免刚进播放器时误触发自动播放。
+    // 本地歌曲仍然保留原来的 started 保护。
     if (!started) return false;
+    if (audio_service_is_playing()) return false;
 
     const int track_count = control_track_count();
     if (track_count <= 0) return false;
@@ -379,7 +611,7 @@ bool player_return_from_radio_to_local() {
     return true;
 }
 
-bool player_play_net_track_index(int idx)
+static bool control_play_net_track_index_impl(int idx, bool reset_shuffle)
 {
     NetMusicItem item{};
     String url;
@@ -416,10 +648,17 @@ bool player_play_net_track_index(int idx)
     const bool ok = audio_service_play_stream_mp3(url.c_str(), true);
     if (ok) {
         player_source_set_net_track_status(true, String("playing"), String());
+
+        if (reset_shuffle && control_is_net_track_random_mode()) {
+            control_reset_net_track_shuffle(idx);
+        }
+
+        control_reset_net_track_eof_watch(idx);
+
         LOGI("[NETTRACK] PLAY idx=%d title=%s url=%s",
-             idx,
-             item.title.c_str(),
-             url.c_str());
+            idx,
+            item.title.c_str(),
+            url.c_str());
         return true;
     }
 
@@ -428,7 +667,13 @@ bool player_play_net_track_index(int idx)
          idx,
          item.title.c_str(),
          url.c_str());
+    s_net_track_eof_watch.armed = false;
     return false;
+}
+
+bool player_play_net_track_index(int idx)
+{
+    return control_play_net_track_index_impl(idx, true);
 }
 
 void player_stop_net_track()
@@ -457,12 +702,12 @@ void player_next_track()
     }
 
     if (source.type == PlayerSourceType::NET_TRACK) {
-        const int next = control_next_net_track_index(source.net_track_idx, +1);
+        const int next = control_resolve_next_net_track_index(source.net_track_idx, +1);
         if (next < 0) return;
 
         ui_notify_cover_panel_nav_feedback(1);
 
-        const bool ok = player_play_net_track_index(next);
+        const bool ok = control_play_net_track_index_impl(next, false);
         if (!ok) {
             ui_notify_cover_panel_nav_feedback(0);
         }
@@ -515,12 +760,12 @@ void player_prev_track()
     }
 
     if (source.type == PlayerSourceType::NET_TRACK) {
-        const int prev = control_next_net_track_index(source.net_track_idx, -1);
+        const int prev = control_resolve_next_net_track_index(source.net_track_idx, -1);
         if (prev < 0) return;
 
         ui_notify_cover_panel_nav_feedback(-1);
 
-        const bool ok = player_play_net_track_index(prev);
+        const bool ok = control_play_net_track_index_impl(prev, false);
         if (!ok) {
             ui_notify_cover_panel_nav_feedback(0);
         }
