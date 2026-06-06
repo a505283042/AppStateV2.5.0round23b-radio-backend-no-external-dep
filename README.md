@@ -4,15 +4,17 @@
 
 - 本地 **MP3 / FLAC** 播放
 - **HTTP MP3 网络电台** 播放
+- **NAS / HTTP MP3 网络歌曲** 播放
 - **圆形 TFT 双视图 UI**（旋转封面 / 信息视图）
 - **歌词显示** 与下一句提示
 - **NFC 绑定播放**（歌曲 / 歌手 / 专辑）
-- **Web 控制页**（状态查看、切歌、音量、模式、电台、封面、设置）
+- **Web 控制页**（状态查看、切歌、音量、模式、电台、NAS 音乐、封面、设置）
 - 基于 **V3 音乐索引** 的快速启动与重扫
 - 基于 **NVS** 的播放状态与网页设置持久化
 
 > 本 README 按当前主线整理：
-> - 网络电台主线已统一为 **Audio Tools URLStream -> unified MP3 core (`audio_mp3.cpp`)**
+> - 网络电台与 NAS/HTTP MP3 网络歌曲均复用 **Audio Tools URLStream -> unified MP3 core (`audio_mp3.cpp`)**
+> - NAS 歌曲列表使用 offset 索引按需读取，避免全量加载长 URL 列表
 
 ---
 
@@ -22,6 +24,16 @@
 
 - 本地文件播放：`MP3`、`FLAC`
 - 电台播放：`HTTP MP3 stream`
+- NAS / HTTP 网络歌曲播放：
+  - 支持 `/System/net_music_base.txt` + `/System/net_music.txt`
+  - 支持 URL 编码后的 HTTP MP3 文件直链
+  - 支持 1339+ 首网络歌曲 offset 索引
+  - 不全量加载歌曲 URL，按 index seek 读取
+  - 支持设备端 NAS 歌曲列表
+  - 支持 Web NAS 分页页
+  - 支持 NAS 歌曲顺序 / 随机播放
+  - 支持 NAS 歌曲播放结束自动下一首
+  - 对 HTTP 文件 EOF 不明确的情况增加 EOF watchdog 兜底
 - UI 双视图：
   - 旋转封面视图
   - 信息详情视图（标题 / 歌手 / 专辑 / 进度 / 歌词）
@@ -35,7 +47,12 @@
   - 全部顺序 / 全部随机
   - 歌手顺序 / 歌手随机
   - 专辑顺序 / 专辑随机
-- 列表选择模式（歌手 / 专辑）
+- 列表选择模式：
+  - 歌手列表
+  - 专辑列表
+  - 本地歌曲列表
+  - 网络电台列表
+  - NAS 歌曲分页列表
 - NFC 绑定：
   - `track`
   - `artist`
@@ -43,7 +60,7 @@
 - Web 控制：
   - 当前状态
   - 切歌 / 播放暂停 / 模式切换 / 音量
-  - 歌手 / 专辑 / 电台页面
+  - 歌手 / 专辑 / 电台 / NAS 音乐页面
   - 当前封面获取
   - 设置页
   - 扫描 / 保存状态
@@ -66,9 +83,12 @@
 ### 当前主线不包含
 
 - `m3u8 / HLS` 播放
-- SMB / NFS / NAS 目录浏览
+- SMB / NFS 直连目录浏览
+- NAS 目录自动扫描
 - 网络 FLAC 文件播放
 - OTA / 蓝牙 / 触摸交互
+- NAS 歌曲时长自动计算
+- NAS 歌曲网络封面 / 网络歌词
 
 ---
 
@@ -164,7 +184,8 @@ Player Core
 ├─ player_state / player_control / player_playlist
 ├─ player_assets（歌词/封面/总时长补齐与预取）
 ├─ player_snapshot（NVS 快照）
-└─ player_source（本地 / 网络电台来源摘要）
+├─ player_source（本地 / 网络电台 / NAS 网络歌曲来源摘要）
+└─ net_music_catalog（NAS 歌曲 base url、列表、offset 索引）
 
 Audio
 ├─ audio_service（独立任务，命令队列）
@@ -180,7 +201,8 @@ Storage
 ├─ storage_index_v3
 ├─ storage_scan_v3
 ├─ storage_builder_v3
-└─ storage_groups_v3
+├─ storage_groups_v3
+└─ net_music_catalog（读取 /System/net_music*.txt，建立行偏移 offset 索引）
 
 UI / Web / NFC
 ├─ ui_*（圆屏渲染、封面缓存、列表页）
@@ -208,10 +230,28 @@ player -> audio_radio_backend.cpp
        -> I2S
 ```
 
+### NAS / HTTP 网络歌曲
+
+```text
+player / Web / list_select
+       -> player_play_net_track_index(idx)
+       -> net_music_catalog_get(idx)
+       -> base_url + encoded_path
+       -> audio_service_play_stream_mp3(...)
+       -> audio_mp3_start_url(...)
+       -> Audio Tools URLStream
+       -> audio_mp3.cpp unified MP3 core
+       -> I2S
+```
+
+NAS 网络歌曲与网络电台一样复用 URLStream 和统一 MP3 核心，但状态上使用独立的 `PlayerSourceType::NET_TRACK`。
+网络歌曲是有限长度 HTTP MP3 文件，播放结束后由 `player_control_try_auto_next()` 触发下一首。由于部分 HTTP 文件结束时底层流不一定明确返回 EOF，当前增加了 NET_TRACK 专用 EOF watchdog：当播放时间长时间不增长时，主动停止当前流并切换下一首。
+
 这意味着当前项目已经实现了：
 
-- **文件 MP3** 与 **网络 MP3** 共用统一 MP3 解码主线
-- “来源”和“解码器”已经开始分离，后续扩展网络文件 / NAS / WebDAV 会更顺
+- **文件 MP3**、**网络电台 MP3** 与 **NAS HTTP MP3 文件** 共用统一 MP3 解码主线
+- "来源"和"解码器"已经分层：本地文件、网络电台、NAS 网络歌曲使用不同 source 状态，但最终收口到统一 MP3 core
+- NAS 歌曲播放已验证可通过 HTTP Web API / NAS 静态文件服务实现，不依赖 SMB / NFS
 
 ---
 
@@ -227,6 +267,8 @@ player -> audio_radio_backend.cpp
    - 读取 NFC 绑定表 `/System/nfc_map.txt`
    - 加载或重建 V3 音乐索引 `/System/music_index_v3.bin`
    - 加载电台列表 `/System/radio_list.txt`
+   - 加载 NAS 歌曲 base url `/System/net_music_base.txt`
+   - 扫描 NAS 歌曲列表 `/System/net_music.txt`，建立行偏移 offset 索引
    - 读取 WiFi 配置 `/System/config/wifi.conf`
 4. 如果开机无卡：
    - 系统仍继续启动
@@ -250,6 +292,16 @@ player -> audio_radio_backend.cpp
 [BOOT] skip local catalog: storage not ready
 ```
 
+NAS 歌曲索引加载成功时会出现：
+
+```text
+[NETMUSIC] catalog loaded tracks=1339 offsets=1339 base=http://192.168.1.105:8080/music/ path=/System/net_music.txt
+[BOOT] Net music catalog loaded: 1339 tracks
+```
+
+这里的 offset 索引只保存每一首歌曲所在行的文件偏移，不保存完整标题和 URL。
+播放或分页显示时，再按 index seek 到对应行读取。
+
 ---
 
 ## 6. SD 卡目录约定
@@ -264,6 +316,8 @@ player -> audio_radio_backend.cpp
 /System/
     music_index_v3.bin
     radio_list.txt
+    net_music_base.txt
+    net_music.txt
     nfc_map.txt
     default_cover.jpg
     /config/
@@ -297,6 +351,70 @@ name|url|format|region|logo
 ```
 
 > 说明：当前项目的**电台实际主线是 HTTP MP3**。即使列表文件可以记 `format` 字段，`m3u8/hls` 仍属于后续扩展方向，不是当前稳定能力。
+
+### NAS / HTTP 网络歌曲列表
+
+Base URL 文件：
+
+```text
+/System/net_music_base.txt
+```
+
+内容只写一行，例如：
+
+```text
+http://192.168.1.105:8080/music/
+```
+
+歌曲列表文件：
+
+```text
+/System/net_music.txt
+```
+
+格式：
+
+```text
+title|encoded_path|format|artist|album
+```
+
+示例：
+
+```text
+不修|%E6%88%BF%E7%94%B0%E7%AB%8B%20-%20%E4%B8%8D%E4%BF%AE.mp3|mp3|房田立|NAS
+Kageokuri|5u5h1%20-%20Kageokuri.mp3|mp3|5u5h1|NAS
+```
+
+说明：
+
+* `encoded_path` 必须是 URL 编码后的相对路径
+* 中文、空格、特殊符号不能直接写进 URL
+* 播放时实际 URL 为：`base_url + encoded_path`
+* 当前稳定支持 `mp3`
+* 当前不支持网络 FLAC
+* 当前不从 ESP32 直接扫描 NAS 目录
+* NAS 侧建议通过 Web Station、nginx、HTTP 静态文件服务暴露音乐目录
+
+Windows PowerShell 生成 `net_music.txt` 示例：
+
+```powershell
+$root = "\\192.168.1.105\麦田广告\Music\音乐"
+$out = ".\net_music.txt"
+
+Get-ChildItem $root -File -Recurse -Include *.mp3 | ForEach-Object {
+    $relative = $_.FullName.Substring($root.Length).TrimStart('\')
+    $relativeUrl = $relative -replace "\\", "/"
+
+    $encodedParts = $relativeUrl.Split("/") | ForEach-Object {
+        [System.Uri]::EscapeDataString($_)
+    }
+    $encodedPath = $encodedParts -join "/"
+
+    $title = [System.IO.Path]::GetFileNameWithoutExtension($_.Name)
+
+    "$title|$encodedPath|mp3|NAS|NAS"
+} | Set-Content -Encoding UTF8 $out
+```
 
 ### NFC 绑定表
 
@@ -370,6 +488,7 @@ password=87654321
 - `/artists`
 - `/albums`
 - `/radios`
+- `/netmusic`
 - `/settings`
 
 ### 主要 API
@@ -378,6 +497,10 @@ password=87654321
 - `GET /api/artists`
 - `GET /api/albums`
 - `GET /api/radios`
+- `GET /api/netmusic?offset=0&limit=20`
+- `GET /api/netmusic?offset=0&limit=20&detail=1`
+- `GET /api/netmusic/play?idx=0`
+- `POST /api/netmusic/play?idx=0`
 - `GET /api/artist/detail`
 - `GET /api/album/detail`
 - `GET /api/settings`
@@ -397,6 +520,40 @@ password=87654321
 - `POST /api/volume`
 - `POST /api/state/save`
 - `POST /api/scan`
+
+### NAS 音乐页
+
+页面：
+
+```text
+/netmusic
+```
+
+特点：
+
+* Web 端分页读取 NAS 歌曲列表
+* 默认每页 20 首，最大 50 首
+* 默认不返回 encoded path，减少 JSON 大小
+* 需要调试路径时可加 `detail=1`
+* 点击播放后调用 `/api/netmusic/play?idx=...`
+* 当前播放的 NAS 歌曲会在状态中显示为 `source_type=net_track`
+
+状态接口中 NAS 播放相关字段：
+
+```json
+{
+  "source_type": "net_track",
+  "net_track_active": true,
+  "net_track_idx": 3,
+  "net_track_title": "...",
+  "net_track_url": "...",
+  "net_track_format": "mp3",
+  "net_track_artist": "NAS",
+  "net_track_album": "NAS",
+  "net_track_state": "playing",
+  "net_track_error": ""
+}
+```
 
 ### 网页设置
 
@@ -424,7 +581,7 @@ password=87654321
 | PREV | 短按 | 上一首 |
 | PREV | 长按 | 进入 NFC 管理模式 |
 | NEXT | 短按 | 下一首 |
-| NEXT | 长按 | 歌手/专辑模式下进入列表选择；全部模式下大步前进 |
+| NEXT | 长按 | 本地歌手/专辑模式下进入对应列表；网络电台播放中进入电台列表；NAS 歌曲播放中进入 NAS 歌曲列表；其他本地全部模式下大步前进 |
 | VOL- | 按住连发 | 音量减 |
 | VOL- | 双击 | WiFi 开关 |
 | VOL+ | 按住连发 | 音量加 |
@@ -458,6 +615,29 @@ WiFi 重新开启时：
 
 - `MODE` / `PLAY` 交给 `nfc_admin_state` 处理
 
+### NAS 歌曲播放状态
+
+NAS 歌曲播放中：
+
+| 按键 | 操作 | 行为 |
+|---|---|---|
+| NEXT | 短按 | NAS 下一首 |
+| PREV | 短按 | NAS 上一首 |
+| NEXT | 长按 | 进入 NAS 歌曲分页列表 |
+| PREV | 长按 | 保持原 NFC 管理入口；当前 NAS 歌曲暂不支持 NFC 绑定，显示"无可绑定目标" |
+| PLAY | 短按 | 暂停 / 恢复 |
+| MODE | 短按 | 顺序 / 随机切换 |
+| MODE | 双击 | 大类切换，当前 NAS 歌曲暂不支持 |
+
+NAS 歌曲列表中：
+
+| 按键 | 行为 |
+|---|---|
+| NEXT / PREV | 上下选择 |
+| VOL+ / VOL- | 每次跳 5 首 |
+| PLAY | 播放选中 NAS 歌曲 |
+| MODE | 退出列表 |
+
 ---
 
 ## 9. 播放模式说明
@@ -477,6 +657,29 @@ WiFi 重新开启时：
 - **大类切换**：全部 → 歌手 → 专辑
 
 这种拆法让模式控制更清楚，也更适合映射到 Web 与硬件按键。
+
+### NAS 歌曲播放模式
+
+NAS 歌曲复用当前播放模式中的"顺序 / 随机"属性：
+
+- `*_SEQ`：按 `net_music.txt` 中的 index 顺序播放
+- `*_RND`：使用 NAS 专用随机队列播放
+
+NAS 随机播放使用"互质步长洗牌序列"：
+
+```text
+index = (shuffle_start + shuffle_pos * shuffle_step) % track_count
+```
+
+其中 `shuffle_step` 与 `track_count` 保持互质。这样一轮随机中尽量不重复，同时不需要在内存中保存完整随机列表。
+
+行为：
+
+* 手动选择 NAS 歌曲时，该歌曲作为新一轮随机起点
+* 短按 NEXT：随机序列下一首
+* 短按 PREV：随机序列上一首
+* 播放结束：随机序列下一首
+* 一轮播放完后重新生成随机起点和步长
 
 ---
 
@@ -540,18 +743,20 @@ TF卡B -> 恢复 TF卡B 的上次播放记录
 - 后续插卡：挂载成功后读取当前卡对应的 snapshot
 - 本地播放中拔卡：拔卡处理前保存当前卡对应的 snapshot
 
-### 网络电台与本地 snapshot 隔离
+### 网络播放源与本地 snapshot 隔离
 
 `player_snapshot_save_to_nvs()` 只保存本地歌曲状态。
 
-网络电台播放时：
+网络电台或 NAS 网络歌曲播放时：
 
 - 网页点击“保存当前状态”不会写入本地歌曲 snapshot
 - 拔卡时不会保存本地歌曲 snapshot
 - 插卡后不会恢复本地歌曲 snapshot
+- NAS 网络歌曲播放状态不会写入本地歌曲 snapshot
+- NAS 网络歌曲当前通过 `PlayerSourceType::NET_TRACK` 维护运行时状态
 - 网络电台播放状态不会被本地歌曲 UI 覆盖
 
-如果未来需要恢复网络电台状态，应新增独立的 radio snapshot，而不是复用本地歌曲 snapshot。
+如果未来需要恢复网络电台或 NAS 网络歌曲状态，应新增独立的 network source snapshot，例如保存 radio index 或 net track index、base url、volume、paused、UI view 等信息，不要复用本地歌曲 snapshot。
 
 恢复策略：
 
@@ -631,6 +836,30 @@ storage_unmount()
 [APP] TF mounted while radio active: skip local snapshot restore
 ```
 
+### NAS 歌曲播放中拔卡
+
+NAS 歌曲音频数据来自 HTTP，但播放列表和 base url 来自 TF 卡：
+
+```text
+/System/net_music_base.txt
+/System/net_music.txt
+```
+
+因此 TF 卡拔出后，NAS 歌曲当前流可能还能继续播放一段时间，但后续选歌、自动下一首、列表分页都依赖 TF 卡列表文件。
+
+当前策略：
+
+* TF 拔出时清理 `net_music_catalog`
+* 不保存本地歌曲 snapshot
+* 不将 NAS 歌曲状态写入本地 snapshot
+* 后续若需要更完整体验，可考虑把当前 NAS 歌曲 URL 缓存在运行时，允许当前首播完，但禁止继续下一首
+
+TF 插回后：
+
+* 重新加载 `/System/net_music_base.txt`
+* 重新扫描 `/System/net_music.txt`
+* 重建 offset 索引
+
 ### 正常失败码说明
 
 由于无 CD 脚，系统无法提前知道卡是否真的存在。无卡状态下周期性 mount 失败属于正常现象：
@@ -699,6 +928,27 @@ HSPI Does not have default pins on ESP32S3
 - **热路径**（I2S / 解码关键缓冲）优先留内部 RAM
 - **大块静态资源**（封面 / 索引）优先放 PSRAM
 - 未来可继续把歌词缓存、playlist 索引等往 PSRAM 推
+
+### NAS 歌曲列表内存策略
+
+NAS 歌曲列表不全量加载标题和 URL。  
+启动时只扫描 `/System/net_music.txt`，记录每一条有效记录的文件偏移：
+
+```text
+offsets[0] = 第 1 行起始位置
+offsets[1] = 第 2 行起始位置
+...
+```
+
+内存估算：
+
+```text
+1339 首 * 4B ≈ 5.2KB
+5000 首 * 4B ≈ 20KB
+```
+
+播放或显示某一页时，通过 `seek(offset)` 读取对应行。
+这避免了 1000+ 首长 URL 直接常驻内存导致 internal heap 和 String 碎片压力上升。
 
 ---
 
@@ -806,12 +1056,51 @@ pio device monitor
 - `[SDIO] recursive SD mutex created`
 - `[BOOT] NFC bindings loaded`
 - `[CATALOG_V3] load ok` 或 `native rebuild ok`
+- `[NETMUSIC] catalog loaded`
 - `[RADIO] catalog loaded`
 - `[SNAPSHOT] pending loaded`
 - `[WEB] STA connected` 或 `[WEB] AP ready`
 - `[WEB] server started`
 - `[MON][MEM] ...`
 - `[MON][STACK] ...`
+
+### NAS 歌曲索引加载
+
+```text
+[NETMUSIC] catalog loaded tracks=1339 offsets=1339 base=http://192.168.1.105:8080/music/ path=/System/net_music.txt
+[BOOT] Net music catalog loaded: 1339 tracks
+```
+
+### NAS 歌曲播放
+
+```text
+[AUDIO] play stream mp3: http://192.168.1.105:8080/music/xxx.mp3
+[MP3] start source detail name=http://192.168.1.105:8080/music/xxx.mp3 stream=1 init=0ms prefill=2ms total=2ms
+[NETTRACK] PLAY idx=880 title=蔡健雅 - 被驯服的象 url=http://192.168.1.105:8080/music/xxx.mp3
+```
+
+### NAS 随机播放
+
+```text
+[NETTRACK] shuffle reset start=884 step=288 count=1339
+[NETTRACK] shuffle resolve cur=1272 step=1 pos=49 -> 880
+```
+
+### NAS 自动下一首
+
+```text
+[NETTRACK] EOF watchdog triggered idx=1272 play_ms=256026 stalled=8063ms
+[NETTRACK] AUTO NEXT 1272 -> 880
+[NETTRACK] PLAY idx=880 title=蔡健雅 - 被驯服的象
+```
+
+### NAS 歌曲列表
+
+```text
+[LIST] 进入 NAS 歌曲列表，共 1339 首，当前 idx=880
+[LIST] 选择下一项: 882/1339
+[LIST] 确认 NAS 歌曲: pos=885/1339 idx=884
+```
 
 如果电台播放异常，建议重点看：
 
@@ -824,14 +1113,14 @@ pio device monitor
 
 ## 16. 已知边界与注意事项
 
-1. 当前稳定网络音频能力仍是 **HTTP MP3 电台**。  
-   `m3u8/HLS` 不是当前稳定主线。
+1. 当前稳定网络音频能力是 **HTTP MP3 电台** 与 **NAS/HTTP MP3 网络歌曲**。  
+   `m3u8/HLS`、网络 FLAC 仍不是当前稳定主线。
 
 2. 当前硬件没有 TF 卡 Card Detect 引脚。  
    热插拔采用软件探测，因此无卡状态下周期性 mount 失败日志属于正常现象。
 
 3. 网络电台播放中插卡会重新加载 TF 卡资源。  
-   当前会同步加载本地 music index，可能造成短暂卡顿。后续可优化为“电台播放中延迟加载本地曲库”。
+   当前会同步加载本地 music index，可能造成短暂卡顿。后续可优化为"电台播放中延迟加载本地曲库"。
 
 4. 本地歌曲 snapshot 和网络电台 snapshot 不共用。  
    当前仅本地歌曲支持 snapshot 保存/恢复。网络电台如果需要持久化，应新增独立 radio snapshot。
@@ -842,6 +1131,18 @@ pio device monitor
 6. 下面这些文件/模块已下线或应视为历史残留：
    - `audio_mp3_stream_audiotools.cpp`
    - `audio_mp3_stream.h`
+
+7. NAS 音乐当前依赖 HTTP 文件直链。  
+   DSM File Station 分享链接、Synology Drive 链接、需要登录/cookie/跳转的链接不适合直接给 ESP32 播放。
+
+8. NAS 音乐当前不直接支持 SMB / NFS。  
+   推荐 NAS 侧通过 Web Station、nginx 或其他静态 HTTP 服务暴露只读音乐目录。
+
+9. NAS 歌曲路径必须 URL 编码。  
+   浏览器可以自动处理中文和空格，但 ESP32 的 URLStream 更适合直接接收已编码 URL。
+
+10. NAS 自动下一首目前依赖 EOF watchdog 兜底。  
+    部分 HTTP 文件播放结束时底层流不会明确返回 EOF，系统会在播放时间长时间不增长后切换下一首。当前默认等待约 8 秒，后续可根据稳定性再调整。
 
 ---
 
@@ -854,14 +1155,17 @@ pio device monitor
 - 完善 `/System/default_cover.jpg` 与内置 NO COVER 兜底逻辑
 - 降低无卡状态下周期 mount 的日志频率
 - 给 WiFi 默认策略增加配置项：开机开启 / 默认关闭 / 自动超时关闭
+- 给 NAS 歌曲增加时长字段，建议由 PC / NAS 侧脚本预生成，不在 ESP32 上逐首计算
+- 优化 NAS 歌曲元数据生成，将歌手 / 专辑从文件名或标签中预处理进 `net_music.txt`
+- 将 NAS EOF watchdog 的等待时间参数化
 
 ### 中期方向
 
 - 继续瘦身内部 RAM
 - 统一更多播放源抽象
 - 优化 Web JSON 构造与长时间运行稳定性
-- 远程 MP3 文件播放
-- WebDAV / NAS 文件源
+- NAS MP3 播放已完成，后续可扩展为 WebDAV / 更通用 HTTP 文件源
+- 网络 FLAC 文件播放，优先考虑 HTTP Range source，而不是直接做纯流式 FLAC
 
 ### 硬件建议
 
@@ -879,6 +1183,7 @@ include/
 ├─ keys/
 ├─ lyrics/
 ├─ nfc/
+├─ net_music/
 ├─ radio/
 ├─ storage/
 ├─ ui/
@@ -891,6 +1196,7 @@ src/
 ├─ keys/
 ├─ lyrics/
 ├─ nfc/
+├─ net_music/
 ├─ radio/
 ├─ storage/
 ├─ ui/

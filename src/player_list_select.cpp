@@ -227,9 +227,10 @@ bool list_select_try_play_selected_net_track()
 
     const int selected_idx = s_list_selected_idx;
 
-    LOGI("[LIST] 确认 NAS 歌曲: idx=%d/%d",
-         selected_idx + 1,
-         total);
+    LOGI("[LIST] 确认 NAS 歌曲: pos=%d/%d idx=%d",
+        selected_idx + 1,
+        total,
+        selected_idx);
 
     list_select_clear_state(true);
 
