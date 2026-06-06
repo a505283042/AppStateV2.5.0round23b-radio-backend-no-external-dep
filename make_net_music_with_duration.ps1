@@ -1,4 +1,7 @@
-﻿$root = "\\192.168.1.105\麦田广告\Music\音乐"
+﻿[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
+
+$root = "\\192.168.1.105\麦田广告\Music\音乐"
 $out = "$env:USERPROFILE\Desktop\net_music.txt"
 $ffprobe = "ffprobe"
 
@@ -7,30 +10,44 @@ function Escape-Field($s) {
     return ($s.ToString().Trim() -replace "\|", "／")
 }
 
-function Get-DurationMs($filePath) {
-    try {
-        $probeArgs = @(
-            "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1",
-            $filePath
-        )
-
-        $seconds = & $ffprobe @probeArgs 2>$null
-
-        if ([string]::IsNullOrWhiteSpace($seconds)) {
-            return 0
-        }
-
-        $value = 0.0
-        if ([double]::TryParse($seconds.Trim(), [ref]$value)) {
-            return [int][Math]::Round($value * 1000)
-        }
-
-        return 0
-    } catch {
-        return 0
+function First-NonEmpty($a, $b) {
+    if ($null -ne $a -and -not [string]::IsNullOrWhiteSpace($a.ToString())) {
+        return $a.ToString().Trim()
     }
+    return $b
+}
+
+function Test-BadText($s) {
+    if ($null -eq $s) { return $true }
+
+    $t = $s.ToString().Trim()
+    if ([string]::IsNullOrWhiteSpace($t)) { return $true }
+
+    # 明显解码失败符号
+    if ($t.Contains("�")) { return $true }
+
+    # 常见 UTF-8 被错误按 Latin-1/ANSI 解码后的乱码特征
+    $badPatterns = @(
+        "Ã", "Â", "Ä", "Å", "Æ", "Ç", "È", "É",
+        "ã€", "ã‚", "ãƒ",
+        "æ", "ç", "è", "é", "å", "ä"
+    )
+
+    foreach ($p in $badPatterns) {
+        if ($t.Contains($p)) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function First-GoodText($tagValue, $fallbackValue) {
+    if (-not (Test-BadText $tagValue)) {
+        return $tagValue.ToString().Trim()
+    }
+
+    return $fallbackValue
 }
 
 function Parse-ArtistTitle($nameWithoutExt) {
@@ -46,6 +63,57 @@ function Parse-ArtistTitle($nameWithoutExt) {
     return @{
         Artist = $artist
         Title = $title
+    }
+}
+
+function Get-MediaInfo($filePath) {
+    $result = @{
+        DurationMs = 0
+        Title = ""
+        Artist = ""
+        Album = ""
+    }
+
+    try {
+        $probeArgs = @(
+            "-v", "error",
+            "-show_entries", "format=duration:format_tags=title,artist,album",
+            "-of", "json",
+            $filePath
+        )
+
+        $jsonText = & $ffprobe @probeArgs 2>$null
+
+        if ([string]::IsNullOrWhiteSpace($jsonText)) {
+            return $result
+        }
+
+        $info = $jsonText | ConvertFrom-Json
+
+        if ($null -ne $info.format.duration) {
+            $value = 0.0
+            if ([double]::TryParse($info.format.duration.ToString(), [ref]$value)) {
+                $result.DurationMs = [int][Math]::Round($value * 1000)
+            }
+        }
+
+        if ($null -ne $info.format.tags) {
+            if ($null -ne $info.format.tags.title) {
+                $result.Title = $info.format.tags.title.ToString().Trim()
+            }
+
+            if ($null -ne $info.format.tags.artist) {
+                $result.Artist = $info.format.tags.artist.ToString().Trim()
+            }
+
+            if ($null -ne $info.format.tags.album) {
+                $result.Album = $info.format.tags.album.ToString().Trim()
+            }
+        }
+
+        return $result
+    } catch {
+        return $result
     }
 }
 
@@ -69,12 +137,17 @@ $items = foreach ($file in $files) {
     $encodedPath = $encodedParts -join "/"
 
     $name = [System.IO.Path]::GetFileNameWithoutExtension($file.Name)
-    $meta = Parse-ArtistTitle $name
+    $fileNameMeta = Parse-ArtistTitle $name
+    $mediaInfo = Get-MediaInfo $file.FullName
 
-    $title = Escape-Field $meta.Title
-    $artist = Escape-Field $meta.Artist
-    $album = "NAS"
-    $durationMs = Get-DurationMs $file.FullName
+    $title = First-GoodText $mediaInfo.Title $fileNameMeta.Title
+    $artist = First-GoodText $mediaInfo.Artist $fileNameMeta.Artist
+    $album = First-GoodText $mediaInfo.Album "NAS"
+    $durationMs = $mediaInfo.DurationMs
+
+    $title = Escape-Field $title
+    $artist = Escape-Field $artist
+    $album = Escape-Field $album
 
     "{0}|{1}|mp3|{2}|{3}|{4}" -f $title, $encodedPath, $artist, $album, $durationMs
 }

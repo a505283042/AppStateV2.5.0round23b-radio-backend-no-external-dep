@@ -209,7 +209,15 @@ struct NetTrackEofWatchState {
 NetTrackEofWatchState s_net_track_eof_watch;
 
 static constexpr uint32_t NET_TRACK_EOF_MIN_PLAY_MS = 5000;
-static constexpr uint32_t NET_TRACK_EOF_STALL_MS = 8000;
+
+// 没有 duration_ms 时，保留旧兜底：进度停滞 8 秒认为结束。
+static constexpr uint32_t NET_TRACK_EOF_UNKNOWN_STALL_MS = 8000;
+
+// 有 duration_ms 时，只在接近结尾时判断 EOF。
+static constexpr uint32_t NET_TRACK_EOF_END_WINDOW_MS = 3000;
+
+// 接近结尾后，播放进度停滞 1.5 秒即可切下一首。
+static constexpr uint32_t NET_TRACK_EOF_KNOWN_STALL_MS = 1500;
 
 static bool control_is_net_track_random_mode()
 {
@@ -389,6 +397,12 @@ static bool control_net_track_eof_watch_triggered(const PlayerSourceState& sourc
     const uint32_t now = millis();
     const uint32_t play_ms = audio_get_play_ms();
 
+    // 优先使用 NET_TRACK 元数据里的时长；如果没有，再用 audio 层总时长。
+    uint32_t duration_ms = source.net_track_duration_ms;
+    if (duration_ms == 0) {
+        duration_ms = audio_get_total_ms();
+    }
+
     if (!s_net_track_eof_watch.armed ||
         s_net_track_eof_watch.idx != source.net_track_idx) {
         control_reset_net_track_eof_watch(source.net_track_idx);
@@ -406,11 +420,36 @@ static bool control_net_track_eof_watch_triggered(const PlayerSourceState& sourc
     }
 
     const uint32_t stalled_ms = now - s_net_track_eof_watch.last_change_ms;
-    if (stalled_ms < NET_TRACK_EOF_STALL_MS) {
+
+    if (duration_ms > 0) {
+        const bool near_end =
+            (play_ms + NET_TRACK_EOF_END_WINDOW_MS >= duration_ms);
+
+        // 有总时长时，播放进度还没接近结尾，不要误判为 EOF。
+        if (!near_end) {
+            return false;
+        }
+
+        if (stalled_ms < NET_TRACK_EOF_KNOWN_STALL_MS) {
+            return false;
+        }
+
+        LOGW("[NETTRACK] EOF duration-watch triggered idx=%d play_ms=%lu total_ms=%lu stalled=%lums",
+             source.net_track_idx,
+             (unsigned long)play_ms,
+             (unsigned long)duration_ms,
+             (unsigned long)stalled_ms);
+
+        s_net_track_eof_watch.armed = false;
+        return true;
+    }
+
+    // 没有时长信息时，保留旧的长停滞兜底。
+    if (stalled_ms < NET_TRACK_EOF_UNKNOWN_STALL_MS) {
         return false;
     }
 
-    LOGW("[NETTRACK] EOF watchdog triggered idx=%d play_ms=%lu stalled=%lums",
+    LOGW("[NETTRACK] EOF stall-watch triggered idx=%d play_ms=%lu stalled=%lums",
          source.net_track_idx,
          (unsigned long)play_ms,
          (unsigned long)stalled_ms);
