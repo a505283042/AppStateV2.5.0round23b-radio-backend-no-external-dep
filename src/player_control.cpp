@@ -244,25 +244,43 @@ bool player_control_should_block_idle()
 
 bool player_control_try_auto_next(bool entered, bool started)
 {
-    if (!entered || !started) return false;
+    if (!entered) return false;
     if (s_user_paused) return false;
     if (audio_service_is_playing()) return false;
 
     const PlayerSourceState source = player_source_get();
-    if (source.type == PlayerSourceType::NET_RADIO) return false;
 
+    // 网络电台是连续流，不做播完自动下一台。
+    if (source.type == PlayerSourceType::NET_RADIO) {
+        return false;
+    }
+
+    // NAS/HTTP 网络歌曲：文件播放结束后，自动播放下一首。
+    // 这里不要依赖 started，因为 NAS 歌曲可能是通过 Web API 直接启动的，
+    // player_state.cpp 里的 s_started 不一定会被本地播放流程置 true。
     if (source.type == PlayerSourceType::NET_TRACK) {
+        if (!net_music_catalog_is_loaded() || net_music_catalog_count() == 0) {
+            LOGW("[NETTRACK] auto next blocked: catalog not loaded or empty");
+            return false;
+        }
+
         if (!storage_is_ready() || storage_has_recent_io_error()) {
             LOGW("[NETTRACK] auto next blocked: storage not ready or IO error pending");
             return false;
         }
 
         const int next = control_next_net_track_index(source.net_track_idx, +1);
-        if (next < 0) return false;
+        if (next < 0) {
+            LOGW("[NETTRACK] auto next failed: invalid next index");
+            return false;
+        }
 
-        LOGI("[NETTRACK] AUTO NEXT -> #%d", next);
+        LOGI("[NETTRACK] AUTO NEXT %d -> %d", source.net_track_idx, next);
         return player_play_net_track_index(next);
     }
+
+    // 本地歌曲仍然保留原来的 started 保护，避免刚进播放器时误触发自动播放。
+    if (!started) return false;
 
     const int track_count = control_track_count();
     if (track_count <= 0) return false;
@@ -616,6 +634,14 @@ void player_next_group()
             return;
         }
         LOGW("[LIST] 电台播放中，但无法进入电台列表");
+        return;
+    }
+
+    if (source.type == PlayerSourceType::NET_TRACK) {
+        if (control_enter_list_select_dispatch()) {
+            return;
+        }
+        LOGW("[LIST] NAS歌曲播放中，但无法进入NAS歌曲列表");
         return;
     }
 

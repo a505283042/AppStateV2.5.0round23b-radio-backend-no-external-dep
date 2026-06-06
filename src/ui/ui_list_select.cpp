@@ -496,7 +496,112 @@ static void drawRadioItem(const RadioItem& item, int idx, int list_pos,
   tft.setTextDatum(top_left);
 }
 
+static void drawNetMusicItem(const NetMusicItem& item,
+                             int global_idx,
+                             int list_pos,
+                             bool is_selected,
+                             int scroll_offset = 0,
+                             bool draw_bg = true)
+{
+  extern lgfx::U8g2font g_font_cjk;
+  tft.setFont(&g_font_cjk);
+  tft.setTextSize(1);
+  tft.setTextWrap(false);
 
+  const int ITEM_HEIGHT = 18;
+  const int START_Y = 60;
+  int y = START_Y + list_pos * ITEM_HEIGHT;
+
+  const int row_x = 10;
+  const int row_w = 210;
+  const int row_h = ITEM_HEIGHT;
+  const int row_r = 5;
+
+  int row_top = y - row_h / 2;
+  int row_mid_y = row_top + row_h / 2;
+  int clip_y = row_top;
+  int clip_h = row_h;
+
+  if (draw_bg) {
+    if (is_selected) {
+      tft.fillRoundRect(row_x, row_top, row_w, row_h, row_r, 0x4208);
+    } else {
+      tft.fillRoundRect(row_x, row_top, row_w, row_h, row_r, TFT_BLACK);
+    }
+  }
+
+  String name = item.title.length() ? item.title : String("未命名");
+  String right = item.artist.length() ? item.artist : String("NAS");
+
+  String prefix = String(global_idx + 1) + ". ";
+  int prefix_width = tft.textWidth(prefix);
+  int right_width = tft.textWidth(right);
+
+  const int list_left_edge = 25;
+  const int list_right_edge = 210;
+
+  int text_start_x = list_left_edge + prefix_width;
+  int text_end_x = list_right_edge - right_width;
+  int available_width = text_end_x - text_start_x;
+  if (available_width < 40) {
+    available_width = list_right_edge - text_start_x;
+    right = "";
+    right_width = 0;
+  }
+
+  int name_width = tft.textWidth(name);
+  bool need_scroll = is_selected && (name_width > available_width);
+
+  if (need_scroll) {
+    tft.setTextColor(TFT_YELLOW, 0x4208);
+    tft.setTextDatum(middle_left);
+    tft.drawString(prefix, list_left_edge, row_mid_y);
+
+    drawScrollingTextPixel(name,
+                           text_start_x,
+                           row_mid_y,
+                           clip_y,
+                           clip_h,
+                           available_width,
+                           scroll_offset,
+                           TFT_YELLOW,
+                           0x4208);
+
+    if (right.length()) {
+      tft.setTextColor(TFT_LIGHTGREY, 0x4208);
+      tft.setTextDatum(middle_right);
+      tft.drawString(right, list_right_edge, row_mid_y);
+    }
+  } else {
+    String display_name = name;
+
+    if (name_width > available_width) {
+      display_name = truncateByPixel(name, available_width);
+      if (display_name.length() < name.length()) {
+        int ellipsis_width = tft.textWidth("...");
+        if (tft.textWidth(display_name) + ellipsis_width <= available_width) {
+          display_name += "...";
+        } else {
+          display_name = truncateByPixel(display_name, available_width - ellipsis_width);
+          display_name += "...";
+        }
+      }
+    }
+
+    tft.setTextColor(is_selected ? TFT_YELLOW : TFT_WHITE,
+                     is_selected ? 0x4208 : TFT_BLACK);
+    tft.setTextDatum(middle_left);
+    tft.drawString(prefix + display_name, list_left_edge, row_mid_y);
+
+    if (right.length()) {
+      tft.setTextColor(TFT_LIGHTGREY, is_selected ? 0x4208 : TFT_BLACK);
+      tft.setTextDatum(middle_right);
+      tft.drawString(right, list_right_edge, row_mid_y);
+    }
+  }
+
+  tft.setTextDatum(top_left);
+}
 
 static void drawTrackItem(TrackIndex16 track_idx, int idx, int list_pos,
                           bool is_selected, int scroll_offset = 0, bool draw_bg = true)
@@ -776,6 +881,126 @@ void ui_draw_radio_select(const std::vector<RadioItem>& radios, int selected_idx
   s_last_selected_idx = selected_idx;
   s_last_start_idx = start_idx;
   last_drawn_selected = selected_idx;
+  last_drawn_offset = s_scroll_state.scroll_offset;
+  s_first_draw = false;
+}
+
+void ui_draw_net_music_select(const std::vector<NetMusicItem>& items,
+                              int page_start_idx,
+                              int selected_global_idx,
+                              int total,
+                              const char* title)
+{
+  if (items.empty() || total <= 0) return;
+
+  extern lgfx::U8g2font g_font_cjk;
+  tft.setFont(&g_font_cjk);
+  tft.setTextSize(1);
+  tft.setTextWrap(false);
+
+  const int ITEMS_VISIBLE = 5;
+
+  int selected_local_idx = selected_global_idx - page_start_idx;
+  if (selected_local_idx < 0) selected_local_idx = 0;
+  if (selected_local_idx >= (int)items.size()) {
+    selected_local_idx = (int)items.size() - 1;
+  }
+
+  if (selected_global_idx != s_scroll_state.scroll_idx) {
+    s_scroll_state.reset(selected_global_idx);
+  }
+
+  bool is_page_changed = (page_start_idx != s_last_start_idx);
+  bool is_selection_changed = (selected_global_idx != s_last_selected_idx);
+
+  bool is_offset_changed = false;
+  {
+    const NetMusicItem& selected = items[selected_local_idx];
+
+    String prefix = String(selected_global_idx + 1) + ". ";
+    int prefix_width = tft.textWidth(prefix);
+
+    String right = selected.artist.length() ? selected.artist : String("NAS");
+    int right_width = tft.textWidth(right);
+
+    const int list_left_edge = 25;
+    const int list_right_edge = 210;
+
+    int text_start_x = list_left_edge + prefix_width;
+    int text_end_x = list_right_edge - right_width;
+    int available_width = text_end_x - text_start_x;
+    if (available_width < 40) {
+      available_width = list_right_edge - text_start_x;
+    }
+
+    String name = selected.title.length() ? selected.title : String("未命名");
+    int full_width = tft.textWidth(name);
+
+    is_offset_changed = s_scroll_state.update(full_width, available_width);
+  }
+
+  if (!s_first_draw && !is_page_changed && !is_selection_changed && !is_offset_changed &&
+      selected_global_idx == last_drawn_selected &&
+      s_scroll_state.scroll_offset == last_drawn_offset) {
+    return;
+  }
+
+  if (s_first_draw || is_page_changed) {
+    tft.fillScreen(TFT_BLACK);
+    drawListFrame(title, page_start_idx, total, ITEMS_VISIBLE);
+
+    for (int local = 0; local < (int)items.size(); ++local) {
+      const int global_idx = page_start_idx + local;
+      const bool is_selected = (global_idx == selected_global_idx);
+
+      drawNetMusicItem(items[local],
+                       global_idx,
+                       local,
+                       is_selected,
+                       is_selected ? s_scroll_state.scroll_offset : 0,
+                       true);
+    }
+  }
+  else if (is_selection_changed) {
+    if (s_last_selected_idx >= page_start_idx &&
+        s_last_selected_idx < page_start_idx + (int)items.size()) {
+      int old_pos = s_last_selected_idx - page_start_idx;
+      int old_row_top, old_row_h;
+      getListRowRect(old_pos, old_row_top, old_row_h);
+      tft.fillRoundRect(10, old_row_top, 210, old_row_h, 5, TFT_BLACK);
+      drawNetMusicItem(items[old_pos],
+                       s_last_selected_idx,
+                       old_pos,
+                       false,
+                       0,
+                       false);
+    }
+
+    int new_pos = selected_global_idx - page_start_idx;
+    if (new_pos >= 0 && new_pos < (int)items.size()) {
+      drawNetMusicItem(items[new_pos],
+                       selected_global_idx,
+                       new_pos,
+                       true,
+                       0,
+                       true);
+    }
+  }
+  else if (is_offset_changed) {
+    int list_pos = selected_global_idx - page_start_idx;
+    if (list_pos >= 0 && list_pos < (int)items.size()) {
+      drawNetMusicItem(items[list_pos],
+                       selected_global_idx,
+                       list_pos,
+                       true,
+                       s_scroll_state.scroll_offset,
+                       false);
+    }
+  }
+
+  s_last_selected_idx = selected_global_idx;
+  s_last_start_idx = page_start_idx;
+  last_drawn_selected = selected_global_idx;
   last_drawn_offset = s_scroll_state.scroll_offset;
   s_first_draw = false;
 }

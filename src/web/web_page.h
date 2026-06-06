@@ -119,6 +119,7 @@ static const char WEBCTRL_INDEX_HTML[] PROGMEM = R"HTML(
         <a class="linkbtn secondary" href="/albums" style="padding:10px 12px;font-size:14px">专辑页</a>
         <a class="linkbtn secondary" href="/nfc" style="padding:10px 12px;font-size:14px">NFC管理</a>
         <a class="linkbtn secondary" href="/radios" style="padding:10px 12px;font-size:14px">电台页</a>
+        <a class="linkbtn secondary" href="/netmusic" style="padding:10px 12px;font-size:14px">NAS页</a>
         <a class="linkbtn secondary" href="/settings" style="padding:10px 12px;font-size:14px">网页设置</a>
       </div>
     </div>
@@ -909,6 +910,7 @@ static const char WEBCTRL_ARTISTS_HTML[] PROGMEM = R"HTML(
         <a class="secondary" href="/albums">专辑页</a>
         <a class="secondary" href="/nfc">NFC管理</a>
         <a class="secondary" href="/radios">电台页</a>
+        <a class="secondary" href="/netmusic">NAS页</a>
         <a class="secondary" href="/settings">网页设置</a>
       </div>
     </div>
@@ -1423,6 +1425,7 @@ static const char WEBCTRL_ALBUMS_HTML[] PROGMEM = R"HTML(
         <a class="secondary" href="/artists">歌手页</a>
         <a class="secondary" href="/nfc">NFC管理</a>
         <a class="secondary" href="/radios">电台页</a>
+        <a class="secondary" href="/netmusic">NAS页</a>
         <a class="secondary" href="/settings">网页设置</a>
       </div>
     </div>
@@ -2182,6 +2185,234 @@ document.body.appendChild(scrollToTopBtn);
 window.addEventListener('scroll', () => {
   const scrollY = window.scrollY;
   if (scrollY > 300) {
+    scrollToTopBtn.classList.add('visible');
+  } else {
+    scrollToTopBtn.classList.remove('visible');
+  }
+});
+</script>
+</body>
+</html>
+)HTML";
+
+static const char WEBCTRL_NETMUSIC_HTML[] PROGMEM = R"HTML(
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>ESP32S3 NAS音乐页</title>
+  <style>
+    body{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:#111;color:#eee}
+    .wrap{max-width:760px;margin:0 auto;padding:16px}
+    .card{background:#1b1b1b;border-radius:16px;padding:16px;margin-bottom:12px;box-shadow:0 4px 18px rgba(0,0,0,.25)}
+    .topbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:space-between}
+    .nav{display:flex;gap:8px;flex-wrap:wrap}
+    a,button{border:none;border-radius:12px;padding:10px 12px;background:#2f6feb;color:#fff;font-size:14px;font-weight:600;text-decoration:none}
+    a.secondary,button.secondary{background:#444}
+    button:disabled{opacity:.45}
+    .muted{color:#aaa;font-size:13px}
+    .err{color:#ff8f8f;font-size:13px;white-space:pre-wrap}
+    .list{display:grid;gap:10px}
+    .item{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;padding:10px 12px;border-radius:12px;background:#161616;border:1px solid #2a2a2a}
+    .item.active{border-color:#2f6feb;background:#182235}
+    .name{font-size:15px;font-weight:700;word-break:break-word;line-height:1.35}
+    .meta{font-size:12px;color:#999;margin-top:4px;word-break:break-word;line-height:1.3}
+    .pager{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:12px}
+    select{background:#222;color:#eee;border:1px solid #444;border-radius:10px;padding:9px}
+    .scrollToTopBtn{position:fixed;bottom:20px;right:20px;width:50px;height:50px;border-radius:50%;background:#2f6feb;color:#fff;border:none;font-size:24px;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,.3);opacity:0;transform:translateY(20px);transition:opacity .3s,transform .3s;z-index:1000;display:flex;align-items:center;justify-content:center}
+    .scrollToTopBtn.visible{opacity:1;transform:translateY(0)}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <div class="topbar">
+      <div>
+        <div style="font-size:22px;font-weight:800">NAS音乐</div>
+        <div class="muted">通过 /System/net_music.txt 按需分页读取，不全量加载到网页</div>
+      </div>
+      <div class="nav" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:12px">
+        <a class="secondary" href="/">控制页</a>
+        <a class="secondary" href="/artists">歌手页</a>
+        <a class="secondary" href="/albums">专辑页</a>
+        <a class="secondary" href="/radios">电台页</a>
+        <a class="secondary" href="/settings">网页设置</a>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div id="statusText">加载中...</div>
+    <div id="err" class="err"></div>
+  </div>
+
+  <div class="card">
+    <div class="muted" id="pathInfo">-</div>
+    <div class="pager">
+      <button onclick="prevPage()">上一页</button>
+      <button onclick="nextPage()">下一页</button>
+      <button class="secondary" onclick="refreshPage()">刷新</button>
+      <label class="muted">每页</label>
+      <select id="limitSelect" onchange="changeLimit()">
+        <option value="20">20</option>
+        <option value="30">30</option>
+        <option value="50">50</option>
+      </select>
+      <span class="muted" id="pageInfo">-</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="list" id="musicList"></div>
+  </div>
+</div>
+
+<script>
+let offset = 0;
+let limit = 20;
+let total = 0;
+let currentIdx = -1;
+
+function setText(id, text){
+  const el = document.getElementById(id);
+  if(el) el.textContent = text;
+}
+
+function clearNode(el){
+  while(el && el.firstChild) el.removeChild(el.firstChild);
+}
+
+async function loadNetMusic(){
+  try{
+    const r = await fetch(`/api/netmusic?offset=${offset}&limit=${limit}`, {cache:'no-store'});
+    const j = await r.json();
+
+    total = j.total || 0;
+    if(offset >= total && total > 0){
+      offset = Math.max(0, total - limit);
+    }
+
+    setText('pathInfo', `Base：${j.base || '-'} / 共 ${total} 首`);
+    setText('err', j.ok ? '' : `加载提示：${j.error || 'unknown'}`);
+
+    const pageNo = total > 0 ? Math.floor(offset / limit) + 1 : 0;
+    const pageTotal = total > 0 ? Math.ceil(total / limit) : 0;
+    setText('pageInfo', `第 ${pageNo} / ${pageTotal} 页，当前 ${offset + 1} - ${Math.min(offset + limit, total)}`);
+
+    const box = document.getElementById('musicList');
+    clearNode(box);
+
+    (j.items || []).forEach(it => {
+      const row = document.createElement('div');
+      row.className = 'item';
+      if(it.idx === currentIdx) row.classList.add('active');
+
+      const left = document.createElement('div');
+
+      const name = document.createElement('div');
+      name.className = 'name';
+      name.textContent = `${it.idx + 1}. ${it.title || '-'}`;
+
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+
+      const artist = it.artist || '';
+      const album = it.album || '';
+      const format = it.format || 'mp3';
+
+      let metaParts = [];
+      if (artist && artist !== 'NAS') metaParts.push(artist);
+      if (album && album !== 'NAS') metaParts.push(album);
+      metaParts.push(format.toUpperCase());
+
+      meta.textContent = metaParts.join(' · ');
+
+      left.appendChild(name);
+      left.appendChild(meta);
+
+      const btn = document.createElement('button');
+      btn.textContent = '播放';
+      btn.onclick = async () => {
+        const resp = await fetch(`/api/netmusic/play?idx=${it.idx}`, {method:'POST'});
+        const ret = await resp.json();
+        alert(ret && ret.ok ? (ret.message || '已开始播放 NAS 歌曲') : (ret.message || '操作失败'));
+        await loadStatus();
+        await loadNetMusic();
+      };
+
+      row.appendChild(left);
+      row.appendChild(btn);
+      box.appendChild(row);
+    });
+  }catch(e){
+    setText('err', 'NAS音乐列表获取失败');
+  }
+}
+
+async function loadStatus(){
+  try{
+    const r = await fetch('/api/status', {cache:'no-store'});
+    const j = await r.json();
+
+    currentIdx = Number.isInteger(j.net_track_idx) ? j.net_track_idx : -1;
+
+    let t = '当前源：-';
+    if(j.source_type === 'net_track'){
+      t = `当前源：NAS / ${j.net_track_title || j.title || '-'}`;
+      if(j.net_track_state) t += ` / ${j.net_track_state}`;
+    }else if(j.source_type === 'radio'){
+      t = `当前源：电台 / ${j.radio_name || '-'}`;
+      if(j.radio_state) t += ` / ${j.radio_state}`;
+    }else{
+      t = `当前源：${j.source_type || '-'}`;
+      if(j.title) t += ` / ${j.title}`;
+    }
+
+    setText('statusText', t);
+    if(j.net_track_error){
+      setText('err', j.net_track_error);
+    }
+  }catch(e){}
+}
+
+function prevPage(){
+  offset -= limit;
+  if(offset < 0) offset = 0;
+  loadNetMusic();
+}
+
+function nextPage(){
+  offset += limit;
+  if(offset >= total){
+    offset = Math.max(0, Math.floor((Math.max(total - 1, 0)) / limit) * limit);
+  }
+  loadNetMusic();
+}
+
+function refreshPage(){
+  loadStatus().then(loadNetMusic);
+}
+
+function changeLimit(){
+  const v = parseInt(document.getElementById('limitSelect').value || '20', 10);
+  limit = Math.max(1, Math.min(50, v));
+  offset = Math.floor(offset / limit) * limit;
+  loadNetMusic();
+}
+
+loadStatus().then(loadNetMusic);
+setInterval(loadStatus, 2000);
+
+const scrollToTopBtn = document.createElement('button');
+scrollToTopBtn.className = 'scrollToTopBtn';
+scrollToTopBtn.innerHTML = '↑';
+scrollToTopBtn.title = '回到顶部';
+scrollToTopBtn.onclick = () => window.scrollTo({top:0,behavior:'smooth'});
+document.body.appendChild(scrollToTopBtn);
+
+window.addEventListener('scroll', () => {
+  if (window.scrollY > 300) {
     scrollToTopBtn.classList.add('visible');
   } else {
     scrollToTopBtn.classList.remove('visible');

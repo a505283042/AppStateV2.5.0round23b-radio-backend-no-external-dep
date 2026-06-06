@@ -40,6 +40,7 @@ static void player_assets_hook_on_current_cover_ready(int track_idx);
 static void player_assets_init_once();
 static bool player_list_select_hook_play_track_dispatch(int idx, bool verbose, bool force_cover);
 static bool player_list_select_hook_play_radio_dispatch(int idx);
+static bool player_list_select_hook_play_net_track_dispatch(int idx);
 static bool player_control_hook_play_track_dispatch(int idx, bool verbose, bool force_cover);
 static bool player_control_hook_enter_list_select();
 static void player_list_select_init_once();
@@ -107,6 +108,12 @@ static bool player_list_select_hook_play_radio_dispatch(int idx)
     return player_play_radio_index(idx);
 }
 
+static bool player_list_select_hook_play_net_track_dispatch(int idx)
+{
+    if (idx < 0) return false;
+    return player_play_net_track_index(idx);
+}
+
 static void player_list_select_init_once()
 {
     if (s_player_list_hooks_inited) return;
@@ -114,6 +121,7 @@ static void player_list_select_init_once()
     PlayerListSelectHooks hooks{};
     hooks.play_track_dispatch = &player_list_select_hook_play_track_dispatch;
     hooks.play_radio_dispatch = &player_list_select_hook_play_radio_dispatch;
+    hooks.play_net_track_dispatch = &player_list_select_hook_play_net_track_dispatch;
     player_list_select_setup_hooks(hooks);
     s_player_list_hooks_inited = true;
 }

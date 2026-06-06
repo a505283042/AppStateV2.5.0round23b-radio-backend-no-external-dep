@@ -5,6 +5,7 @@
 
 #include "storage/storage_groups_v3.h"
 #include "radio/radio_catalog.h"
+#include "net_music/net_music_catalog.h"
 #include "ui/ui.h"
 
 /**
@@ -20,7 +21,8 @@ enum class ListSelectState {
     ARTIST,
     ALBUM,
     TRACKS,
-    RADIO
+    RADIO,
+    NET_TRACK
 };
 
 /** 列表选择态内部消费的按键事件。 */
@@ -42,6 +44,7 @@ enum key_event_t {
 struct PlayerListSelectHooks {
     bool (*play_track_dispatch)(int idx, bool verbose, bool force_cover) = nullptr;
     bool (*play_radio_dispatch)(int idx) = nullptr;
+    bool (*play_net_track_dispatch)(int idx) = nullptr;
 };
 
 /** 设置回调。 */
@@ -65,6 +68,11 @@ const std::vector<PlaylistGroup>& player_list_select_get_groups();
 const std::vector<TrackIndex16>& player_list_select_get_tracks();
 /** 当前正在展示的 radio 列表。 */
 const std::vector<RadioItem>& player_list_select_get_radios();
+
+const std::vector<NetMusicItem>& player_list_select_get_net_tracks();
+int player_list_select_get_net_track_page_start();
+int player_list_select_get_net_track_total();
+
 /** 在列表选择状态下处理按键事件。 */
 void player_list_select_handle_key(key_event_t evt);
 /** 刷新列表选择界面。 */

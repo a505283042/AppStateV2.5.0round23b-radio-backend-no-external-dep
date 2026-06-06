@@ -1526,6 +1526,12 @@ static void web_handle_radios_page() {
   web_send_no_cache_headers();
   s_server.send_P(200, "text/html; charset=utf-8", WEBCTRL_RADIOS_HTML);
 }
+
+static void web_handle_netmusic_page() {
+  web_send_no_cache_headers();
+  s_server.send_P(200, "text/html; charset=utf-8", WEBCTRL_NETMUSIC_HTML);
+}
+
 static void web_handle_radios() {
   web_send_radio_list_json();
 }
@@ -1553,8 +1559,11 @@ static void web_handle_netmusic() {
 
   int offset = 0;
   int limit = 20;
+  int detail = 0;
+
   web_parse_int_arg("offset", offset);
   web_parse_int_arg("limit", limit);
+  web_parse_int_arg("detail", detail);
 
   if (offset < 0) offset = 0;
   if (limit <= 0) limit = 20;
@@ -1562,52 +1571,78 @@ static void web_handle_netmusic() {
 
   const uint32_t total = net_music_catalog_count();
   const uint32_t start = (uint32_t)offset;
+
   uint32_t end = start + (uint32_t)limit;
-  if (end > total) end = total;
+  if (start >= total) {
+    end = start;
+  } else if (end > total) {
+    end = total;
+  }
 
   String json;
-  json.reserve(2048);
+  json.reserve(1024 + limit * 220);
+
   json += "{\"ok\":";
   json += net_music_catalog_is_loaded() ? "true" : "false";
+
   json += ",\"total\":";
   json += String((unsigned long)total);
+
   json += ",\"offset\":";
   json += String(offset);
+
   json += ",\"limit\":";
   json += String(limit);
+
   json += ",\"base\":\"";
   json += web_json_escape(net_music_catalog_base_url());
-  json += "\",\"error\":\"";
+  json += "\"";
+
+  json += ",\"error\":\"";
   json += web_json_escape(net_music_catalog_error());
-  json += "\",\"items\":[";
+  json += "\"";
+
+  json += ",\"items\":[";
 
   bool first = true;
+
   for (uint32_t i = start; i < end; ++i) {
     NetMusicItem item{};
     if (!net_music_catalog_get(i, &item) || !item.valid) {
       continue;
     }
 
-    if (!first) json += ",";
+    if (!first) {
+      json += ",";
+    }
     first = false;
 
     json += "{\"idx\":";
     json += String((unsigned long)i);
+
     json += ",\"title\":\"";
     json += web_json_escape(item.title);
-    json += "\",\"artist\":\"";
-    json += web_json_escape(item.artist);
-    json += "\",\"album\":\"";
-    json += web_json_escape(item.album);
-    json += "\",\"format\":\"";
-    json += web_json_escape(item.format);
-    json += "\",\"path\":\"";
-    json += web_json_escape(item.encoded_path);
-    json += "\"}";
+    json += "\"";
 
-    if (json.length() > 3000) {
-      break;
+    json += ",\"artist\":\"";
+    json += web_json_escape(item.artist);
+    json += "\"";
+
+    json += ",\"album\":\"";
+    json += web_json_escape(item.album);
+    json += "\"";
+
+    json += ",\"format\":\"";
+    json += web_json_escape(item.format);
+    json += "\"";
+
+    if (detail != 0) {
+      json += ",\"path\":\"";
+      json += web_json_escape(item.encoded_path);
+      json += "\"";
     }
+
+    json += "}";
   }
 
   json += "]}";
@@ -1743,6 +1778,7 @@ static void web_setup_routes() {
   s_server.on("/albums", HTTP_GET, web_handle_albums_page);
   s_server.on("/nfc", HTTP_GET, web_handle_nfc_page);
   s_server.on("/radios", HTTP_GET, web_handle_radios_page);
+  s_server.on("/netmusic", HTTP_GET, web_handle_netmusic_page);
   s_server.on("/settings", HTTP_GET, web_handle_settings_page);
   s_server.on("/favicon.ico", HTTP_GET, web_handle_favicon);
   s_server.on("/api/status", HTTP_GET, web_handle_status);

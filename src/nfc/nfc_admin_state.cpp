@@ -6,6 +6,7 @@
 #include "nfc/nfc_binding_commit.h"
 #include "player_control.h"
 #include "player_playlist.h"
+#include "player_source.h"
 #include "player_state.h"
 #include "storage/storage_catalog_v3.h"
 #include "storage/storage_groups_v3.h"
@@ -64,6 +65,12 @@ static bool nfc_admin_is_card_removed(const String& uid)
 static bool build_current_bind_target(NfcAdminTarget& out)
 {
     out = NfcAdminTarget{};
+
+    const PlayerSourceState source = player_source_get();
+    if (source.type == PlayerSourceType::NET_TRACK) {
+        LOGI("[NFC_ADMIN] NET_TRACK does not support NFC bind");
+        return false;
+    }
 
     switch (g_play_mode) {
         case PLAY_MODE_ARTIST_SEQ:
