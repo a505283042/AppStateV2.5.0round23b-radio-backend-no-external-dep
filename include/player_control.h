@@ -46,6 +46,12 @@ void player_stop_radio();
 /** 从电台播放返回到本地播放。 */
 bool player_return_from_radio_to_local();
 
+/** NAS 播放中：切换顺序 / 随机。 */
+bool player_net_track_toggle_order_random();
+
+/** 网络播放源返回本地播放，支持 NET_RADIO / NET_TRACK。 */
+bool player_return_from_network_to_local();
+
 /** 播放一首 NAS/HTTP 网络歌曲。 */
 bool player_play_net_track_index(int idx);
 

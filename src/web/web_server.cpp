@@ -1657,6 +1657,105 @@ static void web_handle_netmusic() {
   s_server.send(200, "application/json; charset=utf-8", json);
 }
 
+static void web_handle_netmusic_search() {
+  if (!net_music_catalog_is_loaded()) {
+    (void)net_music_catalog_load();
+  }
+
+  String q = s_server.hasArg("q") ? s_server.arg("q") : String();
+  q.trim();
+
+  int limit = 50;
+  int detail = 0;
+  web_parse_int_arg("limit", limit);
+  web_parse_int_arg("detail", detail);
+
+  if (limit <= 0) limit = 20;
+  if (limit > 50) limit = 50;
+
+  if (!q.length()) {
+    web_send_no_cache_headers();
+    s_server.send(200,
+                  "application/json; charset=utf-8",
+                  "{\"ok\":false,\"error\":\"empty_query\",\"matched\":0,\"items\":[]}");
+    return;
+  }
+
+  std::vector<NetMusicSearchHit> hits;
+  hits.reserve((size_t)limit);
+
+  const uint32_t matched =
+      net_music_catalog_search(q, (uint16_t)limit, &hits);
+
+  String json;
+  json.reserve(1024 + hits.size() * 240);
+
+  json += "{\"ok\":";
+  json += net_music_catalog_is_loaded() ? "true" : "false";
+
+  json += ",\"query\":\"";
+  json += web_json_escape(q);
+  json += "\"";
+
+  json += ",\"matched\":";
+  json += String((unsigned long)matched);
+
+  json += ",\"returned\":";
+  json += String((unsigned long)hits.size());
+
+  json += ",\"limit\":";
+  json += String(limit);
+
+  json += ",\"error\":\"";
+  json += web_json_escape(net_music_catalog_error());
+  json += "\"";
+
+  json += ",\"items\":[";
+
+  bool first = true;
+  for (const auto& hit : hits) {
+    const NetMusicItem& item = hit.item;
+
+    if (!first) json += ",";
+    first = false;
+
+    json += "{\"idx\":";
+    json += String((unsigned long)hit.idx);
+
+    json += ",\"title\":\"";
+    json += web_json_escape(item.title);
+    json += "\"";
+
+    json += ",\"artist\":\"";
+    json += web_json_escape(item.artist);
+    json += "\"";
+
+    json += ",\"album\":\"";
+    json += web_json_escape(item.album);
+    json += "\"";
+
+    json += ",\"format\":\"";
+    json += web_json_escape(item.format);
+    json += "\"";
+
+    json += ",\"duration_ms\":";
+    json += String((unsigned long)item.duration_ms);
+
+    if (detail != 0) {
+      json += ",\"path\":\"";
+      json += web_json_escape(item.encoded_path);
+      json += "\"";
+    }
+
+    json += "}";
+  }
+
+  json += "]}";
+
+  web_send_no_cache_headers();
+  s_server.send(200, "application/json; charset=utf-8", json);
+}
+
 static void web_handle_netmusic_play() {
   if (!web_require_player_state()) return;
 
@@ -1683,6 +1782,68 @@ static void web_handle_netmusic_play() {
 
   web_send_json_ok_simple("已开始播放 NAS 歌曲");
 }
+
+static void web_handle_netmusic_prev() {
+  if (!web_require_player_state()) return;
+
+  const PlayerSourceState source = player_source_get();
+  if (source.type != PlayerSourceType::NET_TRACK) {
+    web_send_json_err("当前不是 NAS 播放");
+    return;
+  }
+
+  player_prev_track();
+  web_send_json_ok_simple("NAS 上一首");
+}
+
+static void web_handle_netmusic_next() {
+  if (!web_require_player_state()) return;
+
+  const PlayerSourceState source = player_source_get();
+  if (source.type != PlayerSourceType::NET_TRACK) {
+    web_send_json_err("当前不是 NAS 播放");
+    return;
+  }
+
+  player_next_track();
+  web_send_json_ok_simple("NAS 下一首");
+}
+
+static void web_handle_netmusic_toggle() {
+  if (!web_require_player_state()) return;
+
+  const PlayerSourceState source = player_source_get();
+  if (source.type != PlayerSourceType::NET_TRACK) {
+    web_send_json_err("当前不是 NAS 播放");
+    return;
+  }
+
+  player_toggle_play();
+  web_send_json_ok_simple("NAS 播放 / 暂停");
+}
+
+static void web_handle_netmusic_mode() {
+  if (!web_require_player_state()) return;
+
+  if (!player_net_track_toggle_order_random()) {
+    web_send_json_err("NAS 顺序 / 随机切换失败");
+    return;
+  }
+
+  web_send_json_ok_simple("NAS 播放模式已切换");
+}
+
+static void web_handle_netmusic_return_local() {
+  if (!web_require_player_state()) return;
+
+  if (!player_return_from_network_to_local()) {
+    web_send_json_err("返回本地播放失败");
+    return;
+  }
+
+  web_send_json_ok_simple("已返回本地播放");
+}
+
 static void web_handle_playpause() { if (!web_require_player_state()) return; player_toggle_play(); web_send_json_ok_simple(); }
 static void web_handle_next() { if (!web_require_player_state()) return; player_next_track(); web_send_json_ok_simple(); }
 static void web_handle_prev() { if (!web_require_player_state()) return; player_prev_track(); web_send_json_ok_simple(); }
@@ -1794,6 +1955,7 @@ static void web_setup_routes() {
   s_server.on("/api/album/search_song", HTTP_GET, web_handle_album_song_search);
   s_server.on("/api/radios", HTTP_GET, web_handle_radios);
   s_server.on("/api/netmusic", HTTP_GET, web_handle_netmusic);
+  s_server.on("/api/netmusic/search", HTTP_GET, web_handle_netmusic_search);
   s_server.on("/api/artist/detail", HTTP_GET, web_handle_artist_detail);
   s_server.on("/api/album/detail", HTTP_GET, web_handle_album_detail);
   s_server.on("/api/settings", HTTP_GET, web_handle_settings_get);
@@ -1813,6 +1975,11 @@ static void web_setup_routes() {
   s_server.on("/api/radio/stop", HTTP_POST, web_handle_radio_stop);
   s_server.on("/api/netmusic/play", HTTP_GET, web_handle_netmusic_play);
   s_server.on("/api/netmusic/play", HTTP_POST, web_handle_netmusic_play);
+  s_server.on("/api/netmusic/prev", HTTP_POST, web_handle_netmusic_prev);
+  s_server.on("/api/netmusic/next", HTTP_POST, web_handle_netmusic_next);
+  s_server.on("/api/netmusic/toggle", HTTP_POST, web_handle_netmusic_toggle);
+  s_server.on("/api/netmusic/mode", HTTP_POST, web_handle_netmusic_mode);
+  s_server.on("/api/netmusic/return-local", HTTP_POST, web_handle_netmusic_return_local);
   s_server.on("/api/playpause", HTTP_POST, web_handle_playpause);
   s_server.on("/api/next", HTTP_POST, web_handle_next);
   s_server.on("/api/prev", HTTP_POST, web_handle_prev);

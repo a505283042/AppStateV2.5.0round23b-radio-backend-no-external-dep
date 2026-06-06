@@ -253,6 +253,98 @@ bool net_music_catalog_get(uint32_t idx, NetMusicItem* out) {
   return read_item_locked(idx, out);
 }
 
+uint32_t net_music_catalog_search(const String& query,
+                                  uint16_t limit,
+                                  std::vector<NetMusicSearchHit>* out) {
+  if (out) {
+    out->clear();
+  }
+
+  if (!s_loaded) {
+    s_error = "net_music_not_loaded";
+    return 0;
+  }
+
+  String q = query;
+  q.trim();
+  q.toLowerCase();
+
+  if (!q.length()) {
+    s_error = "net_music_search_empty";
+    return 0;
+  }
+
+  if (limit == 0) {
+    limit = 20;
+  }
+
+  if (limit > 50) {
+    limit = 50;
+  }
+
+  StorageSdLockGuard guard(1800);
+  if (!guard) {
+    s_error = "sd_lock_failed";
+    return 0;
+  }
+
+  File32 f = sd.open(kNetMusicListPath, O_RDONLY);
+  if (!f) {
+    s_error = "net_music_list_open_failed";
+    return 0;
+  }
+
+  uint32_t matched_total = 0;
+
+  for (uint32_t i = 0; i < s_offsets.size(); ++i) {
+    if (!f.seek(s_offsets[i])) {
+      continue;
+    }
+
+    String line = f.readStringUntil('\n');
+
+    if (line.length() > kMaxNetMusicLineLen) {
+      continue;
+    }
+
+    NetMusicItem item{};
+    if (!parse_line(line, &item) || !item.valid) {
+      continue;
+    }
+
+    String haystack;
+    haystack.reserve(item.title.length() + item.artist.length() + item.album.length() + 4);
+    haystack += item.title;
+    haystack += " ";
+    haystack += item.artist;
+    haystack += " ";
+    haystack += item.album;
+    haystack.toLowerCase();
+
+    if (haystack.indexOf(q) < 0) {
+      continue;
+    }
+
+    ++matched_total;
+
+    if (out && out->size() < limit) {
+      NetMusicSearchHit hit{};
+      hit.idx = i;
+      hit.item = item;
+      out->push_back(hit);
+    }
+  }
+
+  f.close();
+
+  LOGI("[NETMUSIC] search q=%s matched=%lu returned=%u",
+       q.c_str(),
+       (unsigned long)matched_total,
+       out ? (unsigned)out->size() : 0);
+
+  return matched_total;
+}
+
 String net_music_catalog_build_url(const NetMusicItem& item) {
   if (!item.valid || !item.encoded_path.length()) {
     return String();

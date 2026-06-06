@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <stdint.h>
+#include <vector>
 
 /**
  * @brief NAS/HTTP 网络歌曲条目。
@@ -18,6 +19,23 @@ struct NetMusicItem {
   uint32_t duration_ms = 0;
   bool valid = false;
 };
+
+struct NetMusicSearchHit {
+  uint32_t idx = 0;
+  NetMusicItem item;
+};
+
+/**
+ * @brief 搜索 NAS 歌曲。
+ *
+ * 会扫描 offset 索引对应的列表行，但不会常驻加载全部歌曲信息。
+ * query 会匹配 title / artist / album。
+ *
+ * @return 实际匹配总数，不一定等于 out->size()。
+ */
+uint32_t net_music_catalog_search(const String& query,
+                                  uint16_t limit,
+                                  std::vector<NetMusicSearchHit>* out);
 
 /** 加载 /System/net_music_base.txt 和 /System/net_music.txt，并建立行偏移索引。 */
 bool net_music_catalog_load();

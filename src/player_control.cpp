@@ -1,4 +1,5 @@
 #include "player_control.h"
+#include <vector>
 #include <esp_system.h>
 
 #include "audio/audio.h"
@@ -190,14 +191,15 @@ static bool control_prepare_net_track_item(int idx, NetMusicItem& item, String& 
 }
 
 struct NetTrackShuffleState {
-    uint32_t start = 0;
-    uint32_t step = 1;
+    std::vector<uint16_t> order;
     uint32_t pos = 0;
     uint32_t count = 0;
     bool ready = false;
 };
 
 NetTrackShuffleState s_net_track_shuffle;
+
+int s_net_track_return_local_idx = -1;
 
 struct NetTrackEofWatchState {
     int idx = -1;
@@ -226,95 +228,6 @@ static bool control_is_net_track_random_mode()
            g_play_mode == PLAY_MODE_ALBUM_RND;
 }
 
-static uint32_t control_gcd_u32(uint32_t a, uint32_t b)
-{
-    while (b != 0) {
-        const uint32_t t = a % b;
-        a = b;
-        b = t;
-    }
-    return a;
-}
-
-static uint32_t control_choose_coprime_step(uint32_t count)
-{
-    if (count <= 1) return 1;
-
-    for (int i = 0; i < 24; ++i) {
-        uint32_t step = (esp_random() % (count - 1)) + 1;
-        if (control_gcd_u32(step, count) == 1) {
-            return step;
-        }
-    }
-
-    for (uint32_t step = 1; step < count; ++step) {
-        if (control_gcd_u32(step, count) == 1) {
-            return step;
-        }
-    }
-
-    return 1;
-}
-
-static int control_net_track_shuffle_index_at(uint32_t pos)
-{
-    if (!s_net_track_shuffle.ready || s_net_track_shuffle.count == 0) {
-        return -1;
-    }
-
-    const uint32_t idx =
-        (s_net_track_shuffle.start + pos * s_net_track_shuffle.step) %
-        s_net_track_shuffle.count;
-
-    return (int)idx;
-}
-
-static void control_reset_net_track_shuffle(int start_idx)
-{
-    const uint32_t count = net_music_catalog_count();
-
-    if (count == 0) {
-        s_net_track_shuffle = NetTrackShuffleState{};
-        return;
-    }
-
-    uint32_t start = 0;
-    if (start_idx >= 0 && (uint32_t)start_idx < count) {
-        start = (uint32_t)start_idx;
-    } else {
-        start = esp_random() % count;
-    }
-
-    s_net_track_shuffle.count = count;
-    s_net_track_shuffle.start = start;
-    s_net_track_shuffle.step = control_choose_coprime_step(count);
-    s_net_track_shuffle.pos = 0;
-    s_net_track_shuffle.ready = true;
-
-    LOGI("[NETTRACK] shuffle reset start=%lu step=%lu count=%lu",
-         (unsigned long)s_net_track_shuffle.start,
-         (unsigned long)s_net_track_shuffle.step,
-         (unsigned long)s_net_track_shuffle.count);
-}
-
-static bool control_sync_net_track_shuffle_to_current(int current_idx)
-{
-    const uint32_t count = net_music_catalog_count();
-    if (count == 0) return false;
-
-    if (!s_net_track_shuffle.ready || s_net_track_shuffle.count != count) {
-        control_reset_net_track_shuffle(current_idx);
-        return s_net_track_shuffle.ready;
-    }
-
-    const int expected = control_net_track_shuffle_index_at(s_net_track_shuffle.pos);
-    if (expected != current_idx) {
-        control_reset_net_track_shuffle(current_idx);
-    }
-
-    return s_net_track_shuffle.ready;
-}
-
 static int control_next_net_track_index_sequential(int current_idx, int step)
 {
     const int count = (int)net_music_catalog_count();
@@ -329,6 +242,103 @@ static int control_next_net_track_index_sequential(int current_idx, int step)
     return next;
 }
 
+static void control_clear_net_track_shuffle()
+{
+    s_net_track_shuffle.order.clear();
+    s_net_track_shuffle.pos = 0;
+    s_net_track_shuffle.count = 0;
+    s_net_track_shuffle.ready = false;
+}
+
+static int control_net_track_shuffle_index_at(uint32_t pos)
+{
+    if (!s_net_track_shuffle.ready) return -1;
+    if (pos >= s_net_track_shuffle.order.size()) return -1;
+    return (int)s_net_track_shuffle.order[pos];
+}
+
+static void control_reset_net_track_shuffle(int start_idx)
+{
+    const uint32_t count = net_music_catalog_count();
+
+    control_clear_net_track_shuffle();
+
+    if (count == 0) {
+        return;
+    }
+
+    if (count > 65535) {
+        LOGW("[NETTRACK] shuffle disabled: count too large=%lu",
+             (unsigned long)count);
+        return;
+    }
+
+    s_net_track_shuffle.order.reserve(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        s_net_track_shuffle.order.push_back((uint16_t)i);
+    }
+
+    // Fisher-Yates shuffle.
+    for (int i = (int)count - 1; i > 0; --i) {
+        const int j = (int)(esp_random() % (uint32_t)(i + 1));
+        const uint16_t tmp = s_net_track_shuffle.order[i];
+        s_net_track_shuffle.order[i] = s_net_track_shuffle.order[j];
+        s_net_track_shuffle.order[j] = tmp;
+    }
+
+    // 手动选择某首歌时，把它放到本轮随机序列第一位。
+    if (start_idx >= 0 && (uint32_t)start_idx < count) {
+        for (uint32_t i = 0; i < count; ++i) {
+            if (s_net_track_shuffle.order[i] == (uint16_t)start_idx) {
+                const uint16_t tmp = s_net_track_shuffle.order[0];
+                s_net_track_shuffle.order[0] = s_net_track_shuffle.order[i];
+                s_net_track_shuffle.order[i] = tmp;
+                break;
+            }
+        }
+    }
+
+    s_net_track_shuffle.pos = 0;
+    s_net_track_shuffle.count = count;
+    s_net_track_shuffle.ready = true;
+
+    LOGI("[NETTRACK] shuffle reset method=fisher start=%d count=%lu",
+         start_idx,
+         (unsigned long)count);
+}
+
+static bool control_sync_net_track_shuffle_to_current(int current_idx)
+{
+    const uint32_t count = net_music_catalog_count();
+    if (count == 0) return false;
+
+    if (!s_net_track_shuffle.ready ||
+        s_net_track_shuffle.count != count ||
+        s_net_track_shuffle.order.size() != count) {
+        control_reset_net_track_shuffle(current_idx);
+        return s_net_track_shuffle.ready;
+    }
+
+    const int expected = control_net_track_shuffle_index_at(s_net_track_shuffle.pos);
+    if (expected == current_idx) {
+        return true;
+    }
+
+    // 如果当前播放 index 和随机 pos 不一致，先尝试在当前洗牌表里定位。
+    for (uint32_t i = 0; i < s_net_track_shuffle.order.size(); ++i) {
+        if (s_net_track_shuffle.order[i] == (uint16_t)current_idx) {
+            s_net_track_shuffle.pos = i;
+            LOGI("[NETTRACK] shuffle sync current=%d pos=%lu",
+                 current_idx,
+                 (unsigned long)i);
+            return true;
+        }
+    }
+
+    control_reset_net_track_shuffle(current_idx);
+    return s_net_track_shuffle.ready;
+}
+
 static int control_resolve_next_net_track_index(int current_idx, int step)
 {
     const int count = (int)net_music_catalog_count();
@@ -341,7 +351,7 @@ static int control_resolve_next_net_track_index(int current_idx, int step)
     if (count == 1) return 0;
 
     if (!control_sync_net_track_shuffle_to_current(current_idx)) {
-        return -1;
+        return control_next_net_track_index_sequential(current_idx, step);
     }
 
     const int move_count = step >= 0 ? step : -step;
@@ -349,11 +359,22 @@ static int control_resolve_next_net_track_index(int current_idx, int step)
 
     for (int i = 0; i < move_count; ++i) {
         if (forward) {
-            s_net_track_shuffle.pos++;
+            if (s_net_track_shuffle.pos + 1 >= s_net_track_shuffle.count) {
+                const int avoid_idx = current_idx;
 
-            if (s_net_track_shuffle.pos >= s_net_track_shuffle.count) {
-                // 一轮随机播放完，重新生成一轮随机序列。
+                // 一轮随机播放完，重新洗牌。
                 control_reset_net_track_shuffle(-1);
+
+                // 尽量避免新一轮第一首和刚播完的是同一首。
+                if (s_net_track_shuffle.ready &&
+                    s_net_track_shuffle.count > 1 &&
+                    control_net_track_shuffle_index_at(0) == avoid_idx) {
+                    const uint16_t tmp = s_net_track_shuffle.order[0];
+                    s_net_track_shuffle.order[0] = s_net_track_shuffle.order[1];
+                    s_net_track_shuffle.order[1] = tmp;
+                }
+            } else {
+                s_net_track_shuffle.pos++;
             }
         } else {
             if (s_net_track_shuffle.pos == 0) {
@@ -626,7 +647,14 @@ void player_stop_radio()
 }
 
 bool player_return_from_radio_to_local() {
-    player_stop_radio();
+    const PlayerSourceState source = player_source_get();
+    if (source.type == PlayerSourceType::NET_RADIO) {
+        audio_radio_backend_stop();
+    } else if (source.type == PlayerSourceType::NET_TRACK) {
+        audio_service_stop(true);
+    } else {
+        return false;
+    }
 
     if (!s_radio_return.valid || s_radio_return.track_idx < 0) {
         LOGW("[RADIO] no return context");
@@ -650,6 +678,63 @@ bool player_return_from_radio_to_local() {
     return true;
 }
 
+bool player_return_from_network_to_local()
+{
+    const PlayerSourceState source = player_source_get();
+
+    if (source.type == PlayerSourceType::NET_RADIO) {
+        return player_return_from_radio_to_local();
+    }
+
+    if (source.type != PlayerSourceType::NET_TRACK) {
+        LOGW("[NETTRACK] return local ignored: source=%s",
+             player_source_type_key(source.type));
+        return false;
+    }
+
+    const int track_count = control_track_count();
+    if (track_count <= 0) {
+        LOGW("[NETTRACK] return local failed: no local tracks");
+        return false;
+    }
+
+    int target = s_net_track_return_local_idx;
+
+    if (target < 0 || target >= track_count) {
+        target = 0;
+        LOGW("[NETTRACK] return local fallback to idx=0");
+    }
+
+    LOGI("[NETTRACK] return local target=%d", target);
+
+    audio_service_stop(true);
+
+    // 清掉 NET_TRACK，避免 EOF watchdog 或自动下一首继续把 NAS 歌曲拉起来。
+    player_source_clear_net_track();
+
+    return control_play_track_dispatch(target, false, true);
+}
+
+bool player_net_track_toggle_order_random()
+{
+    const PlayerSourceState source = player_source_get();
+    if (source.type != PlayerSourceType::NET_TRACK) {
+        return false;
+    }
+
+    if (control_is_net_track_random_mode()) {
+        g_play_mode = PLAY_MODE_ALL_SEQ;
+        LOGI("[NETTRACK] mode -> all_seq");
+    } else {
+        g_play_mode = PLAY_MODE_ALL_RND;
+        LOGI("[NETTRACK] mode -> all_rnd");
+    }
+
+    ui_set_play_mode(g_play_mode);
+    ui_request_refresh_now();
+    return true;
+}
+
 static bool control_play_net_track_index_impl(int idx, bool reset_shuffle)
 {
     NetMusicItem item{};
@@ -657,6 +742,16 @@ static bool control_play_net_track_index_impl(int idx, bool reset_shuffle)
 
     if (!control_prepare_net_track_item(idx, item, url)) {
         return false;
+    }
+
+    const PlayerSourceState before_source = player_source_get();
+
+    if (before_source.type == PlayerSourceType::LOCAL_TRACK) {
+        const int cur = control_current_track_idx();
+        if (cur >= 0 && cur < control_track_count()) {
+            s_net_track_return_local_idx = cur;
+            LOGI("[NETTRACK] remember local return idx=%d", s_net_track_return_local_idx);
+        }
     }
 
     if (player_source_get().type == PlayerSourceType::NET_RADIO) {
