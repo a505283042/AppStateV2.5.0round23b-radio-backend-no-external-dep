@@ -18,6 +18,7 @@
 #include "player_binding.h"
 #include "player_recover.h"
 #include "radio/radio_catalog.h"
+#include "net_music/net_music_catalog.h"
 #include "player_list_select.h"
 #include "player_playlist.h"
 #include "storage/storage_catalog_v3.h"
@@ -925,6 +926,40 @@ static void web_handle_status() {
   json += ",\"radio_backend\":\"" + web_json_escape(snap.radio_backend) + "\"";
   json += ",\"radio_bitrate\":" + String(snap.radio_bitrate);
 
+    json += ",\"net_track_active\":";
+  json += (snap.net_track_active ? "true" : "false");
+
+  json += ",\"net_track_idx\":";
+  json += String(snap.net_track_idx);
+
+  json += ",\"net_track_title\":\"";
+  json += web_json_escape(snap.net_track_title);
+  json += "\"";
+
+  json += ",\"net_track_url\":\"";
+  json += web_json_escape(snap.net_track_url);
+  json += "\"";
+
+  json += ",\"net_track_format\":\"";
+  json += web_json_escape(snap.net_track_format);
+  json += "\"";
+
+  json += ",\"net_track_artist\":\"";
+  json += web_json_escape(snap.net_track_artist);
+  json += "\"";
+
+  json += ",\"net_track_album\":\"";
+  json += web_json_escape(snap.net_track_album);
+  json += "\"";
+
+  json += ",\"net_track_state\":\"";
+  json += web_json_escape(snap.net_track_state);
+  json += "\"";
+
+  json += ",\"net_track_error\":\"";
+  json += web_json_escape(snap.net_track_error);
+  json += "\"";
+
   json += "}";
 
   web_send_no_cache_headers();
@@ -1511,6 +1546,102 @@ static void web_handle_radio_stop() {
     web_send_json_ok_simple("已停止电台");
   }
 }
+static void web_handle_netmusic() {
+  if (!net_music_catalog_is_loaded()) {
+    (void)net_music_catalog_load();
+  }
+
+  int offset = 0;
+  int limit = 20;
+  web_parse_int_arg("offset", offset);
+  web_parse_int_arg("limit", limit);
+
+  if (offset < 0) offset = 0;
+  if (limit <= 0) limit = 20;
+  if (limit > 50) limit = 50;
+
+  const uint32_t total = net_music_catalog_count();
+  const uint32_t start = (uint32_t)offset;
+  uint32_t end = start + (uint32_t)limit;
+  if (end > total) end = total;
+
+  String json;
+  json.reserve(2048);
+  json += "{\"ok\":";
+  json += net_music_catalog_is_loaded() ? "true" : "false";
+  json += ",\"total\":";
+  json += String((unsigned long)total);
+  json += ",\"offset\":";
+  json += String(offset);
+  json += ",\"limit\":";
+  json += String(limit);
+  json += ",\"base\":\"";
+  json += web_json_escape(net_music_catalog_base_url());
+  json += "\",\"error\":\"";
+  json += web_json_escape(net_music_catalog_error());
+  json += "\",\"items\":[";
+
+  bool first = true;
+  for (uint32_t i = start; i < end; ++i) {
+    NetMusicItem item{};
+    if (!net_music_catalog_get(i, &item) || !item.valid) {
+      continue;
+    }
+
+    if (!first) json += ",";
+    first = false;
+
+    json += "{\"idx\":";
+    json += String((unsigned long)i);
+    json += ",\"title\":\"";
+    json += web_json_escape(item.title);
+    json += "\",\"artist\":\"";
+    json += web_json_escape(item.artist);
+    json += "\",\"album\":\"";
+    json += web_json_escape(item.album);
+    json += "\",\"format\":\"";
+    json += web_json_escape(item.format);
+    json += "\",\"path\":\"";
+    json += web_json_escape(item.encoded_path);
+    json += "\"}";
+
+    if (json.length() > 3000) {
+      break;
+    }
+  }
+
+  json += "]}";
+
+  web_send_no_cache_headers();
+  s_server.send(200, "application/json; charset=utf-8", json);
+}
+
+static void web_handle_netmusic_play() {
+  if (!web_require_player_state()) return;
+
+  int idx = -1;
+  if (!web_parse_int_arg("idx", idx)) {
+    web_send_json_err("缺少 idx 参数");
+    return;
+  }
+
+  if (!net_music_catalog_is_loaded()) {
+    (void)net_music_catalog_load();
+  }
+
+  const int count = (int)net_music_catalog_count();
+  if (idx < 0 || idx >= count) {
+    web_send_json_err("网络歌曲不存在", 404);
+    return;
+  }
+
+  if (!player_play_net_track_index(idx)) {
+    web_send_json_err("网络歌曲播放失败", 500);
+    return;
+  }
+
+  web_send_json_ok_simple("已开始播放 NAS 歌曲");
+}
 static void web_handle_playpause() { if (!web_require_player_state()) return; player_toggle_play(); web_send_json_ok_simple(); }
 static void web_handle_next() { if (!web_require_player_state()) return; player_next_track(); web_send_json_ok_simple(); }
 static void web_handle_prev() { if (!web_require_player_state()) return; player_prev_track(); web_send_json_ok_simple(); }
@@ -1620,6 +1751,7 @@ static void web_setup_routes() {
   s_server.on("/api/artist/search_song", HTTP_GET, web_handle_artist_song_search);
   s_server.on("/api/album/search_song", HTTP_GET, web_handle_album_song_search);
   s_server.on("/api/radios", HTTP_GET, web_handle_radios);
+  s_server.on("/api/netmusic", HTTP_GET, web_handle_netmusic);
   s_server.on("/api/artist/detail", HTTP_GET, web_handle_artist_detail);
   s_server.on("/api/album/detail", HTTP_GET, web_handle_album_detail);
   s_server.on("/api/settings", HTTP_GET, web_handle_settings_get);
@@ -1637,6 +1769,8 @@ static void web_setup_routes() {
   s_server.on("/api/track/bind_nfc", HTTP_POST, web_handle_track_bind_nfc);
   s_server.on("/api/radio/play", HTTP_POST, web_handle_radio_play);
   s_server.on("/api/radio/stop", HTTP_POST, web_handle_radio_stop);
+  s_server.on("/api/netmusic/play", HTTP_GET, web_handle_netmusic_play);
+  s_server.on("/api/netmusic/play", HTTP_POST, web_handle_netmusic_play);
   s_server.on("/api/playpause", HTTP_POST, web_handle_playpause);
   s_server.on("/api/next", HTTP_POST, web_handle_next);
   s_server.on("/api/prev", HTTP_POST, web_handle_prev);

@@ -68,6 +68,16 @@ struct WebPlayerSnapshot {
   String radio_backend;
   uint32_t radio_bitrate = 0;
 
+  bool net_track_active = false;
+  int net_track_idx = -1;
+  String net_track_title;
+  String net_track_url;
+  String net_track_format;
+  String net_track_artist;
+  String net_track_album;
+  String net_track_state;
+  String net_track_error;
+
   // 建议网页下一次刷新等待多久（毫秒），用于自适应轮询。
   uint32_t next_poll_ms = 0;
 };

@@ -7,6 +7,7 @@
 #include "player_playlist.h"
 #include "player_assets.h"
 #include "radio/radio_catalog.h"
+#include "net_music/net_music_catalog.h"
 #include "player_state.h"
 #include "player_source.h"
 #include "lyrics/lyrics.h"
@@ -162,6 +163,44 @@ static void control_apply_radio_cover(const RadioItem& item)
     (void)control_apply_cover_file("/System/default_cover.jpg");
 }
 
+static bool control_prepare_net_track_item(int idx, NetMusicItem& item, String& url)
+{
+    if (idx < 0) return false;
+
+    if (!net_music_catalog_is_loaded() || net_music_catalog_count() == 0) {
+        LOGW("[NETTRACK] catalog not loaded or empty");
+        return false;
+    }
+
+    if (!net_music_catalog_get((uint32_t)idx, &item) || !item.valid) {
+        LOGW("[NETTRACK] item not found idx=%d err=%s",
+             idx,
+             net_music_catalog_error().c_str());
+        return false;
+    }
+
+    url = net_music_catalog_build_url(item);
+    if (!url.length()) {
+        LOGW("[NETTRACK] url build failed idx=%d", idx);
+        return false;
+    }
+
+    return true;
+}
+
+static int control_next_net_track_index(int current_idx, int step)
+{
+    const int count = (int)net_music_catalog_count();
+    if (count <= 0) return -1;
+
+    if (current_idx < 0 || current_idx >= count) {
+        return step >= 0 ? 0 : count - 1;
+    }
+
+    int next = (current_idx + step) % count;
+    if (next < 0) next += count;
+    return next;
+}
 } // namespace
 
 void player_control_setup_hooks(const PlayerControlHooks& hooks)
@@ -205,15 +244,29 @@ bool player_control_should_block_idle()
 
 bool player_control_try_auto_next(bool entered, bool started)
 {
-    const int track_count = control_track_count();
-    if (!entered || !started || track_count <= 0) return false;
+    if (!entered || !started) return false;
     if (s_user_paused) return false;
     if (audio_service_is_playing()) return false;
+
     const PlayerSourceState source = player_source_get();
     if (source.type == PlayerSourceType::NET_RADIO) return false;
 
-    // SD 疑似拔卡/读卡异常时，不要自动切到下一首。
-    // 否则会在无卡状态下连续尝试打开下一首、歌词、封面，形成失败风暴。
+    if (source.type == PlayerSourceType::NET_TRACK) {
+        if (!storage_is_ready() || storage_has_recent_io_error()) {
+            LOGW("[NETTRACK] auto next blocked: storage not ready or IO error pending");
+            return false;
+        }
+
+        const int next = control_next_net_track_index(source.net_track_idx, +1);
+        if (next < 0) return false;
+
+        LOGI("[NETTRACK] AUTO NEXT -> #%d", next);
+        return player_play_net_track_index(next);
+    }
+
+    const int track_count = control_track_count();
+    if (track_count <= 0) return false;
+
     if (!storage_is_ready() || storage_has_recent_io_error()) {
         LOGW("[PLAYER] auto next blocked: storage not ready or IO error pending");
         return false;
@@ -228,8 +281,11 @@ bool player_control_try_auto_next(bool entered, bool started)
 
     if (anchored) {
         LOGW("[PLAYER] AUTO NEXT anchored to playlist head, mode=%d group=%d cur=%d",
-             (int)g_play_mode, player_playlist_get_current_group_idx(), cur);
+             (int)g_play_mode,
+             player_playlist_get_current_group_idx(),
+             cur);
     }
+
     return control_play_track_dispatch(next, false, true);
 }
 
@@ -305,6 +361,64 @@ bool player_return_from_radio_to_local() {
     return true;
 }
 
+bool player_play_net_track_index(int idx)
+{
+    NetMusicItem item{};
+    String url;
+
+    if (!control_prepare_net_track_item(idx, item, url)) {
+        return false;
+    }
+
+    if (player_source_get().type == PlayerSourceType::NET_RADIO) {
+        audio_radio_backend_stop();
+    }
+
+    if (audio_service_is_playing() || audio_service_is_paused()) {
+        audio_service_stop(true);
+    }
+
+    control_prepare_for_radio_source();
+
+    player_source_set_net_track_stub(idx, item, url, String("connecting"), String());
+    player_state_set_current_index(-1);
+    player_control_reset_runtime_flags();
+    audio_service_resume();
+
+    ui_set_now_playing(item.title.c_str(), item.artist.c_str());
+    ui_set_album(item.album);
+    ui_set_track_pos(idx, (int)net_music_catalog_count());
+    ui_set_play_mode(g_play_mode);
+    ui_set_volume(audio_get_volume());
+
+    // 第一版先使用默认封面，避免引入网络封面和歌词复杂度。
+    (void)control_apply_cover_file("/System/default_cover.jpg");
+    ui_request_refresh_now();
+
+    const bool ok = audio_service_play_stream_mp3(url.c_str(), true);
+    if (ok) {
+        player_source_set_net_track_status(true, String("playing"), String());
+        LOGI("[NETTRACK] PLAY idx=%d title=%s url=%s",
+             idx,
+             item.title.c_str(),
+             url.c_str());
+        return true;
+    }
+
+    player_source_set_net_track_status(false, String("error"), String("stream_start_failed"));
+    LOGW("[NETTRACK] PLAY failed idx=%d title=%s url=%s",
+         idx,
+         item.title.c_str(),
+         url.c_str());
+    return false;
+}
+
+void player_stop_net_track()
+{
+    audio_service_stop(true);
+    player_source_clear_net_track();
+}
+
 void player_next_track()
 {
     const PlayerSourceState source = player_source_get();
@@ -317,6 +431,20 @@ void player_next_track()
         ui_notify_cover_panel_nav_feedback(1);
 
         const bool ok = player_play_radio_index(next_radio);
+        if (!ok) {
+            ui_notify_cover_panel_nav_feedback(0);
+        }
+
+        return;
+    }
+
+    if (source.type == PlayerSourceType::NET_TRACK) {
+        const int next = control_next_net_track_index(source.net_track_idx, +1);
+        if (next < 0) return;
+
+        ui_notify_cover_panel_nav_feedback(1);
+
+        const bool ok = player_play_net_track_index(next);
         if (!ok) {
             ui_notify_cover_panel_nav_feedback(0);
         }
@@ -368,6 +496,20 @@ void player_prev_track()
         return;
     }
 
+    if (source.type == PlayerSourceType::NET_TRACK) {
+        const int prev = control_next_net_track_index(source.net_track_idx, -1);
+        if (prev < 0) return;
+
+        ui_notify_cover_panel_nav_feedback(-1);
+
+        const bool ok = player_play_net_track_index(prev);
+        if (!ok) {
+            ui_notify_cover_panel_nav_feedback(0);
+        }
+
+        return;
+    }
+
     const int total = control_track_count();
     if (total <= 0) return;
 
@@ -397,7 +539,11 @@ void player_toggle_play()
 {
     const PlayerSourceState source = player_source_get();
     const int track_count = control_track_count();
-    if (track_count <= 0 && source.type != PlayerSourceType::NET_RADIO) return;
+    if (track_count <= 0 &&
+        source.type != PlayerSourceType::NET_RADIO &&
+        source.type != PlayerSourceType::NET_TRACK) {
+        return;
+    }
     if (g_rescanning) return;
 
     if (source.type == PlayerSourceType::NET_RADIO) {
@@ -417,6 +563,11 @@ void player_toggle_play()
         audio_service_resume();
         s_user_paused = false;
         s_pause_time_ms = 0;
+
+        if (source.type == PlayerSourceType::NET_TRACK) {
+            player_source_set_net_track_status(true, String("playing"), String());
+        }
+
         LOGI("[PLAYER] Resumed from pause");
         return;
     }
@@ -432,6 +583,11 @@ void player_toggle_play()
 
     if (source.type == PlayerSourceType::NET_RADIO && source.radio_idx >= 0) {
         (void)player_play_radio_index(source.radio_idx);
+        return;
+    }
+
+    if (source.type == PlayerSourceType::NET_TRACK && source.net_track_idx >= 0) {
+        (void)player_play_net_track_index(source.net_track_idx);
         return;
     }
 

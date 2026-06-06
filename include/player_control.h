@@ -46,6 +46,12 @@ void player_stop_radio();
 /** 从电台播放返回到本地播放。 */
 bool player_return_from_radio_to_local();
 
+/** 播放一首 NAS/HTTP 网络歌曲。 */
+bool player_play_net_track_index(int idx);
+
+/** 停止 NAS/HTTP 网络歌曲并清空网络歌曲源状态。 */
+void player_stop_net_track();
+
 /** 播放当前 playlist 的下一首。 */
 void player_next_track();
 /** 播放当前 playlist 的上一首。 */

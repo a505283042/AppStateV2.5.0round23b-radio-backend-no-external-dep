@@ -28,7 +28,7 @@ extern SdFat sd;
 static constexpr uint32_t kAudioTaskStackBytes = 10240; // 音频任务栈大小
 
 #ifndef AUDIO_CMD_PATH_MAX
-#define AUDIO_CMD_PATH_MAX 256
+#define AUDIO_CMD_PATH_MAX 512
 #endif
 
 #ifndef AUDIO_AUX_READ_CHUNK

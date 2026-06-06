@@ -16,6 +16,7 @@
 #include "lyrics/lyrics.h"
 #include "nfc/nfc_binding.h"
 #include "radio/radio_catalog.h"
+#include "net_music/net_music_catalog.h"
 #include "storage/storage.h"
 #include "storage/storage_catalog_v3.h"
 #include "storage/storage_hotplug.h"
@@ -118,6 +119,7 @@ static void app_handle_tf_removed()
 
     audio_file_invalidate_dir_cache();
     storage_catalog_v3_clear();
+    net_music_catalog_clear();
     player_playlist_reset_state();
     nfc_binding_clear();
 
@@ -154,7 +156,14 @@ static void app_handle_tf_mounted()
     } else {
         LOGW("[APP] radio catalog reload failed");
     }
-
+    
+    if (net_music_catalog_load()) {
+        LOGI("[APP] net music catalog reloaded: %lu tracks",
+            (unsigned long)net_music_catalog_count());
+    } else {
+        LOGW("[APP] net music catalog reload failed: %s",
+            net_music_catalog_error().c_str());
+    }
     // 开机无 TF 卡时，Web 会因为读不到 /System/config/wifi.conf 而进入 AP 模式。
     // 插卡后重新读取 WiFi 配置，成功则从 AP 切到 STA；失败则继续保持 AP。
     if (web_server_retry_sta_from_config()) {

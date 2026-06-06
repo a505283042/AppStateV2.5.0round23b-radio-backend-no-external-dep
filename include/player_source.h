@@ -4,11 +4,13 @@
 #include <stdint.h>
 
 #include "radio/radio_catalog.h"
+#include "net_music/net_music_catalog.h"
 
 enum class PlayerSourceType : uint8_t {
   NONE = 0,
   LOCAL_TRACK = 1,
   NET_RADIO = 2,
+  NET_TRACK = 3,
 };
 
 struct PlayerSourceState {
@@ -26,6 +28,16 @@ struct PlayerSourceState {
   String radio_stream_title;
   String radio_backend;
   uint32_t radio_bitrate = 0;
+
+  int net_track_idx = -1;
+  String net_track_title;
+  String net_track_url;
+  String net_track_format;
+  String net_track_artist;
+  String net_track_album;
+  bool net_track_active = false;
+  String net_track_state;   // idle / connecting / playing / paused / error / stopped
+  String net_track_error;
 };
 
 void player_source_reset();
@@ -34,5 +46,17 @@ void player_source_set_radio_stub(int radio_idx, const RadioItem& item, const St
 void player_source_set_radio_status(bool active, const String& state, const String& err = String());
 void player_source_set_radio_runtime(const String& backend, const String& stream_title, uint32_t bitrate, const String& state, bool active);
 void player_source_clear_radio();
+
+void player_source_set_net_track_stub(int idx,
+                                      const NetMusicItem& item,
+                                      const String& url,
+                                      const String& state,
+                                      const String& err);
+void player_source_set_net_track_status(bool active,
+                                        const String& state,
+                                        const String& err = String());
+void player_source_clear_net_track();
+
 PlayerSourceState player_source_get();
 const char* player_source_type_key(PlayerSourceType type);
+

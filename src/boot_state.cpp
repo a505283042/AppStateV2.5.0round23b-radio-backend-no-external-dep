@@ -13,6 +13,7 @@
 #include "utils/runtime_monitor.h"
 #include "web/web_server.h"
 #include "player_snapshot.h"
+#include "net_music/net_music_catalog.h"
 
 static void prepare_music_catalogs()
 {
@@ -91,6 +92,15 @@ void boot_state_run(void)
         LOGI("[BOOT] Radio catalog loaded: %d stations", (int)radio_catalog_count());
     } else {
         LOGW("[BOOT] Radio catalog load skipped or failed");
+    }
+    // 预加载 NAS/HTTP 网络歌曲索引。
+    // 只保存每一行的文件偏移，不全量加载标题和 URL。
+    if (storage_is_ready() && net_music_catalog_load()) {
+        LOGI("[BOOT] Net music catalog loaded: %lu tracks",
+            (unsigned long)net_music_catalog_count());
+    } else {
+        LOGW("[BOOT] Net music catalog load skipped or failed: %s",
+            net_music_catalog_error().c_str());
     }
 
     // 提前从 NVS 读取待恢复快照；真正恢复播放在首次进入 player 状态时执行。
