@@ -10,6 +10,8 @@
 #include "nfc/nfc_admin_state.h"
 #include "utils/log.h"
 #include "web/web_server.h"
+#include "board/board_pins_pcb1_mcp23017.h"
+#include "hal/mcp23017_u3.h"
 
 /*
  * 按键输入模块。
@@ -25,7 +27,7 @@
 static inline bool pressed(int level) { return level == LOW; } // 按下接地
 
 struct KeyCtx {
-  uint8_t pin;
+  int pin;
   int last;
   uint32_t t_down;
   bool long_fired;
@@ -49,6 +51,47 @@ static bool s_rescan_cancel_armed = false;
 static bool s_mode_click_pending = false;
 static uint32_t s_mode_click_deadline = 0;
 static constexpr uint32_t MODE_DOUBLE_CLICK_MS = 320;
+
+static int read_mcp_a_active_low(uint8_t bit)
+{
+    if (!mcp23017_u3_is_ready()) {
+        return HIGH;
+    }
+
+    const uint8_t a = mcp23017_u3_read_a();
+    return (a & (1 << bit)) ? HIGH : LOW;
+}
+
+static int read_key_pin(int pin)
+{
+    switch (pin) {
+        case PIN_KEY_DISABLED:
+            return HIGH;
+
+        case PIN_KEY_MCP_BACK_MODE:
+            return read_mcp_a_active_low(board::MCP_A_KEY_BACK_MODE);
+
+        case PIN_KEY_MCP_EC06_E:
+            return read_mcp_a_active_low(board::MCP_A_EC06_E);
+
+        case PIN_KEY_MCP_PREV_NFC:
+            return read_mcp_a_active_low(board::MCP_A_KEY_PREV_NFC);
+
+        case PIN_KEY_MCP_NEXT_LIST:
+            return read_mcp_a_active_low(board::MCP_A_KEY_NEXT_LIST);
+
+        default:
+            if (pin < 0) return HIGH;
+            return digitalRead(pin);
+    }
+}
+
+static void setup_key_pin(int pin)
+{
+    if (pin >= 0) {
+        pinMode(pin, INPUT_PULLUP);
+    }
+}
 
 /* VOLDN 双击提交：切换 WiFi */
 static void voldn_click_commit_double()
@@ -98,7 +141,7 @@ static void handle_key(KeyCtx& k,
                        void (*on_repeat)() = nullptr)
 {
   uint32_t now = millis();
-  int s = digitalRead(k.pin);
+  int s = read_key_pin(k.pin);
 
   // 边沿检测
   if (s != k.last) {
@@ -146,12 +189,22 @@ static void handle_key(KeyCtx& k,
 
 void keys_init()
 {
-  pinMode(PIN_KEY_MODE,  INPUT_PULLUP);
-  pinMode(PIN_KEY_PLAY,  INPUT_PULLUP);
-  pinMode(PIN_KEY_PREV,  INPUT_PULLUP);
-  pinMode(PIN_KEY_NEXT,  INPUT_PULLUP);
-  pinMode(PIN_KEY_VOLDN, INPUT_PULLUP);
-  pinMode(PIN_KEY_VOLUP, INPUT_PULLUP);
+  setup_key_pin(PIN_KEY_MODE);
+  setup_key_pin(PIN_KEY_PLAY);
+  setup_key_pin(PIN_KEY_PREV);
+  setup_key_pin(PIN_KEY_NEXT);
+  setup_key_pin(PIN_KEY_VOLDN);
+  setup_key_pin(PIN_KEY_VOLUP);
+
+  LOGI("[KEYS] pins mode=%d play=%d prev=%d next=%d voldn=%d volup=%d ec06_a=%d ec06_b=%d",
+      PIN_KEY_MODE,
+      PIN_KEY_PLAY,
+      PIN_KEY_PREV,
+      PIN_KEY_NEXT,
+      PIN_KEY_VOLDN,
+      PIN_KEY_VOLUP,
+      PIN_EC06_A,
+      PIN_EC06_B);
 
   // 同步初始电平，避免上电后的误判
   keys_sync_to_hw_state();
@@ -164,7 +217,7 @@ void keys_sync_to_hw_state()
   uint32_t now = millis();
 
   auto sync_one = [now](KeyCtx& k) {
-    k.last = digitalRead(k.pin);
+    k.last = read_key_pin(k.pin);
     k.t_down = now;
     k.t_repeat = now;
 
@@ -191,7 +244,7 @@ void keys_sync_to_hw_state()
 static void handle_mode_key_normal()
 {
   uint32_t now = millis();
-  int s = digitalRead(k_mode.pin);
+  int s = read_key_pin(k_mode.pin);
 
   if (s != k_mode.last) {
     k_mode.last = s;
@@ -232,7 +285,7 @@ static void handle_mode_key_normal()
 static void handle_voldn_key_normal()
 {
   uint32_t now = millis();
-  int s = digitalRead(k_voldn.pin);
+  int s = read_key_pin(k_voldn.pin);
 
   // 边沿检测
   if (s != k_voldn.last) {
@@ -299,7 +352,7 @@ void keys_update()
     mode_click_reset();
     // 扫描时只允许 MODE 取消，但必须用“按下沿”而不是电平。
     // 否则由 MODE 长按启动重扫后，会因为按键仍保持按下而立刻触发取消。
-    int s = digitalRead(k_mode.pin);
+    int s = read_key_pin(k_mode.pin);
 
     if (!s_rescan_cancel_armed) {
       // 先等待启动重扫的这次长按释放，再允许取消。

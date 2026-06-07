@@ -9,6 +9,20 @@
 
 /* Arduino主设置函数 - 系统初始化入口点 */
 void setup() {  
+  // ---------- Power hold / main power enable ----------
+  // PCB1: POWER_CTRL = GPIO47
+  // 尽量在外设初始化前拉高，避免启动阶段电源保持不住导致 brownout。
+  pinMode(PIN_POWER_CTRL, OUTPUT);
+  digitalWrite(PIN_POWER_CTRL, HIGH);
+  // WS2812 先保持低电平，避免上电乱闪和额外负载。
+  pinMode(PIN_WS2812, OUTPUT);
+  digitalWrite(PIN_WS2812, LOW);
+
+  Serial.begin(115200);
+  delay(100);
+
+  Serial.printf("[POWER] early POWER_CTRL GPIO%d -> HIGH\n", PIN_POWER_CTRL);
+  
   app_state_init();      /* 初始化应用状态 */
 }
 

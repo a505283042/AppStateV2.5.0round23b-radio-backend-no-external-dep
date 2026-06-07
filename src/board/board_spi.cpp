@@ -32,11 +32,9 @@ void board_spi_init(void)
     mcp23017_u3_debug_dump();
 
     if (mcp_ok) {
-        // 复位线先拉低，再释放。RST_TFT=PB3, RST_NFC=PB2。
         mcp23017_u3_set_b(board::MCP_B_RST_TFT, false);
         mcp23017_u3_set_b(board::MCP_B_RST_NFC, false);
 
-        // 背光先关，避免屏幕初始化前闪屏。若后续屏幕不亮，再临时改 true 验证极性。
         mcp23017_u3_set_b(board::MCP_B_BLK, false);
 
         delay(20);
@@ -46,9 +44,9 @@ void board_spi_init(void)
 
         delay(120);
 
-        // 第一版为了验证显示，可以先打开背光。
-        // 如果你的背光是低有效，这里需要改成 false。
         mcp23017_u3_set_b(board::MCP_B_BLK, true);
+        Serial.println("[TFT] BLK MCPB4 -> HIGH");
+    
     } else {
         Serial.println("[MCP23017] init failed, MCP controlled pins unavailable");
     }
