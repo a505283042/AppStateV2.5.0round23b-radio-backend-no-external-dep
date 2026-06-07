@@ -5,6 +5,10 @@
 
 #include "board/board_pins.h"  /* 包含板级引脚定义 */
 #include "board/board_spi.h"   /* 包含板级SPI总线模块 */
+#include <Wire.h>
+
+#include "board/board_pins_pcb1_mcp23017.h"
+#include "hal/mcp23017_u3.h"
 
 SPIClass SPI_SD;              /* SD专用SPI类实例 */
 static SemaphoreHandle_t s_ui_spi_mtx = nullptr;
@@ -18,34 +22,76 @@ void board_spi_init(void)
 
     Serial.println("[SPI] init buses...");
 
+    // ---------- I2C / MCP23017 ----------
+    pinMode(board::PIN_EXP_INTA, INPUT_PULLUP);
+
+    Wire.begin(board::PIN_I2C_SDA, board::PIN_I2C_SCL);
+    Wire.setClock(400000);
+
+    const bool mcp_ok = mcp23017_u3_begin();
+    mcp23017_u3_debug_dump();
+
+    if (mcp_ok) {
+        // 复位线先拉低，再释放。RST_TFT=PB3, RST_NFC=PB2。
+        mcp23017_u3_set_b(board::MCP_B_RST_TFT, false);
+        mcp23017_u3_set_b(board::MCP_B_RST_NFC, false);
+
+        // 背光先关，避免屏幕初始化前闪屏。若后续屏幕不亮，再临时改 true 验证极性。
+        mcp23017_u3_set_b(board::MCP_B_BLK, false);
+
+        delay(20);
+
+        mcp23017_u3_set_b(board::MCP_B_RST_TFT, true);
+        mcp23017_u3_set_b(board::MCP_B_RST_NFC, true);
+
+        delay(120);
+
+        // 第一版为了验证显示，可以先打开背光。
+        // 如果你的背光是低有效，这里需要改成 false。
+        mcp23017_u3_set_b(board::MCP_B_BLK, true);
+    } else {
+        Serial.println("[MCP23017] init failed, MCP controlled pins unavailable");
+    }
+
     if (!s_ui_spi_mtx) {
         s_ui_spi_mtx = xSemaphoreCreateRecursiveMutex();
     }
 
-    // ---------- UI SPI: 全局 SPI（给 TFT_eSPI + RC522 用） ----------
-    // SS 参数务必用 -1（别传 TFT_CS/RC522_CS）
-    ::SPI.end();
-    ::SPI.begin(PIN_SPI_UI_SCK, PIN_SPI_UI_MISO, PIN_SPI_UI_MOSI, -1);
-
-    // 把两颗片选都拉高，确保空闲态不选中
+    // ---------- Chip Select safe state ----------
     pinMode(PIN_TFT_CS, OUTPUT);
     digitalWrite(PIN_TFT_CS, HIGH);
 
     pinMode(PIN_RC522_CS, OUTPUT);
     digitalWrite(PIN_RC522_CS, HIGH);
 
-    // ---------- SD SPI: 独立 SPI（给 SdFat 用） ----------
+    pinMode(PIN_SD_CS, OUTPUT);
+    digitalWrite(PIN_SD_CS, HIGH);
+
+    // ---------- UI SPI: TFT + RC522 ----------
+    // SS 参数务必用 -1（别传 TFT_CS/RC522_CS）
+    ::SPI.end();
+    ::SPI.begin(PIN_SPI_UI_SCK, PIN_SPI_UI_MISO, PIN_SPI_UI_MOSI, -1);
+
+    // ---------- SD SPI ----------
     SPI_SD.end();
     SPI_SD.begin(PIN_SPI_SD_SCK, PIN_SPI_SD_MISO, PIN_SPI_SD_MOSI, -1);
 
     Serial.printf("[SPI] UI  SCK=%d MOSI=%d MISO=%d\n",
                   PIN_SPI_UI_SCK, PIN_SPI_UI_MOSI, PIN_SPI_UI_MISO);
-    Serial.printf("[SPI] TFT CS=%d DC=%d RST=%d\n",
-                  PIN_TFT_CS, PIN_TFT_DC, PIN_TFT_RST);
-    Serial.printf("[SPI] RC522 CS=%d RST=%d\n",
-                  PIN_RC522_CS, PIN_RC522_RST);
+    Serial.printf("[SPI] TFT CS=%d DC=%d RST=MCPB%d BLK=MCPB%d\n",
+                  PIN_TFT_CS,
+                  PIN_TFT_DC,
+                  board::MCP_B_RST_TFT,
+                  board::MCP_B_BLK);
+    Serial.printf("[SPI] RC522 CS=%d RST=MCPB%d IRQ=%d\n",
+                  PIN_RC522_CS,
+                  board::MCP_B_RST_NFC,
+                  PIN_RC522_IRQ);
     Serial.printf("[SPI] SD  SCK=%d MOSI=%d MISO=%d CS=%d\n",
-                  PIN_SPI_SD_SCK, PIN_SPI_SD_MOSI, PIN_SPI_SD_MISO, PIN_SD_CS);
+                  PIN_SPI_SD_SCK,
+                  PIN_SPI_SD_MOSI,
+                  PIN_SPI_SD_MISO,
+                  PIN_SD_CS);
 }
 
 void board_spi_ui_lock(void)
