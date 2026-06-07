@@ -9,6 +9,7 @@
 
 #include "board/board_pins_pcb1_mcp23017.h"
 #include "hal/mcp23017_u3.h"
+#include "hal/board_hw_control.h"
 
 SPIClass SPI_SD;              /* SD专用SPI类实例 */
 static SemaphoreHandle_t s_ui_spi_mtx = nullptr;
@@ -32,6 +33,30 @@ void board_spi_init(void)
     mcp23017_u3_debug_dump();
 
     if (mcp_ok) {
+        board_hw_control_begin();
+
+        // ---------- 临时硬件验证：打开蓝牙和功放 ----------
+
+        // 蓝牙调试：上电 -> 唤醒 -> 模拟按键
+        board_hw_set_bt_power(true);
+        delay(300);
+
+        board_hw_set_bt_wakeup(true);
+        delay(1000);
+
+        // 模拟短按蓝牙开关/配对键
+        board_hw_pulse_bt_switch(200);
+
+        delay(1500);
+
+        // 功放打开建议顺序：先静音，再退出关断，最后取消静音，减少爆音。
+        board_hw_set_amp_mute(true);
+        board_hw_set_amp_shutdown(false);
+        delay(100);
+        board_hw_set_amp_mute(false);
+
+        board_hw_debug_dump();
+
         mcp23017_u3_set_b(board::MCP_B_RST_TFT, false);
         mcp23017_u3_set_b(board::MCP_B_RST_NFC, false);
 

@@ -52,6 +52,87 @@ static bool s_mode_click_pending = false;
 static uint32_t s_mode_click_deadline = 0;
 static constexpr uint32_t MODE_DOUBLE_CLICK_MS = 320;
 
+// EC06 旋钮相关
+static int s_enc_last = 0;
+static int s_enc_accum = 0;
+static uint32_t s_enc_last_step_ms = 0;
+
+static int read_encoder_state()
+{
+    const int a = digitalRead(PIN_EC06_A);
+    const int b = digitalRead(PIN_EC06_B);
+    return (a << 1) | b;
+}
+
+static int8_t decode_encoder_delta(int last_state, int now_state)
+{
+    const int transition = (last_state << 2) | now_state;
+
+    switch (transition) {
+        // 一个方向
+        case 0b0001:
+        case 0b0111:
+        case 0b1110:
+        case 0b1000:
+            return +1;
+
+        // 反方向
+        case 0b0010:
+        case 0b1011:
+        case 0b1101:
+        case 0b0100:
+            return -1;
+
+        default:
+            return 0;
+    }
+}
+
+static void handle_encoder_volume()
+{
+    const int now_state = read_encoder_state();
+
+    if (now_state == s_enc_last) {
+        return;
+    }
+
+    const int8_t delta = decode_encoder_delta(s_enc_last, now_state);
+    s_enc_last = now_state;
+
+    if (delta == 0) {
+        return;
+    }
+
+    s_enc_accum += delta;
+
+    // EC06 常见一格会产生 4 个边沿，所以累计到 4 再触发一次音量。
+    if (s_enc_accum >= 4) {
+        s_enc_accum = 0;
+
+        const uint32_t now = millis();
+        if (now - s_enc_last_step_ms < 30) {
+            return;
+        }
+        s_enc_last_step_ms = now;
+
+        player_volume_step(-5);
+        return;
+    }
+
+    if (s_enc_accum <= -4) {
+        s_enc_accum = 0;
+
+        const uint32_t now = millis();
+        if (now - s_enc_last_step_ms < 30) {
+            return;
+        }
+        s_enc_last_step_ms = now;
+
+        player_volume_step(+5);
+        return;
+    }
+}
+
 static int read_mcp_a_active_low(uint8_t bit)
 {
     if (!mcp23017_u3_is_ready()) {
@@ -196,6 +277,10 @@ void keys_init()
   setup_key_pin(PIN_KEY_VOLDN);
   setup_key_pin(PIN_KEY_VOLUP);
 
+  // EC06 旋钮初始化
+  pinMode(PIN_EC06_A, INPUT_PULLUP);
+  pinMode(PIN_EC06_B, INPUT_PULLUP);
+
   LOGI("[KEYS] pins mode=%d play=%d prev=%d next=%d voldn=%d volup=%d ec06_a=%d ec06_b=%d",
       PIN_KEY_MODE,
       PIN_KEY_PLAY,
@@ -208,6 +293,11 @@ void keys_init()
 
   // 同步初始电平，避免上电后的误判
   keys_sync_to_hw_state();
+
+  // 初始化旋钮状态
+  s_enc_last = read_encoder_state();
+  s_enc_accum = 0;
+  s_enc_last_step_ms = 0;
 }
 
 // 同步当前硬件状态，用于状态切换时避免误判
@@ -339,7 +429,10 @@ static void handle_voldn_key_normal()
 
 void keys_update()
 {
-  // --- NFC 管理状态下，按键转给 admin 状态机处理 ---
+    // EC06 旋钮控制音量
+    handle_encoder_volume();
+
+    // --- NFC 管理状态下，按键转给 admin 状态机处理 ---
   if (g_app_state == STATE_NFC_ADMIN) {
     mode_click_reset();
     handle_key(k_mode, [](){ nfc_admin_state_on_key(NFC_ADMIN_KEY_MODE_SHORT); }, nullptr);

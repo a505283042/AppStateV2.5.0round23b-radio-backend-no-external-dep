@@ -79,8 +79,12 @@ static constexpr uint8_t MCP_A_MUTE_EN = 0;
 static constexpr uint8_t MCP_A_SHDN_EN = 1;
 static constexpr uint8_t MCP_A_KEY_BACK_MODE = 2;
 static constexpr uint8_t MCP_A_EC06_E = 3;
-static constexpr uint8_t MCP_A_BL_WKP_CTRL = 4;
-static constexpr uint8_t MCP_A_BL_SW_CTRL = 5;
+static constexpr uint8_t MCP_A_BT_WKP_CTRL = 4;
+static constexpr uint8_t MCP_A_BT_SW_CTRL = 5;
+
+// 兼容旧名字，后面确认无引用后可以删。
+static constexpr uint8_t MCP_A_BL_WKP_CTRL = MCP_A_BT_WKP_CTRL;
+static constexpr uint8_t MCP_A_BL_SW_CTRL = MCP_A_BT_SW_CTRL;
 static constexpr uint8_t MCP_A_KEY_PREV_NFC = 6;
 static constexpr uint8_t MCP_A_KEY_NEXT_LIST = 7;
 
