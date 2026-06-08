@@ -3,6 +3,8 @@
 #include "ui/ui_internal.h"
 #include "ui/ui_text_utils.h"
 #include "ui/ui_list_select_view.h"
+#include "ui/ui_quick_menu_view.h"
+#include "menu/quick_menu.h"
 #include "utils/log.h"
 #undef LOG_TAG
 #define LOG_TAG "UI"
@@ -84,6 +86,8 @@ bool s_rotFramesInited = false;
 LGFX_Sprite* s_src = nullptr;
 
 int s_list_last_drawn_idx = -1;
+bool s_quick_menu_was_active = false;
+
 float s_angle_deg = 0.0f;
 uint32_t s_rot_last_ms = 0;
 bool s_rotate_wait_audio_start = false;
@@ -155,6 +159,10 @@ static inline TickType_t ui_period_ticks()
   // hold 期间：不画，但要"醒得勤快一点"，保证解除 hold 后立刻恢复（这里按旋转帧率）
   if (s_ui_hold) return pdMS_TO_TICKS(1000 / UI_FPS_ROTATE);
 
+
+  // 快捷菜单：不需要高帧率，但需要比 1fps 更跟手。
+  if (quick_menu_is_active()) return pdMS_TO_TICKS(1000 / 10);
+
   // 列表选择模式：使用较高帧率以实现平滑滚动
   if (player_list_select_is_active()) return pdMS_TO_TICKS(1000 / 20);
 
@@ -188,6 +196,27 @@ static void ui_task_entry(void*)
     if (s_ui_hold) {
       s_rot_last_ms = millis();
       continue;
+    }
+
+    // 快捷菜单优先级高于列表选择和播放器页面。
+    quick_menu_tick();
+    if (quick_menu_is_active()) {
+      if (!s_quick_menu_was_active) {
+        ui_quick_menu_view_reset();
+        s_quick_menu_was_active = true;
+      }
+
+      ui_draw_lock();
+      ui_draw_quick_menu();
+      ui_draw_unlock();
+      continue;
+    }
+
+    // 刚退出菜单时，强制播放器页面重新清屏，避免菜单残影。
+    if (s_quick_menu_was_active) {
+      s_quick_menu_was_active = false;
+      ui_quick_menu_view_reset();
+      s_screen_cleared = false;
     }
 
     // 检查是否处于列表选择模式

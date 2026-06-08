@@ -8,6 +8,7 @@
 #include "player_control.h"
 #include "player_list_select.h"
 #include "nfc/nfc_admin_state.h"
+#include "menu/quick_menu.h"
 #include "utils/log.h"
 #include "web/web_server.h"
 #include "board/board_pins_pcb1_mcp23017.h"
@@ -38,6 +39,7 @@ static KeyCtx k_mode  { PIN_KEY_MODE,  HIGH, 0, false, 0 };
 static KeyCtx k_play  { PIN_KEY_PLAY,  HIGH, 0, false, 0 };
 static KeyCtx k_prev  { PIN_KEY_PREV,  HIGH, 0, false, 0 };
 static KeyCtx k_next  { PIN_KEY_NEXT,  HIGH, 0, false, 0 };
+static KeyCtx k_ec06e { PIN_KEY_MCP_EC06_E, HIGH, 0, false, 0 };
 static KeyCtx k_voldn { PIN_KEY_VOLDN, HIGH, 0, false, 0 };
 static KeyCtx k_volup { PIN_KEY_VOLUP, HIGH, 0, false, 0 };
 
@@ -88,35 +90,34 @@ static int8_t decode_encoder_delta(int last_state, int now_state)
     }
 }
 
-static void handle_encoder_volume()
+static int8_t read_encoder_step()
 {
     const int now_state = read_encoder_state();
 
     if (now_state == s_enc_last) {
-        return;
+        return 0;
     }
 
     const int8_t delta = decode_encoder_delta(s_enc_last, now_state);
     s_enc_last = now_state;
 
     if (delta == 0) {
-        return;
+        return 0;
     }
 
     s_enc_accum += delta;
 
-    // EC06 常见一格会产生 4 个边沿，所以累计到 4 再触发一次音量。
+    // EC06 常见一格会产生 4 个边沿，所以累计到 4 再触发一次。
     if (s_enc_accum >= 4) {
         s_enc_accum = 0;
 
         const uint32_t now = millis();
         if (now - s_enc_last_step_ms < 30) {
-            return;
+            return 0;
         }
         s_enc_last_step_ms = now;
 
-        player_volume_step(-5);
-        return;
+        return -1;
     }
 
     if (s_enc_accum <= -4) {
@@ -124,13 +125,24 @@ static void handle_encoder_volume()
 
         const uint32_t now = millis();
         if (now - s_enc_last_step_ms < 30) {
-            return;
+            return 0;
         }
         s_enc_last_step_ms = now;
 
-        player_volume_step(+5);
+        return +1;
+    }
+
+    return 0;
+}
+
+static void handle_encoder_volume_step(int8_t step)
+{
+    if (step == 0) {
         return;
     }
+
+    ui_volume_key_pressed();
+    player_volume_step(step > 0 ? +5 : -5);
 }
 
 static int read_mcp_a_active_low(uint8_t bit)
@@ -274,6 +286,7 @@ void keys_init()
   setup_key_pin(PIN_KEY_PLAY);
   setup_key_pin(PIN_KEY_PREV);
   setup_key_pin(PIN_KEY_NEXT);
+  setup_key_pin(PIN_KEY_MCP_EC06_E);
   setup_key_pin(PIN_KEY_VOLDN);
   setup_key_pin(PIN_KEY_VOLUP);
 
@@ -320,6 +333,7 @@ void keys_sync_to_hw_state()
   sync_one(k_play);
   sync_one(k_prev);
   sync_one(k_next);
+  sync_one(k_ec06e);
   sync_one(k_voldn);
   sync_one(k_volup);
 
@@ -429,10 +443,43 @@ static void handle_voldn_key_normal()
 
 void keys_update()
 {
-    // EC06 旋钮控制音量
-    handle_encoder_volume();
+  const int8_t encoder_step = read_encoder_step();
 
-    // --- NFC 管理状态下，按键转给 admin 状态机处理 ---
+  // --- 快捷菜单：旋钮导航，按下确认；菜单内不再调整音量 ---
+  if (quick_menu_is_active()) {
+    mode_click_reset();
+    quick_menu_tick();
+
+    if (quick_menu_is_active() && encoder_step > 0) {
+      quick_menu_handle_key(QuickMenuKey::Down);
+    } else if (quick_menu_is_active() && encoder_step < 0) {
+      quick_menu_handle_key(QuickMenuKey::Up);
+    }
+
+    handle_key(k_ec06e,
+               [](){ quick_menu_handle_key(QuickMenuKey::Confirm); },
+               [](){ quick_menu_handle_key(QuickMenuKey::Exit); });
+
+    handle_key(k_play,
+               [](){ quick_menu_handle_key(QuickMenuKey::Confirm); },
+               nullptr);
+
+    handle_key(k_mode,
+               [](){ quick_menu_handle_key(QuickMenuKey::Back); },
+               [](){ quick_menu_handle_key(QuickMenuKey::Exit); });
+
+    handle_key(k_prev,
+               [](){ quick_menu_handle_key(QuickMenuKey::Up); },
+               nullptr);
+
+    handle_key(k_next,
+               [](){ quick_menu_handle_key(QuickMenuKey::Down); },
+               nullptr);
+
+    return;
+  }
+
+  // --- NFC 管理状态下，按键转给 admin 状态机处理 ---
   if (g_app_state == STATE_NFC_ADMIN) {
     mode_click_reset();
     handle_key(k_mode, [](){ nfc_admin_state_on_key(NFC_ADMIN_KEY_MODE_SHORT); }, nullptr);
@@ -440,9 +487,10 @@ void keys_update()
     return;
   }
 
-  // --- 新增：扫描状态下的紧急处理 ---
+  // --- 扫描状态下的紧急处理 ---
   if (g_rescanning) {
     mode_click_reset();
+
     // 扫描时只允许 MODE 取消，但必须用“按下沿”而不是电平。
     // 否则由 MODE 长按启动重扫后，会因为按键仍保持按下而立刻触发取消。
     int s = read_key_pin(k_mode.pin);
@@ -463,41 +511,71 @@ void keys_update()
         LOGI("[KEYS] Abort signal sent!");
       }
     }
-    return; // 扫描时屏蔽其他按键逻辑
-  }
 
-  // 检查是否处于列表选择模式
-  if (player_list_select_is_active()) {
-    mode_click_reset();
-    // 列表选择模式下的按键处理
-    // MODE：短按=返回；长按=取消选择
-    handle_key(k_mode,  [](){ player_list_select_handle_key(KEY_MODE_SHORT); }, [](){ player_list_select_handle_key(KEY_MODE_LONG); });
-
-    // PLAY：短按=确认选择
-    handle_key(k_play,  [](){ player_list_select_handle_key(KEY_PLAY_SHORT); }, nullptr);
-
-    // PREV / NEXT：短按=上下移动选择
-    handle_key(k_prev,  [](){ player_list_select_handle_key(KEY_PREV_SHORT); }, nullptr);
-    handle_key(k_next,  [](){ player_list_select_handle_key(KEY_NEXT_SHORT); }, nullptr);
-
-    // VOL：短按=快速翻页
-    handle_key(k_voldn, [](){ player_list_select_handle_key(KEY_VOLDN_SHORT); }, nullptr);
-    handle_key(k_volup, [](){ player_list_select_handle_key(KEY_VOLUP_SHORT); }, nullptr);
     return;
   }
 
-  // 正常播放模式
-  // MODE：单击=切小类（顺序/随机）；双击=切大类（全部/歌手/专辑）；长按=重扫
+  // --- 列表选择模式 ---
+  if (player_list_select_is_active()) {
+    mode_click_reset();
+
+    // 列表页里旋钮也用于上下移动，不再调音量。
+    if (encoder_step > 0) {
+      player_list_select_handle_key(KEY_NEXT_SHORT);
+    } else if (encoder_step < 0) {
+      player_list_select_handle_key(KEY_PREV_SHORT);
+    }
+
+    // MODE：短按=返回；长按=取消选择
+    handle_key(k_mode,
+               [](){ player_list_select_handle_key(KEY_MODE_SHORT); },
+               [](){ player_list_select_handle_key(KEY_MODE_LONG); });
+
+    // PLAY：短按=确认选择
+    handle_key(k_play,
+               [](){ player_list_select_handle_key(KEY_PLAY_SHORT); },
+               nullptr);
+
+    // PREV / NEXT：短按=上下移动选择
+    handle_key(k_prev,
+               [](){ player_list_select_handle_key(KEY_PREV_SHORT); },
+               nullptr);
+
+    handle_key(k_next,
+               [](){ player_list_select_handle_key(KEY_NEXT_SHORT); },
+               nullptr);
+
+    // VOL：旧板快速翻页；新 PCB1 上 VOLDN/VOLUP 已禁用，不影响。
+    handle_key(k_voldn,
+               [](){ player_list_select_handle_key(KEY_VOLDN_SHORT); },
+               nullptr);
+
+    handle_key(k_volup,
+               [](){ player_list_select_handle_key(KEY_VOLUP_SHORT); },
+               nullptr);
+
+    return;
+  }
+
+  // --- 正常播放模式 ---
+
+  // 正常播放页：旋钮控制音量。
+  handle_encoder_volume_step(encoder_step);
+
+  // EC06_E：短按进入快捷菜单。
+  handle_key(k_ec06e, quick_menu_enter, nullptr);
+
+  // MODE：单击=切小类；双击=切大类；长按=重扫。
   handle_mode_key_normal();
 
-  // PLAY：短按=播放/停止；长按=切换视图
-  handle_key(k_play,  player_toggle_play, ui_toggle_view);
+  // PLAY：短按=播放/停止；长按=切换视图。
+  handle_key(k_play, player_toggle_play, ui_toggle_view);
 
-  // PREV / NEXT：短按=切歌，长按 PREV=进入NFC管理，长按 NEXT=进入列表选择模式
-  handle_key(k_prev,  player_prev_track, [](){ (void)app_request_enter_nfc_admin(); });
-  handle_key(k_next,  player_next_track, player_next_group);
+  // PREV / NEXT：短按=切歌，长按 PREV=进入 NFC 管理，长按 NEXT=进入列表选择模式。
+  handle_key(k_prev, player_prev_track, [](){ (void)app_request_enter_nfc_admin(); });
+  handle_key(k_next, player_next_track, player_next_group);
 
-  // VOL：按住连发
-handle_voldn_key_normal();
-handle_key(k_volup, nullptr, nullptr, true, [](){ player_volume_step(+5); });
+  // VOL：旧板音量按键逻辑。新 PCB1 已禁用，不影响。
+  handle_voldn_key_normal();
+  handle_key(k_volup, nullptr, nullptr, true, [](){ player_volume_step(+5); });
 }
