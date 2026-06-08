@@ -37,6 +37,9 @@ bool board_hw_get_bt_wakeup();
 bool board_hw_set_bt_switch(bool level);
 bool board_hw_get_bt_switch();
 
+bool board_hw_set_backlight(bool enabled);
+bool board_hw_get_backlight();
+
 /** 模拟按一下蓝牙 SW，默认低脉冲 200ms。 */
 bool board_hw_pulse_bt_switch(uint32_t pulse_ms = 200);
 

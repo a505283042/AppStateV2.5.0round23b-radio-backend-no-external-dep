@@ -31,6 +31,7 @@ static bool s_first_draw = true;
 static QuickMenuPage s_last_page = QuickMenuPage::Root;
 static int s_last_start_idx = -1;
 static int s_last_selected_idx = -1;
+static uint32_t s_last_revision = 0;
 
 String clip_utf8_for_tft(const String& text, int max_w)
 {
@@ -248,6 +249,7 @@ void ui_quick_menu_view_reset()
     s_last_page = QuickMenuPage::Root;
     s_last_start_idx = -1;
     s_last_selected_idx = -1;
+    s_last_revision = 0;
 }
 
 void ui_draw_quick_menu()
@@ -262,13 +264,15 @@ void ui_draw_quick_menu()
 
     const int selected = quick_menu_get_selected_index();
     const int start_idx = calc_page_start_index(selected, total);
+    const uint32_t revision = quick_menu_get_revision();
 
     const bool page_changed = page != s_last_page;
     const bool start_changed = start_idx != s_last_start_idx;
     const bool selection_changed = selected != s_last_selected_idx;
+    const bool content_changed = revision != s_last_revision;
 
     // 没有任何变化，直接返回。
-    if (!s_first_draw && !page_changed && !start_changed && !selection_changed) {
+    if (!s_first_draw && !page_changed && !start_changed && !selection_changed && !content_changed) {
         return;
     }
 
@@ -297,9 +301,15 @@ void ui_draw_quick_menu()
             }
         }
     }
+    // 情况 C：同页同选中项，但状态值变化，例如 WiFi 开关变化。
+    else if (content_changed) {
+        draw_visible_rows(start_idx, total);
+    }
 
     s_first_draw = false;
     s_last_page = page;
     s_last_start_idx = start_idx;
     s_last_selected_idx = selected;
+    s_last_revision = revision;
+
 }

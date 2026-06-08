@@ -39,6 +39,7 @@ bool s_bt_wakeup_enabled = false;
 bool s_bt_switch_level = !BT_SW_ACTIVE_LEVEL;
 bool s_amp_mute_enabled = false;
 bool s_amp_shutdown_enabled = false;
+bool s_backlight_enabled = true;
 
 bool level_from_enabled(bool enabled, bool active_level)
 {
@@ -146,6 +147,26 @@ bool board_hw_set_bt_switch(bool pressed)
 bool board_hw_get_bt_switch()
 {
     return s_bt_switch_level;
+}
+
+bool board_hw_set_backlight(bool enabled)
+{
+    if (!mcp23017_u3_is_ready()) {
+        return false;
+    }
+
+    if (!mcp23017_u3_set_b(board::MCP_B_BLK, enabled)) {
+        return false;
+    }
+
+    s_backlight_enabled = enabled;
+    LOGI("[HWCTRL] backlight %s", enabled ? "ON" : "OFF");
+    return true;
+}
+
+bool board_hw_get_backlight()
+{
+    return s_backlight_enabled;
 }
 
 bool board_hw_pulse_bt_switch(uint32_t pulse_ms)

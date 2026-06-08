@@ -358,6 +358,7 @@ bool player_list_select_enter(play_mode_t mode)
 
     return false;
 }
+
 // 判断列表选择模块是否激活
 bool player_list_select_is_active()
 {
