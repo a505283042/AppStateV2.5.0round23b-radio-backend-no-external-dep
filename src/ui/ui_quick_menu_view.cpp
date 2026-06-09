@@ -200,7 +200,7 @@ void draw_menu_row(const QuickMenuItemView& item, int row, bool draw_bg)
     tft.drawString(label, LABEL_X, row_y);
 
     if (value.length() > 0) {
-        value = clip_utf8_for_tft(value, 70);
+        value = clip_utf8_for_tft(value, 96);
 
         tft.setTextDatum(middle_right);
         tft.setTextColor(value_color, bg);

@@ -3,6 +3,7 @@
 #include "menu/quick_menu_page_network.h"
 #include "menu/quick_menu_page_playback.h"
 #include "menu/quick_menu_page_display.h"
+#include "menu/quick_menu_page_system.h"
 
 namespace {
 
@@ -58,17 +59,6 @@ const QuickMenuItem NFC_ITEMS[] = {
     {"返回", QuickMenuItemType::Back, QuickMenuPage::Root, "", nullptr, nullptr, true, false},
 };
 
-const QuickMenuItem SYSTEM_INFO_ITEMS[] = {
-    {"固件版本", QuickMenuItemType::Placeholder, QuickMenuPage::SystemInfo, "待接入", nullptr, nullptr, false, true},
-    {"内存状态", QuickMenuItemType::Placeholder, QuickMenuPage::SystemInfo, "待接入", nullptr, nullptr, false, true},
-    {"栈状态", QuickMenuItemType::Placeholder, QuickMenuPage::SystemInfo, "待接入", nullptr, nullptr, false, true},
-    {"MCP23017状态", QuickMenuItemType::Placeholder, QuickMenuPage::SystemInfo, "待接入", nullptr, nullptr, false, true},
-    {"I2C/SPI状态", QuickMenuItemType::Placeholder, QuickMenuPage::SystemInfo, "占位", nullptr, nullptr, false, true},
-    {"电池状态", QuickMenuItemType::Placeholder, QuickMenuPage::SystemInfo, "待接入", nullptr, nullptr, false, true},
-    {"恢复默认设置", QuickMenuItemType::Placeholder, QuickMenuPage::SystemInfo, "占位", nullptr, nullptr, false, true},
-    {"返回", QuickMenuItemType::Back, QuickMenuPage::Root, "", nullptr, nullptr, true, false},
-};
-
 const QuickMenuPageDef ROOT_PAGE = {
     "快捷菜单",
     QuickMenuPage::Root,
@@ -109,13 +99,6 @@ const QuickMenuPageDef NFC_PAGE = {
     MENU_COUNT(NFC_ITEMS),
 };
 
-const QuickMenuPageDef SYSTEM_INFO_PAGE = {
-    "系统信息",
-    QuickMenuPage::SystemInfo,
-    QuickMenuPage::Root,
-    SYSTEM_INFO_ITEMS,
-    MENU_COUNT(SYSTEM_INFO_ITEMS),
-};
 
 } // namespace
 
@@ -144,7 +127,16 @@ const QuickMenuPageDef& quick_menu_get_page_def(QuickMenuPage page)
             return NFC_PAGE;
 
         case QuickMenuPage::SystemInfo:
-            return SYSTEM_INFO_PAGE;
+            return quick_menu_get_system_page();
+
+        case QuickMenuPage::MemoryInfo:
+        return quick_menu_get_memory_page();
+
+        case QuickMenuPage::StackInfo:
+            return quick_menu_get_stack_page();
+
+        case QuickMenuPage::BatteryInfo:
+            return quick_menu_get_battery_page();
 
         case QuickMenuPage::Root:
         default:

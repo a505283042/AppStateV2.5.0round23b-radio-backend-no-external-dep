@@ -13,6 +13,45 @@ static constexpr uint32_t MENU_CONFIRM_GUARD_MS = 250;
 static bool s_active = false;
 static QuickMenuPage s_page = QuickMenuPage::Root;
 static int s_selected = 0;
+
+static constexpr uint8_t MENU_PAGE_STATE_COUNT = 16;
+static uint8_t s_selected_by_page[MENU_PAGE_STATE_COUNT] = {};
+
+static uint8_t page_state_index(QuickMenuPage page)
+{
+    const uint8_t idx = static_cast<uint8_t>(page);
+    return idx < MENU_PAGE_STATE_COUNT ? idx : 0;
+}
+
+static void save_current_selection()
+{
+    s_selected_by_page[page_state_index(s_page)] = s_selected;
+}
+
+static void reset_menu_session_selection()
+{
+    for (uint8_t i = 0; i < MENU_PAGE_STATE_COUNT; ++i) {
+        s_selected_by_page[i] = 0;
+    }
+}
+
+static uint8_t restore_selection_for_page(QuickMenuPage page)
+{
+    const QuickMenuPageDef& def = quick_menu_get_page_def(page);
+
+    if (def.item_count == 0) {
+        return 0;
+    }
+
+    const uint8_t saved = s_selected_by_page[page_state_index(page)];
+
+    if (saved >= def.item_count) {
+        return static_cast<uint8_t>(def.item_count - 1);
+    }
+
+    return saved;
+}
+
 static uint32_t s_last_action_ms = 0;
 static uint32_t s_revision = 1;
 static uint32_t s_confirm_guard_until_ms = 0;
@@ -45,54 +84,57 @@ const QuickMenuPageDef& current_page_def()
     return quick_menu_get_page_def(s_page);
 }
 
-void open_page(QuickMenuPage page)
+static void open_page(QuickMenuPage page)
 {
+    save_current_selection();
+
     s_page = page;
-    s_selected = 0;
+    s_selected = restore_selection_for_page(page);
 
     touch_menu();
     mark_dirty();
     arm_confirm_guard();
-
-    const QuickMenuPageDef& info = current_page_def();
-    LOGI("[MENU] open page=%s count=%u", info.title, info.item_count);
 }
 
-void move_selection(int delta)
+static void move_selection(int8_t delta)
 {
-    const QuickMenuPageDef& info = current_page_def();
-    if (info.item_count == 0) {
-        s_selected = 0;
+    const QuickMenuPageDef& def = current_page_def();
+
+    if (def.item_count == 0) {
         return;
     }
 
-    const int old_selected = s_selected;
-
-    s_selected += delta;
-
-    if (s_selected < 0) {
-        s_selected = info.item_count - 1;
-    } else if (s_selected >= info.item_count) {
-        s_selected = 0;
+    if (delta > 0) {
+        s_selected = static_cast<uint8_t>((s_selected + 1) % def.item_count);
+    } else {
+        s_selected = (s_selected == 0)
+            ? static_cast<uint8_t>(def.item_count - 1)
+            : static_cast<uint8_t>(s_selected - 1);
     }
+
+    save_current_selection();
 
     touch_menu();
-
-    if (s_selected != old_selected) {
-        mark_dirty();
-    }
+    mark_dirty();
 }
 
-void go_back()
+static void go_back()
 {
-    const QuickMenuPageDef& info = current_page_def();
+    const QuickMenuPageDef& def = current_page_def();
 
     if (s_page == QuickMenuPage::Root) {
         quick_menu_exit();
         return;
     }
 
-    open_page(info.parent);
+    save_current_selection();
+
+    s_page = def.parent;
+    s_selected = restore_selection_for_page(s_page);
+
+    touch_menu();
+    mark_dirty();
+    arm_confirm_guard();
 }
 
 const QuickMenuItem* selected_item()
@@ -180,9 +222,17 @@ bool quick_menu_is_active()
 
 void quick_menu_enter()
 {
+    // 每次从播放器重新进入菜单，都从根菜单第一项开始。
+    // 子菜单的选中记忆也只在本次菜单会话内有效。
+    reset_menu_session_selection();
+
     s_active = true;
-    open_page(QuickMenuPage::Root);
-    LOGI("[MENU] enter");
+    s_page = QuickMenuPage::Root;
+    s_selected = 0;
+
+    touch_menu();
+    mark_dirty();
+    arm_confirm_guard();
 }
 
 void quick_menu_exit()

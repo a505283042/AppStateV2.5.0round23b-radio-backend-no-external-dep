@@ -77,19 +77,47 @@ bool board_hw_control_begin()
     return s_ready;
 }
 
-BatterySample board_hw_read_battery()
-{
+BatterySample board_hw_read_battery(){
     BatterySample s{};
 
     s.raw = (uint16_t)analogRead(PIN_BAT_ADC);
 
-#if defined(ARDUINO_ARCH_ESP32)
-    s.mv_adc = (uint32_t)analogReadMilliVolts(PIN_BAT_ADC);
-#else
-    s.mv_adc = 0;
-#endif
+    #if defined(ARDUINO_ARCH_ESP32)
+        s.mv_adc = (uint32_t)analogReadMilliVolts(PIN_BAT_ADC);
+    #else
+        s.mv_adc = 0;
+    #endif
 
-    s.mv_battery = (s.mv_adc * BATTERY_DIVIDER_NUM) / BATTERY_DIVIDER_DEN;
+        s.mv_battery = (s.mv_adc * BATTERY_DIVIDER_NUM) / BATTERY_DIVIDER_DEN;
+        return s;
+}
+
+ChargerStatus board_hw_read_charger_status()
+{
+    ChargerStatus s{};
+
+    if (!mcp23017_u3_is_ready()) {
+        return s;
+    }
+
+    bool pg_level = true;
+    bool chg_level = true;
+
+    const bool pg_ok = mcp23017_u3_read_b_bit(board::MCP_B_PG, &pg_level);
+    const bool chg_ok = mcp23017_u3_read_b_bit(board::MCP_B_CHG_STAT, &chg_level);
+
+    s.valid = pg_ok && chg_ok;
+    s.pg_level = pg_level;
+    s.chg_level = chg_level;
+
+    // BQ25606 /PG 是低有效，PG 低表示外部输入有效。
+    s.external_power_good = !pg_level;
+
+    // 注意：板子上的 CHG_STAT 不是 BQ25606 STAT 原始电平。
+    // BQ STAT 经过 Q4 反相后接到 MCP23017。
+    // 因此 MCP 读到 CHG_STAT = 高，才表示 BQ STAT = 低，也就是正在充电。
+    s.charging = chg_level;
+
     return s;
 }
 

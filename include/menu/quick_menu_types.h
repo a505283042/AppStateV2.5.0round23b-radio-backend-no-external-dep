@@ -20,6 +20,9 @@ enum class QuickMenuPage : uint8_t {
     Bluetooth,
     Nfc,
     SystemInfo,
+    MemoryInfo,
+    StackInfo,
+    BatteryInfo,
 };
 
 enum class QuickMenuItemType : uint8_t {

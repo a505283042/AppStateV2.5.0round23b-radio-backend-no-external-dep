@@ -24,6 +24,20 @@ struct BatterySample {
     uint32_t mv_battery = 0;  // 按分压比例估算后的电池毫伏
 };
 
+struct ChargerStatus {
+    bool valid = false;
+
+    // 原始电平，便于调试。
+    bool pg_level = true;
+    bool chg_level = true;
+
+    // 解释后的状态。
+    bool external_power_good = false;
+    bool charging = false;
+};
+
+ChargerStatus board_hw_read_charger_status();
+
 bool board_hw_control_begin();
 
 BatterySample board_hw_read_battery();
