@@ -168,11 +168,43 @@ uint8_t battery_percent_from_mv(uint32_t mv)
     return 0;
 }
 
+static constexpr uint32_t BATTERY_MENU_CACHE_MS = 800;
+
+static BatterySample s_battery_cache{};
+static ChargerStatus s_charger_cache{};
+static uint32_t s_battery_cache_ms = 0;
+
+static void update_battery_menu_cache()
+{
+    const uint32_t now = millis();
+
+    if (s_battery_cache_ms != 0 &&
+        now - s_battery_cache_ms < BATTERY_MENU_CACHE_MS) {
+        return;
+    }
+
+    s_battery_cache = board_hw_read_battery();
+    s_charger_cache = board_hw_read_charger_status();
+    s_battery_cache_ms = now;
+}
+
+static const BatterySample& battery_menu_sample()
+{
+    update_battery_menu_cache();
+    return s_battery_cache;
+}
+
+static const ChargerStatus& charger_menu_status()
+{
+    update_battery_menu_cache();
+    return s_charger_cache;
+}
+
 const char* value_battery_voltage()
 {
     static char buf[24];
 
-    const BatterySample bat = board_hw_read_battery();
+    const BatterySample& bat = battery_menu_sample();
     if (bat.mv_battery == 0) {
         return "未知";
     }
@@ -188,7 +220,7 @@ const char* value_battery_percent()
 {
     static char buf[16];
 
-    const BatterySample bat = board_hw_read_battery();
+    const BatterySample& bat = battery_menu_sample();
     if (bat.mv_battery == 0) {
         return "未知";
     }
@@ -203,7 +235,7 @@ const char* value_battery_adc_mv()
 {
     static char buf[24];
 
-    const BatterySample bat = board_hw_read_battery();
+    const BatterySample& bat = battery_menu_sample();
     if (bat.mv_adc == 0) {
         return "未知";
     }
@@ -219,7 +251,7 @@ const char* value_battery_raw()
 {
     static char buf[16];
 
-    const BatterySample bat = board_hw_read_battery();
+    const BatterySample& bat = battery_menu_sample();
     snprintf(buf, sizeof(buf), "%u", static_cast<unsigned>(bat.raw));
 
     return buf;
@@ -227,7 +259,7 @@ const char* value_battery_raw()
 
 const char* value_battery_state()
 {
-    const BatterySample bat = board_hw_read_battery();
+    const BatterySample& bat = battery_menu_sample();
 
     if (bat.mv_battery == 0) {
         return "未知";
@@ -254,7 +286,7 @@ const char* value_battery_state()
 
 const char* value_external_power()
 {
-    const ChargerStatus chg = board_hw_read_charger_status();
+    const ChargerStatus& chg = charger_menu_status();
 
     if (!chg.valid) {
         return "未知";
@@ -265,7 +297,7 @@ const char* value_external_power()
 
 const char* value_charge_state()
 {
-    const ChargerStatus chg = board_hw_read_charger_status();
+    const ChargerStatus& chg = charger_menu_status();
 
     if (!chg.valid) {
         return "未知";
@@ -286,7 +318,7 @@ const char* value_charge_state()
 
 const char* value_pg_level()
 {
-    const ChargerStatus chg = board_hw_read_charger_status();
+    const ChargerStatus& chg = charger_menu_status();
 
     if (!chg.valid) {
         return "未知";
@@ -297,7 +329,7 @@ const char* value_pg_level()
 
 const char* value_chg_level()
 {
-    const ChargerStatus chg = board_hw_read_charger_status();
+    const ChargerStatus& chg = charger_menu_status();
 
     if (!chg.valid) {
         return "未知";

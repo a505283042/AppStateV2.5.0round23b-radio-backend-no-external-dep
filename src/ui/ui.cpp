@@ -6,6 +6,7 @@
 #include "ui/ui_quick_menu_view.h"
 #include "menu/quick_menu.h"
 #include "utils/log.h"
+#include "web/web_settings.h"
 #undef LOG_TAG
 #define LOG_TAG "UI"
 
@@ -166,13 +167,32 @@ static inline TickType_t ui_period_ticks()
   // 列表选择模式：使用较高帧率以实现平滑滚动
   if (player_list_select_is_active()) return pdMS_TO_TICKS(1000 / 20);
 
-  // PLAYER 界面：按视图区分帧率
+  // PLAYER 界面：按视图区分帧率。
+  // 封面旋转关闭后降低刷新压力，但面板视图仍保留歌词/进度刷新。
   if (s_screen == UI_SCREEN_PLAYER) {
-    if (s_view == UI_VIEW_ROTATE) return pdMS_TO_TICKS(1000 / UI_FPS_ROTATE);
-    if (s_view == UI_VIEW_COVER_PANEL) return pdMS_TO_TICKS(1000 / UI_FPS_COVER_PANEL);
+    const bool cover_spin_enabled = web_settings_get().web_cover_spin;
+    const bool player_active = audio_service_is_playing() && !audio_service_is_paused();
 
-    const bool info_active = audio_service_is_playing() && !audio_service_is_paused();
-    const uint32_t fps = info_active ? UI_FPS_INFO_ACTIVE : UI_FPS_INFO_IDLE;
+    if (s_view == UI_VIEW_ROTATE) {
+      const uint32_t fps = cover_spin_enabled
+          ? UI_FPS_ROTATE
+          : UI_FPS_ROTATE_STATIC;
+      return pdMS_TO_TICKS(1000 / fps);
+    }
+
+    if (s_view == UI_VIEW_COVER_PANEL) {
+      uint32_t fps = UI_FPS_COVER_PANEL;
+
+      if (!cover_spin_enabled) {
+        fps = player_active
+            ? UI_FPS_COVER_PANEL_STATIC_ACTIVE
+            : UI_FPS_COVER_PANEL_STATIC_IDLE;
+      }
+
+      return pdMS_TO_TICKS(1000 / fps);
+    }
+
+    const uint32_t fps = player_active ? UI_FPS_INFO_ACTIVE : UI_FPS_INFO_IDLE;
     return pdMS_TO_TICKS(1000 / fps);
   }
 
@@ -279,14 +299,16 @@ static void ui_task_entry(void*)
             LOGI("[UI] rotate release audio_ms=%lu cover_age=%lums", (unsigned long)audio_ms_now, (unsigned long)(now_ms - s_cover_apply_ms));
           } else {
             s_rot_last_ms = now_ms;
+            const bool cover_spin_enabled = web_settings_get().web_cover_spin;
+            const float draw_angle_deg = cover_spin_enabled ? s_angle_deg : 0.0f;
             if (s_view == UI_VIEW_COVER_PANEL) {
-              cover_panel_draw(s_angle_deg);
+              cover_panel_draw(draw_angle_deg);
             } else {
               s_coverSpr.pushSprite(0, 0);
             }
             ui_draw_unlock();
             continue;
-          }
+        }
         }
 
         float dt = (now_ms - s_rot_last_ms) * 0.001f;
@@ -295,17 +317,21 @@ static void ui_task_entry(void*)
         // 防止任何阻塞导致 dt 过大（看起来像“后台一直在转”）
         if (dt > 0.20f) dt = 0.20f;
 
-        // 暂停时不旋转封面
-        if (!audio_service_is_paused()) {
+        // 暂停时不旋转封面；用户关闭"封面旋转"时也不旋转。
+        const bool cover_spin_enabled = web_settings_get().web_cover_spin;
+        if (cover_spin_enabled && !audio_service_is_paused()) {
           s_angle_deg += COVER_DEG_PER_SEC * dt;
           if (s_angle_deg >= 360.0f) s_angle_deg -= 360.0f;
         }
 
+        // 关闭封面旋转时，使用 0 度静态封面，避免停在歪斜角度。
+        const float draw_angle_deg = cover_spin_enabled ? s_angle_deg : 0.0f;
+
         const uint32_t rotate_frame_begin = millis();
         if (s_view == UI_VIEW_COVER_PANEL) {
-          cover_panel_draw(s_angle_deg);
+          cover_panel_draw(draw_angle_deg);
         } else {
-          cover_rotate_draw(s_angle_deg);
+          cover_rotate_draw(draw_angle_deg);
         }
         const uint32_t rotate_frame_end = millis();
         if (s_rotate_probe_frames_left > 0) {

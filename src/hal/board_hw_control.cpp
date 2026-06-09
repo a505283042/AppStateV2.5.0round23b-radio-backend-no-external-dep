@@ -1,6 +1,7 @@
 #include "hal/board_hw_control.h"
 
 #include <Arduino.h>
+#include <driver/gpio.h>
 
 #include "board/board_pins.h"
 #include "board/board_pins_pcb1_mcp23017.h"
@@ -9,11 +10,75 @@
 
 namespace {
 
-// BAT_ADC 分压：上拉 200K，下拉 100K
-// Vadc = Vbat * 100 / (200 + 100) = Vbat / 3
-// Vbat = Vadc * 3
-static constexpr uint32_t BATTERY_DIVIDER_NUM = 3;
-static constexpr uint32_t BATTERY_DIVIDER_DEN = 1;
+// 高阻分压输入，采样次数稍微多一点，降低 ESP32 ADC 抖动。
+static constexpr uint8_t BATTERY_ADC_SAMPLE_COUNT = 16;
+static constexpr uint16_t BATTERY_ADC_SETTLE_US = 300;
+
+// EMA 平滑比例：
+// 新值占 1/4，旧值占 3/4。
+// 电池电压变化慢，这样显示更稳。
+static constexpr uint32_t BATTERY_EMA_NEW_NUM = 1;
+static constexpr uint32_t BATTERY_EMA_DEN = 4;
+
+// 电池采样校准：
+// 实测 BAT+ = 4.11V，BAT_ADC = 1.45V，菜单 ADC = 1.53V。
+// 先把 analogReadMilliVolts() 的 ADC 电压校准到万用表读数。
+static constexpr uint32_t BATTERY_ADC_CAL_NUM = 1450;
+static constexpr uint32_t BATTERY_ADC_CAL_DEN = 1530;
+
+// 当前板子实测分压倍率：BAT+ / BAT_ADC = 4110 / 1450 ≈ 2.834
+static constexpr uint32_t BATTERY_DIVIDER_CAL_NUM = 4110;
+static constexpr uint32_t BATTERY_DIVIDER_CAL_DEN = 1450;
+
+// 电池平滑滤波状态
+static bool s_battery_filter_ready = false;
+static uint32_t s_battery_filtered_raw = 0;
+static uint32_t s_battery_filtered_mv_adc = 0;
+static uint32_t s_battery_filtered_mv_battery = 0;
+
+static void configure_battery_adc_input()
+{
+    // BAT_ADC 是高阻分压输入，必须保持高阻输入状态。
+    // 关闭内部上下拉，避免 GPIO1 把分压点拉偏。
+    pinMode(PIN_BAT_ADC, INPUT);
+
+#if defined(ARDUINO_ARCH_ESP32)
+    gpio_num_t gpio = static_cast<gpio_num_t>(PIN_BAT_ADC);
+    gpio_set_direction(gpio, GPIO_MODE_INPUT);
+    gpio_pullup_dis(gpio);
+    gpio_pulldown_dis(gpio);
+
+    // BAT_ADC 理论满电约 1.4V，使用 11dB 衰减更安全。
+    analogSetPinAttenuation(PIN_BAT_ADC, ADC_11db);
+#endif
+}
+
+static uint32_t apply_ema_filter(uint32_t old_value, uint32_t new_value)
+{
+    return ((old_value * (BATTERY_EMA_DEN - BATTERY_EMA_NEW_NUM)) +
+            (new_value * BATTERY_EMA_NEW_NUM)) /
+           BATTERY_EMA_DEN;
+}
+
+static BatterySample apply_battery_filter(const BatterySample& sample)
+{
+    if (!s_battery_filter_ready) {
+        s_battery_filtered_raw = sample.raw;
+        s_battery_filtered_mv_adc = sample.mv_adc;
+        s_battery_filtered_mv_battery = sample.mv_battery;
+        s_battery_filter_ready = true;
+    } else {
+        s_battery_filtered_raw = apply_ema_filter(s_battery_filtered_raw, sample.raw);
+        s_battery_filtered_mv_adc = apply_ema_filter(s_battery_filtered_mv_adc, sample.mv_adc);
+        s_battery_filtered_mv_battery = apply_ema_filter(s_battery_filtered_mv_battery, sample.mv_battery);
+    }
+
+    BatterySample out = sample;
+    out.raw = static_cast<uint16_t>(s_battery_filtered_raw);
+    out.mv_adc = s_battery_filtered_mv_adc;
+    out.mv_battery = s_battery_filtered_mv_battery;
+    return out;
+}
 
 // 当前先假设高电平为“开启/使能”。
 // 如果实测相反，只改下面这三个常量。
@@ -50,12 +115,7 @@ bool level_from_enabled(bool enabled, bool active_level)
 
 bool board_hw_control_begin()
 {
-    pinMode(PIN_BAT_ADC, INPUT);
-
-#if defined(ARDUINO_ARCH_ESP32)
-    // 3.3V 量程附近更合适。不同 Arduino-ESP32 版本函数可用性可能略有差异。
-    analogSetPinAttenuation(PIN_BAT_ADC, ADC_11db);
-#endif
+    configure_battery_adc_input();
 
     s_ready = true;
 
@@ -77,19 +137,72 @@ bool board_hw_control_begin()
     return s_ready;
 }
 
-BatterySample board_hw_read_battery(){
+BatterySample board_hw_read_battery()
+{
     BatterySample s{};
 
-    s.raw = (uint16_t)analogRead(PIN_BAT_ADC);
+    configure_battery_adc_input();
 
-    #if defined(ARDUINO_ARCH_ESP32)
-        s.mv_adc = (uint32_t)analogReadMilliVolts(PIN_BAT_ADC);
-    #else
-        s.mv_adc = 0;
-    #endif
+    // 高阻分压 + ADC 采样电容，第一次读数容易偏。
+    // 先丢弃两次，再进入正式采样。
+    (void)analogRead(PIN_BAT_ADC);
+    delayMicroseconds(BATTERY_ADC_SETTLE_US);
+    (void)analogRead(PIN_BAT_ADC);
+    delayMicroseconds(BATTERY_ADC_SETTLE_US);
 
-        s.mv_battery = (s.mv_adc * BATTERY_DIVIDER_NUM) / BATTERY_DIVIDER_DEN;
-        return s;
+    uint32_t raw_sum = 0;
+    uint32_t mv_sum = 0;
+
+    uint32_t raw_min = 0xFFFFFFFFu;
+    uint32_t raw_max = 0;
+    uint32_t mv_min = 0xFFFFFFFFu;
+    uint32_t mv_max = 0;
+
+    for (uint8_t i = 0; i < BATTERY_ADC_SAMPLE_COUNT; ++i) {
+        const uint32_t raw = static_cast<uint32_t>(analogRead(PIN_BAT_ADC));
+
+#if defined(ARDUINO_ARCH_ESP32)
+        const uint32_t mv = static_cast<uint32_t>(analogReadMilliVolts(PIN_BAT_ADC));
+#else
+        const uint32_t mv = 0;
+#endif
+
+        raw_sum += raw;
+        mv_sum += mv;
+
+        if (raw < raw_min) raw_min = raw;
+        if (raw > raw_max) raw_max = raw;
+        if (mv < mv_min) mv_min = mv;
+        if (mv > mv_max) mv_max = mv;
+
+        delayMicroseconds(BATTERY_ADC_SETTLE_US);
+    }
+
+    // 去掉一个最大值和一个最小值，减少偶发尖峰。
+    static constexpr uint8_t EFFECTIVE_SAMPLE_COUNT = BATTERY_ADC_SAMPLE_COUNT - 2;
+
+    const uint32_t raw_avg = (raw_sum - raw_min - raw_max) / EFFECTIVE_SAMPLE_COUNT;
+    const uint32_t mv_adc_raw = (mv_sum - mv_min - mv_max) / EFFECTIVE_SAMPLE_COUNT;
+
+    s.raw = static_cast<uint16_t>(raw_avg);
+
+#if defined(ARDUINO_ARCH_ESP32)
+    // ESP32 ADC 软件读数校准到万用表实测 BAT_ADC。
+    s.mv_adc = static_cast<uint32_t>(
+        (static_cast<uint64_t>(mv_adc_raw) * BATTERY_ADC_CAL_NUM) /
+        BATTERY_ADC_CAL_DEN
+    );
+#else
+    s.mv_adc = 0;
+#endif
+
+    // 按当前板子实测分压倍率计算电池电压。
+    s.mv_battery = static_cast<uint32_t>(
+        (static_cast<uint64_t>(s.mv_adc) * BATTERY_DIVIDER_CAL_NUM) /
+        BATTERY_DIVIDER_CAL_DEN
+    );
+
+    return apply_battery_filter(s);
 }
 
 ChargerStatus board_hw_read_charger_status()

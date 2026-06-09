@@ -52,6 +52,19 @@ bool action_toggle_show_cover()
     return true;
 }
 
+const char* value_cover_spin()
+{
+    return web_settings_get().web_cover_spin ? "开" : "关";
+}
+
+bool action_toggle_cover_spin()
+{
+    WebRuntimeSettings ws = web_settings_get();
+    ws.web_cover_spin = !ws.web_cover_spin;
+    web_settings_set(ws);
+    return web_settings_save();
+}
+
 const char* value_show_next_lyric()
 {
     return bool_label(web_settings_get().show_next_lyric);
@@ -90,6 +103,7 @@ bool action_toggle_backlight()
 const QuickMenuItem DISPLAY_ITEMS[] = {
     {"显示类型", QuickMenuItemType::Toggle, QuickMenuPage::Display, "", value_display_type, action_cycle_display_type, true, false},
     {"封面显示", QuickMenuItemType::Toggle, QuickMenuPage::Display, "", value_show_cover, action_toggle_show_cover, true, false},
+    {"封面旋转", QuickMenuItemType::Toggle, QuickMenuPage::Display, "", value_cover_spin, action_toggle_cover_spin, true, false},
     {"下一句歌词", QuickMenuItemType::Toggle, QuickMenuPage::Display, "", value_show_next_lyric, action_toggle_show_next_lyric, true, false},
     {"背光", QuickMenuItemType::Toggle, QuickMenuPage::Display, "", value_backlight, action_toggle_backlight, true, false},
     {"返回", QuickMenuItemType::Back, QuickMenuPage::Root, "", nullptr, nullptr, true, false},

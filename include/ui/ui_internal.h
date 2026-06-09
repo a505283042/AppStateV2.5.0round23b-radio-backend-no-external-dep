@@ -26,6 +26,13 @@ static constexpr uint32_t UI_FPS_COVER_PANEL = 12;          // 封面面板滚�
 static constexpr uint32_t UI_FPS_INFO_ACTIVE = 12;          // 信息面板滚动 FPS
 static constexpr uint32_t UI_FPS_INFO_IDLE = 5;             // 信息面板空闲滚动 FPS 
 static constexpr uint32_t UI_FPS_OTHER = 1;                 // 其他元素滚动 FPS
+
+// 封面旋转关闭后的降帧策略。
+// 旋转视图关闭旋转后只有静态封面，低帧率即可。
+// 面板视图还有歌词、时间和进度环，播放中保留 5fps，避免进度条跳动明显。
+static constexpr uint32_t UI_FPS_ROTATE_STATIC = 2;
+static constexpr uint32_t UI_FPS_COVER_PANEL_STATIC_ACTIVE = 5;
+static constexpr uint32_t UI_FPS_COVER_PANEL_STATIC_IDLE = 2;
 static constexpr int SCROLL_SPEED = 1;                      // 滚动 FPS
 static constexpr int SCROLL_GAP = 20;                       // 滚动间隔
 static constexpr uint32_t VOLUME_ACTIVE_TIMEOUT_MS = 200;   // 音量激活超时时间

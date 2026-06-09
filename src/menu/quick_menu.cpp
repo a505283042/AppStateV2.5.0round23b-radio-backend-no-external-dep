@@ -9,6 +9,7 @@ namespace {
 
 static constexpr uint32_t MENU_AUTO_EXIT_MS = 30000;
 static constexpr uint32_t MENU_CONFIRM_GUARD_MS = 250;
+static constexpr uint32_t MENU_DYNAMIC_REFRESH_MS = 1000;
 
 static bool s_active = false;
 static QuickMenuPage s_page = QuickMenuPage::Root;
@@ -16,6 +17,7 @@ static int s_selected = 0;
 
 static constexpr uint8_t MENU_PAGE_STATE_COUNT = 16;
 static uint8_t s_selected_by_page[MENU_PAGE_STATE_COUNT] = {};
+static uint32_t s_last_dynamic_refresh_ms = 0;
 
 static uint8_t page_state_index(QuickMenuPage page)
 {
@@ -79,6 +81,19 @@ bool confirm_guard_active()
     return static_cast<int32_t>(millis() - s_confirm_guard_until_ms) < 0;
 }
 
+static bool quick_menu_page_is_dynamic(QuickMenuPage page)
+{
+    switch (page) {
+        case QuickMenuPage::MemoryInfo:
+        case QuickMenuPage::StackInfo:
+        case QuickMenuPage::BatteryInfo:
+            return true;
+
+        default:
+            return false;
+    }
+}
+
 const QuickMenuPageDef& current_page_def()
 {
     return quick_menu_get_page_def(s_page);
@@ -90,6 +105,7 @@ static void open_page(QuickMenuPage page)
 
     s_page = page;
     s_selected = restore_selection_for_page(page);
+    s_last_dynamic_refresh_ms = 0;
 
     touch_menu();
     mark_dirty();
@@ -131,6 +147,7 @@ static void go_back()
 
     s_page = def.parent;
     s_selected = restore_selection_for_page(s_page);
+    s_last_dynamic_refresh_ms = 0;
 
     touch_menu();
     mark_dirty();
@@ -229,6 +246,7 @@ void quick_menu_enter()
     s_active = true;
     s_page = QuickMenuPage::Root;
     s_selected = 0;
+    s_last_dynamic_refresh_ms = 0;
 
     touch_menu();
     mark_dirty();
@@ -262,6 +280,17 @@ void quick_menu_tick()
     if (now - s_last_action_ms >= MENU_AUTO_EXIT_MS) {
         LOGI("[MENU] auto exit");
         quick_menu_exit();
+    }
+
+    if (quick_menu_page_is_dynamic(s_page)) {
+        if (s_last_dynamic_refresh_ms == 0 ||
+            now - s_last_dynamic_refresh_ms >= MENU_DYNAMIC_REFRESH_MS) {
+            s_last_dynamic_refresh_ms = now;
+
+            // 只标记内容变化，不刷新用户操作时间。
+            // 这样不会因为动态刷新导致菜单永远不自动退出。
+            mark_dirty();
+        }
     }
 }
 

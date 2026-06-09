@@ -108,8 +108,16 @@ void cover_rotate_draw(float angle_deg)
   auto* dst = s_rotFrame[s_rotBack];
   // 清空后帧
   dst->fillScreen(TFT_BLACK);
-  // 将源精灵旋转指定角度并绘制到后帧（不缩放）
-  s_src->pushRotateZoom(dst, COVER_SIZE / 2, COVER_SIZE / 2, angle_deg, 1.0f, 1.0f);
+
+  // 封面旋转关闭时会传入 0 度。
+  // 0 度不需要走 pushRotateZoom，直接推原图，降低 UI 压力。
+  if (angle_deg == 0.0f) {
+    s_src->pushSprite(dst, 0, 0);
+  } else {
+    // 将源精灵旋转指定角度并绘制到后帧（不缩放）
+    s_src->pushRotateZoom(dst, COVER_SIZE / 2, COVER_SIZE / 2, angle_deg, 1.0f, 1.0f);
+  }
+
   // 绘制音量步进小提示
   draw_volume_step_hint_overlay(dst);
 
