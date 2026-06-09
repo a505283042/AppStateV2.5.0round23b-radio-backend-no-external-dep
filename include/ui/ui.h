@@ -92,6 +92,8 @@ void ui_set_now_playing(const char* title, const char* artist);
 void ui_set_album(const String& album);
 void ui_set_volume(uint8_t vol);
 void ui_volume_key_pressed();
+// 显示音量步进小提示，例如：音量图标 x5
+void ui_show_volume_step_hint(uint8_t step);
 void ui_set_play_mode(play_mode_t mode);
 void ui_mode_switch_highlight();
 void ui_set_track_pos(int idx, int total);

@@ -23,6 +23,78 @@ static void cover_set_source(LGFX_Sprite* src)
   s_src = src;
 }
 
+// =============================================================================
+// 音量步进小提示 Overlay
+// =============================================================================
+
+static constexpr uint32_t VOLUME_STEP_HINT_DURATION_MS = 1200;
+
+static volatile uint8_t s_volume_step_hint = 1;
+static volatile uint32_t s_volume_step_hint_until_ms = 0;
+
+void ui_show_volume_step_hint(uint8_t step)
+{
+  if (step == 0) {
+    step = 1;
+  }
+
+  s_volume_step_hint = step;
+  s_volume_step_hint_until_ms = millis() + VOLUME_STEP_HINT_DURATION_MS;
+
+  ui_request_refresh();
+}
+
+static bool volume_step_hint_active(uint32_t now)
+{
+  if (s_volume_step_hint_until_ms == 0) {
+    return false;
+  }
+
+  return static_cast<int32_t>(s_volume_step_hint_until_ms - now) > 0;
+}
+
+static void draw_volume_step_hint_overlay(LGFX_Sprite* dst)
+{
+  if (!dst) {
+    return;
+  }
+
+  const uint32_t now = millis();
+  if (!volume_step_hint_active(now)) {
+    return;
+  }
+
+  const uint8_t step = s_volume_step_hint;
+
+  // 圆屏上中间小弹窗，尽量避开边缘裁切。
+  static constexpr int BOX_W = 72;
+  static constexpr int BOX_H = 32;
+  static constexpr int BOX_X = (240 - BOX_W) / 2;
+  static constexpr int BOX_Y = (240 - BOX_H) / 2;
+  static constexpr int BOX_R = 10;
+
+  const uint16_t border_color = step > 1 ? TFT_YELLOW : TFT_DARKGREY;
+  const uint16_t icon_color = step > 1 ? TFT_YELLOW : TFT_LIGHTGREY;
+  const uint16_t text_color = TFT_WHITE;
+
+  dst->fillRoundRect(BOX_X, BOX_Y, BOX_W, BOX_H, BOX_R, TFT_BLACK);
+  dst->drawRoundRect(BOX_X, BOX_Y, BOX_W, BOX_H, BOX_R, border_color);
+
+  // 复用项目已有音量图标。
+  draw_volume_icon(dst, BOX_X + 12, BOX_Y + 10, icon_color);
+
+  char label[8];
+  snprintf(label, sizeof(label), "x%u", static_cast<unsigned>(step));
+
+  dst->setFont(&g_font_cjk);
+  dst->setTextSize(1);
+  dst->setTextWrap(false);
+  dst->setTextColor(text_color, TFT_BLACK);
+  dst->setTextDatum(middle_left);
+  dst->drawString(label, BOX_X + 38, BOX_Y + BOX_H / 2);
+  dst->setTextDatum(top_left);
+}
+
 // 将旋转的封面渲染到后帧并推送到 LCD（稳定路径）
 // 参数: angle_deg - 旋转角度（度）
 // 功能: 将源精灵旋转指定角度后绘制到后帧，然后推送到屏幕
@@ -38,6 +110,8 @@ void cover_rotate_draw(float angle_deg)
   dst->fillScreen(TFT_BLACK);
   // 将源精灵旋转指定角度并绘制到后帧（不缩放）
   s_src->pushRotateZoom(dst, COVER_SIZE / 2, COVER_SIZE / 2, angle_deg, 1.0f, 1.0f);
+  // 绘制音量步进小提示
+  draw_volume_step_hint_overlay(dst);
 
   // 将后帧推送到屏幕 (0, 0) 位置
   dst->pushSprite(0, 0);
@@ -1205,6 +1279,9 @@ void cover_panel_draw(float angle_deg)
   // 5. 最后画外圈进度弧，避免被面板覆盖
   draw_cover_panel_progress_ring(dst);
 
+  // 6. 绘制音量步进小提示
+  draw_volume_step_hint_overlay(dst);
+  
   dst->pushSprite(0, 0);
 
   uint8_t tmp = s_rotFront;
@@ -1411,8 +1488,10 @@ void cover_info_draw()
   }
 
   uint32_t t_text = millis();
-
-  // 6) 推屏
+  // 6) 音量步进小提示 Overlay
+  draw_volume_step_hint_overlay(dst);
+  
+  // 7) 推屏
   dst->pushSprite(0, 0);
 
   uint32_t t_push = millis();

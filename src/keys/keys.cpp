@@ -157,11 +157,13 @@ static void volume_fast_mode_enter()
 {
     s_volume_fast_mode = true;
     s_volume_fast_last_ms = millis();
+    ui_show_volume_step_hint(ENCODER_VOLUME_FAST_STEP);
 }
 
 static void volume_fast_mode_exit()
 {
     s_volume_fast_mode = false;
+    ui_show_volume_step_hint(ENCODER_VOLUME_STEP);
 }
 
 static void volume_fast_mode_toggle()
@@ -209,6 +211,7 @@ static void handle_encoder_volume_step(int8_t step)
 
     ui_volume_key_pressed();
     player_volume_step(step > 0 ? volume_step : -volume_step);
+    ui_show_volume_step_hint(static_cast<uint8_t>(volume_step));
 }
 
 static void enter_quick_menu_from_player()
