@@ -147,6 +147,53 @@ static int8_t read_encoder_step()
 }
 
 static constexpr int ENCODER_VOLUME_STEP = 1;
+static constexpr int ENCODER_VOLUME_FAST_STEP = 5;
+static constexpr uint32_t VOLUME_FAST_MODE_TIMEOUT_MS = 5000;
+
+static bool s_volume_fast_mode = false;
+static uint32_t s_volume_fast_last_ms = 0;
+
+static void volume_fast_mode_enter()
+{
+    s_volume_fast_mode = true;
+    s_volume_fast_last_ms = millis();
+}
+
+static void volume_fast_mode_exit()
+{
+    s_volume_fast_mode = false;
+}
+
+static void volume_fast_mode_toggle()
+{
+    if (s_volume_fast_mode) {
+        volume_fast_mode_exit();
+        return;
+    }
+
+    volume_fast_mode_enter();
+}
+
+static bool volume_fast_mode_is_active()
+{
+    if (!s_volume_fast_mode) {
+        return false;
+    }
+
+    if (millis() - s_volume_fast_last_ms > VOLUME_FAST_MODE_TIMEOUT_MS) {
+        volume_fast_mode_exit();
+        return false;
+    }
+
+    return true;
+}
+
+static int current_encoder_volume_step()
+{
+    return volume_fast_mode_is_active()
+        ? ENCODER_VOLUME_FAST_STEP
+        : ENCODER_VOLUME_STEP;
+}
 
 static void handle_encoder_volume_step(int8_t step)
 {
@@ -154,8 +201,20 @@ static void handle_encoder_volume_step(int8_t step)
         return;
     }
 
+    const int volume_step = current_encoder_volume_step();
+
+    if (s_volume_fast_mode) {
+        s_volume_fast_last_ms = millis();
+    }
+
     ui_volume_key_pressed();
-    player_volume_step(step > 0 ? ENCODER_VOLUME_STEP : -ENCODER_VOLUME_STEP);
+    player_volume_step(step > 0 ? volume_step : -volume_step);
+}
+
+static void enter_quick_menu_from_player()
+{
+    volume_fast_mode_exit();
+    quick_menu_enter();
 }
 
 static int read_mcp_a_active_low(uint8_t bit)
@@ -667,12 +726,11 @@ void keys_update()
   handle_encoder_volume_step(encoder_step);
 
   // EC06_E：短按进入快捷菜单。
-  handle_key(k_ec06e, quick_menu_enter, nullptr);
+  handle_key(k_ec06e, enter_quick_menu_from_player, nullptr);
 
-  // MODE：正常播放页不再切换播放模式。
-  // 模式切换、播放顺序、重扫曲库都放到快捷菜单里，避免误触。
+  // MODE：短按切换大步音量模式。
   mode_click_reset();
-  handle_key(k_mode, nullptr, nullptr);
+  handle_key(k_mode, volume_fast_mode_toggle, nullptr);
 
   // PLAY：短按播放/暂停，长按保存 NVS 后关机。
   handle_key(k_play, player_toggle_play, app_power_save_and_shutdown);
