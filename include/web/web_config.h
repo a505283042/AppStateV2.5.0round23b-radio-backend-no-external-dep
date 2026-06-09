@@ -28,7 +28,7 @@
 #endif
 
 #ifndef WEBCTRL_STA_CONNECT_TIMEOUT_MS
-#define WEBCTRL_STA_CONNECT_TIMEOUT_MS 10000
+#define WEBCTRL_STA_CONNECT_TIMEOUT_MS 3000
 #endif
 
 // --- AP 回退模式：STA 连接失败时自动启用 ---

@@ -1,5 +1,7 @@
 #include "menu/quick_menu_page_display.h"
 
+#include "menu/quick_menu.h"
+
 #include "hal/board_hw_control.h"
 #include "ui/ui.h"
 #include "web/web_settings.h"
@@ -72,7 +74,16 @@ const char* value_backlight()
 bool action_toggle_backlight()
 {
     const bool next_enabled = !board_hw_get_backlight();
-    (void)board_hw_set_backlight(next_enabled);
+
+    if (!board_hw_set_backlight(next_enabled)) {
+        return false;
+    }
+
+    // 关闭背光后直接退出菜单，避免黑屏状态下继续停留在菜单里误操作。
+    if (!next_enabled) {
+        quick_menu_exit();
+    }
+
     return true;
 }
 

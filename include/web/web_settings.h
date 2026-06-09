@@ -25,6 +25,13 @@ struct WebRuntimeSettings {
   bool show_next_lyric = true;
   bool show_cover = true;
   bool web_cover_spin = true;
+
+  // WiFi 总开关：保存到 NVS。
+  // false 时，下次开机不自动连接 STA，也不启动 AP fallback。
+  bool wifi_enabled = true;
+
+  // 是否在屏幕 / Web 状态里显示 WiFi 信息。
+  // 这只是显示开关，不影响 WiFi 本身。
   bool show_wifi_info = true;
 };
 

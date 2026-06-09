@@ -10,6 +10,7 @@
  */
 
 void web_server_start();
+void web_server_start_async();
 void web_server_poll();
 bool web_server_started();
 bool web_server_ready();

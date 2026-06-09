@@ -40,6 +40,14 @@ bool board_hw_get_bt_switch();
 bool board_hw_set_backlight(bool enabled);
 bool board_hw_get_backlight();
 
+/**
+ * @brief 释放电源保持脚，触发整机断电。
+ *
+ * 前提：硬件电源自锁由 POWER_CTRL 维持。
+ * 调用后通常不会返回到正常运行状态。
+ */
+void board_hw_power_off();
+
 /** 模拟按一下蓝牙 SW，默认低脉冲 200ms。 */
 bool board_hw_pulse_bt_switch(uint32_t pulse_ms = 200);
 

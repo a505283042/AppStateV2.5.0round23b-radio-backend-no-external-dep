@@ -35,13 +35,7 @@ void board_spi_init(void)
     if (mcp_ok) {
         board_hw_control_begin();
 
-        // ---------- 临时硬件验证：打开功放 ----------
-
-        // 功放打开建议顺序：先静音，再退出关断，最后取消静音，减少爆音。
-        board_hw_set_amp_mute(true);
-        board_hw_set_amp_shutdown(false);
-        delay(100);
-        board_hw_set_amp_mute(false);
+        // 功放保持静音 + 关断，等真正播放前再打开。
 
         board_hw_debug_dump();
 

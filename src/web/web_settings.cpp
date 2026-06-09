@@ -80,14 +80,18 @@ bool web_settings_load() {
   s_cfg.show_next_lyric = pref.getBool("show_next", s_cfg.show_next_lyric);
   s_cfg.show_cover = pref.getBool("show_cover", s_cfg.show_cover);
   s_cfg.web_cover_spin = pref.getBool("cover_spin", s_cfg.web_cover_spin);
+  s_cfg.wifi_enabled = pref.getBool("wifi_en", s_cfg.wifi_enabled);
+  s_cfg.show_wifi_info = pref.getBool("wifi_info", s_cfg.show_wifi_info);
   pref.end();
 
-  LOGI("[WEB] settings loaded from NVS: refresh=%s lyric=%s show_next=%d show_cover=%d cover_spin=%d",
+  LOGI("[WEB] settings loaded from NVS: refresh=%s lyric=%s show_next=%d show_cover=%d cover_spin=%d wifi_en=%d wifi_info=%d",
        web_refresh_preset_key(s_cfg.refresh_preset),
        web_lyric_sync_mode_key(s_cfg.lyric_sync_mode),
        (int)s_cfg.show_next_lyric,
        (int)s_cfg.show_cover,
-       (int)s_cfg.web_cover_spin);
+       (int)s_cfg.web_cover_spin,
+       (int)s_cfg.wifi_enabled,
+       (int)s_cfg.show_wifi_info);
   return true;
 }
 
@@ -102,7 +106,9 @@ bool web_settings_save() {
                && pref.putUChar("lyric", (uint8_t)s_cfg.lyric_sync_mode)
                && pref.putBool("show_next", s_cfg.show_next_lyric)
                && pref.putBool("show_cover", s_cfg.show_cover)
-               && pref.putBool("cover_spin", s_cfg.web_cover_spin);
+               && pref.putBool("cover_spin", s_cfg.web_cover_spin)
+               && pref.putBool("wifi_en", s_cfg.wifi_enabled)
+               && pref.putBool("wifi_info", s_cfg.show_wifi_info);
   pref.end();
 
   if (!ok) {
@@ -110,11 +116,13 @@ bool web_settings_save() {
     return false;
   }
 
-  LOGI("[WEB] settings saved to NVS: refresh=%s lyric=%s show_next=%d show_cover=%d cover_spin=%d",
+  LOGI("[WEB] settings saved to NVS: refresh=%s lyric=%s show_next=%d show_cover=%d cover_spin=%d wifi_en=%d wifi_info=%d",
        web_refresh_preset_key(s_cfg.refresh_preset),
        web_lyric_sync_mode_key(s_cfg.lyric_sync_mode),
        (int)s_cfg.show_next_lyric,
        (int)s_cfg.show_cover,
-       (int)s_cfg.web_cover_spin);
+       (int)s_cfg.web_cover_spin,
+       (int)s_cfg.wifi_enabled,
+       (int)s_cfg.show_wifi_info);
   return true;
 }

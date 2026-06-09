@@ -13,6 +13,7 @@
 #include "audio/audio_file.h"
 #include "audio/audio_i2s.h"
 #include "storage/storage_io.h"
+#include "hal/board_hw_control.h"
 #include "utils/log.h"
 
 extern SdFat sd;
@@ -343,11 +344,33 @@ static bool audio_task_fetch_cover_impl(const AudioCmd& cmd) {
   return true;
 }
 
-static void audio_task_entry(void*)
+static void audio_task_prepare_amp_after_i2s_ready()
 {
+  // I2S 已初始化后，再让功放退出关断。
+  // 关键点：退出关断时仍保持静音，避免 SHDN 跳变打到喇叭。
+  (void)board_hw_set_amp_mute(true);
+  audio_i2s_zero_dma_buffer();
+
+  vTaskDelay(pdMS_TO_TICKS(20));
+
+  (void)board_hw_set_amp_shutdown(false);
+
+  // 给 PAM8406 / 输出电容 / 模拟链路一点稳定时间。
+  vTaskDelay(pdMS_TO_TICKS(150));
+
+  // 注意：这里不要取消静音。
+  // 真正开始播放且首批 PCM 推进后，再取消静音。
+  (void)board_hw_set_amp_mute(true);
+
+  LOGI("[AUDIO] amp prepared: shutdown released, muted");
+}
+
+static void audio_task_entry(void*){
   // I2S/decoder 初始化放在音频任务内部，确保由同一线程管理
   if (!audio_init()) {
     Serial.println("[AUDIO] init failed (AudioTask)");
+  } else {
+    audio_task_prepare_amp_after_i2s_ready();
   }
 
   s_ready = true;
@@ -360,11 +383,21 @@ static void audio_task_entry(void*)
 
       if (cmd.type == CMD_STOP) {
         const uint32_t t_cmd = millis();
+
         audio_task_soft_stop_impl(true);
+
+        // 停止后只静音，不关断功放。
+        // 关断功放留到整机关机时再做，避免下一次播放 SHDN 跳变产生 pop。
+        (void)board_hw_set_amp_mute(true);
+
         const uint32_t t_done = millis();
         LOGD("[AUDIO] service cmd stop exec=%lums", (unsigned long)(t_done - t_cmd));
       } else if (cmd.type == CMD_PLAY || cmd.type == CMD_PLAY_STREAM_MP3) {
         const uint32_t t_cmd = millis();
+
+        // 播放前先保持功放静音，避免切歌/开机瞬态打到喇叭。
+        (void)board_hw_set_amp_mute(true);
+
         if (audio_is_playing() || s_playing_cache || s_fade_gain > 0.0f) {
           audio_task_soft_stop_impl(true);
         } else {
@@ -375,15 +408,30 @@ static void audio_task_entry(void*)
           audio_i2s_zero_dma_buffer();
         }
 
+        (void)board_hw_set_amp_mute(true);
+
         bool ok = (cmd.type == CMD_PLAY_STREAM_MP3) ? audio_play_stream_mp3(cmd.path) : audio_play(cmd.path);
         const uint32_t t_done = millis();
         ack = ok ? 1 : 0;
 
         if (ok) {
-          // 切歌起播不要从 0 开始，避免一开始声音明显偏小
+          // 先用很小增益推进几帧 PCM，但功放仍静音。
+          // 这样可以避开解码器刚打开、I2S 首包数据不稳定的瞬间。
+          s_fade_gain = 0.05f;
+          s_last_fade_gain = 0.05f;
+
+          for (int i = 0; i < 4; ++i) {
+            audio_loop();
+            vTaskDelay(pdMS_TO_TICKS(2));
+          }
+
+          // 再恢复正常起播增益并取消静音。
           s_fade_gain = PLAY_START_GAIN;
           s_last_fade_gain = PLAY_START_GAIN;
+
+          (void)board_hw_set_amp_mute(false);
         } else {
+          (void)board_hw_set_amp_mute(true);
           s_fade_gain = 0.0f;
           s_last_fade_gain = 0.0f;
         }
@@ -625,6 +673,8 @@ void audio_service_pause() {
     // 注意：不再立即调用 zero_dma_buffer，因为我们要留时间做淡出
 }
 void audio_service_resume() {
+    // 恢复播放时只取消静音，不动 SHDN。
+    (void)board_hw_set_amp_mute(false);
     s_paused = false;
 }
 bool audio_service_is_paused() { return s_paused; }

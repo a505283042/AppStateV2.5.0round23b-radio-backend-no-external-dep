@@ -13,7 +13,6 @@
 #include "utils/runtime_monitor.h"
 #include "web/web_server.h"
 #include "player_snapshot.h"
-#include "net_music/net_music_catalog.h"
 
 static void prepare_music_catalogs()
 {
@@ -93,15 +92,9 @@ void boot_state_run(void)
     } else {
         LOGW("[BOOT] Radio catalog load skipped or failed");
     }
-    // 预加载 NAS/HTTP 网络歌曲索引。
-    // 只保存每一行的文件偏移，不全量加载标题和 URL。
-    if (storage_is_ready() && net_music_catalog_load()) {
-        LOGI("[BOOT] Net music catalog loaded: %lu tracks",
-            (unsigned long)net_music_catalog_count());
-    } else {
-        LOGW("[BOOT] Net music catalog load skipped or failed: %s",
-            net_music_catalog_error().c_str());
-    }
+    // NAS/HTTP 歌曲索引不在开机阶段预加载。
+    // 进入 NAS 歌曲列表或 Web NAS 页面时再按需 net_music_catalog_load()，
+    // 避免开机阶段额外读取 TF 卡、拖慢进系统。
 
     // 提前从 NVS 读取待恢复快照；真正恢复播放在首次进入 player 状态时执行。
     // 注意：只有存储就绪时才读取 snapshot，因为 snapshot key 依赖卡身份。
@@ -109,10 +102,9 @@ void boot_state_run(void)
         player_snapshot_load_pending_from_nvs();
     }
 
-    // 启动网页控制 MVP（优先连已配置 Wi-Fi，失败则回退到 AP 热点模式）
-    web_server_start();
-
     Serial.println("[BOOT] -> PLAYER");
-
     g_app_state = STATE_PLAYER;
+
+    // Web/WiFi 异步启动，不阻塞进入播放器。
+    web_server_start_async();
 }

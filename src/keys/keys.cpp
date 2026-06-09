@@ -4,6 +4,7 @@
 
 #include "app_flags.h"
 #include "app_state.h"
+#include "app_power.h"
 #include "ui/ui.h"
 #include "player_control.h"
 #include "player_list_select.h"
@@ -13,6 +14,7 @@
 #include "web/web_server.h"
 #include "board/board_pins_pcb1_mcp23017.h"
 #include "hal/mcp23017_u3.h"
+#include "hal/board_hw_control.h"
 
 /*
  * 按键输入模块。
@@ -58,6 +60,15 @@ static constexpr uint32_t MODE_DOUBLE_CLICK_MS = 320;
 static int s_enc_last = 0;
 static int s_enc_accum = 0;
 static uint32_t s_enc_last_step_ms = 0;
+
+// EC06：12 定位 / 6 脉冲。
+// 这类编码器通常一格定位对应 2 个有效 quadrature 边沿。
+// 如果用 4 个边沿算一步，会变成转两格才触发一次。
+static constexpr int ENCODER_EDGES_PER_STEP = 2;
+
+// 旋钮单步防抖时间。原来 30ms 偏保守，12定位/6脉冲可适当降低。
+// 如果后续发现快速旋转漏步，可以再降到 10ms；如果误触发，升回 30ms。
+static constexpr uint32_t ENCODER_STEP_GUARD_MS = 15;
 
 static int read_encoder_state()
 {
@@ -107,12 +118,12 @@ static int8_t read_encoder_step()
 
     s_enc_accum += delta;
 
-    // EC06 常见一格会产生 4 个边沿，所以累计到 4 再触发一次。
-    if (s_enc_accum >= 4) {
+    // EC06 常见一格会产生多个边沿，累计到阈值再触发一次。
+    if (s_enc_accum >= ENCODER_EDGES_PER_STEP) {
         s_enc_accum = 0;
 
         const uint32_t now = millis();
-        if (now - s_enc_last_step_ms < 30) {
+        if (now - s_enc_last_step_ms < ENCODER_STEP_GUARD_MS) {
             return 0;
         }
         s_enc_last_step_ms = now;
@@ -120,11 +131,11 @@ static int8_t read_encoder_step()
         return -1;
     }
 
-    if (s_enc_accum <= -4) {
+    if (s_enc_accum <= -ENCODER_EDGES_PER_STEP) {
         s_enc_accum = 0;
 
         const uint32_t now = millis();
-        if (now - s_enc_last_step_ms < 30) {
+        if (now - s_enc_last_step_ms < ENCODER_STEP_GUARD_MS) {
             return 0;
         }
         s_enc_last_step_ms = now;
@@ -135,6 +146,8 @@ static int8_t read_encoder_step()
     return 0;
 }
 
+static constexpr int ENCODER_VOLUME_STEP = 1;
+
 static void handle_encoder_volume_step(int8_t step)
 {
     if (step == 0) {
@@ -142,7 +155,7 @@ static void handle_encoder_volume_step(int8_t step)
     }
 
     ui_volume_key_pressed();
-    player_volume_step(step > 0 ? +5 : -5);
+    player_volume_step(step > 0 ? ENCODER_VOLUME_STEP : -ENCODER_VOLUME_STEP);
 }
 
 static int read_mcp_a_active_low(uint8_t bit)
@@ -441,9 +454,100 @@ static void handle_voldn_key_normal()
   yield();
 }
 
+static bool is_any_key_pressed_raw()
+{
+  return pressed(read_key_pin(k_mode.pin))
+      || pressed(read_key_pin(k_play.pin))
+      || pressed(read_key_pin(k_prev.pin))
+      || pressed(read_key_pin(k_next.pin))
+      || pressed(read_key_pin(k_ec06e.pin))
+      || pressed(read_key_pin(k_voldn.pin))
+      || pressed(read_key_pin(k_volup.pin));
+}
+
+static bool handle_backlight_sleep_mode(int8_t encoder_step)
+{
+  static bool s_sleep_armed = false;
+
+  // 背光开着时，不进入熄屏按键模式。
+  if (board_hw_get_backlight()) {
+    s_sleep_armed = false;
+    return false;
+  }
+
+  const bool any_key_pressed = is_any_key_pressed_raw();
+
+  // 刚关闭背光时，关屏的那个按键可能还没松开。
+  // 必须等所有按键松开一次，之后才允许熄屏操作。
+  if (!s_sleep_armed) {
+    if (!any_key_pressed) {
+      s_sleep_armed = true;
+    }
+    return true;
+  }
+
+  // 熄屏状态下，旋钮继续调音量，不唤醒屏幕。
+  if (encoder_step != 0) {
+      player_volume_step(encoder_step > 0 ? ENCODER_VOLUME_STEP : -ENCODER_VOLUME_STEP);
+      return true;
+  }
+
+  // 熄屏状态下，PLAY 短按仍然播放 / 暂停，长按关机。
+  handle_key(k_play,
+            player_toggle_play,
+            app_power_save_and_shutdown);
+
+  // 熄屏状态下，PREV / NEXT 短按仍然切歌。
+  // 长按类入口需要看屏幕，熄屏下只唤醒。
+  handle_key(k_prev,
+             player_prev_track,
+             [](){
+               (void)board_hw_set_backlight(true);
+               keys_sync_to_hw_state();
+             });
+
+  handle_key(k_next,
+             player_next_track,
+             [](){
+               (void)board_hw_set_backlight(true);
+               keys_sync_to_hw_state();
+             });
+
+  // MODE / EC06_E 都是界面类操作，熄屏下只负责唤醒屏幕。
+  handle_key(k_mode,
+             [](){
+               (void)board_hw_set_backlight(true);
+               keys_sync_to_hw_state();
+             },
+             [](){
+               (void)board_hw_set_backlight(true);
+               keys_sync_to_hw_state();
+             });
+
+  handle_key(k_ec06e,
+             [](){
+               (void)board_hw_set_backlight(true);
+               keys_sync_to_hw_state();
+             },
+             [](){
+               (void)board_hw_set_backlight(true);
+               keys_sync_to_hw_state();
+             });
+
+  // 旧板 VOL 键如果存在，也允许熄屏调音量。
+  handle_key(k_voldn, nullptr, nullptr, true, [](){ player_volume_step(-5); });
+  handle_key(k_volup, nullptr, nullptr, true, [](){ player_volume_step(+5); });
+
+  return true;
+}
+
 void keys_update()
 {
   const int8_t encoder_step = read_encoder_step();
+
+  if (handle_backlight_sleep_mode(encoder_step)) {
+    return;
+  }
 
   // --- 快捷菜单：旋钮导航，按下确认；菜单内不再调整音量 ---
   if (quick_menu_is_active()) {
@@ -565,11 +669,13 @@ void keys_update()
   // EC06_E：短按进入快捷菜单。
   handle_key(k_ec06e, quick_menu_enter, nullptr);
 
-  // MODE：单击=切小类；双击=切大类；长按=重扫。
-  handle_mode_key_normal();
+  // MODE：正常播放页不再切换播放模式。
+  // 模式切换、播放顺序、重扫曲库都放到快捷菜单里，避免误触。
+  mode_click_reset();
+  handle_key(k_mode, nullptr, nullptr);
 
-  // PLAY：短按=播放/停止；长按=切换视图。
-  handle_key(k_play, player_toggle_play, ui_toggle_view);
+  // PLAY：短按播放/暂停，长按保存 NVS 后关机。
+  handle_key(k_play, player_toggle_play, app_power_save_and_shutdown);
 
   // PREV / NEXT：短按=切歌，长按 PREV=进入 NFC 管理，长按 NEXT=进入列表选择模式。
   handle_key(k_prev, player_prev_track, [](){ (void)app_request_enter_nfc_admin(); });

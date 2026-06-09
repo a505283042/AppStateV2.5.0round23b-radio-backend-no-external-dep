@@ -157,20 +157,13 @@ static void app_handle_tf_mounted()
         LOGW("[APP] radio catalog reload failed");
     }
     
-    if (net_music_catalog_load()) {
-        LOGI("[APP] net music catalog reloaded: %lu tracks",
-            (unsigned long)net_music_catalog_count());
-    } else {
-        LOGW("[APP] net music catalog reload failed: %s",
-            net_music_catalog_error().c_str());
-    }
-    // 开机无 TF 卡时，Web 会因为读不到 /System/config/wifi.conf 而进入 AP 模式。
-    // 插卡后重新读取 WiFi 配置，成功则从 AP 切到 STA；失败则继续保持 AP。
-    if (web_server_retry_sta_from_config()) {
-        LOGI("[APP] WiFi switched to STA after TF mounted");
-    } else {
-        LOGW("[APP] WiFi remains AP fallback after TF mounted");
-    }
+    // TF 卡插入后不主动加载 NAS/HTTP 歌曲索引。
+    // 后续进入 NAS 歌曲列表或 Web NAS 页面时再按需加载。
+    net_music_catalog_clear();
+    // TF 卡插入后不再自动重连 WiFi。
+    // WiFi 总开关由 NVS 保存；如需联网，由用户在菜单中手动开启/重连。
+    // 这样可以避免插卡后 WiFi 扫描/连接影响本地播放稳定性。
+    LOGI("[APP] WiFi reconnect skipped after TF mounted");
 
     if (!storage_catalog_v3_load_or_rebuild("/Music", "/System/music_index_v3.bin")) {
         LOGE("[APP] catalog reload failed after TF mounted");

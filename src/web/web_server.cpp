@@ -50,6 +50,7 @@ static bool s_wifi_enabled = true;
 static WebServer s_server(80);
 static bool s_started = false;
 static bool s_ready = false;
+static TaskHandle_t s_web_start_task = nullptr;
 static bool s_ap_mode = false;
 static String s_hostname_runtime = WEBCTRL_HOSTNAME_DEFAULT;
 static String s_wifi_source = "ap_fallback";
@@ -68,6 +69,13 @@ void web_wifi_set_enabled(bool enabled)
     }
 
     s_wifi_enabled = enabled;
+
+    // WiFi 总开关保存到 NVS。
+    // 关闭后，下次开机不再自动连接 WiFi。
+    WebRuntimeSettings ws = web_settings_get();
+    ws.wifi_enabled = enabled;
+    web_settings_set(ws);
+    (void)web_settings_save();
 
     if (!enabled) {
         LOGW("[WEB] WiFi disabled by user");
@@ -92,8 +100,8 @@ void web_wifi_set_enabled(bool enabled)
 
     WiFi.mode(WIFI_STA);
 
-    // 重新启动 Web/WiFi 流程
-    web_server_start();
+    // 重新启动 Web/WiFi 流程，不阻塞菜单/UI。
+    web_server_start_async();
 #endif
 }
 
@@ -375,9 +383,10 @@ static bool web_load_wifi_config(std::vector<WebWifiNetwork>& nets, String& host
 static bool web_try_connect_one(const WebWifiNetwork& n, const String& hostname) {
   if (n.ssid.isEmpty()) return false;
   WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
   WiFi.setHostname(hostname.c_str());
   WiFi.disconnect(true, true);
-  delay(50);
+  delay(100);
   if (n.channel > 0 || n.has_bssid) {
     WiFi.begin(n.ssid.c_str(), n.password.c_str(), n.channel > 0 ? n.channel : 0, n.has_bssid ? n.bssid : nullptr, true);
   } else {
@@ -2037,36 +2046,109 @@ bool web_server_retry_sta_from_config()
 #endif
 }
 
+static void web_start_task_entry(void* arg)
+{
+    (void)arg;
+
+    // 先让播放器、I2S、功放时序稳定下来。
+    // 避免 WiFi association/DHCP 正好撞上开机起播。
+    vTaskDelay(pdMS_TO_TICKS(3000));
+
+    web_server_start();
+
+    s_web_start_task = nullptr;
+    vTaskDelete(nullptr);
+}
+
 void web_server_start() {
+  #if WEBCTRL_ENABLED
+    // 开机启动 Web/WiFi 前，先读取 NVS 设置。
+    // 如果用户上次在菜单中关闭了 WiFi，这里直接跳过，不扫网、不启动 AP。
+    web_settings_load();
+    s_wifi_enabled = web_settings_get().wifi_enabled;
+
+    if (!s_wifi_enabled) {
+      LOGW("[WEB] start skipped: WiFi disabled by NVS");
+      WiFi.softAPdisconnect(true);
+      WiFi.disconnect(true, true);
+      WiFi.mode(WIFI_OFF);
+      s_started = false;
+      s_ready = false;
+      s_ap_mode = false;
+      return;
+    }
+
+    if (s_started) return;
+
+    s_started = true;
+    WiFi.persistent(false);
+    WiFi.setAutoReconnect(false);
+    web_settings_load();
+    const bool net_ok = web_try_connect_sta_from_config() || web_start_ap_fallback();
+    if (!net_ok) { LOGE("[WEB] network start failed, web disabled"); s_ready = false; return; }
+
+    static const char* kHeaderKeys[] = { "If-None-Match" };
+    s_server.collectHeaders(kHeaderKeys, 1);
+
+    web_setup_routes();
+    s_server.begin();
+    s_ready = true;
+    LOGI("[WEB] server started: http://%s/", web_ip_string().c_str());
+  #else
+    s_started = true; s_ready = false;
+  #endif
+}
+
+void web_server_start_async()
+{
 #if WEBCTRL_ENABLED
-  if (!s_wifi_enabled) {
-    LOGW("[WEB] start skipped: WiFi disabled");
-    return;
-  }
+    // 开机启动 Web/WiFi 前，先读取 NVS 设置。
+    // 如果用户上次在菜单中关闭了 WiFi，这里直接跳过，不扫网、不启动 AP。
+    web_settings_load();
+    s_wifi_enabled = web_settings_get().wifi_enabled;
 
-  if (s_started) return;
-  s_started = true;
-  WiFi.persistent(false); WiFi.setAutoReconnect(true);
-  web_settings_load();
-  const bool net_ok = web_try_connect_sta_from_config() || web_start_ap_fallback();
-  if (!net_ok) { LOGE("[WEB] network start failed, web disabled"); s_ready = false; return; }
+    if (!s_wifi_enabled) {
+        LOGW("[WEB] async start skipped: WiFi disabled by NVS");
+        WiFi.softAPdisconnect(true);
+        WiFi.disconnect(true, true);
+        WiFi.mode(WIFI_OFF);
+        s_started = false;
+        s_ready = false;
+        s_ap_mode = false;
+        return;
+    }
 
-  static const char* kHeaderKeys[] = { "If-None-Match" };
-  s_server.collectHeaders(kHeaderKeys, 1);
+    if (s_started || s_web_start_task != nullptr) {
+        return;
+    }
 
-  web_setup_routes();
-  s_server.begin();
-  s_ready = true;
-  LOGI("[WEB] server started: http://%s/", web_ip_string().c_str());
+    const BaseType_t ok = xTaskCreatePinnedToCore(
+        web_start_task_entry,
+        "WebStart",
+        6144,
+        nullptr,
+        1,
+        &s_web_start_task,
+        1
+    );
+
+    if (ok != pdPASS) {
+        s_web_start_task = nullptr;
+        LOGE("[WEB] create async start task failed");
+    } else {
+        LOGI("[WEB] async start task created");
+    }
 #else
-  s_started = true; s_ready = false;
+    web_server_start();
 #endif
 }
+
 void web_server_poll() {
-#if WEBCTRL_ENABLED
-  if (!s_ready) return;
-  s_server.handleClient();
-#endif
+  #if WEBCTRL_ENABLED
+    if (!s_ready) return;
+    s_server.handleClient();
+  #endif
+  }
+  bool web_server_started() { return s_started; }
+  bool web_server_ready() { return s_ready; 
 }
-bool web_server_started() { return s_started; }
-bool web_server_ready() { return s_ready; }

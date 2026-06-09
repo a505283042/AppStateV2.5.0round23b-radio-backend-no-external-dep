@@ -37,8 +37,8 @@ bool s_ready = false;
 bool s_bt_power_enabled = false;
 bool s_bt_wakeup_enabled = false;
 bool s_bt_switch_level = !BT_SW_ACTIVE_LEVEL;
-bool s_amp_mute_enabled = false;
-bool s_amp_shutdown_enabled = false;
+bool s_amp_mute_enabled = true;
+bool s_amp_shutdown_enabled = true;
 bool s_backlight_enabled = true;
 
 bool level_from_enabled(bool enabled, bool active_level)
@@ -59,13 +59,14 @@ bool board_hw_control_begin()
 
     s_ready = true;
 
-    // 第一版安全默认：
-    // 蓝牙关闭、静音关闭、功放不关断。
+    // 安全默认：
+    // 蓝牙关闭；
+    // 功放保持“静音 + 关断”，等真正播放前再打开，减少开机爆破音。
     board_hw_set_bt_power(false);
     board_hw_set_bt_wakeup(false);
     board_hw_set_bt_switch(false);
-    board_hw_set_amp_mute(false);
-    board_hw_set_amp_shutdown(false);
+    board_hw_set_amp_mute(true);
+    board_hw_set_amp_shutdown(true);
 
     LOGI("[HWCTRL] begin ok BAT_ADC=%d BT_PWR=MCPB%d MUTE=MCPA%d SHDN=MCPA%d",
          PIN_BAT_ADC,
@@ -232,4 +233,12 @@ void board_hw_debug_dump()
          s_amp_shutdown_enabled ? 1 : 0,
          pg_level ? 1 : 0,
          chg_level ? 1 : 0);
+}
+
+void board_hw_power_off()
+{
+    LOGI("[HWCTRL] power off: release POWER_CTRL GPIO%d", PIN_POWER_CTRL);
+
+    pinMode(PIN_POWER_CTRL, OUTPUT);
+    digitalWrite(PIN_POWER_CTRL, LOW);
 }
