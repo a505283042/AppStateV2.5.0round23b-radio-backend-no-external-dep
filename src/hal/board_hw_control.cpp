@@ -20,21 +20,51 @@ static constexpr uint16_t BATTERY_ADC_SETTLE_US = 300;
 static constexpr uint32_t BATTERY_EMA_NEW_NUM = 1;
 static constexpr uint32_t BATTERY_EMA_DEN = 4;
 
-// 电池采样校准：
-// 实测 BAT+ = 4.11V，BAT_ADC = 1.45V，菜单 ADC = 1.53V。
-// 先把 analogReadMilliVolts() 的 ADC 电压校准到万用表读数。
-static constexpr uint32_t BATTERY_ADC_CAL_NUM = 1450;
-static constexpr uint32_t BATTERY_ADC_CAL_DEN = 1530;
+// ADC 读数校准：
+// 万用表量 BAT_ADC 是 1.48V，但菜单显示采样电压是 1.58V，程序偏高。
+// 所以用 1480 / 1580 把采样电压校准回万用表实测值。
+static constexpr uint32_t BATTERY_ADC_CAL_NUM = 1532;
+static constexpr uint32_t BATTERY_ADC_CAL_DEN = 1580;
 
-// 当前板子实测分压倍率：BAT+ / BAT_ADC = 4110 / 1450 ≈ 2.834
-static constexpr uint32_t BATTERY_DIVIDER_CAL_NUM = 4110;
-static constexpr uint32_t BATTERY_DIVIDER_CAL_DEN = 1450;
+// 电池分压倍率校准：
+// 万用表量 BAT+ 是 3.81V，BAT_ADC 是 1.48V。
+// 所以电池电压 = 采样电压 × 3810 / 1480，约等于 ×2.57。
+static constexpr uint32_t BATTERY_DIVIDER_CAL_NUM = 3810;
+static constexpr uint32_t BATTERY_DIVIDER_CAL_DEN = 1480;
 
 // 电池平滑滤波状态
 static bool s_battery_filter_ready = false;
 static uint32_t s_battery_filtered_raw = 0;
 static uint32_t s_battery_filtered_mv_adc = 0;
 static uint32_t s_battery_filtered_mv_battery = 0;
+
+// 电池 UI 缓存采样策略：
+// 1. 上电后先立即采样；
+// 2. 前几次每 3 秒采样一次，让 EMA 更快稳定；
+// 3. 稳定后每 1 分钟采样一次。
+// 4. PG/CHG 是数字状态，单独每 1 秒刷新一次，插 USB 后闪电能尽快显示。
+static constexpr uint32_t BATTERY_UI_BOOT_SAMPLE_INTERVAL_MS = 3000;
+static constexpr uint32_t BATTERY_UI_STABLE_SAMPLE_INTERVAL_MS = 60UL * 1000UL;
+static constexpr uint32_t CHARGER_UI_SAMPLE_INTERVAL_MS = 1000;
+static constexpr uint8_t BATTERY_UI_BOOT_SAMPLE_COUNT = 5;
+
+static BatteryUiStatus s_battery_ui_status{};
+static uint32_t s_battery_ui_last_sample_ms = 0;
+static uint32_t s_charger_ui_last_sample_ms = 0;
+static uint8_t s_battery_ui_sample_count = 0;
+
+static uint8_t battery_percent_from_mv(uint32_t mv)
+{
+    // 单节锂电粗略估算，不是库仑计。
+    if (mv >= 4200) return 100;
+    if (mv >= 4000) return 80 + static_cast<uint8_t>((mv - 4000) * 20 / 200);
+    if (mv >= 3800) return 55 + static_cast<uint8_t>((mv - 3800) * 25 / 200);
+    if (mv >= 3700) return 40 + static_cast<uint8_t>((mv - 3700) * 15 / 100);
+    if (mv >= 3600) return 25 + static_cast<uint8_t>((mv - 3600) * 15 / 100);
+    if (mv >= 3500) return 12 + static_cast<uint8_t>((mv - 3500) * 13 / 100);
+    if (mv >= 3300) return static_cast<uint8_t>((mv - 3300) * 12 / 200);
+    return 0;
+}
 
 static void configure_battery_adc_input()
 {
@@ -196,12 +226,12 @@ BatterySample board_hw_read_battery()
     s.mv_adc = 0;
 #endif
 
-    // 按当前板子实测分压倍率计算电池电压。
-    s.mv_battery = static_cast<uint32_t>(
+    uint32_t mv_battery = static_cast<uint32_t>(
         (static_cast<uint64_t>(s.mv_adc) * BATTERY_DIVIDER_CAL_NUM) /
         BATTERY_DIVIDER_CAL_DEN
     );
 
+    s.mv_battery = mv_battery;
     return apply_battery_filter(s);
 }
 
@@ -232,6 +262,81 @@ ChargerStatus board_hw_read_charger_status()
     s.charging = chg_level;
 
     return s;
+}
+
+static void board_hw_update_charger_status_cache()
+{
+    const ChargerStatus chg = board_hw_read_charger_status();
+
+    if (!chg.valid) {
+        return;
+    }
+
+    // PG/CHG 是数字状态，更新它不需要重新采样 ADC。
+    // 这样插 USB 后，闪电图标最多 1 秒内出现。
+    s_battery_ui_status.external_power_good = chg.external_power_good;
+    s_battery_ui_status.charging = chg.charging;
+    s_charger_ui_last_sample_ms = millis();
+}
+
+static void board_hw_update_battery_status_cache()
+{
+    const BatterySample bat = board_hw_read_battery();
+    const ChargerStatus chg = board_hw_read_charger_status();
+
+    BatteryUiStatus out = s_battery_ui_status;
+    out.valid = bat.mv_battery > 0;
+    out.mv_battery = bat.mv_battery;
+    out.mv_adc = bat.mv_adc;
+    out.raw = bat.raw;
+    out.percent = battery_percent_from_mv(bat.mv_battery);
+
+    if (chg.valid) {
+        out.external_power_good = chg.external_power_good;
+        out.charging = chg.charging;
+        s_charger_ui_last_sample_ms = millis();
+    }
+
+    out.updated_ms = millis();
+
+    s_battery_ui_status = out;
+    s_battery_ui_last_sample_ms = out.updated_ms;
+
+    if (s_battery_ui_sample_count < 255) {
+        ++s_battery_ui_sample_count;
+    }
+}
+
+void board_hw_battery_status_tick()
+{
+    const uint32_t now = millis();
+
+    // PG/CHG 状态单独快刷。
+    // 插 USB / 拔 USB 后，UI 闪电图标不需要等 1 分钟。
+    if (s_charger_ui_last_sample_ms == 0 ||
+        now - s_charger_ui_last_sample_ms >= CHARGER_UI_SAMPLE_INTERVAL_MS) {
+        board_hw_update_charger_status_cache();
+    }
+
+    const bool boot_sampling =
+        s_battery_ui_sample_count < BATTERY_UI_BOOT_SAMPLE_COUNT;
+
+    const uint32_t interval_ms = boot_sampling
+        ? BATTERY_UI_BOOT_SAMPLE_INTERVAL_MS
+        : BATTERY_UI_STABLE_SAMPLE_INTERVAL_MS;
+
+    // 第一次立即采样；上电前几次快速采样；稳定后 1 分钟一次。
+    if (s_battery_ui_last_sample_ms != 0 &&
+        now - s_battery_ui_last_sample_ms < interval_ms) {
+        return;
+    }
+
+    board_hw_update_battery_status_cache();
+}
+
+BatteryUiStatus board_hw_get_battery_status_cached()
+{
+    return s_battery_ui_status;
 }
 
 bool board_hw_set_bt_power(bool enabled)

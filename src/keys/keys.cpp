@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <driver/gpio.h>
 #include "keys/keys.h"
 #include "keys/keys_pins.h"
 
@@ -359,6 +360,13 @@ void keys_init()
 {
   setup_key_pin(PIN_KEY_MODE);
   setup_key_pin(PIN_KEY_PLAY);
+
+  // PLAY 引脚禁用内部下拉，确保外部上拉生效
+#if defined(ARDUINO_ARCH_ESP32)
+  gpio_pullup_en(static_cast<gpio_num_t>(PIN_KEY_PLAY));
+  gpio_pulldown_dis(static_cast<gpio_num_t>(PIN_KEY_PLAY));
+#endif
+
   setup_key_pin(PIN_KEY_PREV);
   setup_key_pin(PIN_KEY_NEXT);
   setup_key_pin(PIN_KEY_MCP_EC06_E);

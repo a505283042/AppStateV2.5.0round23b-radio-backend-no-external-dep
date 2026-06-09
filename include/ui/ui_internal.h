@@ -17,6 +17,7 @@
  * - 播放页运行状态
  * - 封面精灵 / 双槽缓存
  * - 列表选择页绘图状态
+ * - 电池状态缓存状态   
  */
 
 static constexpr int COVER_SIZE = 240;                      // 封面大小
@@ -130,3 +131,6 @@ bool cover_decode_to_sprite_from_track(const TrackInfo& t);
 void cover_rotate_draw(float angle_deg);
 void cover_panel_draw(float angle_deg);
 void cover_info_draw();
+
+/* 电池状态页脚绘制。 */
+void ui_draw_battery_footer(LGFX_Sprite* dst);

@@ -36,6 +36,26 @@ struct ChargerStatus {
     bool charging = false;
 };
 
+struct BatteryUiStatus {
+    bool valid = false;
+
+    uint32_t mv_battery = 0;
+    uint32_t mv_adc = 0;
+    uint16_t raw = 0;
+
+    uint8_t percent = 0;
+
+    bool external_power_good = false;
+    bool charging = false;
+
+    uint32_t updated_ms = 0;
+};
+
+// 后台电池状态缓存：
+// tick 内部会控制采样频率，UI 只读取缓存，不直接采样 ADC。
+void board_hw_battery_status_tick();
+BatteryUiStatus board_hw_get_battery_status_cached();
+
 ChargerStatus board_hw_read_charger_status();
 
 bool board_hw_control_begin();

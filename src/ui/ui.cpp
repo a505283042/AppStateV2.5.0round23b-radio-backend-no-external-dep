@@ -18,6 +18,7 @@
 #include "player_list_select.h"
 #include "audio/audio.h"
 #include "audio/audio_service.h"
+#include "hal/board_hw_control.h"
 
 lgfx::U8g2font g_font_cjk(u8g2_font_wenquanyi_merged);
 
@@ -203,6 +204,9 @@ static inline TickType_t ui_period_ticks()
 static void ui_task_entry(void*)
 {
   for (;;) {
+    // 电池状态后台采样（内部 1 分钟采样一次）
+    board_hw_battery_status_tick();
+
     // 动态帧率：rotate 20fps / info 自适应 / other 1fps
     TickType_t period = ui_period_ticks();
     if (period == 0) period = 1;

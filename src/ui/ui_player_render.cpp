@@ -12,6 +12,7 @@
 #include "lyrics/lyrics.h"
 #include "player_assets.h"
 #include "player_state.h"
+#include "hal/board_hw_control.h"
 #include "utils/log.h"
 #include "web/web_settings.h"
 
@@ -93,6 +94,100 @@ static void draw_volume_step_hint_overlay(LGFX_Sprite* dst)
   dst->setTextDatum(middle_left);
   dst->drawString(label, BOX_X + 38, BOX_Y + BOX_H / 2);
   dst->setTextDatum(top_left);
+}
+
+// =============================================================================
+// 电池状态页脚绘制
+// =============================================================================
+
+static void draw_tiny_battery_icon(LGFX_Sprite* dst,
+                                   int x,
+                                   int y,
+                                   uint8_t percent,
+                                   bool external_power_good,
+                                   bool charging,
+                                   uint16_t color)
+{
+    static constexpr int BODY_W = 16;
+    static constexpr int BODY_H = 8;
+    static constexpr int HEAD_W = 2;
+    static constexpr int HEAD_H = 4;
+
+    // 电池外框
+    dst->drawRect(x, y, BODY_W, BODY_H, color);
+    dst->fillRect(x + BODY_W, y + 2, HEAD_W, HEAD_H, color);
+
+    // 电量填充
+    const int inner_w = BODY_W - 4;
+    const int fill_w = static_cast<int>((inner_w * percent) / 100);
+
+    if (fill_w > 0) {
+        dst->fillRect(x + 2, y + 2, fill_w, BODY_H - 4, color);
+    }
+
+    if (external_power_good) {
+        // 有输入电源就显示闪电：
+        // 正在充电用黄色，已接电但未充电/满电用当前状态色。
+        const uint16_t lightning_color = charging ? TFT_YELLOW : color;
+
+        const int bx = x + BODY_W + HEAD_W + 1;
+        const int by = y - 1;
+
+        dst->drawLine(bx + 3, by,     bx,     by + 5, lightning_color);
+        dst->drawLine(bx,     by + 5, bx + 4, by + 5, lightning_color);
+        dst->drawLine(bx + 4, by + 5, bx + 1, by + 10, lightning_color);
+    }
+}
+
+void ui_draw_battery_footer(LGFX_Sprite* dst)
+{
+    if (!dst) {
+        return;
+    }
+
+    const BatteryUiStatus bat = board_hw_get_battery_status_cached();
+    if (!bat.valid) {
+        return;
+    }
+
+    // 圆屏底部可视区域很窄，所以放在底部中间，整体高度控制在 12px。
+    static constexpr int FOOTER_H = 12;
+    static constexpr int Y = 220;
+    // 电池图标约 18px，闪电约 5px，中间 1px 间隔。
+    // ICON_W 包含：电池 + 闪电 + 1px 余量。
+    static constexpr int ICON_W = 24;
+    static constexpr int TEXT_W = 28;
+    static constexpr int GAP = 1;
+    static constexpr int TOTAL_W = ICON_W + GAP + TEXT_W;
+    static constexpr int X = (240 - TOTAL_W) / 2;
+
+    uint16_t color = TFT_LIGHTGREY;
+
+    if (bat.external_power_good) {
+        // 插 USB / 外部供电时更醒目。
+        color = bat.charging ? TFT_CYAN : TFT_LIGHTGREY;
+    } else if (bat.percent <= 15) {
+        color = TFT_ORANGE;
+    }
+
+    char text[8];
+    snprintf(text, sizeof(text), "%u%%", static_cast<unsigned>(bat.percent));
+
+    draw_tiny_battery_icon(dst,
+                       X,
+                       Y,
+                       bat.percent,
+                       bat.external_power_good,
+                       bat.charging,
+                       color);
+
+    dst->setFont(&g_font_cjk);
+    dst->setTextSize(1);
+    dst->setTextWrap(false);
+    dst->setTextColor(color);
+    dst->setTextDatum(middle_left);
+    dst->drawString(text, X + ICON_W + GAP, Y + 4);
+    dst->setTextDatum(top_left);
 }
 
 // 将旋转的封面渲染到后帧并推送到 LCD（稳定路径）
@@ -1287,9 +1382,12 @@ void cover_panel_draw(float angle_deg)
   // 5. 最后画外圈进度弧，避免被面板覆盖
   draw_cover_panel_progress_ring(dst);
 
-  // 6. 绘制音量步进小提示
+  // 6. 电池状态页脚
+  ui_draw_battery_footer(dst);
+
+  // 7. 绘制音量步进小提示
   draw_volume_step_hint_overlay(dst);
-  
+
   dst->pushSprite(0, 0);
 
   uint8_t tmp = s_rotFront;
@@ -1496,10 +1594,13 @@ void cover_info_draw()
   }
 
   uint32_t t_text = millis();
-  // 6) 音量步进小提示 Overlay
+  // 6) 电池状态页脚
+  ui_draw_battery_footer(dst);
+
+  // 7) 音量步进小提示 Overlay
   draw_volume_step_hint_overlay(dst);
-  
-  // 7) 推屏
+
+  // 8) 推屏
   dst->pushSprite(0, 0);
 
   uint32_t t_push = millis();
