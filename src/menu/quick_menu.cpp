@@ -84,6 +84,7 @@ bool confirm_guard_active()
 static bool quick_menu_page_is_dynamic(QuickMenuPage page)
 {
     switch (page) {
+        case QuickMenuPage::AudioOutput:
         case QuickMenuPage::MemoryInfo:
         case QuickMenuPage::StackInfo:
         case QuickMenuPage::BatteryInfo:
@@ -369,6 +370,7 @@ bool quick_menu_get_item_view(uint8_t index, QuickMenuItemView& out)
 
     out.label = item.label ? item.label : "";
     out.value = item_value(item);
+    out.type = item.type;
     out.selected = static_cast<int>(index) == s_selected;
     out.enabled = item.enabled;
     out.placeholder = item.placeholder || item.type == QuickMenuItemType::Placeholder;

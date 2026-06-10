@@ -12,8 +12,10 @@
 #include "audio/audio.h"
 #include "audio/audio_file.h"
 #include "audio/audio_i2s.h"
+#include "audio/audio_output_route.h"
 #include "storage/storage_io.h"
 #include "hal/board_hw_control.h"
+#include "audio/audio_output_route.h"
 #include "utils/log.h"
 
 extern SdFat sd;
@@ -348,19 +350,19 @@ static void audio_task_prepare_amp_after_i2s_ready()
 {
   // I2S 已初始化后，再让功放退出关断。
   // 关键点：退出关断时仍保持静音，避免 SHDN 跳变打到喇叭。
-  (void)board_hw_set_amp_mute(true);
+  (void)audio_output_route_set_amp_mute(true);
   audio_i2s_zero_dma_buffer();
 
   vTaskDelay(pdMS_TO_TICKS(20));
 
-  (void)board_hw_set_amp_shutdown(false);
+  (void)audio_output_route_set_amp_shutdown(false);
 
   // 给 PAM8406 / 输出电容 / 模拟链路一点稳定时间。
   vTaskDelay(pdMS_TO_TICKS(150));
 
   // 注意：这里不要取消静音。
   // 真正开始播放且首批 PCM 推进后，再取消静音。
-  (void)board_hw_set_amp_mute(true);
+  (void)audio_output_route_set_amp_mute(true);
 
   LOGI("[AUDIO] amp prepared: shutdown released, muted");
 }
@@ -388,7 +390,7 @@ static void audio_task_entry(void*){
 
         // 停止后只静音，不关断功放。
         // 关断功放留到整机关机时再做，避免下一次播放 SHDN 跳变产生 pop。
-        (void)board_hw_set_amp_mute(true);
+        (void)audio_output_route_set_amp_mute(true);
 
         const uint32_t t_done = millis();
         LOGD("[AUDIO] service cmd stop exec=%lums", (unsigned long)(t_done - t_cmd));
@@ -396,7 +398,7 @@ static void audio_task_entry(void*){
         const uint32_t t_cmd = millis();
 
         // 播放前先保持功放静音，避免切歌/开机瞬态打到喇叭。
-        (void)board_hw_set_amp_mute(true);
+        (void)audio_output_route_set_amp_mute(true);
 
         if (audio_is_playing() || s_playing_cache || s_fade_gain > 0.0f) {
           audio_task_soft_stop_impl(true);
@@ -408,7 +410,7 @@ static void audio_task_entry(void*){
           audio_i2s_zero_dma_buffer();
         }
 
-        (void)board_hw_set_amp_mute(true);
+        (void)audio_output_route_set_amp_mute(true);
 
         bool ok = (cmd.type == CMD_PLAY_STREAM_MP3) ? audio_play_stream_mp3(cmd.path) : audio_play(cmd.path);
         const uint32_t t_done = millis();
@@ -429,9 +431,9 @@ static void audio_task_entry(void*){
           s_fade_gain = PLAY_START_GAIN;
           s_last_fade_gain = PLAY_START_GAIN;
 
-          (void)board_hw_set_amp_mute(false);
+          (void)audio_output_route_set_amp_mute(false);
         } else {
-          (void)board_hw_set_amp_mute(true);
+          (void)audio_output_route_set_amp_mute(true);
           s_fade_gain = 0.0f;
           s_last_fade_gain = 0.0f;
         }
@@ -674,7 +676,7 @@ void audio_service_pause() {
 }
 void audio_service_resume() {
     // 恢复播放时只取消静音，不动 SHDN。
-    (void)board_hw_set_amp_mute(false);
+    (void)audio_output_route_set_amp_mute(false);
     s_paused = false;
 }
 bool audio_service_is_paused() { return s_paused; }

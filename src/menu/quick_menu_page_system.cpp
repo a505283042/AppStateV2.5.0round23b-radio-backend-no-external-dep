@@ -345,7 +345,7 @@ const QuickMenuItem SYSTEM_ITEMS[] = {
     {"扩展芯片", QuickMenuItemType::Status, QuickMenuPage::SystemInfo, "", value_mcp23017_status, nullptr, true, false},
     {"I2C通信", QuickMenuItemType::Status, QuickMenuPage::SystemInfo, "", value_i2c_status, nullptr, true, false},
     {"电池状态", QuickMenuItemType::SubPage, QuickMenuPage::BatteryInfo, "", value_open, nullptr, true, false},
-    {"恢复出厂", QuickMenuItemType::Placeholder, QuickMenuPage::SystemInfo, "", value_placeholder, nullptr, false, true},
+    {"恢复出厂", QuickMenuItemType::SubPage, QuickMenuPage::FactoryResetConfirm, "确认", nullptr, nullptr, true, false},
     {"返回", QuickMenuItemType::Back, QuickMenuPage::Root, "", nullptr, nullptr, true, false},
 };
 
@@ -378,6 +378,11 @@ const QuickMenuItem BATTERY_ITEMS[] = {
     {"采样电压", QuickMenuItemType::Status, QuickMenuPage::BatteryInfo, "", value_battery_adc_mv, nullptr, true, false},
     {"采样数值", QuickMenuItemType::Status, QuickMenuPage::BatteryInfo, "", value_battery_raw, nullptr, true, false},
     {"返回", QuickMenuItemType::Back, QuickMenuPage::SystemInfo, "", nullptr, nullptr, true, false},
+};
+
+const QuickMenuItem FACTORY_RESET_CONFIRM_ITEMS[] = {
+    {"确认清除", QuickMenuItemType::Placeholder, QuickMenuPage::FactoryResetConfirm, "待接入", nullptr, nullptr, false, true},
+    {"取消返回", QuickMenuItemType::Back, QuickMenuPage::SystemInfo, "", nullptr, nullptr, true, false},
 };
 
 } // namespace
@@ -429,6 +434,19 @@ const QuickMenuPageDef& quick_menu_get_battery_page()
         QuickMenuPage::SystemInfo,
         BATTERY_ITEMS,
         MENU_COUNT(BATTERY_ITEMS),
+    };
+
+    return page;
+}
+
+const QuickMenuPageDef& quick_menu_get_factory_reset_confirm_page()
+{
+    static const QuickMenuPageDef page = {
+        "恢复出厂",
+        QuickMenuPage::FactoryResetConfirm,
+        QuickMenuPage::SystemInfo,
+        FACTORY_RESET_CONFIRM_ITEMS,
+        MENU_COUNT(FACTORY_RESET_CONFIRM_ITEMS),
     };
 
     return page;

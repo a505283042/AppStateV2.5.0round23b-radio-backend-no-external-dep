@@ -23,6 +23,7 @@ enum class QuickMenuPage : uint8_t {
     MemoryInfo,
     StackInfo,
     BatteryInfo,
+    FactoryResetConfirm,
 };
 
 enum class QuickMenuItemType : uint8_t {
@@ -37,6 +38,7 @@ enum class QuickMenuItemType : uint8_t {
 struct QuickMenuItemView {
     const char* label = "";
     const char* value = "";
+    QuickMenuItemType type = QuickMenuItemType::Status;
     bool selected = false;
     bool enabled = true;
     bool placeholder = false;

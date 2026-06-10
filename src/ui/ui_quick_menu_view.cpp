@@ -17,7 +17,8 @@ static constexpr int ROW_X = 16;
 static constexpr int ROW_W = 208;
 static constexpr int ROW_R = 6;
 
-static constexpr int LABEL_X = 28;
+static constexpr int MARK_X = 20;
+static constexpr int LABEL_X = 34;
 static constexpr int VALUE_X = 210;
 
 static constexpr uint16_t COLOR_BG = TFT_BLACK;
@@ -140,8 +141,9 @@ void draw_footer()
     tft.setTextWrap(false);
 
     tft.setTextColor(COLOR_DIM, COLOR_BG);
-    draw_center_text("旋钮选择  按下确认", 178);
-    draw_center_text("MODE 返回/退出", 193);
+tft.setTextColor(COLOR_DIM, COLOR_BG);
+draw_center_text("旋钮选择 按下确认 M返回", 178);
+draw_center_text(">进 !执行 +切换 =状态", 193);
 }
 
 void draw_menu_frame(const char* title, int start_idx, int total)
@@ -152,6 +154,37 @@ void draw_menu_frame(const char* title, int start_idx, int total)
     draw_footer();
 }
 
+const char* menu_type_marker(QuickMenuItemType type, bool placeholder)
+{
+    if (placeholder) {
+        return "-";
+    }
+
+    switch (type) {
+        case QuickMenuItemType::SubPage:
+            return ">";
+        case QuickMenuItemType::Action:
+            return "!";
+        case QuickMenuItemType::Toggle:
+            return "+";
+        case QuickMenuItemType::Status:
+            return "=";
+        case QuickMenuItemType::Back:
+            return "<";
+        case QuickMenuItemType::Placeholder:
+        default:
+            return "-";
+    }
+}
+
+bool menu_type_is_operable(QuickMenuItemType type)
+{
+    return type == QuickMenuItemType::SubPage ||
+           type == QuickMenuItemType::Action ||
+           type == QuickMenuItemType::Toggle ||
+           type == QuickMenuItemType::Back;
+}
+
 void draw_menu_row(const QuickMenuItemView& item, int row, bool draw_bg)
 {
     const int row_y = ROW_START_Y + row * ROW_H;
@@ -160,12 +193,19 @@ void draw_menu_row(const QuickMenuItemView& item, int row, bool draw_bg)
     int row_h = 0;
     get_menu_row_rect(row, row_top, row_h);
 
+    const bool placeholder = item.placeholder || item.type == QuickMenuItemType::Placeholder;
+    const bool operable = item.enabled && menu_type_is_operable(item.type) && !placeholder;
+    const bool status_only = item.type == QuickMenuItemType::Status && !placeholder;
+
     const uint16_t bg = item.selected ? COLOR_SELECTED_BG : COLOR_BG;
+    const uint16_t marker_color = item.enabled
+        ? (item.selected ? COLOR_SELECTED_TEXT : (operable ? COLOR_TEXT : COLOR_DIM))
+        : COLOR_DISABLED;
     const uint16_t label_color = item.enabled
-        ? (item.selected ? COLOR_SELECTED_TEXT : COLOR_TEXT)
+        ? (item.selected ? COLOR_SELECTED_TEXT : (status_only ? COLOR_DIM : COLOR_TEXT))
         : COLOR_DISABLED;
     const uint16_t value_color = item.enabled
-        ? (item.selected ? COLOR_SELECTED_TEXT : COLOR_DIM)
+        ? (item.selected ? COLOR_SELECTED_TEXT : (operable ? COLOR_TEXT : COLOR_DIM))
         : COLOR_DISABLED;
 
     if (draw_bg) {
@@ -179,23 +219,26 @@ void draw_menu_row(const QuickMenuItemView& item, int row, bool draw_bg)
     String label = item.label ? String(item.label) : String("");
     String value = item.value ? String(item.value) : String("");
 
-    if (item.placeholder && value.length() == 0) {
+    if (placeholder && value.length() == 0) {
         value = "占位";
     }
 
     const int value_w = value.length() > 0 ? tft.textWidth(value) : 0;
 
-    int label_max_w = 160;
+    int label_max_w = 150;
     if (value_w > 0) {
         label_max_w = VALUE_X - LABEL_X - value_w - 10;
-        if (label_max_w < 60) {
-            label_max_w = 60;
+        if (label_max_w < 56) {
+            label_max_w = 56;
         }
     }
 
     label = clip_utf8_for_tft(label, label_max_w);
 
     tft.setTextDatum(middle_left);
+    tft.setTextColor(marker_color, bg);
+    tft.drawString(menu_type_marker(item.type, placeholder), MARK_X, row_y);
+
     tft.setTextColor(label_color, bg);
     tft.drawString(label, LABEL_X, row_y);
 

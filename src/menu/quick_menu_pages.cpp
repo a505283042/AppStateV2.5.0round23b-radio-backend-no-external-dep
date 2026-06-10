@@ -4,6 +4,9 @@
 #include "menu/quick_menu_page_playback.h"
 #include "menu/quick_menu_page_display.h"
 #include "menu/quick_menu_page_system.h"
+#include "menu/quick_menu_page_audio_output.h"
+#include "menu/quick_menu_page_source.h"
+#include "menu/quick_menu_page_nfc.h"
 
 namespace {
 
@@ -15,47 +18,8 @@ const QuickMenuItem ROOT_ITEMS[] = {
     {"显示设置", QuickMenuItemType::SubPage, QuickMenuPage::Display, "", nullptr, nullptr, true, false},
     {"网络设置", QuickMenuItemType::SubPage, QuickMenuPage::Network, "", nullptr, nullptr, true, false},
     {"音频输出", QuickMenuItemType::SubPage, QuickMenuPage::AudioOutput, "", nullptr, nullptr, true, false},
-    {"蓝牙设置", QuickMenuItemType::SubPage, QuickMenuPage::Bluetooth, "", nullptr, nullptr, true, false},
     {"NFC", QuickMenuItemType::SubPage, QuickMenuPage::Nfc, "", nullptr, nullptr, true, false},
     {"系统信息", QuickMenuItemType::SubPage, QuickMenuPage::SystemInfo, "", nullptr, nullptr, true, false},
-    {"返回", QuickMenuItemType::Back, QuickMenuPage::Root, "", nullptr, nullptr, true, false},
-};
-
-
-const QuickMenuItem SOURCE_ITEMS[] = {
-    {"本地音乐", QuickMenuItemType::Placeholder, QuickMenuPage::Source, "待接入", nullptr, nullptr, false, true},
-    {"网络电台", QuickMenuItemType::Placeholder, QuickMenuPage::Source, "待接入", nullptr, nullptr, false, true},
-    {"NAS音乐", QuickMenuItemType::Placeholder, QuickMenuPage::Source, "待接入", nullptr, nullptr, false, true},
-    {"返回", QuickMenuItemType::Back, QuickMenuPage::Root, "", nullptr, nullptr, true, false},
-};
-
-const QuickMenuItem AUDIO_OUTPUT_ITEMS[] = {
-    {"输出路径", QuickMenuItemType::Placeholder, QuickMenuPage::AudioOutput, "占位", nullptr, nullptr, false, true},
-    {"功放", QuickMenuItemType::Placeholder, QuickMenuPage::AudioOutput, "待接入", nullptr, nullptr, false, true},
-    {"功放静音", QuickMenuItemType::Placeholder, QuickMenuPage::AudioOutput, "待接入", nullptr, nullptr, false, true},
-    {"蓝牙发射", QuickMenuItemType::Placeholder, QuickMenuPage::AudioOutput, "待接入", nullptr, nullptr, false, true},
-    {"输出测试", QuickMenuItemType::Placeholder, QuickMenuPage::AudioOutput, "占位", nullptr, nullptr, false, true},
-    {"返回", QuickMenuItemType::Back, QuickMenuPage::Root, "", nullptr, nullptr, true, false},
-};
-
-const QuickMenuItem BLUETOOTH_ITEMS[] = {
-    {"蓝牙电源", QuickMenuItemType::Placeholder, QuickMenuPage::Bluetooth, "待接入", nullptr, nullptr, false, true},
-    {"蓝牙角色查询", QuickMenuItemType::Placeholder, QuickMenuPage::Bluetooth, "占位", nullptr, nullptr, false, true},
-    {"输入模式查询", QuickMenuItemType::Placeholder, QuickMenuPage::Bluetooth, "占位", nullptr, nullptr, false, true},
-    {"蓝牙名称查询", QuickMenuItemType::Placeholder, QuickMenuPage::Bluetooth, "占位", nullptr, nullptr, false, true},
-    {"允许配对", QuickMenuItemType::Placeholder, QuickMenuPage::Bluetooth, "占位", nullptr, nullptr, false, true},
-    {"SW配对确认", QuickMenuItemType::Placeholder, QuickMenuPage::Bluetooth, "占位", nullptr, nullptr, false, true},
-    {"WKP休眠唤醒", QuickMenuItemType::Placeholder, QuickMenuPage::Bluetooth, "占位", nullptr, nullptr, false, true},
-    {"蓝牙重启", QuickMenuItemType::Placeholder, QuickMenuPage::Bluetooth, "占位", nullptr, nullptr, false, true},
-    {"返回", QuickMenuItemType::Back, QuickMenuPage::Root, "", nullptr, nullptr, true, false},
-};
-
-const QuickMenuItem NFC_ITEMS[] = {
-    {"当前曲绑定NFC", QuickMenuItemType::Placeholder, QuickMenuPage::Nfc, "待接入", nullptr, nullptr, false, true},
-    {"当前歌手绑定NFC", QuickMenuItemType::Placeholder, QuickMenuPage::Nfc, "待接入", nullptr, nullptr, false, true},
-    {"当前专辑绑定NFC", QuickMenuItemType::Placeholder, QuickMenuPage::Nfc, "待接入", nullptr, nullptr, false, true},
-    {"NFC绑定列表", QuickMenuItemType::Placeholder, QuickMenuPage::Nfc, "占位", nullptr, nullptr, false, true},
-    {"清除当前绑定", QuickMenuItemType::Placeholder, QuickMenuPage::Nfc, "占位", nullptr, nullptr, false, true},
     {"返回", QuickMenuItemType::Back, QuickMenuPage::Root, "", nullptr, nullptr, true, false},
 };
 
@@ -67,39 +31,6 @@ const QuickMenuPageDef ROOT_PAGE = {
     MENU_COUNT(ROOT_ITEMS),
 };
 
-const QuickMenuPageDef SOURCE_PAGE = {
-    "播放源",
-    QuickMenuPage::Source,
-    QuickMenuPage::Root,
-    SOURCE_ITEMS,
-    MENU_COUNT(SOURCE_ITEMS),
-};
-
-const QuickMenuPageDef AUDIO_OUTPUT_PAGE = {
-    "音频输出",
-    QuickMenuPage::AudioOutput,
-    QuickMenuPage::Root,
-    AUDIO_OUTPUT_ITEMS,
-    MENU_COUNT(AUDIO_OUTPUT_ITEMS),
-};
-
-const QuickMenuPageDef BLUETOOTH_PAGE = {
-    "蓝牙设置",
-    QuickMenuPage::Bluetooth,
-    QuickMenuPage::Root,
-    BLUETOOTH_ITEMS,
-    MENU_COUNT(BLUETOOTH_ITEMS),
-};
-
-const QuickMenuPageDef NFC_PAGE = {
-    "NFC",
-    QuickMenuPage::Nfc,
-    QuickMenuPage::Root,
-    NFC_ITEMS,
-    MENU_COUNT(NFC_ITEMS),
-};
-
-
 } // namespace
 
 const QuickMenuPageDef& quick_menu_get_page_def(QuickMenuPage page)
@@ -109,7 +40,7 @@ const QuickMenuPageDef& quick_menu_get_page_def(QuickMenuPage page)
             return quick_menu_get_playback_page();
 
         case QuickMenuPage::Source:
-            return SOURCE_PAGE;
+            return quick_menu_get_source_page();
 
         case QuickMenuPage::Display:
             return quick_menu_get_display_page();
@@ -118,13 +49,10 @@ const QuickMenuPageDef& quick_menu_get_page_def(QuickMenuPage page)
             return quick_menu_get_network_page();
 
         case QuickMenuPage::AudioOutput:
-            return AUDIO_OUTPUT_PAGE;
-
-        case QuickMenuPage::Bluetooth:
-            return BLUETOOTH_PAGE;
+            return quick_menu_get_audio_output_page();
 
         case QuickMenuPage::Nfc:
-            return NFC_PAGE;
+            return quick_menu_get_nfc_page();
 
         case QuickMenuPage::SystemInfo:
             return quick_menu_get_system_page();
@@ -137,6 +65,9 @@ const QuickMenuPageDef& quick_menu_get_page_def(QuickMenuPage page)
 
         case QuickMenuPage::BatteryInfo:
             return quick_menu_get_battery_page();
+
+        case QuickMenuPage::FactoryResetConfirm:
+            return quick_menu_get_factory_reset_confirm_page();
 
         case QuickMenuPage::Root:
         default:
