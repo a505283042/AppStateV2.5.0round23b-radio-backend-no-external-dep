@@ -24,12 +24,7 @@ const char* value_output_path()
     return audio_output_route_label();
 }
 
-const char* value_switch_to_speaker()
-{
-    return s_bt_reboot_in_progress ? "重启中" : "执行";
-}
-
-const char* value_switch_to_bluetooth()
+const char* value_switch_route()
 {
     return s_bt_reboot_in_progress ? "重启中" : "执行";
 }
@@ -67,6 +62,16 @@ const char* value_bt_wakeup()
 const char* value_bt_reboot()
 {
     return s_bt_reboot_in_progress ? "重启中" : "执行";
+}
+
+bool action_select_headphone_only()
+{
+    if (s_bt_reboot_in_progress) {
+        LOGW("[AUDIO_OUT] select headphone ignored: bt rebooting");
+        return false;
+    }
+
+    return audio_output_route_select_headphone_only();
 }
 
 bool action_select_speaker()
@@ -184,10 +189,17 @@ bool action_reboot_bt_module()
 
     return true;
 }
+const QuickMenuItem HEADPHONE_ITEMS[] = {
+    {"输出路径", QuickMenuItemType::Status, QuickMenuPage::AudioOutput, "", value_output_path, nullptr, true, false},
+    {"切到功放", QuickMenuItemType::Action, QuickMenuPage::AudioOutput, "", value_switch_route, action_select_speaker, true, false},
+    {"切到蓝牙", QuickMenuItemType::Action, QuickMenuPage::AudioOutput, "", value_switch_route, action_select_bluetooth, true, false},
+    {"返回", QuickMenuItemType::Back, QuickMenuPage::Root, "", nullptr, nullptr, true, false},
+};
 
 const QuickMenuItem SPEAKER_ITEMS[] = {
     {"输出路径", QuickMenuItemType::Status, QuickMenuPage::AudioOutput, "", value_output_path, nullptr, true, false},
-    {"切到蓝牙", QuickMenuItemType::Action, QuickMenuPage::AudioOutput, "", value_switch_to_bluetooth, action_select_bluetooth, true, false},
+    {"切到耳机", QuickMenuItemType::Action, QuickMenuPage::AudioOutput, "", value_switch_route, action_select_headphone_only, true, false},
+    {"切到蓝牙", QuickMenuItemType::Action, QuickMenuPage::AudioOutput, "", value_switch_route, action_select_bluetooth, true, false},
     {"功放静音", QuickMenuItemType::Toggle, QuickMenuPage::AudioOutput, "", value_amp_mute, action_toggle_amp_mute, true, false},
     {"功放状态", QuickMenuItemType::Status, QuickMenuPage::AudioOutput, "", value_amp_power, nullptr, true, false},
     {"返回", QuickMenuItemType::Back, QuickMenuPage::Root, "", nullptr, nullptr, true, false},
@@ -195,7 +207,8 @@ const QuickMenuItem SPEAKER_ITEMS[] = {
 
 const QuickMenuItem BLUETOOTH_TX_ITEMS[] = {
     {"输出路径", QuickMenuItemType::Status, QuickMenuPage::AudioOutput, "", value_output_path, nullptr, true, false},
-    {"切到功放", QuickMenuItemType::Action, QuickMenuPage::AudioOutput, "", value_switch_to_speaker, action_select_speaker, true, false},
+    {"切到耳机", QuickMenuItemType::Action, QuickMenuPage::AudioOutput, "", value_switch_route, action_select_headphone_only, true, false},
+    {"切到功放", QuickMenuItemType::Action, QuickMenuPage::AudioOutput, "", value_switch_route, action_select_speaker, true, false},
     {"蓝牙配对", QuickMenuItemType::Action, QuickMenuPage::AudioOutput, "", value_bt_pair, action_pulse_bt_switch, true, false},
     {"蓝牙待机", QuickMenuItemType::Toggle, QuickMenuPage::AudioOutput, "", value_bt_wakeup, action_toggle_bt_wakeup, true, false},
     {"蓝牙重启", QuickMenuItemType::Action, QuickMenuPage::AudioOutput, "", value_bt_reboot, action_reboot_bt_module, true, false},
@@ -206,6 +219,18 @@ const QuickMenuItem BLUETOOTH_TX_ITEMS[] = {
 
 const QuickMenuPageDef& quick_menu_get_audio_output_page()
 {
+    if (audio_output_route_is_headphone_only()) {
+        static const QuickMenuPageDef headphone_page = {
+            "音频输出",
+            QuickMenuPage::AudioOutput,
+            QuickMenuPage::Root,
+            HEADPHONE_ITEMS,
+            MENU_COUNT(HEADPHONE_ITEMS),
+        };
+
+        return headphone_page;
+    }
+
     if (audio_output_route_is_bluetooth_tx()) {
         static const QuickMenuPageDef bluetooth_page = {
             "音频输出",

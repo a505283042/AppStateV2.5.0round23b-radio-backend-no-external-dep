@@ -32,7 +32,10 @@ static bool s_first_draw = true;
 static QuickMenuPage s_last_page = QuickMenuPage::Root;
 static int s_last_start_idx = -1;
 static int s_last_selected_idx = -1;
+static int s_last_total = -1;
 static uint32_t s_last_revision = 0;
+static String s_last_row_signature[ROW_COUNT];
+static bool s_last_row_valid[ROW_COUNT] = {};
 
 String clip_utf8_for_tft(const String& text, int max_w)
 {
@@ -89,6 +92,24 @@ void get_menu_row_rect(int row, int& row_top, int& row_h)
     const int row_y = ROW_START_Y + row * ROW_H;
     row_top = row_y - ROW_H / 2;
     row_h = ROW_H - 2;
+}
+
+void reset_row_cache()
+{
+    for (int row = 0; row < ROW_COUNT; ++row) {
+        s_last_row_signature[row] = "";
+        s_last_row_valid[row] = false;
+    }
+}
+
+void clear_menu_row(int row)
+{
+    int row_top = 0;
+    int row_h = 0;
+    get_menu_row_rect(row, row_top, row_h);
+
+    // 清掉旧行区域，避免菜单行数变少或内容变短时留下残影。
+    tft.fillRoundRect(ROW_X, row_top, ROW_W, row_h, ROW_R, COLOR_BG);
 }
 
 void draw_menu_header(const char* title)
@@ -253,20 +274,62 @@ void draw_menu_row(const QuickMenuItemView& item, int row, bool draw_bg)
     tft.setTextDatum(top_left);
 }
 
-void draw_visible_rows(int start_idx, int total)
+String make_menu_row_signature(const QuickMenuItemView& item)
+{
+    String sig;
+    sig.reserve(64);
+    sig += static_cast<int>(item.type);
+    sig += '|';
+    sig += item.selected ? '1' : '0';
+    sig += '|';
+    sig += item.enabled ? '1' : '0';
+    sig += '|';
+    sig += item.placeholder ? '1' : '0';
+    sig += '|';
+    sig += item.label ? item.label : "";
+    sig += '|';
+    sig += item.value ? item.value : "";
+    return sig;
+}
+
+void draw_menu_row_cached(const QuickMenuItemView& item, int row, bool force)
+{
+    const String signature = make_menu_row_signature(item);
+
+    if (!force && s_last_row_valid[row] && s_last_row_signature[row] == signature) {
+        return;
+    }
+
+    draw_menu_row(item, row, true);
+    s_last_row_signature[row] = signature;
+    s_last_row_valid[row] = true;
+}
+
+void draw_visible_rows(int start_idx, int total, bool force)
 {
     for (int row = 0; row < ROW_COUNT; ++row) {
         const int item_idx = start_idx + row;
+
         if (item_idx >= total) {
+            if (force || s_last_row_valid[row]) {
+                clear_menu_row(row);
+                s_last_row_signature[row] = "";
+                s_last_row_valid[row] = false;
+            }
             continue;
         }
 
         QuickMenuItemView item;
         if (!quick_menu_get_item_view(item_idx, item)) {
+            if (force || s_last_row_valid[row]) {
+                clear_menu_row(row);
+                s_last_row_signature[row] = "";
+                s_last_row_valid[row] = false;
+            }
             continue;
         }
 
-        draw_menu_row(item, row, true);
+        draw_menu_row_cached(item, row, force);
     }
 }
 
@@ -292,7 +355,9 @@ void ui_quick_menu_view_reset()
     s_last_page = QuickMenuPage::Root;
     s_last_start_idx = -1;
     s_last_selected_idx = -1;
+    s_last_total = -1;
     s_last_revision = 0;
+    reset_row_cache();
 }
 
 void ui_draw_quick_menu()
@@ -312,26 +377,33 @@ void ui_draw_quick_menu()
     const bool page_changed = page != s_last_page;
     const bool start_changed = start_idx != s_last_start_idx;
     const bool selection_changed = selected != s_last_selected_idx;
+    const bool total_changed = total != s_last_total;
     const bool content_changed = revision != s_last_revision;
 
     // 没有任何变化，直接返回。
-    if (!s_first_draw && !page_changed && !start_changed && !selection_changed && !content_changed) {
+    if (!s_first_draw && !page_changed && !start_changed && !selection_changed && !total_changed && !content_changed) {
         return;
     }
 
-    // 情况 A：首次进入、切换页面、翻页，整屏重画。
+    // 情况 A：首次进入、切换页面、翻页，才整屏重画。
+    // 注意：菜单行数变化不能直接 fillScreen，否则音频输出页切换模式时容易造成整屏闪烁。
     if (s_first_draw || page_changed || start_changed) {
         draw_menu_frame(title, start_idx, total);
-        draw_visible_rows(start_idx, total);
+        reset_row_cache();
+        draw_visible_rows(start_idx, total, true);
     }
-    // 情况 B：同一页内上下移动，只重画旧行和新行。
+    // 情况 B：同一页菜单行数变化，只重画菜单行区域并清掉多余旧行，不重画标题/底部。
+    else if (total_changed) {
+        draw_visible_rows(start_idx, total, true);
+    }
+    // 情况 C：同一页内上下移动，只重画旧行和新行。
     else if (selection_changed) {
         int old_row = -1;
         if (get_row_for_item(s_last_selected_idx, start_idx, total, old_row)) {
             QuickMenuItemView old_item;
             if (quick_menu_get_item_view(s_last_selected_idx, old_item)) {
                 old_item.selected = false;
-                draw_menu_row(old_item, old_row, true);
+                draw_menu_row_cached(old_item, old_row, true);
             }
         }
 
@@ -340,19 +412,20 @@ void ui_draw_quick_menu()
             QuickMenuItemView new_item;
             if (quick_menu_get_item_view(selected, new_item)) {
                 new_item.selected = true;
-                draw_menu_row(new_item, new_row, true);
+                draw_menu_row_cached(new_item, new_row, true);
             }
         }
     }
-    // 情况 C：同页同选中项，但状态值变化，例如 WiFi 开关变化。
+    // 情况 D：同页同选中项，但状态值变化，例如 WiFi 开关变化。
     else if (content_changed) {
-        draw_visible_rows(start_idx, total);
+        draw_visible_rows(start_idx, total, false);
     }
 
     s_first_draw = false;
     s_last_page = page;
     s_last_start_idx = start_idx;
     s_last_selected_idx = selected;
+    s_last_total = total;
     s_last_revision = revision;
 
 }
