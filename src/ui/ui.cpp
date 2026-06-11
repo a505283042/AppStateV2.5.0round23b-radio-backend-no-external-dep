@@ -89,6 +89,7 @@ LGFX_Sprite* s_src = nullptr;
 
 int s_list_last_drawn_idx = -1;
 bool s_quick_menu_was_active = false;
+bool s_list_select_was_active = false;
 
 float s_angle_deg = 0.0f;
 uint32_t s_rot_last_ms = 0;
@@ -162,11 +163,13 @@ static inline TickType_t ui_period_ticks()
   if (s_ui_hold) return pdMS_TO_TICKS(1000 / UI_FPS_ROTATE);
 
 
+  // 列表选择模式优先于快捷菜单。
+  // 从快捷菜单进入列表时菜单仍保持 active，帧率判断也要优先按列表处理，
+  // 避免列表刷新被菜单状态降级或延后。
+  if (player_list_select_is_active()) return pdMS_TO_TICKS(1000 / 20);
+
   // 快捷菜单：不需要高帧率，但需要比 1fps 更跟手。
   if (quick_menu_is_active()) return pdMS_TO_TICKS(1000 / 10);
-
-  // 列表选择模式：使用较高帧率以实现平滑滚动
-  if (player_list_select_is_active()) return pdMS_TO_TICKS(1000 / 20);
 
   // PLAYER 界面：按视图区分帧率。
   // 封面旋转关闭后降低刷新压力，但面板视图仍保留歌词/进度刷新。
@@ -222,8 +225,57 @@ static void ui_task_entry(void*)
       continue;
     }
 
-    // 快捷菜单优先级高于列表选择和播放器页面。
+    // 菜单计时仍然要跑，但绘制优先级必须是：列表选择 > 快捷菜单 > 播放器。
+    // 播放源菜单打开列表时会保留 quick_menu active，方便 MODE 短按返回菜单；
+    // 如果这里先画菜单，屏幕会停在菜单页，出现“列表能选能播但 UI 不变”。
     quick_menu_tick();
+
+    if (player_list_select_is_active()) {
+      s_list_select_was_active = true;
+
+      ui_draw_lock();
+
+      int current_idx = player_list_select_get_selected_idx();
+      ListSelectState state = player_list_select_get_state();
+
+      if (state == ListSelectState::RADIO) {
+        const auto& radios = player_list_select_get_radios();
+        ui_draw_radio_select(radios, current_idx, "选择电台");
+      } else if (state == ListSelectState::NET_TRACK) {
+        const auto& items = player_list_select_get_net_tracks();
+        ui_draw_net_music_select(items,
+                                player_list_select_get_net_track_page_start(),
+                                current_idx,
+                                player_list_select_get_net_track_total(),
+                                "选择NAS歌曲");
+      } else if (state == ListSelectState::TRACKS) {
+        const auto& tracks = player_list_select_get_tracks();
+        ui_draw_track_select(tracks, current_idx, "选择歌曲");
+      } else {
+        const char* title = (state == ListSelectState::ARTIST) ? "选择歌手" : "选择专辑";
+        const auto& groups = player_list_select_get_groups();
+        ui_draw_list_select(groups, current_idx, title);
+      }
+
+      s_list_last_drawn_idx = current_idx;
+      ui_draw_unlock();
+      continue;
+    }
+
+    if (s_list_select_was_active) {
+      s_list_select_was_active = false;
+
+      if (quick_menu_is_active()) {
+        // 列表刚退回菜单时，菜单内容本身可能没有 revision 变化，
+        // 但屏幕已经被列表页覆盖，必须强制整屏重画一次。
+        ui_quick_menu_view_reset();
+        s_quick_menu_was_active = false;
+      } else {
+        // 列表直接退出到播放器时，也让播放器下一帧重新清一次背景。
+        s_screen_cleared = false;
+      }
+    }
+
     if (quick_menu_is_active()) {
       if (!s_quick_menu_was_active) {
         ui_quick_menu_view_reset();
@@ -243,37 +295,7 @@ static void ui_task_entry(void*)
       s_screen_cleared = false;
     }
 
-    // 检查是否处于列表选择模式
-    if (player_list_select_is_active()) {
-      ui_draw_lock();
-      int current_idx = player_list_select_get_selected_idx();
-      ListSelectState state = player_list_select_get_state();
-
-    if (state == ListSelectState::RADIO) {
-      const auto& radios = player_list_select_get_radios();
-      ui_draw_radio_select(radios, current_idx, "选择电台");
-    } else if (state == ListSelectState::NET_TRACK) {
-      const auto& items = player_list_select_get_net_tracks();
-      ui_draw_net_music_select(items,
-                              player_list_select_get_net_track_page_start(),
-                              current_idx,
-                              player_list_select_get_net_track_total(),
-                              "选择NAS歌曲");
-    } else if (state == ListSelectState::TRACKS) {
-      const auto& tracks = player_list_select_get_tracks();
-      ui_draw_track_select(tracks, current_idx, "选择歌曲");
-    } else {
-      const char* title = (state == ListSelectState::ARTIST) ? "选择歌手" : "选择专辑";
-      const auto& groups = player_list_select_get_groups();
-      ui_draw_list_select(groups, current_idx, title);
-    }
-
-      s_list_last_drawn_idx = current_idx;
-      ui_draw_unlock();
-      continue;
-    }
-
-    // 只在 PLAYER 界面、封面就绪时推屏
+    // 没有菜单/列表覆盖时，正常绘制播放器页面。
     if (s_screen == UI_SCREEN_PLAYER && s_coverSprReady && s_framesInited) {
       ui_draw_lock();
 

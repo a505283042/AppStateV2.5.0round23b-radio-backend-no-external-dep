@@ -10,6 +10,9 @@ extern SdFat sd;
 #include <vector>
 
 static std::vector<NfcBindingEntry> s_bindings;
+// dirty=true 表示当前内存绑定表比 TF 卡上的 /System/nfc_map.txt 更新。
+// 刷卡绑定时只改这里，避免播放中写 TF；关机时再统一 flush。
+static bool s_bindings_dirty = false;
 
 static void ensure_capacity_once()
 {
@@ -85,6 +88,7 @@ void nfc_binding_clear()
 {
     ensure_capacity_once();
     s_bindings.clear();
+    s_bindings_dirty = false;
 }
 
 int nfc_binding_count()
@@ -146,10 +150,14 @@ bool nfc_binding_set(const String& uid,
         s_bindings.push_back(entry);
     }
 
-    LOGI("[NFC_BIND] update uid=%s type=%s key=%s display=%s", 
-         entry.uid.c_str(), 
-         nfc_binding_type_to_cstr(entry.type), 
-         entry.key.c_str(), 
+    // NFC 绑定确认时只更新内存表并标记 dirty，不在播放中立即写 TF。
+    // 统一在关机流程停音频后再 flush 到 /System/nfc_map.txt。
+    s_bindings_dirty = true;
+
+    LOGI("[NFC_BIND] update uid=%s type=%s key=%s display=%s",
+         entry.uid.c_str(),
+         nfc_binding_type_to_cstr(entry.type),
+         entry.key.c_str(),
          entry.display.c_str());
 
     return true;
@@ -161,7 +169,29 @@ bool nfc_binding_remove(const String& uid)
     if (idx < 0) return false;
 
     s_bindings.erase(s_bindings.begin() + idx);
+    s_bindings_dirty = true;
     return true;
+}
+
+bool nfc_binding_is_dirty()
+{
+    return s_bindings_dirty;
+}
+
+void nfc_binding_set_dirty(bool dirty)
+{
+    s_bindings_dirty = dirty;
+}
+
+bool nfc_binding_flush_if_dirty(const char* path)
+{
+    if (!s_bindings_dirty) {
+        LOGI("[NFC_BIND] flush skipped: no dirty binding");
+        return true;
+    }
+
+    LOGI("[NFC_BIND] flushing dirty map to TF: %s", path);
+    return nfc_binding_save(path);
 }
 
 bool nfc_binding_load(const char* path)
@@ -208,6 +238,10 @@ bool nfc_binding_load(const char* path)
 
     f.close();
 
+    // load 过程中会复用 nfc_binding_set()，它会标 dirty；
+    // 文件加载完成后，内存表和 TF 文件一致，需要清掉 dirty。
+    s_bindings_dirty = false;
+
     LOGI("[NFC_BIND] loaded %d entries from %s", (int)s_bindings.size(), path);
     return true;
 }
@@ -246,6 +280,8 @@ bool nfc_binding_save(const char* path)
 
     f.flush();
     f.close();
+
+    s_bindings_dirty = false;
 
     LOGI("[NFC_BIND] saved %d entries to %s", (int)s_bindings.size(), path);
     return true;

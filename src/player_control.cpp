@@ -26,6 +26,7 @@ PlayerControlHooks s_hooks{};
 bool s_user_paused = false;
 bool s_manual_stop_latched = false;
 uint32_t s_pause_time_ms = 0;
+constexpr uint32_t LOCAL_AUTO_NEXT_MIN_PLAY_MS = 1200;
 
 struct RadioReturnContext {
     bool valid = false;
@@ -574,6 +575,16 @@ bool player_control_try_auto_next(bool entered, bool started)
     if (!started) return false;
     if (audio_service_is_playing()) return false;
 
+    // 从网络流切回本地时，解码器/I2S 刚复位的瞬间可能会出现短暂 not playing。
+    // 不能立刻判定“歌曲结束”，否则会出现响一下就连续自动下一首。
+    const uint32_t local_play_ms = audio_get_play_ms();
+    if (local_play_ms < LOCAL_AUTO_NEXT_MIN_PLAY_MS) {
+        LOGW("[PLAYER] auto next suppressed: local play too short play_ms=%lu source=%s",
+            (unsigned long)local_play_ms,
+            player_source_type_key(source.type));
+        return false;
+    }
+
     const int track_count = control_track_count();
     if (track_count <= 0) return false;
 
@@ -656,6 +667,10 @@ bool player_return_from_radio_to_local() {
         return false;
     }
 
+    // 网络流刚关闭后给 AudioTask / WiFiClient / I2S DMA 一个很短的收尾窗口，
+    // 避免立刻打开本地文件时误触发 EOF 或自动下一首。
+    delay(30);
+
     if (!s_radio_return.valid || s_radio_return.track_idx < 0) {
         LOGW("[RADIO] no return context");
         return false;
@@ -711,6 +726,9 @@ bool player_return_from_network_to_local()
 
     // 清掉 NET_TRACK，避免 EOF watchdog 或自动下一首继续把 NAS 歌曲拉起来。
     player_source_clear_net_track();
+
+    // 网络 HTTP 文件切回本地时同样留一个短收尾窗口。
+    delay(30);
 
     return control_play_track_dispatch(target, false, true);
 }
@@ -1014,40 +1032,26 @@ void player_volume_step(int delta)
 
 void player_next_group()
 {
+    // NEXT 长按的统一语义：进入当前播放源/当前播放模式对应的列表。
+    // - 本地全部播放：打开“全部歌曲”列表
+    // - 歌手/专辑播放：打开对应分组列表
+    // - 网络电台：打开电台列表
+    // - NAS歌曲：打开 NAS 歌曲列表
+    // 旧逻辑在“本地全部播放”时会跳 10 首，导致长按 NEXT/LIST 不能打开列表。
+    if (control_enter_list_select_dispatch()) {
+        return;
+    }
+
     const PlayerSourceState source = player_source_get();
     if (source.type == PlayerSourceType::NET_RADIO) {
-        if (control_enter_list_select_dispatch()) {
-            return;
-        }
         LOGW("[LIST] 电台播放中，但无法进入电台列表");
-        return;
-    }
-
-    if (source.type == PlayerSourceType::NET_TRACK) {
-        if (control_enter_list_select_dispatch()) {
-            return;
-        }
+    } else if (source.type == PlayerSourceType::NET_TRACK) {
         LOGW("[LIST] NAS歌曲播放中，但无法进入NAS歌曲列表");
-        return;
+    } else {
+        LOGW("[LIST] 本地播放中，但无法进入歌曲列表 mode=%d count=%d",
+             (int)g_play_mode,
+             control_track_count());
     }
-
-    if (g_play_mode == PLAY_MODE_ARTIST_SEQ || g_play_mode == PLAY_MODE_ARTIST_RND ||
-        g_play_mode == PLAY_MODE_ALBUM_SEQ || g_play_mode == PLAY_MODE_ALBUM_RND) {
-        if (control_enter_list_select_dispatch()) {
-            return;
-        }
-    }
-
-    const int total = control_track_count();
-    if (total <= 0) return;
-    const int cur = control_current_track_idx();
-    int next = 0;
-    bool anchored = false;
-    if (!player_playlist_resolve_step(cur, +10, next, &anchored)) {
-        return;
-    }
-    LOGI("[PLAYER] 跳10首 -> #%d", next);
-    (void)control_play_track_dispatch(next, false, true);
 }
 
 bool control_mode_is_random(play_mode_t mode)

@@ -219,6 +219,11 @@ static void enter_quick_menu_from_player()
 {
     volume_fast_mode_exit();
     quick_menu_enter();
+
+    // 进入快捷菜单后立即同步一次按键状态。
+    // 这样本轮按键扫描后半段不会继续按“播放器页”语义处理 PREV/NEXT，
+    // 可避免开机第一次进菜单时残留按键边沿被误当成切歌。
+    keys_sync_to_hw_state();
 }
 
 static int read_mcp_a_active_low(uint8_t bit)
@@ -619,6 +624,44 @@ void keys_update()
     return;
   }
 
+  // --- 列表选择模式 ---
+  if (player_list_select_is_active()) {
+    mode_click_reset();
+
+    // 列表页里旋钮也用于上下移动，不再调音量。
+    if (encoder_step > 0) {
+      player_list_select_handle_key(KEY_NEXT_SHORT);
+    } else if (encoder_step < 0) {
+      player_list_select_handle_key(KEY_PREV_SHORT);
+    }
+
+    // MODE：短按=返回上一级；长按=退出到播放器
+    handle_key(k_mode,
+               [](){ player_list_select_handle_key(KEY_MODE_SHORT); },
+               [](){ player_list_select_handle_key(KEY_MODE_LONG); });
+
+    // 编码器按下 / PLAY：短按=确认选择。
+    handle_key(k_ec06e,
+              [](){ player_list_select_handle_key(KEY_PLAY_SHORT); },
+              nullptr);
+
+    handle_key(k_play,
+              [](){ player_list_select_handle_key(KEY_PLAY_SHORT); },
+              nullptr);
+
+    // PREV / NEXT：短按=翻页，编码器旋转负责逐项移动。
+    handle_key(k_prev,
+              [](){ player_list_select_handle_key(KEY_PAGE_UP_SHORT); },
+              nullptr);
+
+    handle_key(k_next,
+              [](){ player_list_select_handle_key(KEY_PAGE_DOWN_SHORT); },
+              nullptr);
+
+    // 旧 VOL 翻页入口已移除，避免残留旧板逻辑影响新交互。
+    return;
+  }
+
   // --- 快捷菜单：旋钮导航，按下确认；菜单内不再调整音量 ---
   if (quick_menu_is_active()) {
     mode_click_reset();
@@ -685,48 +728,6 @@ void keys_update()
         LOGI("[KEYS] Abort signal sent!");
       }
     }
-
-    return;
-  }
-
-  // --- 列表选择模式 ---
-  if (player_list_select_is_active()) {
-    mode_click_reset();
-
-    // 列表页里旋钮也用于上下移动，不再调音量。
-    if (encoder_step > 0) {
-      player_list_select_handle_key(KEY_NEXT_SHORT);
-    } else if (encoder_step < 0) {
-      player_list_select_handle_key(KEY_PREV_SHORT);
-    }
-
-    // MODE：短按=返回；长按=取消选择
-    handle_key(k_mode,
-               [](){ player_list_select_handle_key(KEY_MODE_SHORT); },
-               [](){ player_list_select_handle_key(KEY_MODE_LONG); });
-
-    // PLAY：短按=确认选择
-    handle_key(k_play,
-               [](){ player_list_select_handle_key(KEY_PLAY_SHORT); },
-               nullptr);
-
-    // PREV / NEXT：短按=上下移动选择
-    handle_key(k_prev,
-               [](){ player_list_select_handle_key(KEY_PREV_SHORT); },
-               nullptr);
-
-    handle_key(k_next,
-               [](){ player_list_select_handle_key(KEY_NEXT_SHORT); },
-               nullptr);
-
-    // VOL：旧板快速翻页；新 PCB1 上 VOLDN/VOLUP 已禁用，不影响。
-    handle_key(k_voldn,
-               [](){ player_list_select_handle_key(KEY_VOLDN_SHORT); },
-               nullptr);
-
-    handle_key(k_volup,
-               [](){ player_list_select_handle_key(KEY_VOLUP_SHORT); },
-               nullptr);
 
     return;
   }

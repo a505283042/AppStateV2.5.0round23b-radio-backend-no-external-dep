@@ -5,6 +5,7 @@
 #include "audio/audio_service.h"
 #include "hal/board_hw_control.h"
 #include "menu/quick_menu.h"
+#include "nfc/nfc_binding.h"
 #include "player_snapshot.h"
 #include "ui/ui_power_prompt.h"
 #include "web/web_settings.h"
@@ -29,11 +30,18 @@ void app_power_save_and_shutdown()
     const bool snapshot_ok = player_snapshot_save_to_nvs();
     const bool web_ok = web_settings_save();
 
-    LOGI("[POWER] NVS save result snapshot=%d web=%d",
-         snapshot_ok ? 1 : 0,
-         web_ok ? 1 : 0);
+    // NFC 绑定在刷卡确认时只写内存并标记 dirty。
+    // 真正写 TF 前必须停止 AudioTask 读卡，避免播放中写 /System/nfc_map.txt 抢 SD 锁。
+    audio_service_stop(true);
 
-    if (snapshot_ok && web_ok) {
+    const bool nfc_ok = nfc_binding_flush_if_dirty("/System/nfc_map.txt");
+
+    LOGI("[POWER] save result snapshot=%d web=%d nfc=%d",
+         snapshot_ok ? 1 : 0,
+         web_ok ? 1 : 0,
+         nfc_ok ? 1 : 0);
+
+    if (snapshot_ok && web_ok && nfc_ok) {
         ui_power_show_shutdown_stage("保存完成", "正在关机...");
     } else {
         ui_power_show_shutdown_stage("部分保存失败", "仍将关机...");

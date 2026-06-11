@@ -228,17 +228,21 @@ void ui_nfc_admin_show_confirm(const String& uid, NfcUiConfirmState state, NfcUi
   if (state == NFC_UI_CONFIRM_REPLACE) {
     tft.setTextColor(TFT_RED, TFT_BLACK);
     draw_center_text("将替换现有绑定", 140);
+
+    // 显示旧绑定类型 + 旧绑定名称，格式：单曲-XXX / 歌手-XXX / 专辑-XXX。
+    // 保持原来的确认页逻辑，只补充专辑/单曲/歌手类型说明。
     tft.setTextSize(1);
     tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+    String old_desc = String(nfc_ui_target_type_to_cn(old_type)) + "-" + old_name;
     int old_y = 160;
     circle_span(old_y, 14, x0, w); // 左右各留 14px
     int old_w = w;
-    draw_centered_wrapped_2lines(&tft, 
-                                 old_name, 
-                                 120, 
-                                 old_y, 
-                                 20, 
-                                 old_w, 
+    draw_centered_wrapped_2lines(&tft,
+                                 old_desc,
+                                 120,
+                                 old_y,
+                                 20,
+                                 old_w,
                                  TFT_YELLOW);
   } else if (state == NFC_UI_CONFIRM_SAME) {
     tft.setTextColor(TFT_GREEN, TFT_BLACK);

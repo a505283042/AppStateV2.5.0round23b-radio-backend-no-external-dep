@@ -1,7 +1,9 @@
 #include "player_list_select.h"
 #include "ui/ui_list_select_view.h"
+#include "ui/ui.h"
 
 #include "keys/keys.h"
+#include "menu/quick_menu.h"
 #include "player_playlist.h"
 #include "player_source.h"
 #include "storage/storage_catalog_v3.h"
@@ -48,6 +50,16 @@ static inline uint32_t list_select_timeout_ms()
              : LIST_TIMEOUT_GROUP_MS;
 }
 
+// 进入列表页时强制重置列表 UI 并立即唤醒 UiTask。
+// 从快捷菜单打开列表时，快捷菜单仍保持 active，屏幕上还是菜单画面；
+// 如果不重置列表绘制缓存，列表绘制函数可能认为“没有变化”而直接 return，
+// 造成实际已经进入列表状态，但屏幕仍停留在菜单页。
+static void list_select_prepare_view_on_enter()
+{
+    ui_clear_list_select();
+    ui_request_refresh_now();
+}
+
 // 记录二级列表的父级状态
 int s_parent_group_idx = -1;
 ListSelectState s_parent_group_state = ListSelectState::NONE;
@@ -84,6 +96,30 @@ void list_select_clear_state(bool clear_ui)
         ui_clear_list_select();
     }
 }
+
+// 确认播放后结束列表。
+// 如果列表是从快捷菜单打开的，播放确认后也同步退出快捷菜单，回到播放器界面。
+void list_select_finish_confirm()
+{
+    const bool menu_active = quick_menu_is_active();
+
+    list_select_clear_state(true);
+
+    if (menu_active) {
+        quick_menu_exit();
+    }
+}
+
+// 长按 MODE 明确退出列表和菜单，回到播放器界面。
+void list_select_exit_to_player()
+{
+    list_select_clear_state(true);
+
+    if (quick_menu_is_active()) {
+        quick_menu_exit();
+    }
+}
+
 // 尝试播放选中的组
 bool list_select_try_play_selected_group(const std::vector<PlaylistGroup>& list_groups, int group_count)
 {
@@ -111,8 +147,7 @@ bool list_select_try_play_selected_group(const std::vector<PlaylistGroup>& list_
     s_list_state = ListSelectState::TRACKS;
     list_select_touch_activity();
 
-    ui_clear_list_select();
-    ui_request_refresh_now();
+    list_select_prepare_view_on_enter();
 
     keys_sync_to_hw_state();
     return true;
@@ -134,12 +169,33 @@ bool list_select_try_play_selected_radio(const std::vector<RadioItem>& radios, i
          radio_count,
          selected_radio_idx);
 
-    list_select_clear_state(true);
+    list_select_finish_confirm();
 
     if (s_hooks.play_radio_dispatch) {
         return s_hooks.play_radio_dispatch(selected_radio_idx);
     }
     return false;
+}
+
+bool list_select_load_net_track_page_for_selected();
+
+void list_select_move_selection(int delta, int item_count, bool is_net_track)
+{
+    if (item_count <= 0) {
+        return;
+    }
+
+    s_list_selected_idx = (s_list_selected_idx + delta) % item_count;
+    if (s_list_selected_idx < 0) {
+        s_list_selected_idx += item_count;
+    }
+
+    if (is_net_track) {
+        (void)list_select_load_net_track_page_for_selected();
+    }
+
+    // 旋钮/按键移动后立刻唤醒 UiTask，避免等下一帧才看到高亮变化。
+    ui_request_refresh_now();
 }
 
 bool list_select_load_net_track_page_for_selected()
@@ -208,7 +264,7 @@ bool list_select_try_play_selected_track()
         player_playlist_force_rebuild();
     }
 
-    list_select_clear_state(true);
+    list_select_finish_confirm();
 
     if (s_hooks.play_track_dispatch) {
         return s_hooks.play_track_dispatch(next_track, false, true);
@@ -232,7 +288,7 @@ bool list_select_try_play_selected_net_track()
         total,
         selected_idx);
 
-    list_select_clear_state(true);
+    list_select_finish_confirm();
 
     if (s_hooks.play_net_track_dispatch) {
         return s_hooks.play_net_track_dispatch(selected_idx);
@@ -253,106 +309,207 @@ void player_list_select_reset()
 {
     list_select_clear_state(false);
 }
+
+bool player_list_select_enter_local_tracks()
+{
+    if (!storage_catalog_v3_ready()) {
+        list_select_clear_state(false);
+        LOGW("[LIST] 本地曲库未就绪");
+        return false;
+    }
+
+    const uint32_t total_u32 = storage_catalog_v3_track_count();
+    if (total_u32 == 0) {
+        list_select_clear_state(false);
+        LOGW("[LIST] 本地歌曲列表为空");
+        return false;
+    }
+
+    if (total_u32 > UINT16_MAX) {
+        list_select_clear_state(false);
+        LOGW("[LIST] 本地曲库数量超过 TrackIndex16 上限: %lu", (unsigned long)total_u32);
+        return false;
+    }
+
+    const int total = (int)total_u32;
+    const PlayerSourceState source = player_source_get();
+
+    s_list_groups = nullptr;
+    s_list_net_tracks.clear();
+    s_list_tracks.clear();
+    s_list_tracks.reserve(total);
+    for (int i = 0; i < total; ++i) {
+        s_list_tracks.push_back((TrackIndex16)i);
+    }
+
+    s_parent_group_idx = -1;
+    s_parent_group_state = ListSelectState::NONE;
+    s_list_state = ListSelectState::TRACKS;
+    s_list_selected_idx = source.track_idx;
+
+    if (s_list_selected_idx < 0 || s_list_selected_idx >= total) {
+        s_list_selected_idx = 0;
+    }
+
+    list_select_touch_activity();
+    list_select_prepare_view_on_enter();
+    keys_sync_to_hw_state();
+
+    LOGI("[LIST] 进入本地全部歌曲列表，共 %d 首，当前 idx=%d",
+         total,
+         s_list_selected_idx);
+
+    return true;
+}
+
+bool player_list_select_enter_radio()
+{
+    if (!radio_catalog_is_loaded()) {
+        (void)radio_catalog_load();
+    }
+
+    const auto& radios = radio_catalog_items();
+    if (radios.empty()) {
+        list_select_clear_state(false);
+        LOGW("[LIST] 电台列表为空");
+        return false;
+    }
+
+    const PlayerSourceState source = player_source_get();
+
+    s_list_groups = nullptr;
+    s_list_tracks.clear();
+    s_list_net_tracks.clear();
+    s_list_state = ListSelectState::RADIO;
+    s_list_selected_idx = source.radio_idx;
+
+    if (s_list_selected_idx < 0 || s_list_selected_idx >= (int)radios.size()) {
+        s_list_selected_idx = 0;
+    }
+
+    list_select_touch_activity();
+    list_select_prepare_view_on_enter();
+    keys_sync_to_hw_state();
+
+    LOGI("[LIST] 进入电台列表，共 %d 个，当前选中 idx=%d",
+         (int)radios.size(),
+         s_list_selected_idx);
+
+    return true;
+}
+
+bool player_list_select_enter_net_track()
+{
+    if (!net_music_catalog_is_loaded()) {
+        (void)net_music_catalog_load();
+    }
+
+    const int total = (int)net_music_catalog_count();
+    if (total <= 0) {
+        list_select_clear_state(false);
+        LOGW("[LIST] NAS 歌曲列表为空");
+        return false;
+    }
+
+    const PlayerSourceState source = player_source_get();
+
+    s_list_groups = nullptr;
+    s_list_tracks.clear();
+    s_list_net_tracks.clear();
+    s_list_state = ListSelectState::NET_TRACK;
+    s_list_selected_idx = source.net_track_idx;
+
+    if (s_list_selected_idx < 0 || s_list_selected_idx >= total) {
+        s_list_selected_idx = 0;
+    }
+
+    if (!list_select_load_net_track_page_for_selected()) {
+        list_select_clear_state(false);
+        return false;
+    }
+
+    list_select_touch_activity();
+    list_select_prepare_view_on_enter();
+    keys_sync_to_hw_state();
+
+    LOGI("[LIST] 进入 NAS 歌曲列表，共 %d 首，当前 idx=%d",
+         total,
+         s_list_selected_idx);
+
+    return true;
+}
+
 // 进入列表选择模式
 bool player_list_select_enter(play_mode_t mode)
 {
     const PlayerSourceState source = player_source_get();
     if (source.type == PlayerSourceType::NET_RADIO) {
-        const auto& radios = radio_catalog_items();
-        if (radios.empty()) {
-            list_select_clear_state(false);
-            return false;
-        }
-
-        s_list_groups = nullptr;
-        s_list_state = ListSelectState::RADIO;
-        s_list_selected_idx = source.radio_idx;
-
-        if (s_list_selected_idx < 0 || s_list_selected_idx >= (int)radios.size()) {
-            s_list_selected_idx = 0;
-        }
-
-        keys_sync_to_hw_state();
-        LOGI("[LIST] 进入电台列表，共 %d 个，当前选中 idx=%d",
-             (int)radios.size(), s_list_selected_idx);
-        return true;
+        return player_list_select_enter_radio();
     }
 
-        if (source.type == PlayerSourceType::NET_TRACK) {
-        if (!net_music_catalog_is_loaded()) {
-            (void)net_music_catalog_load();
-        }
+    if (source.type == PlayerSourceType::NET_TRACK) {
+        return player_list_select_enter_net_track();
+    }
 
-        const int total = (int)net_music_catalog_count();
-        if (total <= 0) {
+    if (mode == PLAY_MODE_ALL_SEQ || mode == PLAY_MODE_ALL_RND) {
+        return player_list_select_enter_local_tracks();
+    }
+
+    if (mode == PLAY_MODE_ARTIST_SEQ || mode == PLAY_MODE_ARTIST_RND) {
+        const auto& groups = player_playlist_artist_groups();
+        if (groups.empty()) {
             list_select_clear_state(false);
-            LOGW("[LIST] NAS 歌曲列表为空");
+            LOGW("[LIST] 歌手列表为空");
             return false;
         }
 
-        s_list_groups = nullptr;
+        s_list_groups = &groups;
         s_list_tracks.clear();
-        s_list_state = ListSelectState::NET_TRACK;
-        s_list_selected_idx = source.net_track_idx;
+        s_list_net_tracks.clear();
+        s_list_state = ListSelectState::ARTIST;
+        s_list_selected_idx = player_playlist_get_current_group_idx();
 
-        if (s_list_selected_idx < 0 || s_list_selected_idx >= total) {
+        if (s_list_selected_idx < 0 || s_list_selected_idx >= (int)groups.size()) {
             s_list_selected_idx = 0;
-        }
-
-        if (!list_select_load_net_track_page_for_selected()) {
-            list_select_clear_state(false);
-            return false;
         }
 
         list_select_touch_activity();
+        list_select_prepare_view_on_enter();
         keys_sync_to_hw_state();
 
-        LOGI("[LIST] 进入 NAS 歌曲列表，共 %d 首，当前 idx=%d",
-             total,
+        LOGI("[LIST] 进入歌手列表，共 %d 个，当前选中 idx=%d",
+             (int)groups.size(),
              s_list_selected_idx);
 
         return true;
     }
 
-    if (mode == PLAY_MODE_ARTIST_SEQ || mode == PLAY_MODE_ARTIST_RND) {
-        s_list_groups = &storage_catalog_v3_artist_groups();
-        if (s_list_groups->empty()) {
-            list_select_clear_state(false);
-            player_playlist_set_current_group_idx(0);
-            return false;
-        }
-
-        s_list_selected_idx = player_playlist_get_current_group_idx();
-        if (s_list_selected_idx < 0 || s_list_selected_idx >= (int)s_list_groups->size()) {
-            s_list_selected_idx = 0;
-        }
-
-        s_list_state = ListSelectState::ARTIST;
-        list_select_touch_activity();
-        keys_sync_to_hw_state();
-        LOGI("[LIST] 进入歌手列表选择模式，共 %d 个歌手，当前选中: %d",
-            (int)s_list_groups->size(), s_list_selected_idx + 1);
-        return true;
-    }
-
     if (mode == PLAY_MODE_ALBUM_SEQ || mode == PLAY_MODE_ALBUM_RND) {
-        s_list_groups = &storage_catalog_v3_album_groups();
-        if (s_list_groups->empty()) {
+        const auto& groups = player_playlist_album_groups();
+        if (groups.empty()) {
             list_select_clear_state(false);
-            player_playlist_set_current_group_idx(0);
+            LOGW("[LIST] 专辑列表为空");
             return false;
         }
 
+        s_list_groups = &groups;
+        s_list_tracks.clear();
+        s_list_net_tracks.clear();
+        s_list_state = ListSelectState::ALBUM;
         s_list_selected_idx = player_playlist_get_current_group_idx();
-        if (s_list_selected_idx < 0 || s_list_selected_idx >= (int)s_list_groups->size()) {
+
+        if (s_list_selected_idx < 0 || s_list_selected_idx >= (int)groups.size()) {
             s_list_selected_idx = 0;
         }
 
-        s_list_state = ListSelectState::ALBUM;
         list_select_touch_activity();
+        list_select_prepare_view_on_enter();
         keys_sync_to_hw_state();
-        LOGI("[LIST] 进入专辑列表选择模式，共 %d 个专辑，当前选中: %d",
-            (int)s_list_groups->size(), s_list_selected_idx + 1);
+
+        LOGI("[LIST] 进入专辑列表，共 %d 个，当前选中 idx=%d",
+             (int)groups.size(),
+             s_list_selected_idx);
+
         return true;
     }
 
@@ -432,34 +589,22 @@ void player_list_select_handle_key(key_event_t evt)
 
     switch (evt) {
         case KEY_NEXT_SHORT:
-            s_list_selected_idx = (s_list_selected_idx + 1) % item_count;
-            if (is_net_track) {
-                (void)list_select_load_net_track_page_for_selected();
-            }
+            list_select_move_selection(+1, item_count, is_net_track);
             LOGI("[LIST] 选择下一项: %d/%d", s_list_selected_idx + 1, item_count);
             break;
 
         case KEY_PREV_SHORT:
-            s_list_selected_idx = (s_list_selected_idx - 1 + item_count) % item_count;
-            if (is_net_track) {
-                (void)list_select_load_net_track_page_for_selected();
-            }
+            list_select_move_selection(-1, item_count, is_net_track);
             LOGI("[LIST] 选择上一项: %d/%d", s_list_selected_idx + 1, item_count);
             break;
 
-        case KEY_VOLUP_SHORT:
-            s_list_selected_idx = (s_list_selected_idx + 5) % item_count;
-            if (is_net_track) {
-                (void)list_select_load_net_track_page_for_selected();
-            }
+        case KEY_PAGE_DOWN_SHORT:
+            list_select_move_selection(+NET_TRACK_PAGE_SIZE, item_count, is_net_track);
             LOGI("[LIST] 向下翻页: %d/%d", s_list_selected_idx + 1, item_count);
             break;
 
-        case KEY_VOLDN_SHORT:
-            s_list_selected_idx = (s_list_selected_idx - 5 + item_count) % item_count;
-            if (is_net_track) {
-                (void)list_select_load_net_track_page_for_selected();
-            }
+        case KEY_PAGE_UP_SHORT:
+            list_select_move_selection(-NET_TRACK_PAGE_SIZE, item_count, is_net_track);
             LOGI("[LIST] 向上翻页: %d/%d", s_list_selected_idx + 1, item_count);
             break;
 
@@ -495,8 +640,8 @@ void player_list_select_handle_key(key_event_t evt)
             break;
 
         case KEY_MODE_LONG:
-            LOGI("[LIST] 取消选择");
-            list_select_clear_state(true);
+            LOGI("[LIST] 退出到播放器");
+            list_select_exit_to_player();
             break;  
         }
 }

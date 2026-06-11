@@ -36,6 +36,15 @@ bool nfc_binding_load(const char* path);
 /** 把当前绑定表保存到文件。 */
 bool nfc_binding_save(const char* path);
 
+/** 当前内存绑定表是否有尚未写入 TF 卡的改动。 */
+bool nfc_binding_is_dirty();
+
+/** 手动设置 dirty 标记。通常由 set/remove 自动维护。 */
+void nfc_binding_set_dirty(bool dirty);
+
+/** 如果绑定表有改动，则写入指定文件；没有改动时直接返回 true。 */
+bool nfc_binding_flush_if_dirty(const char* path);
+
 /** 按 UID 查整条绑定记录。当前 NFC admin / 播放分发主流程主要走这个接口。 */
 bool nfc_binding_find(const String& uid, NfcBindingEntry& out);
 /** 按 UID 查条目下标。 */

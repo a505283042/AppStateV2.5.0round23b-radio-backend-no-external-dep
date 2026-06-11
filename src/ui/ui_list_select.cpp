@@ -244,10 +244,11 @@ static void drawListFrame(const char* title, int start_idx, int total, int visib
     tft.fillRect(225, thumb_y, 4, thumb_height, TFT_WHITE);
   }
 
-  // 绘制底部提示（分两行，居中显示）
+  // 绘制底部提示（分两行，居中显示）。
+  // 与列表选择按键保持一致：旋钮转动逐项选择，旋钮按下确认，PREV/NEXT 短按翻页。
   tft.setTextColor(TFT_LIGHTGREY);
-  draw_center_text("NEXT/PREV:选择 VOL:翻页", 171);
-  draw_center_text("PLAY:确认 MODE:取消", 185);
+  draw_center_text("旋钮选择 按下/PLAY确认", 171);
+  draw_center_text("PREV/NEXT翻页 MODE返回/长退", 185);
 }
 
 // 获取列表行的矩形位置和尺寸

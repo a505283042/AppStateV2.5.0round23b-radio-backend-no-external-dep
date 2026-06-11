@@ -245,9 +245,20 @@ static int http_source_read(void* ctx, uint8_t* dst, size_t bytes)
   if (!client || !dst || bytes == 0) return AUDIO_MP3_SOURCE_ERROR;
   if (!s_open) return AUDIO_MP3_SOURCE_EOF;
 
+  // WiFi 已关闭时直接结束，避免进入底层 socket read。
+  // 注意：不要在 available() 之前用 client->connected() 判死，
+  // 某些 HTTP/1.0 流在 connected=false 时仍可能有缓冲数据可读。
+  if (!WiFi.isConnected()) {
+    s_open = false;
+    return AUDIO_MP3_SOURCE_EOF;
+  }
+
   int avail = client->available();
   if (avail <= 0) {
-    if (!WiFi.isConnected() || !client->connected()) return AUDIO_MP3_SOURCE_EOF;
+    if (!client->connected()) {
+      s_open = false;
+      return AUDIO_MP3_SOURCE_EOF;
+    }
     return AUDIO_MP3_SOURCE_WOULD_BLOCK;
   }
 
@@ -256,6 +267,11 @@ static int http_source_read(void* ctx, uint8_t* dst, size_t bytes)
 
   const int n = client->read(dst, want);
   if (n > 0) return n;
+
+  if (!WiFi.isConnected() || !client->connected()) {
+    s_open = false;
+    return AUDIO_MP3_SOURCE_EOF;
+  }
 
   return AUDIO_MP3_SOURCE_WOULD_BLOCK;
 }

@@ -61,6 +61,27 @@ bool web_wifi_is_enabled()
     return s_wifi_enabled;
 }
 
+static bool web_network_audio_source_active()
+{
+    const PlayerSourceState source = player_source_get();
+    return source.type == PlayerSourceType::NET_RADIO ||
+           source.type == PlayerSourceType::NET_TRACK;
+}
+
+static void web_stop_network_audio_before_wifi_down(const char* reason)
+{
+    if (!web_network_audio_source_active()) {
+        return;
+    }
+
+    if (!audio_service_is_playing() && !audio_service_is_paused()) {
+        return;
+    }
+
+    LOGW("[WEB] stop network audio before WiFi down: %s", reason ? reason : "unknown");
+    audio_service_stop(true);
+}
+
 void web_wifi_set_enabled(bool enabled)
 {
 #if WEBCTRL_ENABLED
@@ -88,6 +109,10 @@ void web_wifi_set_enabled(bool enabled)
         s_started = false;
         s_ready = false;
         s_ap_mode = false;
+
+        // 关闭 WiFi 前先停掉网络音频。
+        // 否则 AudioTask 可能正在 WiFiClient::read()，此时直接断 WiFi 会触发 lwIP pbuf 断言。
+        web_stop_network_audio_before_wifi_down("user disabled WiFi");
 
         WiFi.softAPdisconnect(true);
         WiFi.disconnect(true, true);
@@ -408,12 +433,24 @@ static bool web_try_connect_one(const WebWifiNetwork& n, const String& hostname)
 }
 
 static bool web_try_connect_sta_from_config() {
+  // 如果 STA 已经连上，直接复用当前连接，不要为了启动 Web 服务再次 disconnect/reconnect。
+  // 网络电台 / NAS HTTP 播放时，AudioTask 可能正在 WiFiClient::read()；
+  // 另一个任务强制 WiFi.disconnect() 会破坏底层 socket/pbuf 生命周期。
+  if (WiFi.status() == WL_CONNECTED) {
+    WiFi.setSleep(false);
+    s_ap_mode = false;
+    s_wifi_source = "existing_sta";
+    LOGI("[WEB] reuse existing STA ip=%s", WiFi.localIP().toString().c_str());
+    return true;
+  }
+
   std::vector<WebWifiNetwork> nets;
   String hostname;
   if (!web_load_wifi_config(nets, hostname) || nets.empty()) return false;
   for (const auto& n : nets) {
     if (web_try_connect_one(n, hostname)) return true;
   }
+  web_stop_network_audio_before_wifi_down("STA retry failed");
   WiFi.disconnect(true, true);
   return false;
 }

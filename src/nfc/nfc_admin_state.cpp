@@ -3,7 +3,6 @@
 #include "app_state.h"
 #include "nfc/nfc.h"
 #include "nfc/nfc_binding.h"
-#include "nfc/nfc_binding_commit.h"
 #include "player_control.h"
 #include "player_playlist.h"
 #include "player_source.h"
@@ -185,7 +184,7 @@ void nfc_admin_state_exit(void)
 void nfc_admin_state_run(void)
 {
     nfc_poll(); //admin 模式下也要持续轮询 RC522
-    
+
     uint32_t now = millis();
     uint32_t dt_enter = now - s_admin.enter_ms;
     uint32_t dt_step  = now - s_admin.step_ms;
@@ -250,47 +249,45 @@ void nfc_admin_state_run(void)
             break;
 
         case ADMIN_SAVING: {
-            LOGI("[NFC_ADMIN] saving binding...");
+            LOGI("[NFC_ADMIN] update binding in memory...");
 
-            bool was_playing_before = false;
             bool ok = false;
             switch (s_admin.target.type) {
                 case ::NFC_ADMIN_TARGET_TRACK:
-                    ok = nfc_binding_set_and_save_safely(s_admin.pending_uid,
-                                                         NFC_BIND_TRACK,
-                                                         s_admin.target.key,
-                                                         s_admin.target.display,
-                                                         &was_playing_before);
+                    ok = nfc_binding_set(s_admin.pending_uid,
+                                         NFC_BIND_TRACK,
+                                         s_admin.target.key,
+                                         s_admin.target.display);
                     break;
                 case ::NFC_ADMIN_TARGET_ARTIST:
-                    ok = nfc_binding_set_and_save_safely(s_admin.pending_uid,
-                                                         NFC_BIND_ARTIST,
-                                                         s_admin.target.key,
-                                                         s_admin.target.display,
-                                                         &was_playing_before);
+                    ok = nfc_binding_set(s_admin.pending_uid,
+                                         NFC_BIND_ARTIST,
+                                         s_admin.target.key,
+                                         s_admin.target.display);
                     break;
                 case ::NFC_ADMIN_TARGET_ALBUM:
-                    ok = nfc_binding_set_and_save_safely(s_admin.pending_uid,
-                                                         NFC_BIND_ALBUM,
-                                                         s_admin.target.key,
-                                                         s_admin.target.display,
-                                                         &was_playing_before);
+                    ok = nfc_binding_set(s_admin.pending_uid,
+                                         NFC_BIND_ALBUM,
+                                         s_admin.target.key,
+                                         s_admin.target.display);
                     break;
                 default:
                     LOGI("[NFC_ADMIN] invalid target type");
                     break;
             }
 
-            s_resume_play_on_exit = ok && was_playing_before;
+            // 这里只改内存绑定表，不停音频、不写 TF。
+            // dirty 的 nfc_map 会在长按关机流程里，停音频后统一写入 TF 卡。
+            s_resume_play_on_exit = false;
             s_admin.save_ok = ok;
 
             if (ok) {
-                LOGI("[NFC_ADMIN] save ok");
+                LOGI("[NFC_ADMIN] memory update ok, dirty=%d", nfc_binding_is_dirty() ? 1 : 0);
                 s_remove_miss_ms = 0;
                 ui_nfc_admin_show_wait_remove(s_admin.pending_uid);
                 admin_set_step(ADMIN_WAIT_REMOVE);
             } else {
-                LOGI("[NFC_ADMIN] save failed");
+                LOGI("[NFC_ADMIN] memory update failed");
                 ui_nfc_admin_show_error("保存失败");
                 admin_set_step(ADMIN_ERROR);
             }

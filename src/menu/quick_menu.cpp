@@ -104,7 +104,11 @@ static void open_page(QuickMenuPage page)
     save_current_selection();
 
     s_page = page;
-    s_selected = restore_selection_for_page(page);
+
+    // 从上一级进入下一级菜单时，始终从第一行开始。
+    // 不再恢复该子页面上次停留的位置，避免重新进入时默认落在“返回”项。
+    s_selected = 0;
+    s_selected_by_page[page_state_index(page)] = 0;
     s_last_dynamic_refresh_ms = 0;
 
     touch_menu();
@@ -139,6 +143,8 @@ static void go_back()
     const QuickMenuPageDef& def = current_page_def();
 
     if (s_page == QuickMenuPage::Root) {
+        // 根菜单已经没有上一级：无论是短按返回键，还是确认“返回”项，
+        // 都直接退出快捷菜单回到播放器界面。
         quick_menu_exit();
         return;
     }
@@ -184,6 +190,7 @@ void confirm_current()
             return;
 
         case QuickMenuItemType::Back:
+            // 菜单里的“返回”项保留原语义：根菜单确认“返回”可退出播放器界面。
             go_back();
             return;
 
@@ -320,6 +327,7 @@ void quick_menu_handle_key(QuickMenuKey key)
             return;
 
         case QuickMenuKey::Back:
+            // MODE 短按返回上一级；如果已在根菜单，则退出到播放器界面。
             go_back();
             return;
 

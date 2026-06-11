@@ -314,8 +314,11 @@ bool audio_init()
 
 void audio_stop()
 {
-  if (g_dec == DEC_MP3) audio_mp3_stop();
-  if (g_dec == DEC_FLAC) audio_flac_stop();
+  // 切换“网络流 -> 本地文件”时，g_dec 可能已经因为 EOF/断流被置为 DEC_NONE，
+  // 但底层 MP3/FLAC 文件句柄或 HTTP source 仍需要确保关闭。
+  // 这里无条件停止两个解码器，避免残留 source 影响下一首本地播放。
+  audio_mp3_stop();
+  audio_flac_stop();
   g_dec = DEC_NONE;
   s_total_ms = 0;
 }
