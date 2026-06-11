@@ -1,8 +1,11 @@
 #include "menu/quick_menu_page_playback.h"
 
+#include <stdio.h>
+
 #include "menu/quick_menu.h"
 
 #include "app_flags.h"
+#include "app_power.h"
 #include "app_state.h"
 #include "player_control.h"
 #include "player_list_select.h"
@@ -48,6 +51,25 @@ const char* value_execute()
     return "执行";
 }
 
+const char* value_sleep_timer()
+{
+    static char buf[16];
+
+    if (!app_power_sleep_timer_is_active()) {
+        return "关闭";
+    }
+
+    const uint32_t remain = app_power_sleep_timer_remaining_seconds();
+    if (remain >= 60) {
+        const uint32_t minutes = (remain + 59UL) / 60UL;
+        snprintf(buf, sizeof(buf), "剩%lu分", (unsigned long)minutes);
+    } else {
+        snprintf(buf, sizeof(buf), "剩%lu秒", (unsigned long)remain);
+    }
+
+    return buf;
+}
+
 const char* value_tf_status()
 {
     return storage_is_ready() ? "已就绪" : "未就绪";
@@ -76,6 +98,13 @@ bool action_open_current_source_list()
     return ok;
 }
 
+bool action_cycle_sleep_timer()
+{
+    // 每次确认切换一个睡眠关机档位：关闭 -> 15 -> 30 -> 60 -> 90 -> 120 -> 关闭。
+    app_power_sleep_timer_cycle_next();
+    return true;
+}
+
 bool action_start_rescan()
 {
     const bool ok = app_request_start_rescan();
@@ -89,6 +118,7 @@ const QuickMenuItem PLAYBACK_ITEMS[] = {
     {"播放顺序", QuickMenuItemType::Toggle, QuickMenuPage::Playback, "", value_play_order, action_toggle_play_order, true, false},
     {"本地浏览方式", QuickMenuItemType::Toggle, QuickMenuPage::Playback, "", value_local_browse_mode, action_cycle_local_browse_mode, true, false},
     {"当前源列表", QuickMenuItemType::Action, QuickMenuPage::Playback, "", value_open, action_open_current_source_list, true, false},
+    {"睡眠关机", QuickMenuItemType::Toggle, QuickMenuPage::Playback, "", value_sleep_timer, action_cycle_sleep_timer, true, false},
     {"重扫曲库", QuickMenuItemType::Action, QuickMenuPage::Playback, "", value_execute, action_start_rescan, true, false},
     {"TF卡状态", QuickMenuItemType::Status, QuickMenuPage::Playback, "", value_tf_status, nullptr, true, false},
     {"返回", QuickMenuItemType::Back, QuickMenuPage::Root, "", nullptr, nullptr, true, false},

@@ -84,6 +84,7 @@ bool confirm_guard_active()
 static bool quick_menu_page_is_dynamic(QuickMenuPage page)
 {
     switch (page) {
+        case QuickMenuPage::Playback:
         case QuickMenuPage::MemoryInfo:
         case QuickMenuPage::StackInfo:
         case QuickMenuPage::BatteryInfo:

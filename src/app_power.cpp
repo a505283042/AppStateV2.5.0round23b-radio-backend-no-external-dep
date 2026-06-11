@@ -11,9 +11,37 @@
 #include "web/web_settings.h"
 #include "utils/log.h"
 
+namespace {
+
+static constexpr uint16_t SLEEP_PRESETS_MINUTES[] = {0, 15, 30, 60, 90, 120};
+static constexpr uint8_t SLEEP_PRESET_COUNT = sizeof(SLEEP_PRESETS_MINUTES) / sizeof(SLEEP_PRESETS_MINUTES[0]);
+
+static bool s_sleep_timer_active = false;
+static bool s_sleep_shutdown_started = false;
+static uint16_t s_sleep_preset_minutes = 0;
+static uint32_t s_sleep_deadline_ms = 0;
+
+static uint8_t sleep_preset_index(uint16_t minutes)
+{
+    for (uint8_t i = 0; i < SLEEP_PRESET_COUNT; ++i) {
+        if (SLEEP_PRESETS_MINUTES[i] == minutes) {
+            return i;
+        }
+    }
+    return 0;
+}
+
+} // namespace
+
 void app_power_save_and_shutdown()
 {
     LOGI("[POWER] save and shutdown requested");
+
+    // 已经进入关机流程后，睡眠定时不再重复触发。
+    s_sleep_timer_active = false;
+    s_sleep_preset_minutes = 0;
+    s_sleep_deadline_ms = 0;
+    s_sleep_shutdown_started = true;
 
     // 如果是从未来某个菜单入口触发，也先退出菜单。
     quick_menu_exit();
@@ -61,4 +89,80 @@ void app_power_save_and_shutdown()
     while (true) {
         delay(1000);
     }
+}
+
+void app_power_sleep_timer_set_minutes(uint16_t minutes)
+{
+    if (minutes == 0) {
+        app_power_sleep_timer_cancel();
+        return;
+    }
+
+    s_sleep_preset_minutes = minutes;
+    s_sleep_deadline_ms = millis() + (uint32_t)minutes * 60UL * 1000UL;
+    s_sleep_timer_active = true;
+    s_sleep_shutdown_started = false;
+
+    LOGI("[POWER] sleep timer set: %u minutes", (unsigned)minutes);
+}
+
+void app_power_sleep_timer_cancel()
+{
+    if (s_sleep_timer_active || s_sleep_preset_minutes != 0) {
+        LOGI("[POWER] sleep timer canceled");
+    }
+
+    s_sleep_timer_active = false;
+    s_sleep_preset_minutes = 0;
+    s_sleep_deadline_ms = 0;
+    s_sleep_shutdown_started = false;
+}
+
+bool app_power_sleep_timer_is_active()
+{
+    return s_sleep_timer_active;
+}
+
+uint32_t app_power_sleep_timer_remaining_seconds()
+{
+    if (!s_sleep_timer_active) {
+        return 0;
+    }
+
+    const int32_t remain_ms = (int32_t)(s_sleep_deadline_ms - millis());
+    if (remain_ms <= 0) {
+        return 0;
+    }
+
+    return ((uint32_t)remain_ms + 999UL) / 1000UL;
+}
+
+uint16_t app_power_sleep_timer_preset_minutes()
+{
+    return s_sleep_timer_active ? s_sleep_preset_minutes : 0;
+}
+
+uint16_t app_power_sleep_timer_cycle_next()
+{
+    const uint8_t current = sleep_preset_index(app_power_sleep_timer_preset_minutes());
+    const uint8_t next = (uint8_t)((current + 1) % SLEEP_PRESET_COUNT);
+    const uint16_t minutes = SLEEP_PRESETS_MINUTES[next];
+
+    app_power_sleep_timer_set_minutes(minutes);
+    return minutes;
+}
+
+void app_power_sleep_timer_tick()
+{
+    if (!s_sleep_timer_active || s_sleep_shutdown_started) {
+        return;
+    }
+
+    if ((int32_t)(millis() - s_sleep_deadline_ms) < 0) {
+        return;
+    }
+
+    s_sleep_shutdown_started = true;
+    LOGI("[POWER] sleep timer expired, shutdown now");
+    app_power_save_and_shutdown();
 }

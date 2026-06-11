@@ -9,6 +9,7 @@
 #include "nfc/nfc.h"           /* 包含NFC模块 */
 #include "keys/keys.h"                /* 包含按键处理模块 */
 #include "app_flags.h"
+#include "app_power.h"
 #include "ui/ui.h"
 #include "utils/log.h"
 #include "audio/audio_service.h"
@@ -209,6 +210,9 @@ void app_state_update(void)
     // 按键处理也需要高频调用，确保响应及时
     keys_update();
     web_server_poll();
+
+    // 睡眠关机定时器到点后走统一安全关机流程。
+    app_power_sleep_timer_tick();
 
     const PlayerSourceState source = player_source_get();
 
