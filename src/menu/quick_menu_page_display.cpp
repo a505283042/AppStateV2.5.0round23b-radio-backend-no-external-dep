@@ -103,7 +103,7 @@ bool action_toggle_backlight()
 const QuickMenuItem DISPLAY_ITEMS[] = {
     {"显示类型", QuickMenuItemType::Toggle, QuickMenuPage::Display, "", value_display_type, action_cycle_display_type, true, false},
     {"封面旋转", QuickMenuItemType::Toggle, QuickMenuPage::Display, "", value_cover_spin, action_toggle_cover_spin, true, false},
-    {"背光", QuickMenuItemType::Toggle, QuickMenuPage::Display, "", value_backlight, action_toggle_backlight, true, false},
+    {"屏幕开关", QuickMenuItemType::Toggle, QuickMenuPage::Display, "", value_backlight, action_toggle_backlight, true, false},
     {"网页封面显示", QuickMenuItemType::Toggle, QuickMenuPage::Display, "", value_show_cover, action_toggle_show_cover, true, false},
     {"网页下一句歌词", QuickMenuItemType::Toggle, QuickMenuPage::Display, "", value_show_next_lyric, action_toggle_show_next_lyric, true, false},
     {"返回", QuickMenuItemType::Back, QuickMenuPage::Root, "", nullptr, nullptr, true, false},
