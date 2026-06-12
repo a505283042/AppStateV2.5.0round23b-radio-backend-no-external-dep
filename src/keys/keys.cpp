@@ -169,9 +169,19 @@ static void volume_fast_mode_exit()
 
 static void volume_fast_mode_toggle()
 {
+    // MODE 短按的语义：当前是有效 X5 时切回 X1；
+    // 如果 X5 已经超时自动退出，下一次短按应该重新进入 X5。
+    // 不能只看 s_volume_fast_mode，因为超时后如果没有再转动旋钮，
+    // 内部标志可能还保持 true，导致短按被误认为“从 X5 切回 X1”。
     if (s_volume_fast_mode) {
-        volume_fast_mode_exit();
-        return;
+        const bool still_active = (millis() - s_volume_fast_last_ms) <= VOLUME_FAST_MODE_TIMEOUT_MS;
+        if (still_active) {
+            volume_fast_mode_exit();
+            return;
+        }
+
+        // 已超时：只修正内部状态，不再额外显示一次 X1，随后直接进入 X5。
+        s_volume_fast_mode = false;
     }
 
     volume_fast_mode_enter();
@@ -733,6 +743,11 @@ void keys_update()
   }
 
   // --- 正常播放模式 ---
+
+  // 正常播放页持续刷新 X5 超时状态。
+  // 否则 X5 超时后如果用户没有再转动旋钮，内部 s_volume_fast_mode 仍可能保持 true，
+  // 下一次短按 MODE 会被误判为“从 X5 切回 X1”。
+  (void)volume_fast_mode_is_active();
 
   // 正常播放页：旋钮控制音量。
   handle_encoder_volume_step(encoder_step);
