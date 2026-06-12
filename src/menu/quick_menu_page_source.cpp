@@ -1,6 +1,7 @@
 #include "menu/quick_menu_page_source.h"
 
 #include <stdio.h>
+#include <WiFi.h>
 
 #include "menu/quick_menu.h"
 #include "app_flags.h"
@@ -10,10 +11,21 @@
 #include "player_source.h"
 #include "radio/radio_catalog.h"
 #include "ui/ui.h"
+#include "web/web_server.h"
 
 namespace {
 
 #define MENU_COUNT(arr) static_cast<uint8_t>(sizeof(arr) / sizeof((arr)[0]))
+
+bool network_source_available()
+{
+    return web_wifi_is_enabled() && WiFi.status() == WL_CONNECTED;
+}
+
+const char* value_network_unavailable_label()
+{
+    return network_source_available() ? nullptr : "未联网";
+}
 
 const char* value_local_source()
 {
@@ -31,6 +43,11 @@ const char* value_local_source()
 const char* value_radio_source()
 {
     static char buf[16];
+
+    const char* unavailable = value_network_unavailable_label();
+    if (unavailable != nullptr) {
+        return unavailable;
+    }
 
     // 注意：菜单 value getter 会在 UI 绘制线程里被频繁调用。
     // 这里不能为了显示数量而主动读 TF 卡，否则开机后第一次进入“播放源”页时，
@@ -52,6 +69,11 @@ const char* value_radio_source()
 const char* value_net_music_source()
 {
     static char buf[16];
+
+    const char* unavailable = value_network_unavailable_label();
+    if (unavailable != nullptr) {
+        return unavailable;
+    }
 
     // NAS 歌曲索引可能比较大，不能在菜单显示 value 时自动扫描。
     // 只显示已缓存的数量；未加载时显示“打开”，由点击 NAS 音乐列表时再加载。
@@ -89,12 +111,20 @@ bool action_open_local_source()
 
 bool action_open_radio_source()
 {
+    if (!network_source_available()) {
+        return false;
+    }
+
     // 保留快捷菜单会话，方便列表短按 MODE 返回“播放源”页面。
     return player_list_select_enter_radio();
 }
 
 bool action_open_net_music_source()
 {
+    if (!network_source_available()) {
+        return false;
+    }
+
     // 保留快捷菜单会话，方便列表短按 MODE 返回“播放源”页面。
     return player_list_select_enter_net_track();
 }

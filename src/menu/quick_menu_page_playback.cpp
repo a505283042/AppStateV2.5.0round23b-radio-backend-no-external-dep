@@ -9,6 +9,7 @@
 #include "app_state.h"
 #include "player_control.h"
 #include "player_list_select.h"
+#include "player_source.h"
 #include "storage/storage.h"
 #include "ui/ui.h"
 
@@ -21,24 +22,62 @@ const char* value_play_order()
     return control_mode_is_random(g_play_mode) ? "随机" : "顺序";
 }
 
-const char* value_local_browse_mode()
+int mode_category(play_mode_t mode)
 {
-    switch (g_play_mode) {
-        case PLAY_MODE_ALL_SEQ:
-        case PLAY_MODE_ALL_RND:
-            return "全部";
-
+    switch (mode) {
         case PLAY_MODE_ARTIST_SEQ:
         case PLAY_MODE_ARTIST_RND:
-            return "歌手";
+            return 1;
 
         case PLAY_MODE_ALBUM_SEQ:
         case PLAY_MODE_ALBUM_RND:
-            return "专辑";
+            return 2;
 
+        case PLAY_MODE_ALL_SEQ:
+        case PLAY_MODE_ALL_RND:
         default:
-            return "未知";
+            return 0;
     }
+}
+
+const char* category_label(int category)
+{
+    switch (category) {
+        case 1: return "歌手";
+        case 2: return "专辑";
+        case 0:
+        default: return "全部";
+    }
+}
+
+play_mode_t browse_mode_for_category(int category)
+{
+    switch (category) {
+        case 1: return PLAY_MODE_ARTIST_SEQ;
+        case 2: return PLAY_MODE_ALBUM_SEQ;
+        case 0:
+        default: return PLAY_MODE_ALL_SEQ;
+    }
+}
+
+int& local_browse_category_ref()
+{
+    // -1 表示首次进入前还没有用户选择，默认跟随当前播放大类显示。
+    static int s_local_browse_category = -1;
+    if (s_local_browse_category < 0) {
+        s_local_browse_category = mode_category(g_play_mode);
+    }
+    return s_local_browse_category;
+}
+
+const char* value_play_category()
+{
+    return category_label(mode_category(g_play_mode));
+}
+
+const char* value_local_browse_mode()
+{
+    return category_label(local_browse_category_ref());
 }
 
 const char* value_open()
@@ -82,19 +121,32 @@ bool action_toggle_play_order()
     return true;
 }
 
-bool action_cycle_local_browse_mode()
+bool action_cycle_play_category()
 {
     ui_mode_switch_highlight();
     player_cycle_mode_category();
     return true;
 }
 
+bool action_cycle_local_browse_mode()
+{
+    // 本地浏览方式只影响“当前源列表/本地列表”的浏览入口，
+    // 不修改 g_play_mode，也不切换正在播放的播放大类。
+    int& browse_category = local_browse_category_ref();
+    browse_category = (browse_category + 1) % 3;
+    return true;
+}
+
 bool action_open_current_source_list()
 {
-    const bool ok = player_list_select_enter(g_play_mode);
-    if (ok) {
-        quick_menu_exit();
-    }
+    const PlayerSourceState source = player_source_get();
+    const bool ok = (source.type == PlayerSourceType::LOCAL_TRACK)
+        ? player_list_select_enter(browse_mode_for_category(local_browse_category_ref()))
+        : player_list_select_enter(g_play_mode);
+
+    // 从“播放控制”进入列表时保留快捷菜单会话。
+    // 这样列表里短按 MODE 只退回“播放控制”菜单，长按 MODE 才退出到播放器界面，
+    // 行为和“播放源”里的本地/电台/NAS列表一致。
     return ok;
 }
 
@@ -116,6 +168,7 @@ bool action_start_rescan()
 
 const QuickMenuItem PLAYBACK_ITEMS[] = {
     {"播放顺序", QuickMenuItemType::Toggle, QuickMenuPage::Playback, "", value_play_order, action_toggle_play_order, true, false},
+    {"播放大类", QuickMenuItemType::Toggle, QuickMenuPage::Playback, "", value_play_category, action_cycle_play_category, true, false},
     {"本地浏览方式", QuickMenuItemType::Toggle, QuickMenuPage::Playback, "", value_local_browse_mode, action_cycle_local_browse_mode, true, false},
     {"当前源列表", QuickMenuItemType::Action, QuickMenuPage::Playback, "", value_open, action_open_current_source_list, true, false},
     {"睡眠关机", QuickMenuItemType::Toggle, QuickMenuPage::Playback, "", value_sleep_timer, action_cycle_sleep_timer, true, false},

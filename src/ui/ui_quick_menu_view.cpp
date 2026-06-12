@@ -163,7 +163,7 @@ void draw_footer()
 
     tft.setTextColor(COLOR_DIM, COLOR_BG);
 tft.setTextColor(COLOR_DIM, COLOR_BG);
-draw_center_text("旋钮选择 按下确认 M返回", 178);
+draw_center_text("旋钮选择 按下确认 MODE返回/长退", 178);
 draw_center_text(">进 !执行 +切换 =状态", 193);
 }
 

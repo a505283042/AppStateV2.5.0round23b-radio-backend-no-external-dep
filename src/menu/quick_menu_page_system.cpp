@@ -340,11 +340,11 @@ const char* value_chg_level()
 
 const QuickMenuItem SYSTEM_ITEMS[] = {
     {"固件版本", QuickMenuItemType::Status, QuickMenuPage::SystemInfo, "", value_firmware_version, nullptr, true, false},
+    {"电池状态", QuickMenuItemType::SubPage, QuickMenuPage::BatteryInfo, "", value_open, nullptr, true, false},
     {"运行内存", QuickMenuItemType::SubPage, QuickMenuPage::MemoryInfo, "", value_open, nullptr, true, false},
     {"任务余量", QuickMenuItemType::SubPage, QuickMenuPage::StackInfo, "", value_open, nullptr, true, false},
     {"扩展芯片", QuickMenuItemType::Status, QuickMenuPage::SystemInfo, "", value_mcp23017_status, nullptr, true, false},
     {"I2C通信", QuickMenuItemType::Status, QuickMenuPage::SystemInfo, "", value_i2c_status, nullptr, true, false},
-    {"电池状态", QuickMenuItemType::SubPage, QuickMenuPage::BatteryInfo, "", value_open, nullptr, true, false},
     {"恢复出厂", QuickMenuItemType::SubPage, QuickMenuPage::FactoryResetConfirm, "确认", nullptr, nullptr, true, false},
     {"返回", QuickMenuItemType::Back, QuickMenuPage::Root, "", nullptr, nullptr, true, false},
 };
