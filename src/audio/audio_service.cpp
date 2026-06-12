@@ -83,6 +83,11 @@ static float s_last_fade_gain = 1.0f; // 上一次的增益
 #define PAUSE_FADE_STEP   0.05f   // 暂停时淡出，保持柔和
 #define PLAY_FADE_STEP    0.12f   // 开播/切歌时淡入，加快恢复正常音量
 #define PLAY_START_GAIN   0.35f   // 新歌起播初始增益，别从 0 开始
+// FLAC 某些歌曲解码会短时间超过实时长度。
+// 注意：不能在功放静音时直接预填 I2S DMA，否则 I2S 硬件会把开头音频播放掉；
+// 这里改为“软件预解码 PCM 到 RAM”，真正开声后再写入 I2S。
+#define PLAY_PREFILL_TARGET_MS 160
+#define PLAY_PREFILL_MAX_LOOPS 8
 #define STOP_FADE_MAX_ITERS 8
 #define STOP_FADE_STEP    0.20f
 
@@ -422,10 +427,12 @@ static void audio_task_entry(void*){
           s_fade_gain = 0.05f;
           s_last_fade_gain = 0.05f;
 
-          for (int i = 0; i < 4; ++i) {
-            audio_loop();
-            vTaskDelay(pdMS_TO_TICKS(2));
-          }
+          const uint32_t prefill_t0 = millis();
+          const uint32_t primed_ms = audio_prime_pcm_ms(PLAY_PREFILL_TARGET_MS, PLAY_PREFILL_MAX_LOOPS);
+          LOGI("[AUDIO] startup software prefill primed_ms=%lu cost=%lums play_ms=%lu",
+               (unsigned long)primed_ms,
+               (unsigned long)(millis() - prefill_t0),
+               (unsigned long)audio_i2s_get_play_ms());
 
           // 再恢复正常起播增益并取消静音。
           s_fade_gain = PLAY_START_GAIN;
@@ -522,7 +529,10 @@ static void audio_task_entry(void*){
     } else if (!s_playing_cache || s_paused) {
       vTaskDelay(10);
     } else {
-      vTaskDelay(1);
+      // 正常播放中不要固定 sleep 1ms。
+      // 某些 FLAC 解码已经接近实时上限，额外 1ms 会持续消耗缓冲余量。
+      // I2S 写入本身会阻塞/让出，这里只做 yield。
+      taskYIELD();
     }
   }
 }

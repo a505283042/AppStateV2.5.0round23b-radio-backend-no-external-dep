@@ -428,3 +428,11 @@ uint16_t audio_get_gain_q15(void)
 // 新增函数实现
 uint32_t audio_get_play_ms() { return audio_i2s_get_play_ms(); }
 void audio_reset_play_pos()  { audio_i2s_reset_play_pos(); }
+
+uint32_t audio_prime_pcm_ms(uint32_t target_ms, uint32_t max_chunks)
+{
+  if (g_dec == DEC_FLAC) {
+    return audio_flac_prime_pcm_ms(target_ms, max_chunks);
+  }
+  return 0;
+}

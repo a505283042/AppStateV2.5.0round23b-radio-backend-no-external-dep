@@ -459,19 +459,44 @@ static bool player_play_trackinfo_core(const TrackInfo& t,
 
         if (primed_cover_fetch_ok &&
             primed_cover_buf &&
-            primed_cover_len > 0 &&
-            player_assets_prime_current_cover(s_cur,
-                                            primed_cover_buf,
-                                            primed_cover_len,
-                                            primed_cover_is_png)) {
-            primed_cover_buf = nullptr; // ownership moved
-            cover_primed = true;
+            primed_cover_len > 0) {
+            // 当前封面未命中缓存时，直接在播放前完成解码/缩放并写入 UI cache。
+            // 这样会让本次切歌出声稍晚一点，但能避免 [AUDIO] play 后
+            // 当前封面缩放和 FLAC 开头解码同时抢 CPU/PSRAM，造成音频顿一下。
+            const uint32_t t_scale_begin = millis();
+            const bool scaled_ok = ui_cover_scale_to_cache_from_buffer(primed_cover_buf,
+                                                                       primed_cover_len,
+                                                                       primed_cover_is_png,
+                                                                       s_cur);
+            const uint32_t scale_cost = millis() - t_scale_begin;
 
-            LOGI("[PLAYER] current cover primed before play track=%d len=%u cost=%lu from_nfc=%d",
-                s_cur,
-                (unsigned)primed_cover_len,
-                (unsigned long)prime_cover_cost,
-                from_nfc ? 1 : 0);
+            if (scaled_ok) {
+                cover_primed = true;
+                asset_job.need_cover = false;
+                need_decode_cover = false;
+                (void)ui_cover_apply_cached(s_cur);
+                s_cover_idx = s_cur;
+                ui_request_refresh_now();
+                player_assets_clear_deferred_current_cover_apply();
+
+                LOGI("[PLAYER] current cover scaled before play track=%d len=%u fetch=%lu scale=%lu from_nfc=%d",
+                    s_cur,
+                    (unsigned)primed_cover_len,
+                    (unsigned long)prime_cover_cost,
+                    (unsigned long)scale_cost,
+                    from_nfc ? 1 : 0);
+            } else if (player_assets_prime_current_cover(s_cur,
+                                                        primed_cover_buf,
+                                                        primed_cover_len,
+                                                        primed_cover_is_png)) {
+                // 缩放失败时退回旧路径，把 raw 交给资源任务，避免封面完全丢失。
+                primed_cover_buf = nullptr; // ownership moved
+                cover_primed = true;
+                LOGW("[PLAYER] current cover scale before play failed, defer raw track=%d len=%u fetch=%lu",
+                     s_cur,
+                     (unsigned)primed_cover_len,
+                     (unsigned long)prime_cover_cost);
+            }
         }
 
         if (primed_cover_buf) {

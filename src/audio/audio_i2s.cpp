@@ -62,8 +62,10 @@ bool audio_i2s_init(int bck, int ws, int dout, int sample_rate)
     cfg.channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT;
     cfg.communication_format = I2S_COMM_FORMAT_STAND_I2S; // ✅ Philips I2S
     cfg.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
-    cfg.dma_buf_count = 12;       // ✅ 稍大一些
-    cfg.dma_buf_len = 512;        // ✅ 稍大一些，减少“咔嗒”
+    // FLAC 部分歌曲单次解码会超过 23ms 实时长度，I2S 需要更大的 DMA 余量吸收抖动。
+    // 16 * 512 stereo frames 约 185ms 缓冲，比原 12 * 512 更稳，内部 RAM 占用仍可控。
+    cfg.dma_buf_count = 16;
+    cfg.dma_buf_len = 512;
     cfg.use_apll = true;          // ✅ PCM5102A 通常更稳
     cfg.tx_desc_auto_clear = true;
     cfg.fixed_mclk = 0;
@@ -105,7 +107,6 @@ size_t audio_i2s_write_frames(const int16_t* stereo_samples, size_t frames)
     const size_t total_samples = frames * 2; // L/R 交错的 int16 数
     size_t sample_off = 0;
     size_t bytes_written_total = 0;
-
     while (sample_off < total_samples) {
         size_t n = total_samples - sample_off;
         if (n > VOL_BUF_SAMPLES) n = VOL_BUF_SAMPLES;
@@ -160,6 +161,7 @@ size_t audio_i2s_write_frames(const int16_t* stereo_samples, size_t frames)
 
     // 转回写入的 frame 数（每帧 4 bytes）
     size_t frames_written = bytes_written_total / (2 * sizeof(int16_t));
+
     portENTER_CRITICAL(&s_pos_mux);
     s_frames_played += frames_written;
     portEXIT_CRITICAL(&s_pos_mux);
