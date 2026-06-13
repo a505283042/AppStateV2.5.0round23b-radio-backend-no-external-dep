@@ -3,8 +3,9 @@
 #include <string.h>
 
 // 0=错误, 1=警告, 2=信息, 3=调试
-#ifndef LOG_LEVEL
-#define LOG_LEVEL 2
+// 使用 APP_LOG_LEVEL，避免和第三方库或命令行里的通用 LOG_LEVEL 宏冲突。
+#ifndef APP_LOG_LEVEL
+#define APP_LOG_LEVEL 2
 #endif
 
 #ifndef LOG_TAG
@@ -28,24 +29,24 @@ static inline const char* log_tag_cn(const char* tag)
   return tag;
 }
 
-#if LOG_LEVEL >= 3
+#if APP_LOG_LEVEL >= 3
   #define LOGD(fmt, ...) Serial.printf("[%s][%s] " fmt "\n", log_level_cn("D"), log_tag_cn(LOG_TAG), ##__VA_ARGS__)
 #else
   #define LOGD(...) do {} while (0)
 #endif
 
-#if LOG_LEVEL >= 2
+#if APP_LOG_LEVEL >= 2
   #define LOGI(fmt, ...) Serial.printf("[%s][%s] " fmt "\n", log_level_cn("I"), log_tag_cn(LOG_TAG), ##__VA_ARGS__)
 #else
   #define LOGI(...) do {} while (0)
 #endif
 
-#if LOG_LEVEL >= 1
+#if APP_LOG_LEVEL >= 1
   #define LOGW(fmt, ...) Serial.printf("[%s][%s] " fmt "\n", log_level_cn("W"), log_tag_cn(LOG_TAG), ##__VA_ARGS__)
 #else
   #define LOGW(...) do {} while (0)
 #endif
 
-#if LOG_LEVEL >= 0
+#if APP_LOG_LEVEL >= 0
   #define LOGE(fmt, ...) Serial.printf("[%s][%s] " fmt "\n", log_level_cn("E"), log_tag_cn(LOG_TAG), ##__VA_ARGS__)
 #endif
