@@ -60,7 +60,7 @@ static void app_rescan_task_entry(void* )
     if (storage_is_ready()) {
         success = storage_catalog_v3_rebuild("/Music", "/System/music_index_v3.bin");
     } else {
-        LOGW("[APP] rescan skipped: storage not ready");
+        LOGW("[应用] rescan 已跳过: storage 未就绪");
         success = false;
     }
 
@@ -83,7 +83,7 @@ void app_state_init(void)
 
 static void app_handle_tf_removed()
 {
-    LOGW("[APP] TF removed");
+    LOGW("[应用] TF 删除d");
     s_tf_mount_restore_pending = false;
 
     const PlayerSourceState source = player_source_get();
@@ -136,7 +136,7 @@ static void app_handle_tf_removed()
 
 static void app_handle_tf_mounted()
 {
-    LOGD("[APP] TF mounted");
+    LOGD("[应用] TF 已挂载");
 
     const PlayerSourceState source_before_mount = player_source_get();
 
@@ -147,15 +147,15 @@ static void app_handle_tf_mounted()
     audio_file_prepare_music_root_cache();
 
     if (nfc_binding_load("/System/nfc_map.txt")) {
-        LOGD("[APP] NFC bindings reloaded: %d entries", nfc_binding_count());
+        LOGD("[应用] NFC bindings re加载ed: %d entries", nfc_binding_count());
     } else {
-        LOGD("[APP] no NFC bindings after TF mounted");
+        LOGD("[应用] no NFC bindings after TF 已挂载");
     }
 
     if (radio_catalog_load()) {
-        LOGD("[APP] radio catalog reloaded: %d stations", (int)radio_catalog_count());
+        LOGD("[应用] 电台 目录 re加载ed: %d stations", (int)radio_catalog_count());
     } else {
-        LOGW("[APP] radio catalog reload failed");
+        LOGW("[应用] 电台 目录 re加载 失败");
     }
     
     // TF 卡插入后不主动加载 NAS/HTTP 歌曲索引。
@@ -164,10 +164,10 @@ static void app_handle_tf_mounted()
     // TF 卡插入后不再自动重连 WiFi。
     // WiFi 总开关由 NVS 保存；如需联网，由用户在菜单中手动开启/重连。
     // 这样可以避免插卡后 WiFi 扫描/连接影响本地播放稳定性。
-    LOGI("[APP] WiFi reconnect skipped after TF mounted");
+    LOGD("[应用] TF 卡挂载后已跳过 WiFi 重连");
 
     if (!storage_catalog_v3_load_or_rebuild("/Music", "/System/music_index_v3.bin")) {
-        LOGE("[APP] catalog reload failed after TF mounted");
+        LOGE("[应用] 目录 re加载 失败 after TF 已挂载");
         ui_request_refresh_now();
         return;
     }
@@ -178,7 +178,7 @@ static void app_handle_tf_mounted()
     // 关键修复：
     // 网络电台播放中插卡，只加载 TF 资源，不恢复本地歌曲快照。
     if (radio_active) {
-        LOGI("[APP] TF mounted while radio active: skip local snapshot restore");
+        LOGD("[应用] TF 已挂载 while 电台 active: 跳过 本地 snapshot 恢复");
         s_tf_mount_restore_pending = false;
         ui_request_refresh_now();
         return;
@@ -192,7 +192,7 @@ static void app_handle_tf_mounted()
     if (player_snapshot_load_pending_from_nvs() &&
         player_snapshot_begin_restore_on_player_enter()) {
         s_tf_mount_restore_pending = true;
-        LOGI("[APP] TF mounted: snapshot restore armed");
+        LOGD("[应用] TF 已挂载: snapshot 恢复 armed");
         ui_request_refresh_now();
         return;
     }
@@ -240,7 +240,7 @@ void app_state_update(void)
         const PlayerSourceState restore_source = player_source_get();
 
         if (restore_source.type == PlayerSourceType::NET_RADIO) {
-            LOGW("[APP] cancel local snapshot restore: radio is active");
+            LOGW("[应用] 取消 本地 snapshot 恢复: 电台 is active");
             s_tf_mount_restore_pending = false;
             return;
         }
@@ -255,11 +255,11 @@ void app_state_update(void)
         s_tf_mount_restore_pending = false;
 
         if (restore_res == PLAYER_SNAPSHOT_RESTORE_DONE) {
-            LOGI("[APP] TF mounted: snapshot restore done");
+            LOGD("[应用] TF 卡已挂载：快照恢复完成");
             return;
         }
 
-        LOGW("[APP] TF mounted: snapshot restore failed");
+        LOGW("[应用] TF 已挂载: snapshot 恢复 失败");
 
         // 恢复失败时不要自动从第一首播放，只提示用户手动开始。
         ui_request_refresh_now();
@@ -289,23 +289,23 @@ bool app_request_enter_nfc_admin()
 {
     // 只允许从播放器主状态进入
     if (g_app_state != STATE_PLAYER) {
-        LOGI("[APP] enter NFC admin denied: not in player state");
+        LOGD("[应用] 进入 NFC admin 被拒绝: not in player 状态");
         return false;
     }
 
     // 扫描中不允许进入
     if (g_rescanning) {
-        LOGI("[APP] enter NFC admin denied: rescanning");
+        LOGD("[应用] 进入 NFC admin 被拒绝: rescanning");
         return false;
     }
 
     // 列表选择模式不允许进入
     if (player_list_select_is_active()) {
-        LOGI("[APP] enter NFC admin denied: list select mode");
+        LOGD("[应用] 拒绝进入 NFC 管理：正在列表选择模式");
         return false;
     }
 
-    LOGI("[APP] entering NFC admin");
+    LOGI("[应用] 进入ing NFC admin");
 
     // 冻结一下 UI 渲染，避免切页时和旧界面打架
     ui_hold_render(true);
@@ -331,21 +331,21 @@ bool app_request_enter_nfc_admin()
 bool app_request_enter_nfc_admin_with_target(const NfcAdminTarget& target)
 {
     if (g_app_state != STATE_PLAYER) {
-        LOGI("[APP] enter NFC admin denied: not in player state");
+        LOGD("[应用] 进入 NFC admin 被拒绝: not in player 状态");
         return false;
     }
 
     if (g_rescanning) {
-        LOGI("[APP] enter NFC admin denied: rescanning");
+        LOGD("[应用] 进入 NFC admin 被拒绝: rescanning");
         return false;
     }
 
     if (player_list_select_is_active()) {
-        LOGI("[APP] enter NFC admin denied: list select mode");
+        LOGD("[应用] 拒绝进入 NFC 管理：正在列表选择模式");
         return false;
     }
 
-    LOGI("[APP] entering NFC admin with explicit target");
+    LOGI("[应用] 进入 NFC 管理：使用指定绑定目标");
 
     ui_hold_render(true);
     keys_sync_to_hw_state();
@@ -366,7 +366,7 @@ bool app_request_enter_nfc_admin_with_target(const NfcAdminTarget& target)
 /* 请求退出 NFC 管理状态 */
 void app_request_exit_nfc_admin()
 {
-    LOGI("[APP] exiting NFC admin");
+    LOGI("[应用] 退出ing NFC admin");
 
     ui_hold_render(true);
 
@@ -380,7 +380,7 @@ void app_request_exit_nfc_admin()
     ui_hold_render(false);
 
     if (nfc_admin_state_consume_resume_request()) {
-        LOGI("[APP] NFC admin exit: resume current track");
+        LOGD("[应用] NFC admin 退出: 恢复 当前 歌曲");
         player_toggle_play();
     }
 }
@@ -389,19 +389,19 @@ void app_request_exit_nfc_admin()
 bool app_request_start_rescan()
 {
     if (g_app_state != STATE_PLAYER) {
-        LOGI("[APP] start rescan denied: not in player state");
+        LOGD("[应用] 启动 rescan 被拒绝: not in player 状态");
         return false;
     }
     if (g_rescanning || s_rescan_task != nullptr) {
-        LOGI("[APP] start rescan denied: already rescanning");
+        LOGD("[应用] 启动 rescan 被拒绝: al就绪 rescanning");
         return false;
     }
     if (player_list_select_is_active()) {
-        LOGI("[APP] start rescan denied: list select mode");
+        LOGD("[应用] 拒绝开始重扫：正在列表选择模式");
         return false;
     }
     if (!storage_is_ready()) {
-        LOGI("[APP] start rescan denied: storage not ready");
+        LOGD("[应用] 启动 rescan 被拒绝: storage 未就绪");
         return false;
     }
 
@@ -420,7 +420,7 @@ bool app_request_start_rescan()
         &s_rescan_task);
 
     if (ok != pdPASS) {
-        LOGE("[APP] Failed to create rescan task");
+        LOGE("[应用] 失败 to 创建 rescan task");
         s_rescan_task = nullptr;
         g_rescanning = false;
         return false;
@@ -433,12 +433,12 @@ bool app_request_start_rescan()
 bool app_request_cancel_rescan()
 {
     if (!g_rescanning) {
-        LOGI("[APP] cancel rescan ignored: not rescanning");
+        LOGD("[应用] 取消 rescan 已忽略: not rescanning");
         return false;
     }
     if (!g_abort_scan) {
         g_abort_scan = true;
-        LOGI("[APP] rescan cancel requested");
+        LOGI("[应用] rescan 取消 requested");
     }
     return true;
 }

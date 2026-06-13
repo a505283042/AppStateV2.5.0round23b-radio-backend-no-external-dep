@@ -67,7 +67,7 @@ static bool build_current_bind_target(NfcAdminTarget& out)
 
     const PlayerSourceState source = player_source_get();
     if (source.type == PlayerSourceType::NET_TRACK) {
-        LOGI("[NFC_ADMIN] NET_TRACK does not support NFC bind");
+        LOGW("[NFC管理] NET_TRACK does not 支持 NFC bind");
         return false;
     }
 
@@ -150,7 +150,7 @@ static NfcUiTargetType to_ui_target_type_from_target(NfcAdminTargetType t)
 
 void nfc_admin_state_enter(void)
 {
-    LOGI("[NFC_ADMIN] enter");
+    LOGD("[NFC管理] 进入");
 
     s_admin = NfcAdminCtx{};
     s_resume_play_on_exit = false;
@@ -162,7 +162,7 @@ void nfc_admin_state_enter(void)
         nfc_admin_state_clear_override_target();
     } else {
         if (!build_current_bind_target(s_admin.target)) {
-            LOGI("[NFC_ADMIN] invalid bind target");
+            LOGW("[NFC管理] 无效绑定目标");
             admin_set_step(ADMIN_ERROR);
             ui_nfc_admin_show_error("无可绑定目标");
             return;
@@ -176,7 +176,7 @@ void nfc_admin_state_enter(void)
 
 void nfc_admin_state_exit(void)
 {
-    LOGI("[NFC_ADMIN] exit");
+    LOGD("[NFC管理] 退出");
     s_admin = NfcAdminCtx{};
     nfc_admin_state_clear_override_target();
 }
@@ -191,7 +191,7 @@ void nfc_admin_state_run(void)
 
 
     if (dt_enter > 30000UL) {
-        LOGI("[NFC_ADMIN] timeout");
+        LOGD("[NFC管理] 超时");
         app_request_exit_nfc_admin();
         return;
     }
@@ -201,7 +201,7 @@ void nfc_admin_state_run(void)
             String uid;
             if (nfc_take_last_uid(uid)) {
                 s_admin.pending_uid = uid;
-                LOGI("[NFC_ADMIN] card detected: %s", uid.c_str());
+                LOGI("[NFC管理] 卡片 detected: %s", uid.c_str());
 
                 NfcBindingEntry old_entry;
                 NfcUiConfirmState confirm_state;
@@ -249,7 +249,7 @@ void nfc_admin_state_run(void)
             break;
 
         case ADMIN_SAVING: {
-            LOGD("[NFC_ADMIN] update binding in memory...");
+            LOGD("[NFC管理] update binding in memory...");
 
             bool ok = false;
             switch (s_admin.target.type) {
@@ -272,7 +272,7 @@ void nfc_admin_state_run(void)
                                          s_admin.target.display);
                     break;
                 default:
-                    LOGI("[NFC_ADMIN] invalid target type");
+                    LOGW("[NFC管理] 无效目标类型");
                     break;
             }
 
@@ -282,12 +282,12 @@ void nfc_admin_state_run(void)
             s_admin.save_ok = ok;
 
             if (ok) {
-                LOGD("[NFC_ADMIN] memory update ok, dirty=%d", nfc_binding_is_dirty() ? 1 : 0);
+                LOGD("[NFC管理] memory update 成功, 脏数据=%d", nfc_binding_is_dirty() ? 1 : 0);
                 s_remove_miss_ms = 0;
                 ui_nfc_admin_show_wait_remove(s_admin.pending_uid);
                 admin_set_step(ADMIN_WAIT_REMOVE);
             } else {
-                LOGI("[NFC_ADMIN] memory update failed");
+                LOGW("[NFC管理] memory update 失败");
                 ui_nfc_admin_show_error("保存失败");
                 admin_set_step(ADMIN_ERROR);
             }
@@ -329,16 +329,16 @@ bool nfc_admin_state_consume_resume_request(void)
 
 void nfc_admin_state_on_key(NfcAdminKey key)
 {
-    LOGD("[NFC_ADMIN] on_key key=%d", (int)key);
+    LOGD("[NFC管理] on_key key=%d", (int)key);
     switch (key) {
         case NFC_ADMIN_KEY_MODE_SHORT:
-            LOGI("[NFC_ADMIN] cancel by MODE");
+            LOGD("[NFC管理] 取消 by MODE");
             app_request_exit_nfc_admin();
             break;
 
         case NFC_ADMIN_KEY_PLAY_SHORT:
             if (s_admin.step == ADMIN_CONFIRM_BIND && s_admin.pending_uid.length() > 0) {
-                LOGI("[NFC_ADMIN] confirm bind uid=%s type=%d",
+                LOGI("[NFC管理] 确认绑定 UID=%s 类型=%d",
                      s_admin.pending_uid.c_str(),
                      (int)s_admin.target.type);
                 ui_nfc_admin_show_saving();

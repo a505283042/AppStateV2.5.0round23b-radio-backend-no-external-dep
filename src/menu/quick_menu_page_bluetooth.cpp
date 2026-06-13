@@ -61,7 +61,7 @@ const char* value_bt_reboot()
 bool action_toggle_bt_power()
 {
     if (s_bt_reboot_in_progress) {
-        LOGW("[BT] power toggle ignored: reboot in progress");
+        LOGW("[蓝牙] 电源切换已忽略：正在重启");
         return false;
     }
 
@@ -74,7 +74,7 @@ bool action_toggle_bt_power()
 bool action_pulse_bt_switch()
 {
     if (!bt_can_use_control_items()) {
-        LOGW("[BT] switch pulse ignored: power off or rebooting");
+        LOGW("[蓝牙] 切换脉冲已忽略：电源关闭或正在重启");
         return false;
     }
 
@@ -85,7 +85,7 @@ bool action_pulse_bt_switch()
 bool action_toggle_bt_wakeup()
 {
     if (!bt_can_use_control_items()) {
-        LOGW("[BT] wakeup toggle ignored: power off or rebooting");
+        LOGW("[蓝牙] 唤醒切换已忽略：电源关闭或正在重启");
         return false;
     }
 
@@ -98,7 +98,7 @@ bool action_toggle_bt_wakeup()
 void bt_reboot_task(void*)
 {
     // 蓝牙重启需要等待断电保持时间，放到独立任务里，避免阻塞菜单/按键任务。
-    LOGI("[BT] reboot start");
+    LOGI("[蓝牙] 开始重启");
     const bool power_off_ok = board_hw_set_bt_power(false);
 
     vTaskDelay(pdMS_TO_TICKS(300));
@@ -106,9 +106,9 @@ void bt_reboot_task(void*)
     if (power_off_ok) {
         const bool power_on_ok = board_hw_set_bt_power(true);
         const bool wakeup_ok = board_hw_set_bt_wakeup(s_bt_reboot_restore_wakeup);
-        LOGI("[BT] reboot done power_on=%d wakeup_restore=%d", power_on_ok ? 1 : 0, wakeup_ok ? 1 : 0);
+        LOGI("[蓝牙] 重启完成：电源开启=%d 唤醒恢复=%d", power_on_ok ? 1 : 0, wakeup_ok ? 1 : 0);
     } else {
-        LOGW("[BT] reboot failed: power off step failed");
+        LOGW("[蓝牙] 重启失败：关闭电源步骤失败");
     }
 
     s_bt_reboot_in_progress = false;
@@ -118,12 +118,12 @@ void bt_reboot_task(void*)
 bool action_reboot_bt_module()
 {
     if (!board_hw_get_bt_power()) {
-        LOGW("[BT] reboot ignored: power off");
+        LOGW("[蓝牙] 重启已忽略：电源关闭");
         return false;
     }
 
     if (s_bt_reboot_in_progress) {
-        LOGW("[BT] reboot ignored: already in progress");
+        LOGW("[蓝牙] 重启已忽略：已经在重启");
         return false;
     }
 
@@ -141,7 +141,7 @@ bool action_reboot_bt_module()
 
     if (created != pdPASS) {
         s_bt_reboot_in_progress = false;
-        LOGW("[BT] reboot task create failed");
+        LOGW("[蓝牙] 创建重启任务失败");
         return false;
     }
 

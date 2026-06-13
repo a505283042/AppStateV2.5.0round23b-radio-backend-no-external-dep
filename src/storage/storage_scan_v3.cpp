@@ -48,7 +48,7 @@ static inline void scan_v3_maybe_log_progress(int scanned, const String& where)
     uint32_t now = millis();
     if ((uint32_t)(now - s_scan_v3_last_progress_log_ms) >= 1500) {
         s_scan_v3_last_progress_log_ms = now;
-        LOGD("[SCAN_V3] progress: tracks=%d dir=%s", scanned, where.c_str());
+        LOGD("[曲库扫描] progress: 歌曲s=%d 目录=%s", scanned, where.c_str());
     }
 }
 
@@ -155,7 +155,7 @@ static String pick_cover_in_folder_v3(const String& folder)
         scan_v3_cooperate_wdt();
 
         if (g_abort_scan) {
-            LOGD("[SCAN_V3] cover scan aborted: %s", folder.c_str());
+            LOGD("[曲库扫描] 封面 scan aborted: %s", folder.c_str());
             f.close();
             break;
         }
@@ -376,7 +376,7 @@ static bool scan_dir_recursive_v3(const String& dir_path,
 
     SdFile dir;
     if (!dir.open(dir_path.c_str(), O_RDONLY) || !dir.isDir()) {
-        LOGE("[SCAN_V3] open dir failed: %s", dir_path.c_str());
+        LOGE("[曲库扫描] 打开 目录 失败: %s", dir_path.c_str());
         dir.close();
         return false;
     }
@@ -393,7 +393,7 @@ static bool scan_dir_recursive_v3(const String& dir_path,
         scan_v3_cooperate_wdt();
 
         if (g_abort_scan) {
-            LOGI("[SCAN_V3] scan aborted by user");
+            LOGI("[曲库扫描] scan aborted by user");
             f.close();
             break;
         }
@@ -445,7 +445,7 @@ bool storage_scan_music_v3(std::vector<TrackBuildTempV3>& out_tracks,
 {
     StorageSdLockGuard sd_lock(2000);
     if (!sd_lock) {
-        LOGE("[SCAN_V3] lock timeout");
+        LOGE("[曲库扫描] 锁 超时");
         return false;
     }
 
@@ -467,6 +467,6 @@ bool storage_scan_music_v3(std::vector<TrackBuildTempV3>& out_tracks,
 
     ui_scan_end();
 
-    LOGI("[SCAN_V3] recursive done: tracks=%d", (int)out_tracks.size());
+    LOGI("[曲库扫描] 递归扫描完成：歌曲=%d", (int)out_tracks.size());
     return !out_tracks.empty();
 }

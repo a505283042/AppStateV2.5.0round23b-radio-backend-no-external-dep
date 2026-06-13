@@ -198,7 +198,7 @@ static bool cover_blit_scaled_to_pair(const uint8_t* ptr, size_t len, bool is_pn
   tmp.setPsram(psramFound());
 
   if (!tmp.createSprite(srcW, srcH)) {
-    LOGW("[COVER] tmp.createSprite(%d,%d) failed -> fallback crop", srcW, srcH);
+    LOGW("[封面] tmp.创建Sprite(%d,%d) 失败 -> 回退 crop", srcW, srcH);
     dst_cover.fillScreen(TFT_BLACK);
     bool ok = is_png ? dst_cover.drawPng(ptr, len, 0, 0, COVER_SIZE, COVER_SIZE)
                     : dst_cover.drawJpg(ptr, len, 0, 0, COVER_SIZE, COVER_SIZE);
@@ -310,7 +310,7 @@ void cover_sprite_init_once()
   s_coverSpr.setColorDepth(16);
   s_coverSpr.setPsram(has_psram);
   if (!s_coverSpr.createSprite(COVER_SIZE, COVER_SIZE)) {
-    LOGW("[COVER] s_coverSpr.createSprite(%d,%d) failed", COVER_SIZE, COVER_SIZE);
+    LOGW("[封面] s_封面Spr.创建Sprite(%d,%d) 失败", COVER_SIZE, COVER_SIZE);
     return;
   }
   s_coverSpr.fillScreen(TFT_BLACK);
@@ -318,7 +318,7 @@ void cover_sprite_init_once()
   s_coverMasked.setColorDepth(16);
   s_coverMasked.setPsram(has_psram);
   if (!s_coverMasked.createSprite(COVER_SIZE, COVER_SIZE)) {
-    LOGW("[COVER] s_coverMasked.createSprite(%d,%d) failed", COVER_SIZE, COVER_SIZE);
+    LOGW("[封面] s_封面Masked.创建Sprite(%d,%d) 失败", COVER_SIZE, COVER_SIZE);
     s_coverSpr.deleteSprite();
     return;
   }
@@ -336,7 +336,7 @@ void cover_cache_sprite_init_once()
     s_coverCacheSpr[i]->setColorDepth(16);
     s_coverCacheSpr[i]->setPsram(has_psram);
     if (!s_coverCacheSpr[i]->createSprite(COVER_SIZE, COVER_SIZE)) {
-      LOGW("[COVER] s_coverCacheSpr[%d].createSprite(%d,%d) failed", i, COVER_SIZE, COVER_SIZE);
+      LOGW("[封面] s_封面CacheSpr[%d].创建Sprite(%d,%d) 失败", i, COVER_SIZE, COVER_SIZE);
       for (int j = 0; j < i; ++j) s_coverCacheSpr[j]->deleteSprite();
       return;
     }
@@ -345,7 +345,7 @@ void cover_cache_sprite_init_once()
     s_coverCacheMasked[i]->setColorDepth(16);
     s_coverCacheMasked[i]->setPsram(has_psram);
     if (!s_coverCacheMasked[i]->createSprite(COVER_SIZE, COVER_SIZE)) {
-      LOGW("[COVER] s_coverCacheMasked[%d].createSprite(%d,%d) failed", i, COVER_SIZE, COVER_SIZE);
+      LOGW("[封面] s_封面CacheMasked[%d].创建Sprite(%d,%d) 失败", i, COVER_SIZE, COVER_SIZE);
       s_coverCacheSpr[i]->deleteSprite();
       for (int j = 0; j < i; ++j) {
         s_coverCacheMasked[j]->deleteSprite();
@@ -376,7 +376,7 @@ void cover_frames_init_once()
     s_frame[i]->setColorDepth(16);
     s_frame[i]->setPsram(has_psram);
     if (!s_frame[i]->createSprite(COVER_SIZE, COVER_SIZE)) {
-      LOGW("[COVER] s_frame[%d].createSprite(%d,%d) failed", i, COVER_SIZE, COVER_SIZE);
+      LOGW("[封面] s_帧[%d].创建Sprite(%d,%d) 失败", i, COVER_SIZE, COVER_SIZE);
       // 清理已创建的精灵
       for (int j = 0; j < i; ++j) {
         s_frame[j]->deleteSprite();
@@ -394,7 +394,7 @@ void cover_frames_init_once()
     s_rotFrame[i]->setColorDepth(16);
     s_rotFrame[i]->setPsram(has_psram);
     if (!s_rotFrame[i]->createSprite(COVER_SIZE, COVER_SIZE)) {
-      LOGW("[COVER] s_rotFrame[%d].createSprite(%d,%d) failed", i, COVER_SIZE, COVER_SIZE);
+      LOGW("[封面] s_rotFrame[%d].创建Sprite(%d,%d) 失败", i, COVER_SIZE, COVER_SIZE);
       // 清理已创建的精灵
       for (int j = 0; j < i; ++j) {
         s_rotFrame[j]->deleteSprite();
@@ -431,7 +431,7 @@ bool cover_decode_to_sprite_from_track(const TrackInfo& t)
     {
       StorageSdLockGuard sd_lock(1000);
       if (!sd_lock || !sd.exists("/System/default_cover.jpg")) {
-        LOGW("[COVER] default cover not found -> placeholder");
+        LOGW("[封面] 默认 封面 未找到 -> 占位图");
         ui_lock();
         cover_draw_placeholder("NO COVER");
         s_coverSprReady = true;
@@ -444,14 +444,14 @@ bool cover_decode_to_sprite_from_track(const TrackInfo& t)
     {
       StorageSdLockGuard sd_lock(1000);
       if (!sd_lock) {
-        LOGW("[COVER] open default cover lock timeout");
+        LOGW("[封面] 打开 默认 封面 锁 超时");
         s_coverSprReady = false;
         return false;
       }
       f = sd.open("/System/default_cover.jpg", O_RDONLY);
     }
     if (!f) {
-      LOGW("[COVER] open default cover failed");
+      LOGW("[封面] 打开 默认 封面 失败");
       s_coverSprReady = false;
       return false;
     }
@@ -469,7 +469,7 @@ bool cover_decode_to_sprite_from_track(const TrackInfo& t)
     if (fileSize == 0 || !cover_ensure_buffer(fileSize)) {
       StorageSdLockGuard sd_lock(1000);
       if (sd_lock) f.close();
-      LOGW("[COVER] ensure buffer failed for default cover");
+      LOGW("[封面] ensure 缓冲区 失败 for 默认 封面");
       s_coverSprReady = false;
       return false;
     }
@@ -487,7 +487,7 @@ bool cover_decode_to_sprite_from_track(const TrackInfo& t)
       f.close();
     }
     if (bytesRead != (int)fileSize) {
-      LOGW("[COVER] read default cover failed");
+      LOGW("[封面] 读取 默认 封面 失败");
       s_coverSprReady = false;
       return false;
     }
@@ -497,7 +497,7 @@ bool cover_decode_to_sprite_from_track(const TrackInfo& t)
     bool ok = cover_blit_scaled_to_240(buf, fileSize, false);
 
     s_coverSprReady = ok;
-    LOGD("[COVER] default cover ok=%d", (int)ok);
+    LOGD("[封面] 默认封面成功=%d", (int)ok);
     ui_unlock();
     return ok;
   }
@@ -515,7 +515,7 @@ bool cover_decode_to_sprite_from_track(const TrackInfo& t)
   uint32_t t4 = millis();
 
   s_coverSprReady = ok;
-  LOGD("[COVER] decode: init=%lums, load=%lums, scale=%lums, total=%lums", 
+  LOGD("[封面] 解码: init=%lums, 加载=%lums, 缩放=%lums, 总计=%lums", 
        t1-t0, t2-t1, t4-t3, t4-t0);
   ui_unlock();
   return ok;

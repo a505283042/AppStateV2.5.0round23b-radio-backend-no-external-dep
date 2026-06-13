@@ -65,7 +65,7 @@ bool write_reg(uint8_t reg, uint8_t value) {
   const uint8_t err = Wire.endTransmission();
 
   if (err != 0) {
-    LOGW("[MCP23017] write reg=0x%02X value=0x%02X failed err=%u",
+    LOGW("[MCP23017] 写寄存器失败 寄存器=0x%02X 值=0x%02X 错误=%u",
          reg,
          value,
          err);
@@ -82,13 +82,13 @@ bool read_reg(uint8_t reg, uint8_t* out) {
   Wire.write(reg);
   uint8_t err = Wire.endTransmission(false);
   if (err != 0) {
-    LOGW("[MCP23017] read select reg=0x%02X failed err=%u", reg, err);
+    LOGW("[MCP23017] 选择读取寄存器失败 寄存器=0x%02X 错误=%u", reg, err);
     return false;
   }
 
   const uint8_t n = Wire.requestFrom((int)board::MCP23017_U3_ADDR, 1);
   if (n != 1 || !Wire.available()) {
-    LOGW("[MCP23017] read reg=0x%02X failed n=%u", reg, n);
+    LOGW("[MCP23017] 读取寄存器失败 寄存器=0x%02X 数量=%u", reg, n);
     return false;
   }
 
@@ -159,12 +159,12 @@ bool mcp23017_u3_begin() {
   s_ready = ok;
 
   if (s_ready) {
-    LOGI("[MCP23017] U3 init ok addr=0x%02X IODIRA=0x%02X IODIRB=0x%02X",
+    LOGI("[MCP23017] U3 初始化成功：地址=0x%02X IODIRA=0x%02X IODIRB=0x%02X",
          board::MCP23017_U3_ADDR,
          IODIRA_VALUE,
          IODIRB_VALUE);
   } else {
-    LOGW("[MCP23017] U3 init failed addr=0x%02X", board::MCP23017_U3_ADDR);
+    LOGW("[MCP23017] U3 初始化失败：地址=0x%02X", board::MCP23017_U3_ADDR);
   }
 
   return s_ready;
@@ -224,7 +224,7 @@ void mcp23017_u3_debug_dump() {
   const uint8_t gpio_a = mcp23017_u3_read_a();
   const uint8_t gpio_b = mcp23017_u3_read_b();
 
-  LOGD("[MCP23017] dump ready=%d GPIOA=0x%02X GPIOB=0x%02X OLATA=0x%02X OLATB=0x%02X",
+  LOGD("[MCP23017] 状态：就绪=%d GPIOA=0x%02X GPIOB=0x%02X OLATA=0x%02X OLATB=0x%02X",
        s_ready ? 1 : 0,
        gpio_a,
        gpio_b,

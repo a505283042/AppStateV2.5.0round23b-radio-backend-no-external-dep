@@ -180,7 +180,7 @@ bool storage_build_catalog_v3_from_temp(const std::vector<TrackBuildTempV3>& tra
   storage_catalog_v3_free(out_cat);
 
   if (tracks.empty()) {
-    LOGE("[BUILDER_V3] temp input tracks empty");
+    LOGE("[曲库构建] 临时输入歌曲为空");
     return false;
   }
 
@@ -261,7 +261,7 @@ bool storage_build_catalog_v3_from_temp(const std::vector<TrackBuildTempV3>& tra
   /* 拷贝到最终 catalog */
 
   if (!copy_blob_to_psram(pool_builder.blob, out_cat.pool.data, out_cat.pool.size)) {
-    LOGE("[BUILDER_V3] alloc/copy string pool failed");
+    LOGE("[曲库构建] 分配/copy string pool 失败");
     storage_catalog_v3_free(out_cat);
     return false;
   }
@@ -270,7 +270,7 @@ bool storage_build_catalog_v3_from_temp(const std::vector<TrackBuildTempV3>& tra
     size_t n = artist_rows.size() * sizeof(ArtistRowV3);
     out_cat.artists = (ArtistRowV3*)alloc_prefer_psram(n);
     if (!out_cat.artists) {
-      LOGE("[BUILDER_V3] alloc artists failed");
+      LOGE("[曲库构建] 分配 歌手s 失败");
       storage_catalog_v3_free(out_cat);
       return false;
     }
@@ -282,7 +282,7 @@ bool storage_build_catalog_v3_from_temp(const std::vector<TrackBuildTempV3>& tra
     size_t n = album_rows.size() * sizeof(AlbumRowV3);
     out_cat.albums = (AlbumRowV3*)alloc_prefer_psram(n);
     if (!out_cat.albums) {
-      LOGE("[BUILDER_V3] alloc albums failed");
+      LOGE("[曲库构建] 分配 专辑s 失败");
       storage_catalog_v3_free(out_cat);
       return false;
     }
@@ -294,7 +294,7 @@ bool storage_build_catalog_v3_from_temp(const std::vector<TrackBuildTempV3>& tra
     size_t n = track_rows.size() * sizeof(TrackRowV3);
     out_cat.tracks = (TrackRowV3*)alloc_prefer_psram(n);
     if (!out_cat.tracks) {
-      LOGE("[BUILDER_V3] alloc tracks failed");
+      LOGE("[曲库构建] 分配 歌曲s 失败");
       storage_catalog_v3_free(out_cat);
       return false;
     }
@@ -304,7 +304,7 @@ bool storage_build_catalog_v3_from_temp(const std::vector<TrackBuildTempV3>& tra
 
   out_cat.generation = 1;
 
-  LOGI("[BUILDER_V3] build from temp ok: tracks=%lu albums=%lu artists=%lu pool=%lu",
+  LOGI("[曲库构建] 从临时数据构建成功: 歌曲s=%lu 专辑s=%lu 歌手s=%lu pool=%lu",
        (unsigned long)out_cat.track_count,
        (unsigned long)out_cat.album_count,
        (unsigned long)out_cat.artist_count,

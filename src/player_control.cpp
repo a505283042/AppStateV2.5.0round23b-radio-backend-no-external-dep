@@ -57,7 +57,7 @@ static void player_save_radio_return_context_if_needed() {
     s_radio_return.group_idx = player_playlist_get_current_group_idx();
     s_radio_return.volume = audio_get_volume();
 
-    LOGD("[RADIO] save return ctx track=%d mode=%d group=%d vol=%u",
+    LOGD("[电台] 保存 返回 ctx 歌曲=%d 模式=%d 分组=%d vol=%u",
          cur,
          (int)s_radio_return.mode,
          s_radio_return.group_idx,
@@ -157,10 +157,10 @@ static void control_apply_radio_cover(const RadioItem& item)
 
     if (logo.length() > 0 && !control_is_remote_logo(logo)) {
         if (control_apply_cover_file(logo)) {
-            LOGD("[RADIO] logo applied: %s", logo.c_str());
+            LOGD("[电台] 台标 applied: %s", logo.c_str());
             return;
         }
-        LOGW("[RADIO] logo load failed: %s", logo.c_str());
+        LOGW("[电台] 台标 加载 失败: %s", logo.c_str());
     }
 
     (void)control_apply_cover_file("/System/default_cover.jpg");
@@ -171,12 +171,12 @@ static bool control_prepare_net_track_item(int idx, NetMusicItem& item, String& 
     if (idx < 0) return false;
 
     if (!net_music_catalog_is_loaded() || net_music_catalog_count() == 0) {
-        LOGW("[NETTRACK] catalog not loaded or empty");
+        LOGW("[网络歌曲] 目录 未加载 or 为空");
         return false;
     }
 
     if (!net_music_catalog_get((uint32_t)idx, &item) || !item.valid) {
-        LOGW("[NETTRACK] item not found idx=%d err=%s",
+        LOGW("[网络歌曲] 未找到条目：索引=%d 错误=%s",
              idx,
              net_music_catalog_error().c_str());
         return false;
@@ -184,7 +184,7 @@ static bool control_prepare_net_track_item(int idx, NetMusicItem& item, String& 
 
     url = net_music_catalog_build_url(item);
     if (!url.length()) {
-        LOGW("[NETTRACK] url build failed idx=%d", idx);
+        LOGW("[网络歌曲] URL 构建失败：索引=%d", idx);
         return false;
     }
 
@@ -269,7 +269,7 @@ static void control_reset_net_track_shuffle(int start_idx)
     }
 
     if (count > 65535) {
-        LOGW("[NETTRACK] shuffle disabled: count too large=%lu",
+        LOGW("[网络歌曲] shuffle 已禁用: 数量 过大=%lu",
              (unsigned long)count);
         return;
     }
@@ -303,7 +303,7 @@ static void control_reset_net_track_shuffle(int start_idx)
     s_net_track_shuffle.count = count;
     s_net_track_shuffle.ready = true;
 
-    LOGD("[NETTRACK] shuffle reset method=fisher start=%d count=%lu",
+    LOGD("[网络歌曲] shuffle re设置 method=fisher 启动=%d 数量=%lu",
          start_idx,
          (unsigned long)count);
 }
@@ -329,7 +329,7 @@ static bool control_sync_net_track_shuffle_to_current(int current_idx)
     for (uint32_t i = 0; i < s_net_track_shuffle.order.size(); ++i) {
         if (s_net_track_shuffle.order[i] == (uint16_t)current_idx) {
             s_net_track_shuffle.pos = i;
-            LOGD("[NETTRACK] shuffle sync current=%d pos=%lu",
+            LOGD("[网络歌曲] shuffle 同步 当前=%d pos=%lu",
                  current_idx,
                  (unsigned long)i);
             return true;
@@ -388,7 +388,7 @@ static int control_resolve_next_net_track_index(int current_idx, int step)
 
     const int next = control_net_track_shuffle_index_at(s_net_track_shuffle.pos);
 
-    LOGD("[NETTRACK] shuffle resolve cur=%d step=%d pos=%lu -> %d",
+    LOGD("[网络歌曲] shuffle resolve cur=%d step=%d pos=%lu -> %d",
          current_idx,
          step,
          (unsigned long)s_net_track_shuffle.pos,
@@ -404,7 +404,7 @@ static void control_reset_net_track_eof_watch(int idx)
     s_net_track_eof_watch.last_change_ms = millis();
     s_net_track_eof_watch.armed = true;
 
-    LOGD("[NETTRACK] eof watch reset idx=%d play_ms=%lu",
+    LOGD("[网络歌曲] 播放结束监测已重置：索引=%d 播放=%lums",
          idx,
          (unsigned long)s_net_track_eof_watch.last_play_ms);
 }
@@ -456,7 +456,7 @@ static bool control_net_track_eof_watch_triggered(const PlayerSourceState& sourc
             return false;
         }
 
-        LOGW("[NETTRACK] EOF duration-watch triggered idx=%d play_ms=%lu total_ms=%lu stalled=%lums",
+        LOGW("[网络歌曲] 播放结束时长监测触发：索引=%d 播放=%lums 总时长=%lums 卡住=%lums",
              source.net_track_idx,
              (unsigned long)play_ms,
              (unsigned long)duration_ms,
@@ -471,7 +471,7 @@ static bool control_net_track_eof_watch_triggered(const PlayerSourceState& sourc
         return false;
     }
 
-    LOGW("[NETTRACK] EOF stall-watch triggered idx=%d play_ms=%lu stalled=%lums",
+    LOGW("[网络歌曲] 播放结束卡住监测触发：索引=%d 播放=%lums 卡住=%lums",
          source.net_track_idx,
          (unsigned long)play_ms,
          (unsigned long)stalled_ms);
@@ -552,22 +552,22 @@ bool player_control_try_auto_next(bool entered, bool started)
         }
 
         if (!net_music_catalog_is_loaded() || net_music_catalog_count() == 0) {
-            LOGW("[NETTRACK] auto next blocked: catalog empty");
+            LOGW("[网络歌曲] auto 下一首 被阻止: 目录 为空");
             return false;
         }
 
         if (!storage_is_ready() || storage_has_recent_io_error()) {
-            LOGW("[NETTRACK] auto next blocked: storage not ready or IO error pending");
+            LOGW("[网络歌曲] auto 下一首 被阻止: storage 未就绪 or IO error pending");
             return false;
         }
 
         const int next = control_resolve_next_net_track_index(source.net_track_idx, +1);
         if (next < 0) {
-            LOGW("[NETTRACK] auto next failed: invalid next index");
+            LOGW("[网络歌曲] auto 下一首 失败: 无效 下一首 index");
             return false;
         }
 
-        LOGI("[NETTRACK] AUTO NEXT %d -> %d", source.net_track_idx, next);
+        LOGD("[网络歌曲] 自动下一首 %d -> %d", source.net_track_idx, next);
         return control_play_net_track_index_impl(next, false);
     }
 
@@ -579,7 +579,7 @@ bool player_control_try_auto_next(bool entered, bool started)
     // 不能立刻判定“歌曲结束”，否则会出现响一下就连续自动下一首。
     const uint32_t local_play_ms = audio_get_play_ms();
     if (local_play_ms < LOCAL_AUTO_NEXT_MIN_PLAY_MS) {
-        LOGW("[PLAYER] auto next suppressed: local play too short play_ms=%lu source=%s",
+        LOGW("[播放器] auto 下一首 已抑制: 本地 play 过短 play_ms=%lu 来源=%s",
             (unsigned long)local_play_ms,
             player_source_type_key(source.type));
         return false;
@@ -589,7 +589,7 @@ bool player_control_try_auto_next(bool entered, bool started)
     if (track_count <= 0) return false;
 
     if (!storage_is_ready() || storage_has_recent_io_error()) {
-        LOGW("[PLAYER] auto next blocked: storage not ready or IO error pending");
+        LOGW("[播放器] auto 下一首 被阻止: storage 未就绪 or IO error pending");
         return false;
     }
 
@@ -601,7 +601,7 @@ bool player_control_try_auto_next(bool entered, bool started)
     }
 
     if (anchored) {
-        LOGW("[PLAYER] AUTO NEXT anchored to playlist head, mode=%d group=%d cur=%d",
+        LOGW("[播放器] AUTO NEXT 锚定到播放列表开头, 模式=%d 分组=%d cur=%d",
              (int)g_play_mode,
              player_playlist_get_current_group_idx(),
              cur);
@@ -642,12 +642,12 @@ bool player_play_radio_index(int idx)
     if (ok) {
         player_source_set_radio_status(true, String("connecting"), String());
         player_source_set_radio_runtime(String(audio_radio_backend_name()), String(), 0, String("connecting"), true);
-        LOGI("[RADIO] PLAY idx=%d name=%s backend=%s", idx, item->name.c_str(), audio_radio_backend_name());
+        LOGI("[电台] 播放电台 索引=%d 名称=%s 后端=%s", idx, item->name.c_str(), audio_radio_backend_name());
         return true;
     }
 
     player_source_set_radio_status(false, String("error"), String("backend_start_failed"));
-    LOGW("[RADIO] PLAY failed idx=%d name=%s", idx, item->name.c_str());
+    LOGW("[电台] 播放失败：索引=%d 名称=%s", idx, item->name.c_str());
     return false;
 }
 
@@ -672,7 +672,7 @@ bool player_return_from_radio_to_local() {
     delay(30);
 
     if (!s_radio_return.valid || s_radio_return.track_idx < 0) {
-        LOGW("[RADIO] no return context");
+        LOGW("[电台] no 返回 context");
         return false;
     }
 
@@ -682,14 +682,14 @@ bool player_return_from_radio_to_local() {
 
     const bool ok = player_play_idx_v3((uint32_t)s_radio_return.track_idx, true, true);
     if (!ok) {
-        LOGW("[RADIO] restore local track failed idx=%d", s_radio_return.track_idx);
+        LOGW("[电台] 恢复本地歌曲失败：索引=%d", s_radio_return.track_idx);
         return false;
     }
 
     audio_set_volume(s_radio_return.volume);
     ui_set_volume(s_radio_return.volume);
 
-    LOGI("[RADIO] restored local track idx=%d", s_radio_return.track_idx);
+    LOGD("[电台] 已恢复本地歌曲：索引=%d", s_radio_return.track_idx);
     return true;
 }
 
@@ -702,14 +702,14 @@ bool player_return_from_network_to_local()
     }
 
     if (source.type != PlayerSourceType::NET_TRACK) {
-        LOGW("[NETTRACK] return local ignored: source=%s",
+        LOGW("[网络歌曲] 返回 本地 已忽略: 来源=%s",
              player_source_type_key(source.type));
         return false;
     }
 
     const int track_count = control_track_count();
     if (track_count <= 0) {
-        LOGW("[NETTRACK] return local failed: no local tracks");
+        LOGW("[网络歌曲] 返回 本地 失败: no 本地 歌曲s");
         return false;
     }
 
@@ -717,10 +717,10 @@ bool player_return_from_network_to_local()
 
     if (target < 0 || target >= track_count) {
         target = 0;
-        LOGW("[NETTRACK] return local fallback to idx=0");
+        LOGW("[网络歌曲] 返回本地失败，回退到 idx=0");
     }
 
-    LOGI("[NETTRACK] return local target=%d", target);
+    LOGD("[网络歌曲] 返回本地目标=%d", target);
 
     audio_service_stop(true);
 
@@ -742,10 +742,10 @@ bool player_net_track_toggle_order_random()
 
     if (control_is_net_track_random_mode()) {
         g_play_mode = PLAY_MODE_ALL_SEQ;
-        LOGI("[NETTRACK] mode -> all_seq");
+        LOGD("[网络歌曲] 模式 -> all_seq");
     } else {
         g_play_mode = PLAY_MODE_ALL_RND;
-        LOGI("[NETTRACK] mode -> all_rnd");
+        LOGD("[网络歌曲] 模式 -> all_rnd");
     }
 
     ui_set_play_mode(g_play_mode);
@@ -768,7 +768,7 @@ static bool control_play_net_track_index_impl(int idx, bool reset_shuffle)
         const int cur = control_current_track_idx();
         if (cur >= 0 && cur < control_track_count()) {
             s_net_track_return_local_idx = cur;
-            LOGD("[NETTRACK] remember local return idx=%d", s_net_track_return_local_idx);
+            LOGD("[网络歌曲] 记住本地返回位置：索引=%d", s_net_track_return_local_idx);
         }
     }
 
@@ -813,7 +813,7 @@ static bool control_play_net_track_index_impl(int idx, bool reset_shuffle)
 
         control_reset_net_track_eof_watch(idx);
 
-        LOGI("[NETTRACK] PLAY idx=%d title=%s duration=%lums url=%s",
+        LOGI("[网络歌曲] 播放网络歌曲 索引=%d 标题=%s 时长=%lums URL=%s",
             idx,
             item.title.c_str(),
             (unsigned long)item.duration_ms,
@@ -822,7 +822,7 @@ static bool control_play_net_track_index_impl(int idx, bool reset_shuffle)
     }
 
     player_source_set_net_track_status(false, String("error"), String("stream_start_failed"));
-    LOGW("[NETTRACK] PLAY failed idx=%d title=%s url=%s",
+    LOGW("[网络歌曲] 播放失败：索引=%d 标题=%s URL=%s",
          idx,
          item.title.c_str(),
          url.c_str());
@@ -885,11 +885,11 @@ void player_next_track()
     }
 
     if (anchored) {
-        LOGW("[PLAYER] NEXT anchored to playlist head, mode=%d group=%d cur=%d",
+        LOGW("[播放器] NEXT 锚定到播放列表开头, 模式=%d 分组=%d cur=%d",
              (int)g_play_mode, player_playlist_get_current_group_idx(), cur);
     }
 
-    LOGI("[PLAYER] NEXT -> #%d", next);
+    LOGI("[播放器] 下一首 -> #%d", next);
 
     ui_notify_cover_panel_nav_feedback(1);
 
@@ -943,11 +943,11 @@ void player_prev_track()
     }
 
     if (anchored) {
-        LOGW("[PLAYER] PREV anchored to playlist tail, mode=%d group=%d cur=%d",
+        LOGW("[播放器] PREV 锚定到播放列表末尾, 模式=%d 分组=%d cur=%d",
              (int)g_play_mode, player_playlist_get_current_group_idx(), cur);
     }
 
-    LOGI("[PLAYER] PREV -> #%d", prev);
+    LOGI("[播放器] 上一首 -> #%d", prev);
 
     ui_notify_cover_panel_nav_feedback(-1);
 
@@ -972,7 +972,7 @@ void player_toggle_play()
         if (audio_radio_backend_toggle_pause()) {
             const bool paused = audio_radio_backend_is_paused();
             player_source_set_radio_status(true, paused ? String("paused") : String("playing"), String());
-            LOGI("[RADIO] %s", paused ? "Paused" : "Resumed");
+            LOGI("[电台] %s", paused ? "Paused" : "Resumed");
             return;
         }
         if (source.radio_idx >= 0) {
@@ -990,7 +990,7 @@ void player_toggle_play()
             player_source_set_net_track_status(true, String("playing"), String());
         }
 
-        LOGI("[PLAYER] Resumed from pause");
+        LOGI("[播放器] 已从暂停恢复");
         return;
     }
 
@@ -999,7 +999,7 @@ void player_toggle_play()
         s_user_paused = true;
         s_pause_time_ms = millis();
         const uint32_t paused_at_ms = audio_get_play_ms();
-        LOGI("[PLAYER] Paused at %u ms", paused_at_ms);
+        LOGI("[播放器] 暂停于 %u ms", paused_at_ms);
         return;
     }
 
@@ -1015,7 +1015,7 @@ void player_toggle_play()
 
     const int cur = control_current_track_idx();
     if (cur >= 0) {
-        LOGI("[PLAYER] Restart current track #%d", cur);
+        LOGI("[播放器] 重新启动 当前 歌曲 #%d", cur);
         (void)control_play_track_dispatch(cur, false, true);
     }
 }
@@ -1027,7 +1027,7 @@ void player_volume_step(int delta)
     if (v > 100) v = 100;
     audio_set_volume((uint8_t)v);
     ui_set_volume((uint8_t)v);
-    LOGD("[VOL] %d%%", v);
+    LOGD("[音量] %d%%", v);
 }
 
 void player_next_group()
@@ -1044,11 +1044,11 @@ void player_next_group()
 
     const PlayerSourceState source = player_source_get();
     if (source.type == PlayerSourceType::NET_RADIO) {
-        LOGW("[LIST] 电台播放中，但无法进入电台列表");
+        LOGW("[列表] 电台播放中，但无法进入电台列表");
     } else if (source.type == PlayerSourceType::NET_TRACK) {
-        LOGW("[LIST] NAS歌曲播放中，但无法进入NAS歌曲列表");
+        LOGW("[列表] NAS歌曲播放中，但无法进入NAS歌曲列表");
     } else {
-        LOGW("[LIST] 本地播放中，但无法进入歌曲列表 mode=%d count=%d",
+        LOGW("[列表] 本地播放中，但无法进入歌曲列表 模式=%d 数量=%d",
              (int)g_play_mode,
              control_track_count());
     }
@@ -1106,7 +1106,7 @@ void player_toggle_random()
 
     control_apply_mode_context(new_mode, control_current_track_idx(), false);
 
-    LOGI("[PLAYER] 小类切换: %s", next_random ? "随机" : "顺序");
+    LOGI("[播放器] 小类切换: %s", next_random ? "随机" : "顺序");
 }
 
 void player_cycle_mode_category()
@@ -1126,5 +1126,5 @@ void player_cycle_mode_category()
         default: break;
     }
 
-    LOGI("[PLAYER] 大类切换: %s (%s)", cat_name, is_random ? "随机" : "顺序");
+    LOGI("[播放器] 大类切换: %s (%s)", cat_name, is_random ? "随机" : "顺序");
 }

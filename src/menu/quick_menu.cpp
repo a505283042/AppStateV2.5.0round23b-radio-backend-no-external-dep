@@ -197,12 +197,12 @@ void confirm_current()
             return;
 
         case QuickMenuItemType::Status:
-            LOGD("[MENU] status item: %s", item->label ? item->label : "");
+            LOGD("[菜单] 状态 item: %s", item->label ? item->label : "");
             mark_dirty();
             return;
 
         case QuickMenuItemType::Placeholder:
-            LOGW("[MENU] placeholder item: %s", item->label ? item->label : "");
+            LOGW("[菜单] 占位图 item: %s", item->label ? item->label : "");
             mark_dirty();
             return;
 
@@ -210,14 +210,14 @@ void confirm_current()
         case QuickMenuItemType::Toggle:
             if (item->on_confirm != nullptr) {
                 const bool changed = item->on_confirm();
-                LOGD("[MENU] action item=%s changed=%d",
+                LOGD("[菜单] action item=%s changed=%d",
                      item->label ? item->label : "",
                      changed ? 1 : 0);
                 mark_dirty();
                 return;
             }
 
-            LOGW("[MENU] item not wired yet: %s", item->label ? item->label : "");
+            LOGW("[菜单] item 尚未接入: %s", item->label ? item->label : "");
             mark_dirty();
             return;
 
@@ -276,7 +276,7 @@ void quick_menu_exit()
 
     mark_dirty();
 
-    LOGD("[MENU] exit");
+    LOGD("[菜单] 退出");
 }
 
 void quick_menu_tick()
@@ -287,7 +287,7 @@ void quick_menu_tick()
 
     const uint32_t now = millis();
     if (now - s_last_action_ms >= MENU_AUTO_EXIT_MS) {
-        LOGD("[MENU] auto exit");
+        LOGD("[菜单] auto 退出");
         quick_menu_exit();
     }
 
@@ -311,7 +311,7 @@ void quick_menu_handle_key(QuickMenuKey key)
 
     if (key == QuickMenuKey::Confirm && confirm_guard_active()) {
         touch_menu();
-        LOGW("[MENU] confirm ignored by guard");
+        LOGW("[菜单] confirm 已忽略 by guard");
         return;
     }
 

@@ -97,7 +97,7 @@ static void snapshot_sanitize_loaded(PlayerPersistSnapshot& snap)
 
 static void snapshot_log_loaded(const char* prefix, const PlayerPersistSnapshot& snap)
 {
-    LOGI("[SNAPSHOT] %s: mode=%u group=%d track=%d path=%s vol=%u view=%u paused=%d",
+    LOGD("[快照] %s：模式=%u 分组=%d 歌曲=%d 路径=%s 音量=%u 视图=%u 暂停=%d",
          prefix,
          (unsigned)snap.play_mode,
          snap.current_group_idx,
@@ -124,12 +124,12 @@ static bool snapshot_read_blob(Preferences& pref, PlayerPersistSnapshot& out)
     PlayerPersistSnapshotBlob blob{};
     const size_t read_len = pref.getBytes(key, &blob, sizeof(blob));
     if (read_len != sizeof(blob)) {
-        LOGW("[SNAPSHOT] blob read size mismatch: got=%u expect=%u",
+        LOGW("[快照] blob 读取大小不匹配: 实际=%u 期望=%u",
              (unsigned)read_len, (unsigned)sizeof(blob));
         return false;
     }
     if (blob.version != kSnapshotVersion && blob.version != 1) {
-        LOGW("[SNAPSHOT] blob version unsupported: %u", (unsigned)blob.version);
+        LOGW("[快照] blob 版本 不支持: %u", (unsigned)blob.version);
         return false;
     }
 
@@ -177,20 +177,20 @@ bool player_snapshot_load_pending_from_nvs()
 
     Preferences pref;
     if (!pref.begin(kPrefsNs, true)) {
-        LOGW("[SNAPSHOT] load skipped: open NVS namespace failed");
+        LOGW("[快照] 加载 已跳过: 打开 NVS namespace 失败");
         return false;
     }
 
     bool ok = false;
     if (snapshot_read_blob(pref, s_pending)) {
         ok = true;
-        LOGI("[SNAPSHOT] load key=%s", key);
+        LOGD("[快照] 读取 NVS：key=%s", key);
         snapshot_log_loaded("pending loaded from NVS blob", s_pending);
     }
     pref.end();
 
     if (!ok) {
-        LOGI("[SNAPSHOT] no saved player snapshot in NVS key=%s", key);
+        LOGD("[快照] NVS 中没有保存的播放快照：key=%s", key);
         return false;
     }
 
@@ -203,13 +203,13 @@ bool player_snapshot_save_to_nvs()
     const PlayerSourceState source = player_source_get();
 
     if (source.type != PlayerSourceType::LOCAL_TRACK) {
-        LOGW("[SNAPSHOT] save skipped: unsupported source=%s",
+        LOGW("[快照] 保存 已跳过: 不支持 来源=%s",
              player_source_type_key(source.type));
         return false;
     }
 
     if (player_state_current_index() < 0) {
-        LOGW("[SNAPSHOT] save skipped: no current local track");
+        LOGW("[快照] 保存 已跳过: no 当前 本地 歌曲");
         return false;
     }
 
@@ -241,21 +241,21 @@ bool player_snapshot_save_to_nvs()
 
     Preferences pref;
     if (!pref.begin(kPrefsNs, false)) {
-        LOGE("[SNAPSHOT] save failed: open NVS namespace");
+        LOGE("[快照] 保存 失败: 打开 NVS namespace");
         return false;
     }
 
     const size_t written = pref.putBytes(key, &blob, sizeof(blob));
     pref.end();
     if (written != sizeof(blob)) {
-        LOGE("[SNAPSHOT] save failed: blob write size=%u expect=%u",
+        LOGE("[快照] 保存 失败: blob 写入 大小=%u 期望=%u",
              (unsigned)written, (unsigned)sizeof(blob));
         return false;
     }
 
     s_pending = snap;
     s_has_pending = true;
-    LOGD("[SNAPSHOT] save key=%s", key);
+    LOGD("[快照] 保存 key=%s", key);
     snapshot_log_loaded("saved to NVS blob", snap);
     return true;
 }
@@ -264,7 +264,7 @@ bool player_snapshot_begin_restore_on_player_enter()
 {
     if (!s_has_pending) return false;
     if (!storage_catalog_v3_ready() || storage_catalog_v3_track_count() == 0) {
-        LOGW("[SNAPSHOT] restore skipped: catalog not ready");
+        LOGW("[快照] 恢复 已跳过: 目录 未就绪");
         s_has_pending = false;
         return false;
     }
@@ -272,7 +272,7 @@ bool player_snapshot_begin_restore_on_player_enter()
     snapshot_apply_light_state(s_pending);
     s_restore_armed = true;
     s_restore_not_before_ms = millis() + kDeferredRestoreDelayMs;
-    LOGI("[SNAPSHOT] light restore applied, deferred track restore in %ums",
+    LOGD("[快照] 已应用轻量恢复，%u ms 后恢复当前歌曲",
          (unsigned)kDeferredRestoreDelayMs);
     return true;
 }
@@ -291,7 +291,7 @@ PlayerSnapshotRestorePollResult player_snapshot_poll_restore()
     s_restore_armed = false;
 
     if (!storage_catalog_v3_ready() || storage_catalog_v3_track_count() == 0) {
-        LOGW("[SNAPSHOT] deferred restore failed: catalog not ready");
+        LOGW("[快照] 延迟 恢复 失败: 目录 未就绪");
         s_has_pending = false;
         return PLAYER_SNAPSHOT_RESTORE_FAILED;
     }
@@ -300,14 +300,14 @@ PlayerSnapshotRestorePollResult player_snapshot_poll_restore()
     const int track_idx = snapshot_resolve_track_idx(snap);
     s_has_pending = false;
     if (track_idx < 0) {
-        LOGW("[SNAPSHOT] deferred restore skipped: saved track missing, path=%s idx=%d",
+        LOGW("[快照] 延迟 恢复 已跳过: 保存的 歌曲 不存在, 路径=%s 索引=%d",
              snap.track_path.c_str(), snap.track_idx);
         return PLAYER_SNAPSHOT_RESTORE_FAILED;
     }
 
     TrackInfo t;
     if (!storage_catalog_v3_get_trackinfo((uint32_t)track_idx, t, "/Music")) {
-        LOGE("[SNAPSHOT] deferred UI-only restore expand trackinfo failed: idx=%d", track_idx);
+        LOGE("[快照] 延迟 UI-only 恢复 展开 歌曲信息 失败: 索引=%d", track_idx);
         return PLAYER_SNAPSHOT_RESTORE_FAILED;
     }
 
@@ -392,12 +392,12 @@ PlayerSnapshotRestorePollResult player_snapshot_poll_restore()
 
         player_assets_schedule(asset_job);
 
-        LOGD("[SNAPSHOT] boot next-cover-only prefetch job armed track=%d", track_idx);
+        LOGD("[快照] boot 下一首-封面-only prefetch job armed 歌曲=%d", track_idx);
     }
 
     ui_request_refresh_now();
 
-    LOGI("[SNAPSHOT] deferred UI-only restore done: mode=%d group=%d track=%d path=%s vol=%u view=%u cover_hit=%d lyrics=%d cover=%d",
+    LOGD("[快照] 延迟 UI 恢复完成：模式=%d 分组=%d 歌曲=%d 路径=%s 音量=%u 视图=%u 封面命中=%d 歌词=%d 封面=%d",
         (int)g_play_mode,
         player_playlist_get_current_group_idx(),
         track_idx,

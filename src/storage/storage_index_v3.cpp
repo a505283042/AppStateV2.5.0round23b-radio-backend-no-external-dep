@@ -122,7 +122,7 @@ bool storage_index_save_v3(const MusicCatalogV3& cat, const char* index_path)
 {
   StorageSdLockGuard sd_lock(2000);
   if (!sd_lock) {
-    LOGE("[曲库索引] 保存锁定超时");
+    LOGE("[曲库索引] 保存 锁 超时");
     return false;
   }
 
@@ -131,7 +131,7 @@ bool storage_index_save_v3(const MusicCatalogV3& cat, const char* index_path)
   String tmp_path = String(index_path) + ".tmp";
   File32 f = sd.open(tmp_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC);
   if (!f) {
-    LOGE("[曲库索引] 打开临时文件失败：%s", tmp_path.c_str());
+    LOGE("[曲库索引] 打开 tmp 失败: %s", tmp_path.c_str());
     return false;
   }
 
@@ -180,7 +180,7 @@ bool storage_index_save_v3(const MusicCatalogV3& cat, const char* index_path)
       !write_section(f, sec_tracks)) {
     f.close();
     sd.remove(tmp_path.c_str());
-    LOGE("[曲库索引] 写入表头失败");
+    LOGE("[曲库索引] 写入 头/区段s 失败");
     return false;
   }
 
@@ -188,7 +188,7 @@ bool storage_index_save_v3(const MusicCatalogV3& cat, const char* index_path)
     if (!cat.pool.data || f.write(cat.pool.data, cat.pool.size) != (int)cat.pool.size) {
       f.close();
       sd.remove(tmp_path.c_str());
-      LOGE("[曲库索引] 写入字符池失败");
+      LOGE("[曲库索引] 写入 string pool 失败");
       return false;
     }
   }
@@ -198,7 +198,7 @@ bool storage_index_save_v3(const MusicCatalogV3& cat, const char* index_path)
     if (!cat.artists || f.write((const uint8_t*)cat.artists, n) != (int)n) {
       f.close();
       sd.remove(tmp_path.c_str());
-      LOGE("[曲库索引] 写入歌手数据失败");
+      LOGE("[曲库索引] 写入 歌手s 失败");
       return false;
     }
   }
@@ -208,7 +208,7 @@ bool storage_index_save_v3(const MusicCatalogV3& cat, const char* index_path)
     if (!cat.albums || f.write((const uint8_t*)cat.albums, n) != (int)n) {
       f.close();
       sd.remove(tmp_path.c_str());
-      LOGE("[曲库索引] 写入专辑数据失败");
+      LOGE("[曲库索引] 写入 专辑s 失败");
       return false;
     }
   }
@@ -218,7 +218,7 @@ bool storage_index_save_v3(const MusicCatalogV3& cat, const char* index_path)
     if (!cat.tracks || f.write((const uint8_t*)cat.tracks, n) != (int)n) {
       f.close();
       sd.remove(tmp_path.c_str());
-      LOGE("[曲库索引] 写入歌曲数据失败");
+      LOGE("[曲库索引] 写入 歌曲s 失败");
       return false;
     }
   }
@@ -228,7 +228,7 @@ bool storage_index_save_v3(const MusicCatalogV3& cat, const char* index_path)
   sd.remove(index_path);
   if (!sd.rename(tmp_path.c_str(), index_path)) {
     sd.remove(tmp_path.c_str());
-    LOGE("[曲库索引] 重命名临时文件失败");
+    LOGE("[曲库索引] rename tmp -> final 失败");
     return false;
   }
 
@@ -256,33 +256,33 @@ bool storage_index_load_v3(MusicCatalogV3& out_cat, const char* index_path)
 
   StorageSdLockGuard sd_lock(2000);
   if (!sd_lock) {
-    LOGE("[曲库索引] 加载锁定超时");
+    LOGE("[曲库索引] 加载 锁 超时");
     return false;
   }
 
   File32 f = sd.open(index_path, O_RDONLY);
   if (!f) {
-    LOGE("[曲库索引] 打开索引文件失败：%s", index_path);
+    LOGE("[曲库索引] 打开失败：%s", index_path);
     return false;
   }
 
   IndexV3Header h;
   if (!read_header(f, h)) {
     f.close();
-    LOGE("[曲库索引] 读取表头失败");
+    LOGE("[曲库索引] 读取 头 失败");
     return false;
   }
 
   if (h.magic != INDEX_V3_MAGIC || h.version != INDEX_V3_VERSION) {
     f.close();
-    LOGE("[曲库索引] 不支持的格式 magic=0x%08lx ver=%u",
+    LOGE("[曲库索引] 不支持 格式 魔数=0x%08lx ver=%u",
          (unsigned long)h.magic, (unsigned)h.version);
     return false;
   }
 
   if (h.section_count != 4 || h.track_count > 100000 || h.album_count > 20000 || h.artist_count > 20000) {
     f.close();
-    LOGE("[曲库索引] 数据量不合理");
+    LOGE("[曲库索引] unreasonable 数量s");
     return false;
   }
 
@@ -290,7 +290,7 @@ bool storage_index_load_v3(MusicCatalogV3& out_cat, const char* index_path)
   for (uint32_t i = 0; i < 4; ++i) {
     if (!read_section(f, sections[i])) {
       f.close();
-      LOGE("[曲库索引] 读取分区失败");
+      LOGE("[曲库索引] 读取 区段 失败");
       return false;
     }
   }
@@ -308,7 +308,7 @@ bool storage_index_load_v3(MusicCatalogV3& out_cat, const char* index_path)
       case SEC_V3_TRACKS:   sec_tracks = sections[i]; break;
       default:
         f.close();
-        LOGE("[曲库索引] 未知节类型：%lu", (unsigned long)sections[i].type);
+        LOGE("[曲库索引] 未知区段类型=%lu", (unsigned long)sections[i].type);
         return false;
     }
   }
@@ -318,14 +318,14 @@ bool storage_index_load_v3(MusicCatalogV3& out_cat, const char* index_path)
     if (!out_cat.pool.data) {
       f.close();
       storage_catalog_v3_free(out_cat);
-      LOGE("[曲库索引] 分配内存失败：字符池不足");
+      LOGE("[曲库索引] 分配 pool 失败");
       return false;
     }
     out_cat.pool.size = h.string_pool_size;
     if (!load_section_blob(f, sec_pool, out_cat.pool.data, h.string_pool_size)) {
       f.close();
       storage_catalog_v3_free(out_cat);
-      LOGE("[曲库索引] 加载字符池失败：内存不足");
+      LOGE("[曲库索引] 加载 pool 失败");
       return false;
     }
   }
@@ -336,13 +336,13 @@ bool storage_index_load_v3(MusicCatalogV3& out_cat, const char* index_path)
     if (!out_cat.artists) {
       f.close();
       storage_catalog_v3_free(out_cat);
-      LOGE("[曲库索引] 分配内存失败：歌手不足");
+      LOGE("[曲库索引] 分配 歌手s 失败");
       return false;
     }
     if (!load_section_blob(f, sec_artists, out_cat.artists, n)) {
       f.close();
       storage_catalog_v3_free(out_cat);
-      LOGE("[曲库索引] 加载歌手失败：内存不足");
+      LOGE("[曲库索引] 加载 歌手s 失败");
       return false;
     }
     out_cat.artist_count = h.artist_count;
@@ -354,13 +354,13 @@ bool storage_index_load_v3(MusicCatalogV3& out_cat, const char* index_path)
     if (!out_cat.albums) {
       f.close();
       storage_catalog_v3_free(out_cat);
-      LOGE("[曲库索引] 分配内存失败：专辑不足");
+      LOGE("[曲库索引] 分配 专辑s 失败");
       return false;
     }
     if (!load_section_blob(f, sec_albums, out_cat.albums, n)) {
       f.close();
       storage_catalog_v3_free(out_cat);
-      LOGE("[曲库索引] 加载专辑失败：内存不足");
+      LOGE("[曲库索引] 加载 专辑s 失败");
       return false;
     }
     out_cat.album_count = h.album_count;
@@ -372,13 +372,13 @@ bool storage_index_load_v3(MusicCatalogV3& out_cat, const char* index_path)
     if (!out_cat.tracks) {
       f.close();
       storage_catalog_v3_free(out_cat);
-      LOGE("[曲库索引] 分配内存失败：歌曲不足");
+      LOGE("[曲库索引] 分配 歌曲s 失败");
       return false;
     }
     if (!load_section_blob(f, sec_tracks, out_cat.tracks, n)) {
       f.close();
       storage_catalog_v3_free(out_cat);
-      LOGE("[曲库索引] 加载歌曲失败：内存不足");
+      LOGE("[曲库索引] 加载 歌曲s 失败");
       return false;
     }
     out_cat.track_count = h.track_count;

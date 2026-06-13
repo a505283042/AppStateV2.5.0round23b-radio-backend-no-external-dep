@@ -47,12 +47,12 @@ bool audio_mp3_file_source_open(SdFat& sd, const char* path, AudioMp3Source& out
   audio_mp3_file_source_close();
 
   if (!path || !*path) {
-    LOGE("[MP3] file source open failed: empty path");
+    LOGE("[MP3] 文件音源打开失败：路径为空");
     return false;
   }
 
   if (!g_file.open(sd, path)) {
-    LOGE("[MP3] open failed: %s", path);
+    LOGE("[MP3] 打开失败：%s", path);
     return false;
   }
 

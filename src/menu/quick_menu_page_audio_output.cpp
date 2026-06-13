@@ -67,7 +67,7 @@ const char* value_bt_reboot()
 bool action_select_headphone_only()
 {
     if (s_bt_reboot_in_progress) {
-        LOGW("[AUDIO_OUT] select headphone ignored: bt rebooting");
+        LOGW("[音频输出] select headphone 已忽略: bt 正在重启");
         return false;
     }
 
@@ -77,7 +77,7 @@ bool action_select_headphone_only()
 bool action_select_speaker()
 {
     if (s_bt_reboot_in_progress) {
-        LOGW("[AUDIO_OUT] select speaker ignored: bt rebooting");
+        LOGW("[音频输出] select speaker 已忽略: bt 正在重启");
         return false;
     }
 
@@ -87,7 +87,7 @@ bool action_select_speaker()
 bool action_select_bluetooth()
 {
     if (s_bt_reboot_in_progress) {
-        LOGW("[AUDIO_OUT] select bluetooth ignored: bt rebooting");
+        LOGW("[音频输出] select bluetooth 已忽略: bt 正在重启");
         return false;
     }
 
@@ -97,7 +97,7 @@ bool action_select_bluetooth()
 bool action_toggle_amp_mute()
 {
     if (!audio_output_route_is_speaker()) {
-        LOGW("[AUDIO_OUT] amp mute ignored: route is bluetooth tx");
+        LOGW("[音频输出] amp mute 已忽略: 路线 is bluetooth tx");
         return false;
     }
 
@@ -108,7 +108,7 @@ bool action_toggle_amp_mute()
 bool action_pulse_bt_switch()
 {
     if (!bt_route_ready()) {
-        LOGW("[AUDIO_OUT] bt pair ignored: route not bluetooth or rebooting");
+        LOGW("[音频输出] bt pair 已忽略: 路线 not bluetooth or 正在重启");
         return false;
     }
 
@@ -119,7 +119,7 @@ bool action_pulse_bt_switch()
 bool action_toggle_bt_wakeup()
 {
     if (!bt_route_ready()) {
-        LOGW("[AUDIO_OUT] bt wakeup ignored: route not bluetooth or rebooting");
+        LOGW("[音频输出] bt wakeup 已忽略: 路线 not bluetooth or 正在重启");
         return false;
     }
 
@@ -132,7 +132,7 @@ bool action_toggle_bt_wakeup()
 void bt_reboot_task(void*)
 {
     // 蓝牙重启需要等待断电保持时间，放到独立任务里，避免阻塞菜单/按键任务。
-    LOGI("[AUDIO_OUT] bt reboot start");
+    LOGI("[音频输出] bt reboot 启动");
     const bool power_off_ok = board_hw_set_bt_power(false);
 
     vTaskDelay(pdMS_TO_TICKS(300));
@@ -141,11 +141,11 @@ void bt_reboot_task(void*)
         const bool power_on_ok = board_hw_set_bt_power(true);
         const bool wakeup_ok = board_hw_set_bt_wakeup(s_bt_reboot_restore_wakeup);
         (void)audio_output_route_enforce();
-        LOGI("[AUDIO_OUT] bt reboot done power_on=%d wakeup_restore=%d", power_on_ok ? 1 : 0, wakeup_ok ? 1 : 0);
+        LOGI("[音频输出] 蓝牙重启完成：电源开启=%d 唤醒恢复=%d", power_on_ok ? 1 : 0, wakeup_ok ? 1 : 0);
     } else if (!audio_output_route_is_bluetooth_tx()) {
-        LOGW("[AUDIO_OUT] bt reboot skipped power on: route changed");
+        LOGW("[音频输出] bt reboot 已跳过 power on: 路线 changed");
     } else {
-        LOGW("[AUDIO_OUT] bt reboot failed: power off step failed");
+        LOGW("[音频输出] bt reboot 失败: power off step 失败");
     }
 
     s_bt_reboot_in_progress = false;
@@ -155,17 +155,17 @@ void bt_reboot_task(void*)
 bool action_reboot_bt_module()
 {
     if (!audio_output_route_is_bluetooth_tx()) {
-        LOGW("[AUDIO_OUT] bt reboot ignored: route not bluetooth tx");
+        LOGW("[音频输出] bt reboot 已忽略: 路线 not bluetooth tx");
         return false;
     }
 
     if (!board_hw_get_bt_power()) {
-        LOGW("[AUDIO_OUT] bt reboot ignored: power off");
+        LOGW("[音频输出] bt reboot 已忽略: power off");
         return false;
     }
 
     if (s_bt_reboot_in_progress) {
-        LOGW("[AUDIO_OUT] bt reboot ignored: already in progress");
+        LOGW("[音频输出] bt reboot 已忽略: al就绪 in progress");
         return false;
     }
 
@@ -183,7 +183,7 @@ bool action_reboot_bt_module()
 
     if (created != pdPASS) {
         s_bt_reboot_in_progress = false;
-        LOGW("[AUDIO_OUT] bt reboot task create failed");
+        LOGW("[音频输出] bt reboot task 创建 失败");
         return false;
     }
 

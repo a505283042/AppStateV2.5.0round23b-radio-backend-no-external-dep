@@ -41,7 +41,7 @@ static bool parse_http_url(const char* url, ParsedUrl& out)
 
   const char* prefix = "http://";
   if (!u.startsWith(prefix)) {
-    LOGE("[RADIO] only http stream is supported: %s", url);
+    LOGE("[电台] only http 流 is 支持ed: %s", url);
     return false;
   }
 
@@ -77,7 +77,7 @@ static bool read_line_with_timeout(String& line, uint32_t timeout_ms)
       if (c == '\n') return true;
       line += c;
       if (line.length() > 512) {
-        LOGW("[RADIO] HTTP header line too long");
+        LOGW("[电台] HTTP 头行过长");
         return false;
       }
     }
@@ -89,7 +89,7 @@ static bool read_line_with_timeout(String& line, uint32_t timeout_ms)
     delay(5);
   }
 
-  LOGW("[RADIO] HTTP header read timeout");
+  LOGW("[电台] HTTP 头 读取 超时");
   return false;
 }
 
@@ -140,12 +140,12 @@ static bool read_response_header(const ParsedUrl& current, int& status_code, Str
 {
   String line;
   if (!read_line_with_timeout(line, kHeaderTimeoutMs)) {
-    LOGE("[RADIO] HTTP status line missing");
+    LOGE("[电台] 缺少 HTTP 状态行");
     return false;
   }
 
   status_code = parse_status_code(line);
-  LOGD("[RADIO] HTTP status: %s", line.c_str());
+  LOGD("[电台] HTTP 状态: %s", line.c_str());
 
   while (read_line_with_timeout(line, kHeaderTimeoutMs)) {
     if (line.length() == 0) {
@@ -163,14 +163,14 @@ static bool read_response_header(const ParsedUrl& current, int& status_code, Str
       if (key == "location") {
         location = make_redirect_url(current, value);
       } else if (key == "content-type") {
-        LOGD("[RADIO] HTTP content-type: %s", value.c_str());
+        LOGD("[电台] HTTP 内容类型：%s", value.c_str());
       } else if (key == "icy-name") {
-        LOGD("[RADIO] ICY name: %s", value.c_str());
+        LOGD("[电台] ICY 名称: %s", value.c_str());
       }
     }
   }
 
-  LOGE("[RADIO] HTTP header not completed");
+  LOGE("[电台] HTTP 头未完整读取");
   return false;
 }
 
@@ -180,17 +180,17 @@ static bool open_http_stream_once(const char* url, String& redirect_url)
 
   ParsedUrl parsed{};
   if (!parse_http_url(url, parsed)) {
-    LOGE("[RADIO] invalid stream url: %s", url ? url : "<null>");
+    LOGE("[电台] 无效 流 URL: %s", url ? url : "<null>");
     return false;
   }
 
-  LOGD("[RADIO] HTTP connect host=%s port=%u path=%s", parsed.host.c_str(), parsed.port, parsed.path.c_str());
+  LOGD("[电台] HTTP 连接 主机=%s 端口=%u 路径=%s", parsed.host.c_str(), parsed.port, parsed.path.c_str());
 
   g_client.stop();
   g_client.setTimeout(kConnectTimeoutMs);
 
   if (!g_client.connect(parsed.host.c_str(), parsed.port)) {
-    LOGE("[RADIO] HTTP connect failed host=%s port=%u", parsed.host.c_str(), parsed.port);
+    LOGE("[电台] HTTP 连接 失败 主机=%s 端口=%u", parsed.host.c_str(), parsed.port);
     return false;
   }
 
@@ -219,19 +219,19 @@ static bool open_http_stream_once(const char* url, String& redirect_url)
 
   if (status_code == 301 || status_code == 302 || status_code == 307 || status_code == 308) {
     if (location.length() == 0) {
-      LOGE("[RADIO] HTTP redirect without Location");
+      LOGE("[电台] HTTP 重定向缺少 Location");
       g_client.stop();
       return false;
     }
 
-    LOGD("[RADIO] HTTP redirect -> %s", location.c_str());
+    LOGD("[电台] HTTP 重定向 -> %s", location.c_str());
     redirect_url = location;
     g_client.stop();
     return false;
   }
 
   if (status_code < 200 || status_code >= 300) {
-    LOGE("[RADIO] HTTP bad status=%d url=%s", status_code, url);
+    LOGE("[电台] HTTP 状态异常=%d URL=%s", status_code, url);
     g_client.stop();
     return false;
   }
@@ -293,12 +293,12 @@ bool audio_mp3_audiotools_source_open(const char* url, AudioMp3Source& out_sourc
   audio_mp3_audiotools_source_close();
 
   if (!url || !*url) {
-    LOGE("[RADIO] HTTP source open failed: empty url");
+    LOGE("[电台] HTTP 音源打开失败：URL 为空");
     return false;
   }
 
   if (!WiFi.isConnected()) {
-    LOGE("[RADIO] HTTP source open failed: WiFi not connected");
+    LOGE("[电台] HTTP 音源打开失败：WiFi 未连接");
     return false;
   }
 
@@ -318,7 +318,7 @@ bool audio_mp3_audiotools_source_open(const char* url, AudioMp3Source& out_sourc
   }
 
   if (!ok) {
-    LOGE("[RADIO] HTTP stream open failed: %s", url);
+    LOGE("[电台] HTTP 流 打开失败：%s", url);
     return false;
   }
 
@@ -332,7 +332,7 @@ bool audio_mp3_audiotools_source_open(const char* url, AudioMp3Source& out_sourc
   out_source.debug_name = s_url.c_str();
   out_source.is_stream = true;
 
-  LOGD("[RADIO] HTTP stream open ok: %s", s_url.c_str());
+  LOGD("[电台] HTTP 流打开成功：%s", s_url.c_str());
   return true;
 }
 

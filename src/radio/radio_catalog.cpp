@@ -62,14 +62,14 @@ bool radio_catalog_load() {
   StorageSdLockGuard guard(1200);
   if (!guard) {
     s_error = "sd_lock_failed";
-    LOGW("[RADIO] catalog load skipped: SD lock failed");
+    LOGW("[电台] 跳过目录加载：获取 SD 锁失败");
     return false;
   }
 
   File32 f = sd.open(kRadioListPath, O_RDONLY);
   if (!f) {
     s_error = "radio_list_missing";
-    LOGW("[RADIO] list not found: %s", kRadioListPath);
+    LOGW("[电台] 列表文件未找到：%s", kRadioListPath);
     return false;
   }
 
@@ -81,7 +81,7 @@ bool radio_catalog_load() {
   f.close();
 
   s_loaded = true;
-  LOGI("[RADIO] catalog loaded items=%d path=%s", (int)s_items.size(), kRadioListPath);
+  LOGD("[电台] 列表加载完成：数量=%d 路径=%s", (int)s_items.size(), kRadioListPath);
   return true;
 }
 

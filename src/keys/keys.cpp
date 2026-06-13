@@ -11,7 +11,6 @@
 #include "player_list_select.h"
 #include "nfc/nfc_admin_state.h"
 #include "menu/quick_menu.h"
-#include "menu/quick_menu_page_nfc.h"
 #include "utils/log.h"
 #include "web/web_server.h"
 #include "board/board_pins_pcb1_mcp23017.h"
@@ -282,7 +281,7 @@ static void setup_key_pin(int pin)
 static void voldn_click_commit_double()
 {
   web_wifi_toggle();
-  LOGW("[APP] WiFi toggled: %s", web_wifi_is_enabled() ? "ON" : "OFF");
+  LOGW("[应用] WiFi 已切换：%s", web_wifi_is_enabled() ? "开启" : "关闭");
   s_voldn_click_pending = false;
   s_voldn_click_deadline = 0;
 }
@@ -372,129 +371,6 @@ static void handle_key(KeyCtx& k,
   yield();
 }
 
-// =============================================================================
-// NFC 绑定类型小弹窗
-// =============================================================================
-
-static constexpr uint32_t NFC_BIND_POPUP_TIMEOUT_MS = 6500;
-static bool s_nfc_bind_popup_active = false;
-static uint8_t s_nfc_bind_popup_selected = 0; // 0=单曲，1=歌手，2=专辑
-static uint32_t s_nfc_bind_popup_last_ms = 0;
-
-static uint8_t nfc_bind_default_selected_index()
-{
-    switch (g_play_mode) {
-        case PLAY_MODE_ARTIST_SEQ:
-        case PLAY_MODE_ARTIST_RND:
-            return 1;
-
-        case PLAY_MODE_ALBUM_SEQ:
-        case PLAY_MODE_ALBUM_RND:
-            return 2;
-
-        case PLAY_MODE_ALL_SEQ:
-        case PLAY_MODE_ALL_RND:
-        default:
-            return 0;
-    }
-}
-
-static void nfc_bind_popup_touch()
-{
-    s_nfc_bind_popup_last_ms = millis();
-    ui_show_nfc_bind_target_popup(s_nfc_bind_popup_selected);
-}
-
-static void nfc_bind_popup_open_default()
-{
-    volume_fast_mode_exit();
-    s_nfc_bind_popup_active = true;
-    s_nfc_bind_popup_selected = nfc_bind_default_selected_index();
-    nfc_bind_popup_touch();
-
-    // 打开弹窗时同步按键状态，消费掉触发弹窗的这次长按。
-    keys_sync_to_hw_state();
-}
-
-static void nfc_bind_popup_close()
-{
-    s_nfc_bind_popup_active = false;
-    ui_hide_nfc_bind_target_popup();
-    keys_sync_to_hw_state();
-}
-
-static void nfc_bind_popup_move(int8_t dir)
-{
-    if (dir > 0) {
-        s_nfc_bind_popup_selected = static_cast<uint8_t>((s_nfc_bind_popup_selected + 1) % 3);
-    } else if (dir < 0) {
-        s_nfc_bind_popup_selected = static_cast<uint8_t>((s_nfc_bind_popup_selected + 2) % 3);
-    }
-    nfc_bind_popup_touch();
-}
-
-static void nfc_bind_popup_confirm()
-{
-    bool ok = false;
-
-    switch (s_nfc_bind_popup_selected) {
-        case 1:
-            ok = quick_menu_nfc_bind_current_artist();
-            break;
-
-        case 2:
-            ok = quick_menu_nfc_bind_current_album();
-            break;
-
-        case 0:
-        default:
-            ok = quick_menu_nfc_bind_current_track();
-            break;
-    }
-
-    if (ok) {
-        s_nfc_bind_popup_active = false;
-        ui_hide_nfc_bind_target_popup();
-        keys_sync_to_hw_state();
-    } else {
-        // 当前不是本地歌曲、曲库未就绪等情况会失败。失败时保留弹窗，方便用户换类型或取消。
-        nfc_bind_popup_touch();
-    }
-}
-
-static bool nfc_bind_popup_handle(int8_t encoder_step)
-{
-    if (!s_nfc_bind_popup_active) {
-        return false;
-    }
-
-    if (millis() - s_nfc_bind_popup_last_ms > NFC_BIND_POPUP_TIMEOUT_MS) {
-        nfc_bind_popup_close();
-        return true;
-    }
-
-    mode_click_reset();
-
-    if (encoder_step > 0) {
-        nfc_bind_popup_move(+1);
-    } else if (encoder_step < 0) {
-        nfc_bind_popup_move(-1);
-    }
-
-    // PLAY / 旋钮按下：确认当前绑定类型。
-    handle_key(k_play, nfc_bind_popup_confirm, nullptr);
-    handle_key(k_ec06e, nfc_bind_popup_confirm, nullptr);
-
-    // PREV / NEXT：左右切换绑定类型。
-    handle_key(k_prev, [](){ nfc_bind_popup_move(-1); }, nullptr);
-    handle_key(k_next, [](){ nfc_bind_popup_move(+1); }, nullptr);
-
-    // MODE：取消弹窗。
-    handle_key(k_mode, nfc_bind_popup_close, nullptr);
-
-    return true;
-}
-
 void keys_init()
 {
   setup_key_pin(PIN_KEY_MODE);
@@ -516,7 +392,7 @@ void keys_init()
   pinMode(PIN_EC06_A, INPUT_PULLUP);
   pinMode(PIN_EC06_B, INPUT_PULLUP);
 
-  LOGI("[KEYS] pins mode=%d play=%d prev=%d next=%d voldn=%d volup=%d ec06_a=%d ec06_b=%d",
+  LOGD("[按键] 引脚：模式=%d 播放=%d 上一曲=%d 下一曲=%d 音量减=%d 音量加=%d ec06_a=%d ec06_b=%d",
       PIN_KEY_MODE,
       PIN_KEY_PLAY,
       PIN_KEY_PREV,
@@ -830,11 +706,6 @@ void keys_update()
     return;
   }
 
-  // --- NFC 绑定类型小弹窗：保持播放器页背景，只拦截选择相关按键 ---
-  if (nfc_bind_popup_handle(encoder_step)) {
-    return;
-  }
-
   // --- NFC 管理状态下，按键转给 admin 状态机处理 ---
   if (g_app_state == STATE_NFC_ADMIN) {
     mode_click_reset();
@@ -864,7 +735,7 @@ void keys_update()
       k_mode.last = s;
       if (pressed(s) && !g_abort_scan) {
         g_abort_scan = true;
-        LOGI("[KEYS] Abort signal sent!");
+        LOGI("[按键] 已发送中止信号");
       }
     }
 
@@ -891,8 +762,8 @@ void keys_update()
   // PLAY：短按播放/暂停，长按保存 NVS 后关机。
   handle_key(k_play, player_toggle_play, app_power_save_and_shutdown);
 
-  // PREV / NEXT：短按=切歌，长按 PREV=弹出 NFC 绑定类型小弹窗，长按 NEXT=进入列表选择模式。
-  handle_key(k_prev, player_prev_track, nfc_bind_popup_open_default);
+  // PREV / NEXT：短按=切歌，长按 PREV=进入 NFC 管理，长按 NEXT=进入列表选择模式。
+  handle_key(k_prev, player_prev_track, [](){ (void)app_request_enter_nfc_admin(); });
   handle_key(k_next, player_next_track, player_next_group);
 
   // VOL：旧板音量按键逻辑。新 PCB1 已禁用，不影响。

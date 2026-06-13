@@ -86,7 +86,7 @@ static bool select_input_buffer_for_source(bool is_stream)
   }
 
   // PSRAM 不够时不要强行占用大量内部 RAM，退回 8KB 安全缓冲，至少保证能播放。
-  LOGW("[MP3] stream PSRAM input buffer alloc failed, fallback to %u bytes internal buffer",
+  LOGW("[MP3] 网络流 PSRAM 输入缓冲区分配失败，回退到 %u 字节内部缓冲区",
        (unsigned)sizeof(s_file_inbuf));
   return true;
 }
@@ -144,7 +144,7 @@ static bool fill_input_buffer(size_t min_fill_target, uint32_t wait_timeout_ms =
         continue;
       }
       if (waited) {
-        LOGD("[MP3] stream prefill partial target=%u filled=%d wait=%lums",
+        LOGD("[MP3] 网络流预填充不足：目标=%u 已填=%d 等待=%lums",
              (unsigned)min_fill_target,
              g_inbuf_filled,
              (unsigned long)(millis() - start_ms));
@@ -157,7 +157,7 @@ static bool fill_input_buffer(size_t min_fill_target, uint32_t wait_timeout_ms =
       return true;
     }
 
-    LOGE("[MP3] source read failed name=%s code=%d", s_debug_name ? s_debug_name : "<null>", n);
+    LOGE("[MP3] 音源读取失败：名称=%s 代码=%d", s_debug_name ? s_debug_name : "<null>", n);
     return false;
   }
 
@@ -170,7 +170,7 @@ bool audio_mp3_start_source(const AudioMp3Source& source, const char* debug_name
   audio_mp3_stop();
 
   if (!source.read) {
-    LOGE("[MP3] invalid source: read callback missing");
+    LOGE("[MP3] 无效音源：缺少读取回调");
     return false;
   }
 
@@ -202,7 +202,7 @@ bool audio_mp3_start_source(const AudioMp3Source& source, const char* debug_name
   }
 
   if (g_source_is_stream && g_inbuf_filled <= 0) {
-    LOGW("[MP3] stream start with empty input buffer name=%s", s_debug_name ? s_debug_name : "<null>");
+    LOGW("[MP3] 网络流以空输入缓冲区启动：名称=%s", s_debug_name ? s_debug_name : "<null>");
   }
 
   g_playing = true;
@@ -213,7 +213,7 @@ bool audio_mp3_start_source(const AudioMp3Source& source, const char* debug_name
   s_mp3_last_error = String();
 
   const uint32_t t_after_prefill = millis();
-  LOGD("[MP3] start source detail name=%s stream=%d init=%lums prefill=%lums total=%lums prefill_bytes=%d buf=%u psram=%d target=%u",
+  LOGD("[MP3] 音源启动细节：名称=%s 流=%d 初始化=%lums 预填充=%lums 总计=%lums 预填字节=%d 缓冲=%u PSRAM=%d 目标=%u",
        s_debug_name ? s_debug_name : "<null>",
        g_source_is_stream ? 1 : 0,
        (unsigned long)(t_after_init - t0),
@@ -331,7 +331,7 @@ bool audio_mp3_loop()
       if (sync_pos > 0) {
         memmove(g_inbuf, g_inbuf + sync_pos, g_inbuf_filled - sync_pos);
         g_inbuf_filled -= sync_pos;
-        LOGD("[MP3] Resynced to pos %d", sync_pos);
+        LOGD("[MP3] 已重新同步到位置 %d", sync_pos);
       } else {
         int keep = 1;
         memmove(g_inbuf, g_inbuf + g_inbuf_filled - keep, keep);

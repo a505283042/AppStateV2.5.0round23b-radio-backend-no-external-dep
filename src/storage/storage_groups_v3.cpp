@@ -66,7 +66,7 @@ static void build_artist_groups_v3(MusicCatalogV3& cat)
     std::map<String, uint32_t> artist_name_to_off = build_artist_name_to_off_map_v3(cat);
 
     if (!cat.tracks || cat.track_count == 0) {
-        LOGD("[GROUPS_V3] no tracks, skip artist groups");
+        LOGD("[曲库分组] no 歌曲s, 跳过 歌手 分组s");
         return;
     }
 
@@ -79,7 +79,7 @@ static void build_artist_groups_v3(MusicCatalogV3& cat)
 
         // 保护：检查曲目索引是否在有效范围内
         if (i > 65535) {
-            LOGE("[GROUPS_V3] invalid track_idx=%d", i);
+            LOGE("[曲库分组] 无效 歌曲_索引=%d", i);
             continue;
         }
 
@@ -108,7 +108,7 @@ static void build_artist_groups_v3(MusicCatalogV3& cat)
         cat.artist_groups[it->second].track_indices.push_back((TrackIndex16)i);
     }
 
-    LOGD("[GROUPS_V3] artist groups=%d", (int)cat.artist_groups.size());
+    LOGD("[曲库分组] 歌手 分组s=%d", (int)cat.artist_groups.size());
 }
 
 static void build_album_groups_v3(MusicCatalogV3& cat)
@@ -116,7 +116,7 @@ static void build_album_groups_v3(MusicCatalogV3& cat)
     cat.album_groups.clear();
 
     if (!cat.tracks || cat.track_count == 0) {
-        LOGI("[GROUPS_V3] no tracks, skip album groups");
+        LOGD("[曲库分组] no 歌曲s, 跳过 专辑 分组s");
         return;
     }
 
@@ -128,7 +128,7 @@ static void build_album_groups_v3(MusicCatalogV3& cat)
 
         // 保护：检查曲目索引是否在有效范围内
         if (i > 65535) {
-            LOGE("[GROUPS_V3] invalid track_idx=%d", i);
+            LOGE("[曲库分组] 无效 歌曲_索引=%d", i);
             continue;
         }
 
@@ -158,7 +158,7 @@ static void build_album_groups_v3(MusicCatalogV3& cat)
         cat.album_groups[it->second].track_indices.push_back((TrackIndex16)i);
     }
 
-    LOGD("[GROUPS_V3] album groups=%d", (int)cat.album_groups.size());
+    LOGD("[曲库分组] 专辑 分组s=%d", (int)cat.album_groups.size());
 }
 
 void storage_build_groups_v3(MusicCatalogV3& cat)
@@ -167,13 +167,13 @@ void storage_build_groups_v3(MusicCatalogV3& cat)
     cat.album_groups.clear();
 
     if (!cat.tracks || cat.track_count == 0) {
-        LOGD("[GROUPS_V3] empty catalog");
+        LOGD("[曲库分组] 为空 目录");
         return;
     }
 
     // 保护：检查曲目数是否超过 uint16_t 的最大值
     if (cat.track_count > 65535) {
-        LOGE("[GROUPS_V3] track count too large for uint16_t indices: %d", cat.track_count);
+        LOGE("[曲库分组] 歌曲 数量 过大 for uint16_t indices: %d", cat.track_count);
         return;
     }
 
@@ -181,7 +181,7 @@ void storage_build_groups_v3(MusicCatalogV3& cat)
     build_album_groups_v3(cat);
 
     // 记录分组内存使用信息
-    LOGD("[GROUPS][MEM] artist_groups=%d album_groups=%d sizeof(track_index)=%u",
+    LOGD("[曲库分组][内存] 歌手分组=%d 专辑分组=%d 单个歌曲索引大小=%u",
          (int)cat.artist_groups.size(),
          (int)cat.album_groups.size(),
          (unsigned)sizeof(uint16_t));

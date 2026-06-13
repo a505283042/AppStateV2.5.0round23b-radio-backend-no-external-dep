@@ -70,8 +70,8 @@ bool web_settings_load() {
 
   Preferences pref;
   if (!pref.begin(kPrefsNs, true)) {
-    LOGW("[WEB] settings load failed: open NVS namespace");
-    LOGD("[WEB] settings use defaults");
+    LOGW("[网页] 设置tings 加载 失败: 打开 NVS namespace");
+    LOGD("[网页] 设置tings use 默认s");
     return false;
   }
 
@@ -84,7 +84,7 @@ bool web_settings_load() {
   s_cfg.show_wifi_info = pref.getBool("wifi_info", s_cfg.show_wifi_info);
   pref.end();
 
-  LOGI("[WEB] settings loaded from NVS: refresh=%s lyric=%s show_next=%d show_cover=%d cover_spin=%d wifi_en=%d wifi_info=%d",
+  LOGD("[网页] 设置已从 NVS 读取：刷新=%s 歌词=%s 显示下一首=%d 显示封面=%d 封面旋转=%d WiFi启用=%d WiFi信息=%d",
        web_refresh_preset_key(s_cfg.refresh_preset),
        web_lyric_sync_mode_key(s_cfg.lyric_sync_mode),
        (int)s_cfg.show_next_lyric,
@@ -98,7 +98,7 @@ bool web_settings_load() {
 bool web_settings_save() {
   Preferences pref;
   if (!pref.begin(kPrefsNs, false)) {
-    LOGE("[WEB] settings save failed: open NVS namespace");
+    LOGE("[网页] 设置tings 保存 失败: 打开 NVS namespace");
     return false;
   }
 
@@ -112,11 +112,11 @@ bool web_settings_save() {
   pref.end();
 
   if (!ok) {
-    LOGE("[WEB] settings save failed: write NVS");
+    LOGE("[网页] 设置tings 保存 失败: 写入 NVS");
     return false;
   }
 
-  LOGI("[WEB] settings saved to NVS: refresh=%s lyric=%s show_next=%d show_cover=%d cover_spin=%d wifi_en=%d wifi_info=%d",
+  LOGI("[网页] 设置已保存到 NVS：刷新=%s 歌词=%s 显示下一首=%d 显示封面=%d 封面旋转=%d WiFi启用=%d WiFi信息=%d",
        web_refresh_preset_key(s_cfg.refresh_preset),
        web_lyric_sync_mode_key(s_cfg.lyric_sync_mode),
        (int)s_cfg.show_next_lyric,

@@ -55,31 +55,31 @@ static void log_task_stack_usage(const char* name, TaskHandle_t handle, uint32_t
     const uint32_t margin_pct = 
         (configured_stack_bytes > 0) ? (uint32_t)((100ULL * min_free_bytes) / configured_stack_bytes) : 0;
 
-    LOGD("[MON][STACK] %s stack=%uB min_free=%uB peak_used=%uB margin=%u%%", 
-        name, 
-        (unsigned)configured_stack_bytes, 
-        (unsigned)min_free_bytes, 
-        (unsigned)peak_used_bytes, 
-        (unsigned)margin_pct);
+    LOGD("[监控][栈] %s stack=%uB min_可用=%uB peak_used=%uB 余量=%u%%", 
+         name, 
+         (unsigned)configured_stack_bytes, 
+         (unsigned)min_free_bytes, 
+         (unsigned)peak_used_bytes, 
+         (unsigned)margin_pct);
 
     if (margin_pct <= RUNTIME_MONITOR_WARN_STACK_MARGIN_PCT) {
-        LOGW("[MON][STACK] low margin: %s stack=%uB min_free=%uB peak_used=%uB margin=%u%%",
-            name,
-            (unsigned)configured_stack_bytes,
-            (unsigned)min_free_bytes,
-            (unsigned)peak_used_bytes,
-            (unsigned)margin_pct);
+        LOGW("[监控][栈] 偏低 余量: %s stack=%uB min_可用=%uB peak_used=%uB 余量=%u%%",
+             name,
+             (unsigned)configured_stack_bytes,
+             (unsigned)min_free_bytes,
+             (unsigned)peak_used_bytes,
+             (unsigned)margin_pct);
     }
 }
 
 // 运行时监控任务入口
 static void runtime_monitor_task_entry(void*) 
 {
-  #if RUNTIME_MONITOR_FIRST_DELAY_MS > 0
-    // 开机阶段 SD / UI / NFC / 曲库都在初始化，监控日志立即输出会把启动日志冲散。
-    // 延迟第一次输出，只影响日志时间，不影响播放器功能。
-    vTaskDelay(pdMS_TO_TICKS(RUNTIME_MONITOR_FIRST_DELAY_MS));
-  #endif
+#if RUNTIME_MONITOR_FIRST_DELAY_MS > 0
+  // 开机阶段 SD / UI / NFC / 曲库都在初始化，监控日志立即输出会把启动日志冲散。
+  // 延迟第一次输出，只影响日志时间，不影响播放器功能。
+  vTaskDelay(pdMS_TO_TICKS(RUNTIME_MONITOR_FIRST_DELAY_MS));
+#endif
 
   for (;;) {
     const uint32_t free_heap = (uint32_t)ESP.getFreeHeap();
@@ -102,13 +102,13 @@ static void runtime_monitor_task_entry(void*)
         : 0u;
     const uint32_t psram_frag = has_psram ? calc_fragment_percent(free_psram, largest_psram) : 0u;
 
-    LOGD("[MON][MEM] heap free=%lu min=%lu largest=%lu frag=%lu%%",
+    LOGD("[监控][内存] 堆 可用=%lu min=%lu 最大连续=%lu 碎片=%lu%%",
          (unsigned long)free_heap,
          (unsigned long)min_free_heap,
          (unsigned long)largest_heap,
          (unsigned long)heap_frag);
 
-    LOGD("[MON][MEM] internal free=%lu largest=%lu frag=%lu%% | dma free=%lu largest=%lu frag=%lu%%",
+    LOGD("[监控][内存] 内部 RAM 可用=%lu 最大连续=%lu 碎片=%lu%% | DMA RAM 可用=%lu 最大连续=%lu 碎片=%lu%%",
          (unsigned long)free_internal,
          (unsigned long)largest_internal,
          (unsigned long)internal_frag,
@@ -116,20 +116,20 @@ static void runtime_monitor_task_entry(void*)
          (unsigned long)largest_dma,
          (unsigned long)dma_frag);
 
-    LOGD("[MON][MEM] psram free=%lu largest=%lu frag=%lu%%",
+    LOGD("[监控][内存] psram 可用=%lu 最大连续=%lu 碎片=%lu%%",
          (unsigned long)free_psram,
          (unsigned long)largest_psram,
          (unsigned long)psram_frag);
 
     if (free_internal < RUNTIME_MONITOR_WARN_INTERNAL_FREE_BYTES) {
-      LOGW("[MON][MEM] low internal RAM: free=%lu largest=%lu",
-          (unsigned long)free_internal,
-          (unsigned long)largest_internal);
+      LOGW("[监控][内存] 内部 RAM 偏低: 可用=%lu 最大连续=%lu",
+           (unsigned long)free_internal,
+           (unsigned long)largest_internal);
     }
     if (free_dma < RUNTIME_MONITOR_WARN_DMA_FREE_BYTES) {
-      LOGW("[MON][MEM] low DMA RAM: free=%lu largest=%lu",
-          (unsigned long)free_dma,
-          (unsigned long)largest_dma);
+      LOGW("[监控][内存] 偏低 DMA RAM: 可用=%lu 最大连续=%lu",
+           (unsigned long)free_dma,
+           (unsigned long)largest_dma);
     }
 
     log_task_stack_usage("AudioTask", audio_service_get_task_handle(), 10240);

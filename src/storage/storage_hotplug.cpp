@@ -37,7 +37,7 @@ StorageHotplugEvent storage_hotplug_poll(bool allow_sd_probe)
         if (storage_mount()) {
             s_fail_count = 0;
             storage_clear_io_error();
-            LOGI("[SD_HOTPLUG] card mounted");
+            LOGI("[TF热插拔] 卡片 已挂载");
             return StorageHotplugEvent::CARD_MOUNTED;
         }
 
@@ -60,11 +60,11 @@ StorageHotplugEvent storage_hotplug_poll(bool allow_sd_probe)
     }
 
     ++s_fail_count;
-    LOGW("[SD_HOTPLUG] probe failed count=%u suspect=%d", (unsigned)s_fail_count, suspect ? 1 : 0);
+    LOGW("[TF热插拔] 探测 失败 数量=%u suspect=%d", (unsigned)s_fail_count, suspect ? 1 : 0);
 
     if (suspect || s_fail_count >= 2) {
         s_fail_count = 0;
-        LOGW("[SD_HOTPLUG] card removed confirmed");
+        LOGW("[TF热插拔] 卡片 删除d confirmed");
         return StorageHotplugEvent::CARD_REMOVED;
     }
 

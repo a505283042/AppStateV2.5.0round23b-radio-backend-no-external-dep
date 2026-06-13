@@ -205,18 +205,18 @@ static bool player_play_trackinfo_core(const TrackInfo& t,
     // 切歌播放命令会在 AudioTask 内部清除暂停状态，并在软件预填充完成后再取消静音。
     // 如果这里提前 resume，会先把功放打开，然后 AudioTask 又立即静音，造成 OFF->ON->OFF 的抖动。
 
-    LOGI("[PLAYER] play #%d: %s", s_cur, t.audio_path.c_str());
+    LOGI("[播放器] 播放 #%d：%s", s_cur, t.audio_path.c_str());
 
     if (verbose) {
         Serial.println("----- TRACK META CHECK -----");
-        Serial.printf("path  : %s\n", t.audio_path.c_str());
+        Serial.printf("路径  : %s\n", t.audio_path.c_str());
         Serial.printf("ext   : %s\n", t.ext.c_str());
-        Serial.printf("artist: %s\n", t.artist.c_str());
-        Serial.printf("album : %s\n", t.album.c_str());
+        Serial.printf("歌手: %s\n", t.artist.c_str());
+        Serial.printf("专辑 : %s\n", t.album.c_str());
         Serial.printf("title : %s\n", t.title.c_str());
         Serial.println("---------------------------");
 
-        Serial.printf("cover_source=%d offset=%u size=%u mime=%s path=%s\n",
+        Serial.printf("封面_来源=%d 偏移=%u 大小=%u mime=%s 路径=%s\n",
                       (int)t.cover_source,
                       (unsigned)t.cover_offset,
                       (unsigned)t.cover_size,
@@ -246,7 +246,7 @@ static bool player_play_trackinfo_core(const TrackInfo& t,
     if (cover_cache_hit) {
         s_cover_idx = s_cur;
         ui_request_refresh_now();
-        LOGD("[PLAYER] current cover cache hit track=%d", s_cur);
+        LOGD("[播放器] 当前 封面 缓存 命中 歌曲=%d", s_cur);
     }
 
     bool need_decode_cover = (force_cover || s_cover_idx != s_cur) && !cover_cache_hit;
@@ -291,7 +291,7 @@ static bool player_play_trackinfo_core(const TrackInfo& t,
     // 切到新歌时，先清当前 raw。next raw 不要直接清，先尝试提升。
     player_assets_clear_primed_current_cover();
 
-    LOGD("[PLAYER] prime check track=%d cover_cache_hit=%d need_decode_cover=%d cover_source=%u cover_size=%u",
+    LOGD("[播放器] prime check 歌曲=%d 封面_缓存_命中=%d need_解码_封面=%d 封面_来源=%u 封面_大小=%u",
      s_cur,
      cover_cache_hit ? 1 : 0,
      need_decode_cover ? 1 : 0,
@@ -303,7 +303,7 @@ static bool player_play_trackinfo_core(const TrackInfo& t,
         player_assets_promote_next_cover_to_current(s_cur) :
         false;
 
-    LOGD("[PLAYER] promote next raw check track=%d promoted=%d",
+    LOGD("[播放器] promote 下一首 原始检查 歌曲=%d promoted=%d",
         s_cur,
         promoted_next_cover ? 1 : 0);
     player_assets_clear_deferred_current_cover_apply();
@@ -341,7 +341,7 @@ static bool player_play_trackinfo_core(const TrackInfo& t,
         next_cover_track.cover_size > 0 &&
         next_cover_track.cover_size <= next_raw_size_limit;
 
-    LOGD("[PLAYER] next raw check cur=%d allow=%d got=%d target=%d from_nfc=%d prep=%lu limit=%lu cache=%d source=%u size=%u size_limit=%lu",
+    LOGD("[播放器] 下一首原始封面检查：当前=%d 允许=%d 获取=%d 目标=%d 来自NFC=%d 准备=%lums 限制=%lums 缓存=%d 来源=%u 大小=%u 大小限制=%lu",
         s_cur,
         allow_prime_next_raw ? 1 : 0,
         got_next_cover ? 1 : 0,
@@ -392,7 +392,7 @@ static bool player_play_trackinfo_core(const TrackInfo& t,
             next_cover_buf = nullptr;
         }
 
-        LOGD("[PLAYER] next cover raw prime before current target=%d ok=%d len=%u cost=%lu prep=%lu",
+        LOGD("[播放器] 当前播放前预读下一首原始封面：目标=%d 成功=%d 长度=%u 耗时=%lums 准备=%lums",
             next_cover_idx,
             next_cover_raw_primed ? 1 : 0,
             (unsigned)next_cover_len,
@@ -414,7 +414,7 @@ static bool player_play_trackinfo_core(const TrackInfo& t,
                 primed_lyrics_text = nullptr; // ownership moved
                 lyrics_primed = true;
                 asset_job.need_lyrics = false; // 后台不要再读一次
-                LOGD("[PLAYER] lyrics primed before play track=%d len=%u",
+                LOGD("[播放器] 播放前歌词已预读 歌曲=%d le数量=%u",
                     s_cur, (unsigned)primed_lyrics_len);
             }
         }
@@ -434,7 +434,7 @@ static bool player_play_trackinfo_core(const TrackInfo& t,
         asset_job.cover_size > 0 &&
         asset_job.cover_size <= 96 * 1024;
 
-    LOGD("[PLAYER] current raw check track=%d allow=%d promoted=%d need_cover=%d cache=%d source=%u size=%u",
+    LOGD("[播放器] 当前 原始检查 歌曲=%d 允许=%d promoted=%d need_封面=%d 缓存=%d 来源=%u 大小=%u",
         s_cur,
         allow_prime_current_cover_before_play ? 1 : 0,
         promoted_next_cover ? 1 : 0,
@@ -481,7 +481,7 @@ static bool player_play_trackinfo_core(const TrackInfo& t,
                 ui_request_refresh_now();
                 player_assets_clear_deferred_current_cover_apply();
 
-                LOGD("[PLAYER] current cover scaled before play track=%d len=%u fetch=%lu scale=%lu from_nfc=%d",
+                LOGD("[播放器] 当前 封面 播放前已缩放 歌曲=%d le数量=%u fetch=%lu 缩放=%lu from_nfc=%d",
                     s_cur,
                     (unsigned)primed_cover_len,
                     (unsigned long)prime_cover_cost,
@@ -494,7 +494,7 @@ static bool player_play_trackinfo_core(const TrackInfo& t,
                 // 缩放失败时退回旧路径，把 raw 交给资源任务，避免封面完全丢失。
                 primed_cover_buf = nullptr; // ownership moved
                 cover_primed = true;
-                LOGW("[PLAYER] current cover scale before play failed, defer raw track=%d len=%u fetch=%lu",
+                LOGW("[播放器] 当前 封面 缩放 before 播放失败, defer raw 歌曲=%d le数量=%u fetch=%lu",
                      s_cur,
                      (unsigned)primed_cover_len,
                      (unsigned long)prime_cover_cost);
@@ -508,7 +508,7 @@ static bool player_play_trackinfo_core(const TrackInfo& t,
     }
 
     if (!audio_service_play(t.audio_path.c_str(), true)) {
-        LOGE("[AUDIO] play failed");
+        LOGE("[音频] 播放失败");
         player_assets_clear_primed_current_cover();
         player_assets_drop_primed_next_cover();
         if (primed_cover_buf) {
@@ -533,7 +533,7 @@ static bool player_play_trackinfo_core(const TrackInfo& t,
             ui_set_rotate_wait_prefetch(true);
         }
         player_assets_schedule(asset_job);
-        LOGD("[PLAYER] deferred asset request armed track=%d lyrics=%d cover=%d",
+        LOGD("[播放器] 延迟 as设置 request armed 歌曲=%d 歌词=%d 封面=%d",
              s_cur,
              req_lyrics ? 1 : 0,
              req_cover ? 1 : 0);
@@ -547,7 +547,7 @@ static bool player_play_trackinfo_core(const TrackInfo& t,
 
     const uint32_t total_switch_ms = t_after_play - t_switch_begin;
     if (total_switch_ms >= 80) {
-        LOGD("[PLAYER] switch timing stop=%lums ui_prepare=%lums lyrics_prefetch=%lums cover_prefetch_pre=%lums play=%lums to_audio=%lums deferred_cover=%d",
+        LOGD("[播放器] 切换耗时 停止=%lums 界面准备=%lums 歌词预取=%lums 封面预取=%lums play=%lums 送入音频=%lums 延迟封面=%d",
              (unsigned long)(t_after_stop - t_switch_begin),
              (unsigned long)(t_after_ui_prepare - t_after_stop),
              (unsigned long)(t_after_lyrics_prefetch - t_after_ui_prepare),
@@ -565,13 +565,13 @@ static bool player_play_trackinfo_core(const TrackInfo& t,
 bool player_play_idx_v3(uint32_t idx, bool verbose, bool force_cover)
 {
     if (!storage_catalog_v3_ready()) {
-        LOGE("[PLAYER] V3 catalog not ready");
+        LOGE("[播放器] V3 目录 未就绪");
         return false;
     }
 
     const uint32_t total = storage_catalog_v3_track_count();
     if (total == 0) {
-        LOGE("[PLAYER] no tracks in V3 catalog");
+        LOGE("[播放器] no 歌曲s in V3 目录");
         return false;
     }
 
@@ -579,7 +579,7 @@ bool player_play_idx_v3(uint32_t idx, bool verbose, bool force_cover)
 
     TrackInfo t;
     if (!storage_catalog_v3_get_trackinfo(idx, t, "/Music")) {
-        LOGE("[PLAYER] expand trackinfo failed, idx=%u", (unsigned)idx);
+        LOGE("[播放器] 展开歌曲信息失败：索引=%u", (unsigned)idx);
         return false;
     }
 
@@ -595,7 +595,7 @@ void player_state_run(void)
 
     if (!entered) {
         entered = true;
-        LOGI("[PLAYER] enter");
+        LOGI("[播放器] 进入播放器状态");
         ui_enter_player();
         s_cover_idx = -1;
         player_assets_init_once();
@@ -603,12 +603,12 @@ void player_state_run(void)
         player_control_init_once();
         player_list_select_reset();
 
-        LOGD("[SCAN] albums=%d tracks=%d",
+        LOGD("[扫描] 专辑=%d 歌曲=%d",
              (int)storage_catalog_v3_album_count(),
              track_count);
 
         if (track_count <= 0) {
-            LOGE("[PLAYER] no tracks");
+            LOGE("[播放器] no 歌曲s");
 
             if (!storage_is_ready()) {
                 ui_show_player_placeholder("未插入TF卡", "插卡后自动加载");
@@ -639,12 +639,12 @@ void player_state_run(void)
 
         int start_idx = player_clamp_idx_for_dispatch(V3_TEST_START_INDEX);
         if (start_idx < 0) {
-            LOGE("[PLAYER] no playable tracks");
+            LOGE("[播放器] no playable 歌曲s");
             return;
         }
 
         if (!player_play_idx_v3((uint32_t)start_idx, true, true)) {
-            LOGE("[PLAYER] boot play failed");
+            LOGE("[播放器] boot 播放失败");
         }
         return;
     }
@@ -660,14 +660,14 @@ void player_state_run(void)
             return;
         }
 
-        LOGW("[PLAYER] boot restore fallback to default track");
+        LOGW("[播放器] 开机恢复失败，回退到默认歌曲");
         int start_idx = player_clamp_idx_for_dispatch(V3_TEST_START_INDEX);
         if (start_idx < 0) {
-            LOGE("[PLAYER] no playable tracks after restore fallback");
+            LOGE("[播放器] 恢复回退后仍没有可播放歌曲");
             return;
         }
         if (!player_play_idx_v3((uint32_t)start_idx, true, true)) {
-            LOGE("[PLAYER] boot play failed after restore fallback");
+            LOGE("[播放器] boot 播放失败 恢复回退后");
         }
         return;
     }
@@ -709,10 +709,10 @@ void player_state_run(void)
 
         String uid;
         if (nfc_take_last_uid(uid)) {
-            Serial.printf("[PLAYER] NFC uid=%s\n", uid.c_str());
+            Serial.printf("[播放器] NFC uid=%s\n", uid.c_str());
 
             if (!player_binding_try_handle_nfc_uid(uid)) {
-                LOGI("[NFC] no binding for uid=%s", uid.c_str());
+                LOGI("[NFC] UID 未绑定：%s", uid.c_str());
             }
         }
     }

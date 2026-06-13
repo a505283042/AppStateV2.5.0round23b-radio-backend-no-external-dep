@@ -40,27 +40,27 @@ bool lyrics_read_file_to_alloc_buffer(const char* path, char** out_content, size
 
     StorageSdLockGuard sd_lock(500);
     if (!sd_lock) {
-        LOGW("[LYRICS] 获取 SD 锁超时");
+        LOGW("[歌词] 获取 SD 锁超时");
         return false;
     }
 
     File32 file = sd.open(path, O_RDONLY);
     if (!file) {
-        LOGW("[LYRICS] Failed to open: %s", path);
+        LOGW("[歌词] 打开失败: %s", path);
         return false;
     }
 
     const uint32_t file_size = file.fileSize();
     if (file_size == 0 || file_size > 65536) {
         file.close();
-        LOGW("[LYRICS] Invalid file size: %u", (unsigned)file_size);
+        LOGW("[歌词] 文件大小无效: %u", (unsigned)file_size);
         return false;
     }
 
     char* buf = lyrics_alloc_text_buffer(file_size);
     if (!buf) {
         file.close();
-        LOGW("[LYRICS] alloc failed size=%u", (unsigned)file_size);
+        LOGW("[歌词] 分配 失败 大小=%u", (unsigned)file_size);
         return false;
     }
 
@@ -80,7 +80,7 @@ bool lyrics_read_file_to_alloc_buffer(const char* path, char** out_content, size
 
     if (!ok || copied != file_size) {
         free(buf);
-        LOGW("[LYRICS] read failed copied=%u expected=%u", (unsigned)copied, (unsigned)file_size);
+        LOGW("[歌词] 读取失败：已读=%u 期望=%u", (unsigned)copied, (unsigned)file_size);
         return false;
     }
 
@@ -111,7 +111,7 @@ bool LyricsParser::loadFromFile(const char* path) {
     const bool result = parseOwnedBuffer(content, content_len);
     const uint32_t t_after_parse = millis();
 
-    LOGD("[LYRICS] Loaded: %s (%u bytes, read=%lums parse=%lums total=%lums)",
+    LOGD("[歌词] 已加载：%s（%u 字节，读取=%lums 解析=%lums 总计=%lums）",
          path,
          (unsigned)content_len,
          (unsigned long)(t_after_read - t0),
@@ -159,7 +159,7 @@ bool LyricsParser::parseOwnedBuffer(char* content, size_t len) {
         return false;
     }
 
-    LOGD("[LYRICS][PARSE] done text_len=%u lines=%d text_buf=%p",
+    LOGD("[歌词][解析] 完成：文本长度=%u 行数=%d 文本缓冲=%p",
          (unsigned)m_text_len, (int)m_lines.size(), m_text_buf);
 
     return true;
@@ -330,7 +330,7 @@ String LyricsParser::getLineText(int index) const {
 
 void LyricsParser::clear() {
     if (m_text_buf || !m_lines.empty()) {
-        LOGD("[LYRICS][PARSE] clear text_buf=%p lines=%d",
+        LOGD("[歌词][解析] 清空：文本缓冲=%p 行数=%d",
              m_text_buf, (int)m_lines.size());
     }
 
@@ -356,7 +356,7 @@ String LyricsParser::findLyricsFile(const char* audio_path) {
 
     StorageSdLockGuard sd_lock(500);
     if (!sd_lock) {
-        LOGW("[LYRICS] findLyricsFile lock timeout");
+        LOGW("[歌词] findLyricsFile 锁 超时");
         return "";
     }
 
@@ -398,7 +398,7 @@ bool LyricsDisplay::loadFromPath(const char* lrc_path) {
     if (success) {
         m_currentIndex = 0;
     } else {
-        LOGW("[LYRICS] Failed: %s", lrc_path);
+        LOGW("[歌词] 失败: %s", lrc_path);
     }
     return success;
 }
@@ -426,7 +426,7 @@ void LyricsDisplay::updateTime(uint32_t time_ms) {
 
     if (newIndex != m_currentIndex) {
         m_currentIndex = newIndex;
-        LOGD("[LYRICS] Index changed to: %d (time: %u ms)", m_currentIndex, time_ms);
+        LOGD("[歌词] 索引已变化：%d（时间=%u ms）", m_currentIndex, time_ms);
     }
 }
 
@@ -495,7 +495,7 @@ LyricsDisplay::ScrollLyrics LyricsDisplay::getScrollLyrics() const {
     result.current = m_parser.getLineTextCStr(m_currentIndex);
     result.next = m_parser.getLineTextCStr(m_currentIndex + 1);
 
-    LOGD("[LYRICS][UI] scroll ptrs prev=%p cur=%p next=%p", 
+    LOGD("[歌词][界面] 滚动指针：上一行=%p 当前=%p 下一行=%p", 
          (const void*)result.prev, 
          (const void*)result.current, 
          (const void*)result.next);

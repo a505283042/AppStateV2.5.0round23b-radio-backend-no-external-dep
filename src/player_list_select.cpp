@@ -131,7 +131,7 @@ bool list_select_try_play_selected_group(const std::vector<PlaylistGroup>& list_
     const int current_group_idx = s_list_selected_idx;
     const auto& group = list_groups[current_group_idx];
 
-    LOGD("[LIST] 进入歌曲列表: %s (%d/%d)",
+    LOGD("[列表] 进入歌曲列表: %s (%d/%d)",
          playlist_group_name_cstr(storage_catalog_v3(), group),
          current_group_idx + 1, group_count);
 
@@ -163,7 +163,7 @@ bool list_select_try_play_selected_radio(const std::vector<RadioItem>& radios, i
     const int selected_radio_idx = s_list_selected_idx;
     const RadioItem& item = radios[selected_radio_idx];
 
-    LOGI("[LIST] 确认电台: %s (%d/%d) idx=%d",
+    LOGI("[列表] 确认电台：%s（%d/%d）索引=%d",
          item.name.c_str(),
          selected_radio_idx + 1,
          radio_count,
@@ -283,7 +283,7 @@ bool list_select_try_play_selected_net_track()
 
     const int selected_idx = s_list_selected_idx;
 
-    LOGI("[LIST] 确认 NAS 歌曲: pos=%d/%d idx=%d",
+    LOGI("[列表] 确认 NAS 歌曲：位置=%d/%d 索引=%d",
         selected_idx + 1,
         total,
         selected_idx);
@@ -314,20 +314,20 @@ bool player_list_select_enter_local_tracks()
 {
     if (!storage_catalog_v3_ready()) {
         list_select_clear_state(false);
-        LOGW("[LIST] 本地曲库未就绪");
+        LOGW("[列表] 本地曲库未就绪");
         return false;
     }
 
     const uint32_t total_u32 = storage_catalog_v3_track_count();
     if (total_u32 == 0) {
         list_select_clear_state(false);
-        LOGW("[LIST] 本地歌曲列表为空");
+        LOGW("[列表] 本地歌曲列表为空");
         return false;
     }
 
     if (total_u32 > UINT16_MAX) {
         list_select_clear_state(false);
-        LOGW("[LIST] 本地曲库数量超过 TrackIndex16 上限: %lu", (unsigned long)total_u32);
+        LOGW("[列表] 本地曲库数量超过 TrackIndex16 上限: %lu", (unsigned long)total_u32);
         return false;
     }
 
@@ -355,7 +355,7 @@ bool player_list_select_enter_local_tracks()
     list_select_prepare_view_on_enter();
     keys_sync_to_hw_state();
 
-    LOGD("[LIST] 进入本地全部歌曲列表，共 %d 首，当前 idx=%d",
+    LOGD("[列表] 进入本地全部歌曲列表，共 %d 首，当前 索引=%d",
          total,
          s_list_selected_idx);
 
@@ -371,7 +371,7 @@ bool player_list_select_enter_radio()
     const auto& radios = radio_catalog_items();
     if (radios.empty()) {
         list_select_clear_state(false);
-        LOGW("[LIST] 电台列表为空");
+        LOGW("[列表] 电台列表为空");
         return false;
     }
 
@@ -391,7 +391,7 @@ bool player_list_select_enter_radio()
     list_select_prepare_view_on_enter();
     keys_sync_to_hw_state();
 
-    LOGD("[LIST] 进入电台列表，共 %d 个，当前选中 idx=%d",
+    LOGD("[列表] 进入电台列表，共 %d 个，当前选中 索引=%d",
          (int)radios.size(),
          s_list_selected_idx);
 
@@ -407,7 +407,7 @@ bool player_list_select_enter_net_track()
     const int total = (int)net_music_catalog_count();
     if (total <= 0) {
         list_select_clear_state(false);
-        LOGW("[LIST] NAS 歌曲列表为空");
+        LOGW("[列表] NAS 歌曲列表为空");
         return false;
     }
 
@@ -432,7 +432,7 @@ bool player_list_select_enter_net_track()
     list_select_prepare_view_on_enter();
     keys_sync_to_hw_state();
 
-    LOGD("[LIST] 进入 NAS 歌曲列表，共 %d 首，当前 idx=%d",
+    LOGD("[列表] 进入 NAS 歌曲列表，共 %d 首，当前 索引=%d",
          total,
          s_list_selected_idx);
 
@@ -459,7 +459,7 @@ bool player_list_select_enter(play_mode_t mode)
         const auto& groups = player_playlist_artist_groups();
         if (groups.empty()) {
             list_select_clear_state(false);
-            LOGW("[LIST] 歌手列表为空");
+            LOGW("[列表] 歌手列表为空");
             return false;
         }
 
@@ -477,7 +477,7 @@ bool player_list_select_enter(play_mode_t mode)
         list_select_prepare_view_on_enter();
         keys_sync_to_hw_state();
 
-        LOGD("[LIST] 进入歌手列表，共 %d 个，当前选中 idx=%d",
+        LOGD("[列表] 进入歌手列表，共 %d 个，当前选中 索引=%d",
              (int)groups.size(),
              s_list_selected_idx);
 
@@ -488,7 +488,7 @@ bool player_list_select_enter(play_mode_t mode)
         const auto& groups = player_playlist_album_groups();
         if (groups.empty()) {
             list_select_clear_state(false);
-            LOGW("[LIST] 专辑列表为空");
+            LOGW("[列表] 专辑列表为空");
             return false;
         }
 
@@ -506,7 +506,7 @@ bool player_list_select_enter(play_mode_t mode)
         list_select_prepare_view_on_enter();
         keys_sync_to_hw_state();
 
-        LOGD("[LIST] 进入专辑列表，共 %d 个，当前选中 idx=%d",
+        LOGD("[列表] 进入专辑列表，共 %d 个，当前选中 索引=%d",
              (int)groups.size(),
              s_list_selected_idx);
 
@@ -590,22 +590,22 @@ void player_list_select_handle_key(key_event_t evt)
     switch (evt) {
         case KEY_NEXT_SHORT:
             list_select_move_selection(+1, item_count, is_net_track);
-            LOGD("[LIST] 选择下一项: %d/%d", s_list_selected_idx + 1, item_count);
+            LOGD("[列表] 选择下一项: %d/%d", s_list_selected_idx + 1, item_count);
             break;
 
         case KEY_PREV_SHORT:
             list_select_move_selection(-1, item_count, is_net_track);
-            LOGD("[LIST] 选择上一项: %d/%d", s_list_selected_idx + 1, item_count);
+            LOGD("[列表] 选择上一项: %d/%d", s_list_selected_idx + 1, item_count);
             break;
 
         case KEY_PAGE_DOWN_SHORT:
             list_select_move_selection(+NET_TRACK_PAGE_SIZE, item_count, is_net_track);
-            LOGD("[LIST] 向下翻页: %d/%d", s_list_selected_idx + 1, item_count);
+            LOGD("[列表] 向下翻页: %d/%d", s_list_selected_idx + 1, item_count);
             break;
 
         case KEY_PAGE_UP_SHORT:
             list_select_move_selection(-NET_TRACK_PAGE_SIZE, item_count, is_net_track);
-            LOGD("[LIST] 向上翻页: %d/%d", s_list_selected_idx + 1, item_count);
+            LOGD("[列表] 向上翻页: %d/%d", s_list_selected_idx + 1, item_count);
             break;
 
         case KEY_PLAY_SHORT:
@@ -632,15 +632,15 @@ void player_list_select_handle_key(key_event_t evt)
                 ui_request_refresh_now();
 
                 keys_sync_to_hw_state();
-                LOGD("[LIST] 返回上一级列表");
+                LOGD("[列表] 返回上一级列表");
             } else {
-                LOGD("[LIST] 取消选择");
+                LOGD("[列表] 取消选择");
                 list_select_clear_state(true);
             }
             break;
 
         case KEY_MODE_LONG:
-            LOGI("[LIST] 退出到播放器");
+            LOGD("[列表] 退出到播放器");
             list_select_exit_to_player();
             break;  
         }
@@ -659,7 +659,7 @@ void player_list_select_tick()
 
     const uint32_t timeout_ms = list_select_timeout_ms();
     if ((uint32_t)(millis() - s_list_last_action_ms) >= timeout_ms) {
-        LOGD("[LIST] 超时退出 state=%d timeout=%lu ms",
+        LOGD("[列表] 超时退出 状态=%d 超时=%lu ms",
              (int)s_list_state,
              (unsigned long)timeout_ms);
         list_select_clear_state(true);

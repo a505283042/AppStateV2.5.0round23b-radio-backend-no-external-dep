@@ -78,7 +78,7 @@ static void web_stop_network_audio_before_wifi_down(const char* reason)
         return;
     }
 
-    LOGW("[WEB] stop network audio before WiFi down: %s", reason ? reason : "unknown");
+    LOGW("[网页] WiFi 关闭前先停止网络音频：%s", reason ? reason : "未知");
     audio_service_stop(true);
 }
 
@@ -99,7 +99,7 @@ void web_wifi_set_enabled(bool enabled)
     (void)web_settings_save();
 
     if (!enabled) {
-        LOGW("[WEB] WiFi disabled by user");
+        LOGW("[网页] 用户已关闭 WiFi");
 
         // 停止 Web 服务
         if (s_started) {
@@ -121,7 +121,7 @@ void web_wifi_set_enabled(bool enabled)
         return;
     }
 
-    LOGI("[WEB] WiFi enabled by user");
+    LOGI("[网页] 用户已启用 WiFi");
 
     WiFi.mode(WIFI_STA);
 
@@ -370,9 +370,9 @@ static bool web_require_player_state() {
 static bool web_load_wifi_config(std::vector<WebWifiNetwork>& nets, String& hostname) {
   hostname = WEBCTRL_HOSTNAME_DEFAULT;
   StorageSdLockGuard guard(1200);
-  if (!guard) { LOGW("[WEB] wifi config load skip: SD lock failed"); return false; }
+  if (!guard) { LOGW("[网页] 跳过 WiFi 配置读取：获取 SD 锁失败"); return false; }
   File32 f = sd.open(WEBCTRL_WIFI_CONFIG_PATH, O_RDONLY);
-  if (!f) { LOGW("[WEB] wifi config not found: %s", WEBCTRL_WIFI_CONFIG_PATH); return false; }
+  if (!f) { LOGW("[网页] 未找到 WiFi 配置：%s", WEBCTRL_WIFI_CONFIG_PATH); return false; }
 
   WebWifiNetwork cur{}; bool in_network = false; bool any = false;
   while (f.available()) {
@@ -401,7 +401,7 @@ static bool web_load_wifi_config(std::vector<WebWifiNetwork>& nets, String& host
   }
   if (in_network && cur.ssid.length()) { nets.push_back(cur); any = true; }
   f.close();
-  LOGD("[WEB] wifi config loaded: %d network(s), hostname=%s", (int)nets.size(), hostname.c_str());
+  LOGD("[网页] WiFi 配置已读取：网络数量=%d 主机名=%s", (int)nets.size(), hostname.c_str());
   return any;
 }
 
@@ -417,18 +417,18 @@ static bool web_try_connect_one(const WebWifiNetwork& n, const String& hostname)
   } else {
     WiFi.begin(n.ssid.c_str(), n.password.c_str());
   }
-  LOGD("[WEB] connecting STA ssid=%s%s", n.ssid.c_str(), n.hidden ? " (hidden)" : "");
+  LOGD("[网页] 正在连接 STA：ssid=%s%s", n.ssid.c_str(), n.hidden ? " (隐藏)" : "");
   const uint32_t t0 = millis();
   while ((millis() - t0) < WEBCTRL_STA_CONNECT_TIMEOUT_MS) {
     if (WiFi.status() == WL_CONNECTED) {
       WiFi.setSleep(false);
-      LOGI("[WEB] STA connected ip=%s", WiFi.localIP().toString().c_str());
+      LOGI("[网页] STA 已连接，IP=%s", WiFi.localIP().toString().c_str());
       s_ap_mode = false; s_wifi_source = "config_file"; s_hostname_runtime = hostname;
       return true;
     }
     delay(200);
   }
-  LOGI("[WEB] STA connect timeout for ssid=%s", n.ssid.c_str());
+  LOGW("[网页] STA 连接超时：ssid=%s", n.ssid.c_str());
   return false;
 }
 
@@ -440,7 +440,7 @@ static bool web_try_connect_sta_from_config() {
     WiFi.setSleep(false);
     s_ap_mode = false;
     s_wifi_source = "existing_sta";
-    LOGI("[WEB] reuse existing STA ip=%s", WiFi.localIP().toString().c_str());
+    LOGD("[网页] 复用已有 STA 连接，IP=%s", WiFi.localIP().toString().c_str());
     return true;
   }
 
@@ -459,10 +459,10 @@ static bool web_start_ap_fallback() {
   WiFi.mode(WIFI_AP);
   WiFi.setHostname(WEBCTRL_HOSTNAME_DEFAULT);
   const bool ok = WiFi.softAP(WEBCTRL_AP_SSID, WEBCTRL_AP_PASS);
-  if (!ok) { LOGE("[WEB] AP start failed"); return false; }
+  if (!ok) { LOGE("[网页] AP 启动失败"); return false; }
   WiFi.setSleep(false);
   s_ap_mode = true; s_wifi_source = "ap_fallback"; s_hostname_runtime = WEBCTRL_HOSTNAME_DEFAULT;
-  LOGI("[WEB] AP ready ssid=%s ip=%s", WEBCTRL_AP_SSID, WiFi.softAPIP().toString().c_str());
+  LOGI("[网页] AP 已就绪：SSID=%s IP=%s", WEBCTRL_AP_SSID, WiFi.softAPIP().toString().c_str());
   return true;
 }
 
@@ -488,7 +488,7 @@ static void web_send_radio_list_json() {
   const bool loaded = web_radio_catalog_ensure_loaded();
   const auto& items = radio_catalog_items();
 
-  LOGD("[WEB] radios total=%u (stream-batch)", (unsigned)items.size());
+  LOGD("[网页] 电台s 总计=%u (流-batch)", (unsigned)items.size());
 
   web_send_no_cache_headers();
   s_server.sendHeader("Connection", "close");
@@ -561,7 +561,7 @@ static void web_send_group_list_json(const std::vector<PlaylistGroup>& groups, b
   const MusicCatalogV3& cat = storage_catalog_v3();
   const int current_group_idx = player_playlist_get_current_group_idx();
 
-  LOGD("[WEB] group list type=%s total=%u (stream-batch)",
+  LOGD("[网页] 分组列表：类型=%s 总数=%u（流式批量输出）",
        is_album ? "album" : "artist",
        (unsigned)groups.size());
 
@@ -674,7 +674,7 @@ static void web_send_group_detail_json(const std::vector<PlaylistGroup>& groups,
   if (offset > total_tracks) offset = total_tracks;
   const int end = (offset + limit > total_tracks) ? total_tracks : (offset + limit);
 
-  LOGD("[WEB] group detail idx=%d is_album=%d q=%s offset=%d limit=%d returned=%d total=%d",
+  LOGD("[网页] 分组详情：索引=%d 是否专辑=%d 查询=%s 偏移=%d 限制=%d 返回数量=%d 总数=%d",
        group_idx,
        is_album ? 1 : 0,
        q.c_str(),
@@ -1058,7 +1058,7 @@ static void web_handle_radio_logo_current() {
 
   if (is_remote) {
     if (web_if_none_match_hit(etag)) {
-      LOGD("[WEB] radio logo 304 idx=%d remote=1", radio_idx);
+      LOGD("[网页] 电台台标 304：索引=%d 远程=1", radio_idx);
       web_send_not_modified(etag);
       return;
     }
@@ -1071,7 +1071,7 @@ static void web_handle_radio_logo_current() {
   }
 
   if (web_if_none_match_hit(etag)) {
-    LOGD("[WEB] radio logo 304 idx=%d remote=0", radio_idx);
+    LOGD("[网页] 电台台标 304：索引=%d 远程=0", radio_idx);
     web_send_not_modified(etag);
     return;
   }
@@ -1107,7 +1107,7 @@ static void web_handle_radio_logo_current() {
   const size_t written = client.write(buf, len);
   client.flush();
   if (written != len) {
-    LOGW("[WEB] radio logo send short write bytes=%u/%u", (unsigned)written, (unsigned)len);
+    LOGW("[网页] 电台 台标 发送写入不足 字节=%u/%u", (unsigned)written, (unsigned)len);
   }
 
   free(buf);
@@ -1135,7 +1135,7 @@ static void web_handle_cover_current() {
   const String cover_rev = web_make_track_cover_rev(v);
   const String etag = String("\"cover-track-") + String(cur) + "-" + cover_rev + "\"";
   if (web_if_none_match_hit(etag)) {
-    LOGD("[WEB] cover 304 track=%d rev=%s", cur, cover_rev.c_str());
+    LOGD("[网页] 封面 304 歌曲=%d 版本=%s", cur, cover_rev.c_str());
     web_send_not_modified(etag);
     return;
   }
@@ -1157,7 +1157,7 @@ static void web_handle_cover_current() {
     return;
   }
 
-  LOGD("[WEB] cover bmp hit track=%d bytes=%u", cur, (unsigned)len);
+  LOGD("[网页] 封面 BMP 命中 歌曲=%d 字节=%u", cur, (unsigned)len);
 
   WiFiClient client = s_server.client();
   client.setTimeout(800);
@@ -1171,7 +1171,7 @@ static void web_handle_cover_current() {
   const size_t written = client.write(buf, len);
   client.flush();
   if (written != len) {
-    LOGW("[WEB] cover send short write track=%d bytes=%u/%u", cur, (unsigned)written, (unsigned)len);
+    LOGW("[网页] 封面 发送写入不足 歌曲=%d 字节=%u/%u", cur, (unsigned)written, (unsigned)len);
   }
 
   free(buf);
@@ -2044,7 +2044,7 @@ bool web_server_retry_sta_from_config()
 {
 #if WEBCTRL_ENABLED
   if (!s_wifi_enabled) {
-    LOGW("[WEB] retry STA skipped: WiFi disabled");
+    LOGW("[网页] 跳过 STA 重试：WiFi 已关闭");
     return false;
   }
 
@@ -2059,23 +2059,23 @@ bool web_server_retry_sta_from_config()
 
   // 如果已经是 STA 且连接正常，不重复切换。
   if (!s_ap_mode && WiFi.status() == WL_CONNECTED) {
-    LOGI("[WEB] STA already connected ip=%s", WiFi.localIP().toString().c_str());
+    LOGD("[网页] STA 已连接，IP=%s", WiFi.localIP().toString().c_str());
     return true;
   }
 
-  LOGI("[WEB] retry STA from config");
+  LOGD("[网页] 根据配置重试 STA 连接");
 
   const bool ok = web_try_connect_sta_from_config();
 
   if (ok) {
     // s_server 已经 begin 过，WiFi 从 AP 切 STA 后一般不需要重新注册路由。
-    LOGI("[WEB] switched to STA ip=%s", WiFi.localIP().toString().c_str());
+    LOGI("[网页] 已切换到 STA，IP=%s", WiFi.localIP().toString().c_str());
     return true;
   }
 
   // 注意：web_try_connect_sta_from_config 失败后会 WiFi.disconnect，
   // 如果不重新拉起 AP，网页控制入口会丢失。
-  LOGW("[WEB] retry STA failed, restore AP fallback");
+  LOGW("[网页] STA 重试失败，恢复 AP 兜底模式");
   web_start_ap_fallback();
   return false;
 #else
@@ -2105,7 +2105,7 @@ void web_server_start() {
     s_wifi_enabled = web_settings_get().wifi_enabled;
 
     if (!s_wifi_enabled) {
-      LOGW("[WEB] start skipped: WiFi disabled by NVS");
+      LOGW("[网页] 跳过启动：NVS 设置中 WiFi 已关闭");
       WiFi.softAPdisconnect(true);
       WiFi.disconnect(true, true);
       WiFi.mode(WIFI_OFF);
@@ -2122,7 +2122,7 @@ void web_server_start() {
     WiFi.setAutoReconnect(false);
     web_settings_load();
     const bool net_ok = web_try_connect_sta_from_config() || web_start_ap_fallback();
-    if (!net_ok) { LOGE("[WEB] network start failed, web disabled"); s_ready = false; return; }
+    if (!net_ok) { LOGE("[网页] 网络启动失败，Web 已禁用"); s_ready = false; return; }
 
     static const char* kHeaderKeys[] = { "If-None-Match" };
     s_server.collectHeaders(kHeaderKeys, 1);
@@ -2130,7 +2130,7 @@ void web_server_start() {
     web_setup_routes();
     s_server.begin();
     s_ready = true;
-    LOGI("[WEB] server started: http://%s/", web_ip_string().c_str());
+    LOGI("[网页] 服务已启动：http://%s/", web_ip_string().c_str());
   #else
     s_started = true; s_ready = false;
   #endif
@@ -2145,7 +2145,7 @@ void web_server_start_async()
     s_wifi_enabled = web_settings_get().wifi_enabled;
 
     if (!s_wifi_enabled) {
-        LOGW("[WEB] async start skipped: WiFi disabled by NVS");
+        LOGD("[网页] NVS 设置中 WiFi 已关闭，Web 服务不启动");
         WiFi.softAPdisconnect(true);
         WiFi.disconnect(true, true);
         WiFi.mode(WIFI_OFF);
@@ -2171,9 +2171,9 @@ void web_server_start_async()
 
     if (ok != pdPASS) {
         s_web_start_task = nullptr;
-        LOGE("[WEB] create async start task failed");
+        LOGE("[网页] 创建异步启动任务失败");
     } else {
-        LOGD("[WEB] async start task created");
+        LOGD("[网页] 异步启动任务已创建");
     }
 #else
     web_server_start();

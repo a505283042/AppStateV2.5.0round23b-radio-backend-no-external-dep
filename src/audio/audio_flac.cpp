@@ -107,14 +107,14 @@ bool audio_flac_start(SdFat& sd, const char* path)
   uint32_t t_after_meta = t0;
 
   if (!g_file.open(sd, path)) {
-    LOGE("[FLAC] open failed: %s", path);
+    LOGE("[FLAC] 打开失败：%s", path);
     return false;
   }
   t_after_open = millis();
 
   g_flac = drflac_open(on_read, on_seek, on_tell, &g_file, nullptr);
   if (!g_flac) {
-    LOGE("[FLAC] drflac_open failed");
+    LOGE("[FLAC] drflac 打开失败");
     g_file.close();
     return false;
   }
@@ -123,7 +123,7 @@ bool audio_flac_start(SdFat& sd, const char* path)
   g_sr = (int)g_flac->sampleRate;
   g_ch = g_flac->channels;
   if (g_ch > 2 || g_ch == 0) {
-    LOGE("[FLAC] Unsupported channels: %d", g_ch);
+    LOGE("[FLAC] 不支持的声道数：%d", g_ch);
     audio_flac_stop();
     return false;
   }
@@ -135,7 +135,7 @@ bool audio_flac_start(SdFat& sd, const char* path)
   s_pending_frames = 0;
   clear_prime_buffer();
   const auto& st = g_file.last_open_stats();
-  LOGD("[FLAC] start detail lock_wait=%lums dir_prepare=%lums dir_cache=%u cache_reason=%s file_open=%lums file_size=%lums open=%lums drflac_open=%lums meta=%lums total=%lums sr=%d ch=%u",
+  LOGD("[FLAC] 启动细节：等待锁=%lums 目录准备=%lums 目录缓存=%u 缓存原因=%s 文件打开=%lums 文件大小=%lums 打开=%lums drflac打开=%lums 元数据=%lums 总计=%lums 采样率=%d 声道=%u",
        (unsigned long)st.lock_wait_ms,
        (unsigned long)st.dir_prepare_ms,
        (unsigned)st.used_dir_cache,
@@ -204,7 +204,7 @@ uint32_t audio_flac_prime_pcm_ms(uint32_t target_ms, uint32_t max_chunks)
   }
 
   const uint32_t primed_ms = (g_sr > 0) ? ((total_frames * 1000UL) / (uint32_t)g_sr) : 0;
-  LOGD("[FLAC] startup software prime ms=%lu chunks=%lu frames=%lu cost=%lums max_decode=%lums",
+  LOGD("[FLAC] 启动软件预填充：时长=%lums 块=%lu 帧=%lu 耗时=%lums 最大解码=%lums",
        (unsigned long)primed_ms,
        (unsigned long)chunks,
        (unsigned long)total_frames,

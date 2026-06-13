@@ -35,7 +35,7 @@ static uint8_t sleep_preset_index(uint16_t minutes)
 
 void app_power_save_and_shutdown()
 {
-    LOGI("[POWER] save and shutdown requested");
+    LOGI("[电源] 保存 and shutdown requested");
 
     // 已经进入关机流程后，睡眠定时不再重复触发。
     s_sleep_timer_active = false;
@@ -64,7 +64,7 @@ void app_power_save_and_shutdown()
 
     const bool nfc_ok = nfc_binding_flush_if_dirty("/System/nfc_map.txt");
 
-    LOGI("[POWER] save result snapshot=%d web=%d nfc=%d",
+    LOGI("[电源] 保存 result snapshot=%d 网页=%d nfc=%d",
          snapshot_ok ? 1 : 0,
          web_ok ? 1 : 0,
          nfc_ok ? 1 : 0);
@@ -103,13 +103,13 @@ void app_power_sleep_timer_set_minutes(uint16_t minutes)
     s_sleep_timer_active = true;
     s_sleep_shutdown_started = false;
 
-    LOGI("[POWER] sleep timer set: %u minutes", (unsigned)minutes);
+    LOGI("[电源] sleep timer 设置: %u minutes", (unsigned)minutes);
 }
 
 void app_power_sleep_timer_cancel()
 {
     if (s_sleep_timer_active || s_sleep_preset_minutes != 0) {
-        LOGI("[POWER] sleep timer canceled");
+        LOGI("[电源] sleep timer 取消ed");
     }
 
     s_sleep_timer_active = false;
@@ -163,6 +163,6 @@ void app_power_sleep_timer_tick()
     }
 
     s_sleep_shutdown_started = true;
-    LOGI("[POWER] sleep timer expired, shutdown now");
+    LOGI("[电源] 睡眠定时到期，立即关机");
     app_power_save_and_shutdown();
 }

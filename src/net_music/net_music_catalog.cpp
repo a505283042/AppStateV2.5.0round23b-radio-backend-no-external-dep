@@ -40,7 +40,7 @@ static bool read_base_url_locked() {
   File32 f = sd.open(kNetMusicBasePath, O_RDONLY);
   if (!f) {
     s_error = "net_music_base_missing";
-    LOGW("[NETMUSIC] base file not found: %s", kNetMusicBasePath);
+    LOGW("[网络音乐] base 文件 未找到: %s", kNetMusicBasePath);
     return false;
   }
 
@@ -60,7 +60,7 @@ static bool read_base_url_locked() {
 
   if (!s_base_url.length()) {
     s_error = "net_music_base_empty";
-    LOGW("[NETMUSIC] base url empty: %s", kNetMusicBasePath);
+    LOGW("[网络音乐] base URL 为空: %s", kNetMusicBasePath);
     return false;
   }
 
@@ -164,7 +164,7 @@ static bool read_item_locked(uint32_t idx, NetMusicItem* out) {
 
   if (line.length() > kMaxNetMusicLineLen) {
     s_error = "net_music_line_too_long";
-    LOGW("[NETMUSIC] line too long idx=%lu len=%u",
+    LOGW("[网络音乐] 行 too long idx=%lu le数量=%u",
          (unsigned long)idx,
          (unsigned)line.length());
     return false;
@@ -172,7 +172,7 @@ static bool read_item_locked(uint32_t idx, NetMusicItem* out) {
 
   if (!parse_line(line, out)) {
     s_error = "net_music_parse_failed";
-    LOGW("[NETMUSIC] parse failed idx=%lu", (unsigned long)idx);
+    LOGW("[网络音乐] parse 失败 idx=%lu", (unsigned long)idx);
     return false;
   }
 
@@ -189,7 +189,7 @@ bool net_music_catalog_load() {
   StorageSdLockGuard guard(1500);
   if (!guard) {
     s_error = "sd_lock_failed";
-    LOGW("[NETMUSIC] catalog load skipped: SD lock failed");
+    LOGW("[网络音乐] 跳过目录加载：获取 SD 锁失败");
     return false;
   }
 
@@ -200,7 +200,7 @@ bool net_music_catalog_load() {
   File32 f = sd.open(kNetMusicListPath, O_RDONLY);
   if (!f) {
     s_error = "net_music_list_missing";
-    LOGW("[NETMUSIC] list not found: %s", kNetMusicListPath);
+    LOGW("[网络音乐] 列表文件未找到：%s", kNetMusicListPath);
     return false;
   }
 
@@ -221,7 +221,7 @@ bool net_music_catalog_load() {
 
   s_loaded = true;
 
-  LOGI("[NETMUSIC] catalog loaded tracks=%lu offsets=%u base=%s path=%s",
+  LOGI("[网络音乐] 目录 加载ed 歌曲s=%lu 偏移s=%u base=%s 路径=%s",
        (unsigned long)valid_count,
        (unsigned)s_offsets.size(),
        s_base_url.c_str(),
@@ -337,7 +337,7 @@ uint32_t net_music_catalog_search(const String& query,
 
   f.close();
 
-  LOGD("[NETMUSIC] search q=%s matched=%lu returned=%u",
+  LOGD("[网络音乐] search q=%s matched=%lu 返回数量=%u",
        q.c_str(),
        (unsigned long)matched_total,
        out ? (unsigned)out->size() : 0);
