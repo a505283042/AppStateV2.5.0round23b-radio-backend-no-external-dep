@@ -43,7 +43,7 @@ static void storage_refresh_card_identity_locked()
              "snap_default");
 
     if (!sd.card()) {
-        Serial.println("[STORAGE] card identity skipped: no card");
+        Serial.println("[存储] 卡标识跳过：无卡");  
         return;
     }
 
@@ -51,7 +51,7 @@ static void storage_refresh_card_identity_locked()
     memset(&cid, 0, sizeof(cid));
 
     if (!sd.card()->readCID(&cid)) {
-        Serial.printf("[STORAGE] read CID failed err=%u data=%u\n",
+        Serial.printf("[存储] 读取 TF 卡标识失败，错误码=%u，数据=%u\n",
                       sd.card()->errorCode(),
                       sd.card()->errorData());
         return;
@@ -64,7 +64,7 @@ static void storage_refresh_card_identity_locked()
              "snap_%08lX",
              static_cast<unsigned long>(s_card_hash));
 
-    Serial.printf("[STORAGE] card hash=%08lX snapshot_key=%s\n",
+    Serial.printf("[存储] TF 卡标识=%08lX，快照键=%s\n",
                   static_cast<unsigned long>(s_card_hash),
                   s_card_snapshot_key);
 }
@@ -89,7 +89,7 @@ void storage_clear_card_identity(void)
 
 bool storage_mount(void)
 {
-    Serial.println("[STORAGE] mount (SdFat)");
+    Serial.println("[存储] 挂载 TF 卡（SdFat）");
 
     // 初始化 SD 卡访问互斥锁，在 sd.begin() 之前
     if (!storage_sd_init_mutex()) {
@@ -100,7 +100,7 @@ bool storage_mount(void)
 
     StorageSdLockGuard sd_lock(2000);
     if (!sd_lock) {
-        Serial.println("[STORAGE] mount lock timeout");
+        Serial.println("[存储] 挂载锁超时");
         storage_ready = false;
         return false;
     }
@@ -120,7 +120,7 @@ bool storage_mount(void)
 
     // 检查是否已经挂载，如果是则先卸载
     if (storage_ready) {
-        Serial.println("[STORAGE] 检测到已有挂载，尝试重新挂载");
+        Serial.println("[存储] 检测到已有挂载，尝试重新挂载");
         sd.end();
         storage_ready = false;
     }
@@ -129,18 +129,18 @@ bool storage_mount(void)
     if (sd.card()) {
         uint8_t err = sd.card()->errorCode();
         if (err != 0) {
-            Serial.printf("[STORAGE] 卡错误代码: %d\n", err);
+            Serial.printf("[存储] 卡错误代码: %d\n", err);
         }
     }
 
     if (!sd.begin(cfg)) {
-        Serial.println("[STORAGE] SdFat mount FAILED");
+        Serial.println("[存储] TF 卡挂载失败");
         storage_ready = false;
         digitalWrite(PIN_SD_CS, HIGH);
         return false;
     }
 
-    Serial.println("[STORAGE] SdFat mount OK");
+    Serial.println("[存储] TF 卡挂载成功");
     storage_ready = true;
     s_recent_io_error = false;
 
@@ -166,7 +166,7 @@ bool storage_unmount(void)
 
     StorageSdLockGuard sd_lock(2000);
     if (!sd_lock) {
-        Serial.println("[STORAGE] unmount lock timeout");
+        Serial.println("[存储] 卸载锁超时");
         return false;
     }
 
@@ -175,8 +175,7 @@ bool storage_unmount(void)
 
     pinMode(PIN_SD_CS, OUTPUT);
     digitalWrite(PIN_SD_CS, HIGH);
-
-    Serial.println("[STORAGE] unmounted");
+    Serial.println("[存储] TF 卡卸载完成");
     return true;
 }
 
@@ -200,14 +199,14 @@ bool storage_probe_alive(void)
     }
 
     if (!sd.card()) {
-        Serial.println("[STORAGE] probe failed: no card object");
+        Serial.println("[存储] 无卡对象");
         return false;
     }
 
     // 强制读物理 0 扇区。无 CD 脚时这是比 root.open("/") 更可靠的存在性探测。
     const bool ok = sd.card()->readSector(0, s_probe_sector);
     if (!ok) {
-        Serial.printf("[STORAGE] probe readSector failed err=%u data=%u\n",
+        Serial.printf("[存储] 读取扇区错误: %d, 数据: %d\n",
                       sd.card()->errorCode(),
                       sd.card()->errorData());
     }
@@ -218,7 +217,7 @@ bool storage_probe_alive(void)
 void storage_report_io_error(const char* where)
 {
     s_recent_io_error = true;
-    Serial.printf("[STORAGE] IO error reported: %s\n", where ? where : "(unknown)");
+    Serial.printf("[存储] IO 错误报告: %s\n", where ? where : "(未知)");
 }
 
 bool storage_has_recent_io_error(void)
@@ -237,19 +236,19 @@ void storage_list_root(void)
 
     StorageSdLockGuard sd_lock(1000);
     if (!sd_lock) {
-        Serial.println("[STORAGE] 无法获取 SD 互斥锁");
+        Serial.println("[存储] 无法获取 SD 互斥锁");
         return;
     }
 
     SdFile root;
     if (!root.open("/")) {
-        Serial.println("[STORAGE] open / FAILED");
+        Serial.println("[存储] 打开根目录失败");
         return;
     }
 
     #if LOG_LEVEL >= 3
         // 根目录列表属于启动排查日志，日常 INFO 启动不打印。
-        Serial.println("[STORAGE] list /");
+        Serial.println("[存储] 根目录列表");
         SdFile f;
         while (f.openNext(&root, O_RDONLY)) {
             char name[128];

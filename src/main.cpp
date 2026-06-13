@@ -21,7 +21,7 @@ void setup() {
   Serial.begin(115200);
   delay(100);
 
-  Serial.printf("[POWER] early POWER_CTRL GPIO%d -> HIGH\n", PIN_POWER_CTRL);
+  Serial.printf("[电源] 提前拉高 POWER_CTRL GPIO%d，保持整机供电\n", PIN_POWER_CTRL);
   
   app_state_init();      /* 初始化应用状态 */
 }

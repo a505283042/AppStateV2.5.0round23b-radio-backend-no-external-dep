@@ -21,7 +21,7 @@ void board_spi_init(void)
     if (inited) return;          /* 如果已经初始化则直接返回 */
     inited = true;
 
-    Serial.println("[SPI] init buses...");
+    Serial.println("[启动] 初始化SPI总线...");
 
     // ---------- I2C / MCP23017 ----------
     pinMode(board::PIN_EXP_INTA, INPUT_PULLUP);
@@ -52,10 +52,10 @@ void board_spi_init(void)
         delay(120);
 
         mcp23017_u3_set_b(board::MCP_B_BLK, true);
-        Serial.println("[TFT] BLK MCPB4 -> HIGH");
+        Serial.println("[总线] 背光使能 (BLK) -> 高电平");
     
     } else {
-        Serial.println("[MCP23017] init failed, MCP controlled pins unavailable");
+        Serial.println("[总线] 初始化IIC扩展失败");
     }
 
     if (!s_ui_spi_mtx) {
@@ -81,18 +81,18 @@ void board_spi_init(void)
     SPI_SD.end();
     SPI_SD.begin(PIN_SPI_SD_SCK, PIN_SPI_SD_MISO, PIN_SPI_SD_MOSI, -1);
 
-    Serial.printf("[SPI] UI  SCK=%d MOSI=%d MISO=%d\n",
+    Serial.printf("[总线] 初始化UI和SDSPI总线参数: SCK=%d MOSI=%d MISO=%d\n",
                   PIN_SPI_UI_SCK, PIN_SPI_UI_MOSI, PIN_SPI_UI_MISO);
-    Serial.printf("[SPI] TFT CS=%d DC=%d RST=MCPB%d BLK=MCPB%d\n",
+    Serial.printf("[总线] 屏幕：CS=%d DC=%d RST=MCPB%d BLK=MCPB%d\n",
                   PIN_TFT_CS,
                   PIN_TFT_DC,
                   board::MCP_B_RST_TFT,
                   board::MCP_B_BLK);
-    Serial.printf("[SPI] RC522 CS=%d RST=MCPB%d IRQ=%d\n",
+    Serial.printf("[总线] RC522 芯片选择引脚=%d 复位引脚=MCPB%d 中断请求引脚=%d\n",
                   PIN_RC522_CS,
                   board::MCP_B_RST_NFC,
                   PIN_RC522_IRQ);
-    Serial.printf("[SPI] SD  SCK=%d MOSI=%d MISO=%d CS=%d\n",
+    Serial.printf("[总线] SD卡 时钟引脚=%d 主出从入引脚=%d 主入从出引脚=%d 芯片选择引脚=%d\n",
                   PIN_SPI_SD_SCK,
                   PIN_SPI_SD_MOSI,
                   PIN_SPI_SD_MISO,

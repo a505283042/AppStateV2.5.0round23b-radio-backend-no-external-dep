@@ -52,7 +52,7 @@ static String format_uid_hex(const MFRC522::Uid& uid)
 
 void nfc_init(void)
 {
-    Serial.println("[NFC] init...");
+    Serial.println("[NFC] 初始化...");
 
     // board_spi_init() 已经把全局 SPI 绑到 UI SPI 那组引脚
     // 这里只做 RC522 初始化
@@ -68,34 +68,34 @@ void nfc_init(void)
 
     board_spi_ui_unlock();
 
-    Serial.printf("[NFC] PCD_Init=%s\n", ok ? "OK" : "FAIL");
-    Serial.printf("[NFC] MFRC522 version: 0x%02X\n", ver);
+    Serial.printf("[NFC] RC522 初始化=%s\n", ok ? "成功" : "失败");
+    Serial.printf("[NFC] MFRC522 版本寄存器：0x%02X\n", ver);
 
     switch (ver) {
         case 0x88:
-            Serial.println("[NFC] version decode: clone / Fudan FM17522?");
+            Serial.println("[NFC] 版本识别：FM17522?");
             break;
         case 0x90:
-            Serial.println("[NFC] version decode: v0.0");
+            Serial.println("[NFC] 版本识别：v0.0");
             break;
         case 0x91:
-            Serial.println("[NFC] version decode: v1.0");
+            Serial.println("[NFC] 版本识别：v1.0");
             break;
         case 0x92:
-            Serial.println("[NFC] version decode: v2.0");
+            Serial.println("[NFC] 版本识别：v2.0");
             break;
         case 0x00:
-            Serial.println("[NFC] version decode: no response");
+            Serial.println("[NFC] 无响应");
             break;
         case 0xFF:
-            Serial.println("[NFC] version decode: bus floating or communication failed");
+            Serial.println("[NFC] 通信失败");
             break;
         default:
-            Serial.println("[NFC] version decode: unknown");
+            Serial.println("[NFC] 未知版本");
             break;
     }
 
-    Serial.println("[NFC] ready");
+    Serial.println("[NFC] 就绪");
 }
 
 void nfc_poll(void)
@@ -160,7 +160,7 @@ void nfc_poll(void)
     s_pending_uid = uid_str;
     s_has_pending_uid = true;
 
-    Serial.printf("[NFC] detected uid=%s\n", uid_str.c_str());
+    Serial.printf("[NFC] 识别到 UID=%s\n", uid_str.c_str());
 }
 
 bool nfc_is_uid_present(const String& uid)

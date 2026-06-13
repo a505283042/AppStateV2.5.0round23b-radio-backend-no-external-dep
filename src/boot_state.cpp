@@ -18,7 +18,7 @@ static void prepare_music_catalogs()
 {
     if (storage_catalog_v3_load_or_rebuild("/Music",
                                            "/System/music_index_v3.bin")) {
-        LOGI("[BOOT] V3 ready: tracks=%lu albums=%lu artists=%lu",
+        LOGD("[启动] V3歌曲库 加载成功: 音乐=%lu 专辑=%lu 歌手=%lu",
              (unsigned long)storage_catalog_v3_track_count(),
              (unsigned long)storage_catalog_v3_album_count(),
              (unsigned long)storage_catalog_v3_artist_count());
@@ -29,7 +29,7 @@ static void prepare_music_catalogs()
         storage_catalog_v3_log_memory_stats();
         #endif
     } else {
-        LOGE("[BOOT] V3 load/rebuild failed");
+        LOGE("[启动] V3歌曲库 加载失败");
     }
 }
 
@@ -41,11 +41,11 @@ void boot_state_run(void)
 
     Serial.begin(115200);
     delay(300);
-    Serial.println("[BOOT] start");
+    Serial.println("[启动] 开始");
 
-    Serial.printf("[MEM] psramFound=%d, PsramSize=%u, FreePsram=%u\n",
-              (int)psramFound(), (unsigned)ESP.getPsramSize(), (unsigned)ESP.getFreePsram());
-    Serial.printf("[MEM] FreeHeap=%u\n", (unsigned)ESP.getFreeHeap());
+    Serial.printf("[内存] PSRAM存在=%d，总容量=%u，可用=%u\n",
+                (int)psramFound(), (unsigned)ESP.getPsramSize(), (unsigned)ESP.getFreePsram());
+    Serial.printf("[内存] 内部堆可用=%u\n", (unsigned)ESP.getFreeHeap());
 
     // 1) 初始化两条 SPI：默认SPI=UI，SPI_SD=SD
     board_spi_init();
@@ -56,19 +56,19 @@ void boot_state_run(void)
 
         // 加载 NFC 绑定文件
         if (nfc_binding_load("/System/nfc_map.txt")) {
-            LOGI("[BOOT] NFC bindings loaded: %d entries", nfc_binding_count());
+            LOGD("[启动] NFC 绑定表 加载成功: %d 条", nfc_binding_count());
         } else {
-            LOGI("[BOOT] No NFC bindings found");
+            LOGI("[启动] 未找到 NFC 绑定表");
         }
     } else {
-        LOGW("[BOOT] no TF card, start without local library");
+        LOGW("[启动] 没有 TF 卡，不加载本地库");
         nfc_binding_clear();
         storage_catalog_v3_clear();
     }
 
     // 初始化封面缓冲区（固定大小，避免 PSRAM 碎片）
     if (!cover_init_buffer()) {
-        Serial.println("[BOOT] 封面缓冲区初始化失败");
+        Serial.println("[启动] 封面缓冲区初始化失败");
     }
 
     // 2) 先点亮屏幕  启动 UI（TFT_eSPI 用默认 SPI，不会再打架）
@@ -86,15 +86,15 @@ void boot_state_run(void)
     if (storage_is_ready()) {
         prepare_music_catalogs();
     } else {
-        LOGW("[BOOT] skip local catalog: storage not ready");
+        LOGW("[启动] 本地库加载失败，存储未就绪");
     }
 
     // 预加载电台列表到内存中
     #include "radio/radio_catalog.h"
     if (storage_is_ready() && radio_catalog_load()) {
-        LOGI("[BOOT] Radio catalog loaded: %d stations", (int)radio_catalog_count());
+        LOGD("[启动] 电台列表 加载成功: %d 个电台", (int)radio_catalog_count());
     } else {
-        LOGW("[BOOT] Radio catalog load skipped or failed");
+        LOGW("[启动] 加载电台列表失败");    
     }
     // NAS/HTTP 歌曲索引不在开机阶段预加载。
     // 进入 NAS 歌曲列表或 Web NAS 页面时再按需 net_music_catalog_load()，
@@ -106,7 +106,7 @@ void boot_state_run(void)
         player_snapshot_load_pending_from_nvs();
     }
 
-    Serial.println("[BOOT] -> PLAYER");
+    Serial.println("[启动] 初始化完成，进入播放器");
     g_app_state = STATE_PLAYER;
 
     // Web/WiFi 异步启动，不阻塞进入播放器。
