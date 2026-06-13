@@ -277,6 +277,17 @@ static bool web_parse_bool(const String& v, bool defv=false) {
   if (s=="0"||s=="false"||s=="no"||s=="off") return false;
   return defv;
 }
+
+static bool web_settings_persistent_core_changed(const WebRuntimeSettings& old_cfg,
+                                                 const WebRuntimeSettings& new_cfg)
+{
+  // 这些设置保持原来的“立即保存”语义；
+  // 显示类开关 show_next_lyric / show_cover / web_cover_spin 可延迟到关机前保存。
+  return old_cfg.refresh_preset != new_cfg.refresh_preset
+      || old_cfg.lyric_sync_mode != new_cfg.lyric_sync_mode
+      || old_cfg.wifi_enabled != new_cfg.wifi_enabled
+      || old_cfg.show_wifi_info != new_cfg.show_wifi_info;
+}
 static bool web_parse_mac(const String& text, uint8_t out[6]) {
   unsigned vals[6];
   if (sscanf(text.c_str(), "%x:%x:%x:%x:%x:%x", &vals[0], &vals[1], &vals[2], &vals[3], &vals[4], &vals[5]) != 6) return false;
@@ -818,7 +829,9 @@ static void web_handle_settings_get() {
   s_server.send(200, "application/json; charset=utf-8", json);
 }
 static void web_handle_settings_post() {
-  WebRuntimeSettings ws = web_settings_get();
+  const WebRuntimeSettings old_ws = web_settings_get();
+  WebRuntimeSettings ws = old_ws;
+
   String refresh = s_server.arg("refresh_preset");
   if (refresh.length()) {
     String s = refresh; s.toLowerCase();
@@ -837,9 +850,19 @@ static void web_handle_settings_post() {
   ws.show_cover = web_parse_bool(s_server.arg("show_cover"), ws.show_cover);
   ws.web_cover_spin = web_parse_bool(s_server.arg("web_cover_spin"), ws.web_cover_spin);
   ws.show_wifi_info = web_parse_bool(s_server.arg("show_wifi_info"), ws.show_wifi_info);
+
+  const bool need_immediate_save = web_settings_persistent_core_changed(old_ws, ws);
   web_settings_set(ws);
-  if (!web_settings_save()) { web_send_json_err("保存设置失败", 500); return; }
-  web_send_json_ok_simple("settings_saved");
+
+  if (need_immediate_save) {
+    if (!web_settings_save_if_dirty()) { web_send_json_err("保存设置失败", 500); return; }
+    web_send_json_ok_simple("settings_saved");
+    return;
+  }
+
+  // 只修改封面旋转 / 网页封面 / 下一句歌词这类显示开关时，
+  // 立即生效，但不立刻写 NVS；关机前由 app_power 统一保存。
+  web_send_json_ok_simple(web_settings_is_dirty() ? "settings_deferred" : "settings_unchanged");
 }
 static void web_handle_status() {
   WebPlayerSnapshot snap = web_snapshot_capture();

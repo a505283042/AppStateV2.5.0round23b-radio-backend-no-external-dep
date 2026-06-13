@@ -4,12 +4,46 @@
 #include "utils/log.h"
 
 static WebRuntimeSettings s_cfg{};
+static bool s_dirty = false;
 static const char* kPrefsNs = "webctrl";
 
-
+static bool web_settings_equal(const WebRuntimeSettings& a, const WebRuntimeSettings& b)
+{
+  return a.refresh_preset == b.refresh_preset
+      && a.lyric_sync_mode == b.lyric_sync_mode
+      && a.show_next_lyric == b.show_next_lyric
+      && a.show_cover == b.show_cover
+      && a.web_cover_spin == b.web_cover_spin
+      && a.wifi_enabled == b.wifi_enabled
+      && a.show_wifi_info == b.show_wifi_info;
+}
 
 const WebRuntimeSettings& web_settings_get() { return s_cfg; }
-void web_settings_set(const WebRuntimeSettings& s) { s_cfg = s; }
+
+void web_settings_set(const WebRuntimeSettings& s)
+{
+  if (web_settings_equal(s_cfg, s)) {
+    return;
+  }
+
+  s_cfg = s;
+  s_dirty = true;
+}
+
+bool web_settings_is_dirty()
+{
+  return s_dirty;
+}
+
+bool web_settings_save_if_dirty()
+{
+  if (!s_dirty) {
+    LOGD("[网页] 设置没有变化，跳过 NVS 保存");
+    return true;
+  }
+
+  return web_settings_save();
+}
 
 const char* web_refresh_preset_key(WebRefreshPreset p) {
   switch (p) {
@@ -72,6 +106,7 @@ bool web_settings_load() {
   if (!pref.begin(kPrefsNs, true)) {
     LOGW("[网页] 设置tings 加载 失败: 打开 NVS namespace");
     LOGD("[网页] 设置tings use 默认s");
+    s_dirty = false;
     return false;
   }
 
@@ -83,6 +118,7 @@ bool web_settings_load() {
   s_cfg.wifi_enabled = pref.getBool("wifi_en", s_cfg.wifi_enabled);
   s_cfg.show_wifi_info = pref.getBool("wifi_info", s_cfg.show_wifi_info);
   pref.end();
+  s_dirty = false;
 
   LOGD("[网页] 设置已从 NVS 读取：刷新=%s 歌词=%s 显示下一首=%d 显示封面=%d 封面旋转=%d WiFi启用=%d WiFi信息=%d",
        web_refresh_preset_key(s_cfg.refresh_preset),
@@ -115,6 +151,8 @@ bool web_settings_save() {
     LOGE("[网页] 设置tings 保存 失败: 写入 NVS");
     return false;
   }
+
+  s_dirty = false;
 
   LOGI("[网页] 设置已保存到 NVS：刷新=%s 歌词=%s 显示下一首=%d 显示封面=%d 封面旋转=%d WiFi启用=%d WiFi信息=%d",
        web_refresh_preset_key(s_cfg.refresh_preset),

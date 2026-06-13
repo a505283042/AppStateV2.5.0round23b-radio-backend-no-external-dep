@@ -48,7 +48,7 @@ bool action_toggle_show_cover()
     WebRuntimeSettings ws = web_settings_get();
     ws.show_cover = !ws.show_cover;
     web_settings_set(ws);
-    (void)web_settings_save();
+    // 只更新运行时设置并标记待保存，关机前由 app_power 统一写入 NVS。
     return true;
 }
 
@@ -62,7 +62,8 @@ bool action_toggle_cover_spin()
     WebRuntimeSettings ws = web_settings_get();
     ws.web_cover_spin = !ws.web_cover_spin;
     web_settings_set(ws);
-    return web_settings_save();
+    // 只更新运行时设置并标记待保存，关机前由 app_power 统一写入 NVS。
+    return true;
 }
 
 const char* value_show_next_lyric()
@@ -75,7 +76,7 @@ bool action_toggle_show_next_lyric()
     WebRuntimeSettings ws = web_settings_get();
     ws.show_next_lyric = !ws.show_next_lyric;
     web_settings_set(ws);
-    (void)web_settings_save();
+    // 只更新运行时设置并标记待保存，关机前由 app_power 统一写入 NVS。
     return true;
 }
 

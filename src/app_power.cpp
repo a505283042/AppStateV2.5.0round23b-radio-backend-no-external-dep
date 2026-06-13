@@ -56,7 +56,7 @@ void app_power_save_and_shutdown()
     (void)board_hw_set_amp_mute(true);
 
     const bool snapshot_ok = player_snapshot_save_to_nvs();
-    const bool web_ok = web_settings_save();
+    const bool web_ok = web_settings_save_if_dirty();
 
     // NFC 绑定在刷卡确认时只写内存并标记 dirty。
     // 真正写 TF 前必须停止 AudioTask 读卡，避免播放中写 /System/nfc_map.txt 抢 SD 锁。

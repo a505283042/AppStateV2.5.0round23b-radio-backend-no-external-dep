@@ -41,8 +41,12 @@ bool web_settings_load();
 bool web_settings_save();
 // 获取当前网页运行设置快照。
 const WebRuntimeSettings& web_settings_get();
-// 更新当前网页运行设置（不自动保存）。
+// 更新当前网页运行设置（不自动保存）；内容有变化时只标记为待保存。
 void web_settings_set(const WebRuntimeSettings& s);
+// 当前网页设置是否有待保存改动。
+bool web_settings_is_dirty();
+// 仅在有待保存改动时写入 NVS；没有改动时直接返回 true。
+bool web_settings_save_if_dirty();
 
 // 机器可读 key / 中文标签 / 由档位映射出的实际参数。
 const char* web_refresh_preset_key(WebRefreshPreset p);
