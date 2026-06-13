@@ -427,13 +427,18 @@ bool board_hw_set_amp_mute(bool enabled)
 {
     if (!mcp23017_u3_is_ready()) return false;
 
+    if (s_amp_mute_enabled == enabled) {
+        // 状态未变化时不重复写 MCP23017，避免切歌时出现多次相同静音日志和无意义 I2C 操作。
+        return true;
+    }
+
     const bool level = level_from_enabled(enabled, AMP_MUTE_ACTIVE_LEVEL);
     if (!mcp23017_u3_set_a(board::MCP_A_MUTE_EN, level)) {
         return false;
     }
 
     s_amp_mute_enabled = enabled;
-    LOGI("[HWCTRL] AMP mute %s level=%d", enabled ? "ON" : "OFF", level ? 1 : 0);
+    LOGD("[HWCTRL] AMP mute %s level=%d", enabled ? "ON" : "OFF", level ? 1 : 0);
     return true;
 }
 

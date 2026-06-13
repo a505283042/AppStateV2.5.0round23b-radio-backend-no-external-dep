@@ -744,7 +744,7 @@ bool player_assets_prime_next_cover(const TrackInfo& t,
     s_primed_next_cover.cover_offset = t.cover_offset;
     s_primed_next_cover.cover_size = t.cover_size;
 
-    LOGI("[PLAYER] next cover primed raw track=%d len=%u source=%u size=%u",
+    LOGD("[PLAYER] next cover primed raw track=%d len=%u source=%u size=%u",
          track_idx,
          (unsigned)len,
          (unsigned)t.cover_source,
@@ -772,7 +772,7 @@ bool player_assets_promote_next_cover_to_current(int track_idx)
     s_primed_next_cover.len = 0;
     s_primed_next_cover.is_png = false;
 
-    LOGI("[PLAYER] next cover promoted to current track=%d len=%u",
+    LOGD("[PLAYER] next cover promoted to current track=%d len=%u",
          track_idx,
          (unsigned)s_primed_current_cover.len);
 
@@ -800,7 +800,7 @@ static void player_assets_try_scale_primed_next_cover_after_current(const Player
     const int target_idx = s_primed_next_cover.track_idx;
 
     if (ui_cover_cache_is_ready(target_idx)) {
-        LOGI("[PLAYER] next cover scale skip ready target=%d", target_idx);
+        LOGD("[PLAYER] next cover scale skip ready target=%d", target_idx);
 
         if (s_primed_next_cover.has_meta) {
             player_assets_try_store_web_cover_from_ui_cache(target_idx,
@@ -818,7 +818,7 @@ static void player_assets_try_scale_primed_next_cover_after_current(const Player
     // 下一首后台缩放 + webcover 都比较吃 CPU/PSRAM，先限制小封面。
     // 96KB 最大封面大小
     if (s_primed_next_cover.len > 96 * 1024) {
-        LOGI("[PLAYER] next cover scale/web skip large target=%d len=%u",
+        LOGD("[PLAYER] next cover scale/web skip large target=%d len=%u",
              target_idx,
              (unsigned)s_primed_next_cover.len);
         return;
@@ -840,7 +840,7 @@ static void player_assets_try_scale_primed_next_cover_after_current(const Player
 
     const uint32_t t0 = millis();
 
-    LOGI("[PLAYER] next cover scale begin target=%d len=%u",
+    LOGD("[PLAYER] next cover scale begin target=%d len=%u",
          target_idx,
          (unsigned)s_primed_next_cover.len);
 
@@ -852,7 +852,7 @@ static void player_assets_try_scale_primed_next_cover_after_current(const Player
 
     const uint32_t scale_cost = millis() - t0;
 
-    LOGI("[PLAYER] next cover scale done target=%d ok=%d cost=%lu",
+    LOGD("[PLAYER] next cover scale done target=%d ok=%d cost=%lu",
          target_idx,
          scaled_ok ? 1 : 0,
          (unsigned long)scale_cost);
@@ -867,7 +867,7 @@ static void player_assets_try_scale_primed_next_cover_after_current(const Player
                                                         s_primed_next_cover.cover_offset,
                                                         s_primed_next_cover.cover_size);
 
-        LOGI("[PLAYER] next webcover prebuilt target=%d cost=%lu",
+        LOGD("[PLAYER] next webcover prebuilt target=%d cost=%lu",
              target_idx,
              (unsigned long)(millis() - t_web0));
     }
@@ -908,7 +908,7 @@ void player_assets_try_apply_deferred_current_cover(int current_track_idx)
         if (s_hooks.on_current_cover_ready) {
             s_hooks.on_current_cover_ready(current_track_idx);
         }
-        LOGI("[PLAYER] deferred current cover applied track=%d", current_track_idx);
+        LOGD("[PLAYER] deferred current cover applied track=%d", current_track_idx);
         player_assets_clear_deferred_current_cover_apply();
     }
 }

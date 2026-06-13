@@ -429,7 +429,7 @@ static void audio_task_entry(void*){
 
           const uint32_t prefill_t0 = millis();
           const uint32_t primed_ms = audio_prime_pcm_ms(PLAY_PREFILL_TARGET_MS, PLAY_PREFILL_MAX_LOOPS);
-          LOGI("[AUDIO] startup software prefill primed_ms=%lu cost=%lums play_ms=%lu",
+          LOGD("[AUDIO] startup software prefill primed_ms=%lu cost=%lums play_ms=%lu",
                (unsigned long)primed_ms,
                (unsigned long)(millis() - prefill_t0),
                (unsigned long)audio_i2s_get_play_ms());

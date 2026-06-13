@@ -334,16 +334,15 @@ bool audio_play(const char* path)
   uint32_t t_after_start = t0;
   bool sniff_ran = false;
 
-  Serial.printf("[AUDIO] play: %s\n", path);
+  LOGD("[AUDIO] play: %s", path);
 
 #if AUDIO_SYNC_SNIFF_ON_PLAY
   sniff_ran = true;
   s_total_ms = sniff_total_ms(sd, path);
   t_after_sniff = millis();
   if (s_total_ms) {
-    Serial.printf("[AUDIO] total_ms=%u\n", (unsigned)s_total_ms);
-    Serial.println();
-  }
+    LOGD("[AUDIO] total_ms=%u", (unsigned)s_total_ms);
+      }
 #else
   t_after_sniff = millis();
   LOGD("[AUDIO] sync sniff skipped on play path");
@@ -357,7 +356,7 @@ bool audio_play(const char* path)
     ok = audio_flac_start(sd, path);
     if (ok) g_dec = DEC_FLAC;
   } else {
-    Serial.println("[AUDIO] unsupported format");
+    LOGE("[AUDIO] unsupported format: %s", path);
     return false;
   }
 
@@ -380,7 +379,7 @@ bool audio_play_stream_mp3(const char* url)
   audio_reset_play_pos();
   s_total_ms = 0;
   if (!url) return false;
-  Serial.printf("[AUDIO] play stream mp3: %s\n", url);
+  LOGD("[AUDIO] play stream mp3: %s", url);
   bool ok = audio_mp3_start_url(url);
   if (ok) g_dec = DEC_MP3;
   return ok;

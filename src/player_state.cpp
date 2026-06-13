@@ -201,7 +201,9 @@ static bool player_play_trackinfo_core(const TrackInfo& t,
 
     // 切歌时重置暂停/手动停止状态，确保新歌能够正常播放
     player_control_on_track_started();
-    audio_service_resume();  // 确保音频服务的暂停标志被清空
+    // 不在这里调用 audio_service_resume()。
+    // 切歌播放命令会在 AudioTask 内部清除暂停状态，并在软件预填充完成后再取消静音。
+    // 如果这里提前 resume，会先把功放打开，然后 AudioTask 又立即静音，造成 OFF->ON->OFF 的抖动。
 
     LOGI("[PLAYER] play #%d: %s", s_cur, t.audio_path.c_str());
 
@@ -244,7 +246,7 @@ static bool player_play_trackinfo_core(const TrackInfo& t,
     if (cover_cache_hit) {
         s_cover_idx = s_cur;
         ui_request_refresh_now();
-        LOGI("[PLAYER] current cover cache hit track=%d", s_cur);
+        LOGD("[PLAYER] current cover cache hit track=%d", s_cur);
     }
 
     bool need_decode_cover = (force_cover || s_cover_idx != s_cur) && !cover_cache_hit;
@@ -289,7 +291,7 @@ static bool player_play_trackinfo_core(const TrackInfo& t,
     // 切到新歌时，先清当前 raw。next raw 不要直接清，先尝试提升。
     player_assets_clear_primed_current_cover();
 
-    LOGI("[PLAYER] prime check track=%d cover_cache_hit=%d need_decode_cover=%d cover_source=%u cover_size=%u",
+    LOGD("[PLAYER] prime check track=%d cover_cache_hit=%d need_decode_cover=%d cover_source=%u cover_size=%u",
      s_cur,
      cover_cache_hit ? 1 : 0,
      need_decode_cover ? 1 : 0,
@@ -301,7 +303,7 @@ static bool player_play_trackinfo_core(const TrackInfo& t,
         player_assets_promote_next_cover_to_current(s_cur) :
         false;
 
-    LOGI("[PLAYER] promote next raw check track=%d promoted=%d",
+    LOGD("[PLAYER] promote next raw check track=%d promoted=%d",
         s_cur,
         promoted_next_cover ? 1 : 0);
     player_assets_clear_deferred_current_cover_apply();
@@ -339,7 +341,7 @@ static bool player_play_trackinfo_core(const TrackInfo& t,
         next_cover_track.cover_size > 0 &&
         next_cover_track.cover_size <= next_raw_size_limit;
 
-    LOGI("[PLAYER] next raw check cur=%d allow=%d got=%d target=%d from_nfc=%d prep=%lu limit=%lu cache=%d source=%u size=%u size_limit=%lu",
+    LOGD("[PLAYER] next raw check cur=%d allow=%d got=%d target=%d from_nfc=%d prep=%lu limit=%lu cache=%d source=%u size=%u size_limit=%lu",
         s_cur,
         allow_prime_next_raw ? 1 : 0,
         got_next_cover ? 1 : 0,
@@ -390,7 +392,7 @@ static bool player_play_trackinfo_core(const TrackInfo& t,
             next_cover_buf = nullptr;
         }
 
-        LOGI("[PLAYER] next cover raw prime before current target=%d ok=%d len=%u cost=%lu prep=%lu",
+        LOGD("[PLAYER] next cover raw prime before current target=%d ok=%d len=%u cost=%lu prep=%lu",
             next_cover_idx,
             next_cover_raw_primed ? 1 : 0,
             (unsigned)next_cover_len,
@@ -412,7 +414,7 @@ static bool player_play_trackinfo_core(const TrackInfo& t,
                 primed_lyrics_text = nullptr; // ownership moved
                 lyrics_primed = true;
                 asset_job.need_lyrics = false; // 后台不要再读一次
-                LOGI("[PLAYER] lyrics primed before play track=%d len=%u",
+                LOGD("[PLAYER] lyrics primed before play track=%d len=%u",
                     s_cur, (unsigned)primed_lyrics_len);
             }
         }
@@ -432,7 +434,7 @@ static bool player_play_trackinfo_core(const TrackInfo& t,
         asset_job.cover_size > 0 &&
         asset_job.cover_size <= 96 * 1024;
 
-    LOGI("[PLAYER] current raw check track=%d allow=%d promoted=%d need_cover=%d cache=%d source=%u size=%u",
+    LOGD("[PLAYER] current raw check track=%d allow=%d promoted=%d need_cover=%d cache=%d source=%u size=%u",
         s_cur,
         allow_prime_current_cover_before_play ? 1 : 0,
         promoted_next_cover ? 1 : 0,
@@ -479,7 +481,7 @@ static bool player_play_trackinfo_core(const TrackInfo& t,
                 ui_request_refresh_now();
                 player_assets_clear_deferred_current_cover_apply();
 
-                LOGI("[PLAYER] current cover scaled before play track=%d len=%u fetch=%lu scale=%lu from_nfc=%d",
+                LOGD("[PLAYER] current cover scaled before play track=%d len=%u fetch=%lu scale=%lu from_nfc=%d",
                     s_cur,
                     (unsigned)primed_cover_len,
                     (unsigned long)prime_cover_cost,

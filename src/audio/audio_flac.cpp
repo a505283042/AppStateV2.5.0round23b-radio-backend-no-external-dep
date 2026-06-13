@@ -135,7 +135,7 @@ bool audio_flac_start(SdFat& sd, const char* path)
   s_pending_frames = 0;
   clear_prime_buffer();
   const auto& st = g_file.last_open_stats();
-  LOGI("[FLAC] start detail lock_wait=%lums dir_prepare=%lums dir_cache=%u cache_reason=%s file_open=%lums file_size=%lums open=%lums drflac_open=%lums meta=%lums total=%lums sr=%d ch=%u",
+  LOGD("[FLAC] start detail lock_wait=%lums dir_prepare=%lums dir_cache=%u cache_reason=%s file_open=%lums file_size=%lums open=%lums drflac_open=%lums meta=%lums total=%lums sr=%d ch=%u",
        (unsigned long)st.lock_wait_ms,
        (unsigned long)st.dir_prepare_ms,
        (unsigned)st.used_dir_cache,
@@ -204,7 +204,7 @@ uint32_t audio_flac_prime_pcm_ms(uint32_t target_ms, uint32_t max_chunks)
   }
 
   const uint32_t primed_ms = (g_sr > 0) ? ((total_frames * 1000UL) / (uint32_t)g_sr) : 0;
-  LOGI("[FLAC] startup software prime ms=%lu chunks=%lu frames=%lu cost=%lums max_decode=%lums",
+  LOGD("[FLAC] startup software prime ms=%lu chunks=%lu frames=%lu cost=%lums max_decode=%lums",
        (unsigned long)primed_ms,
        (unsigned long)chunks,
        (unsigned long)total_frames,
