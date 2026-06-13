@@ -216,9 +216,9 @@ static bool audio_task_fetch_lyrics_impl(const char* path, char** out_text, size
   *out_text = buf;
   *out_len = file_size;
 
-  LOGI("[LYRICS][AUDIO] fetch ok path=%s size=%u ptr=%p",
+  LOGD("[LYRICS][AUDIO] fetch ok path=%s size=%u ptr=%p",
        path, (unsigned)file_size, buf);
-  LOGI("[LYRICS][AUDIO] alloc=%s size=%u ptr=%p",
+  LOGD("[LYRICS][AUDIO] alloc=%s size=%u ptr=%p",
        heap_caps_malloc_extmem_enable ? "psram_or_heap" : "heap",
        (unsigned)file_size, buf);
 

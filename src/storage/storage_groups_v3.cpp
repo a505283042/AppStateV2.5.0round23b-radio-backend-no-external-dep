@@ -108,7 +108,7 @@ static void build_artist_groups_v3(MusicCatalogV3& cat)
         cat.artist_groups[it->second].track_indices.push_back((TrackIndex16)i);
     }
 
-    LOGI("[GROUPS_V3] artist groups=%d", (int)cat.artist_groups.size());
+    LOGD("[GROUPS_V3] artist groups=%d", (int)cat.artist_groups.size());
 }
 
 static void build_album_groups_v3(MusicCatalogV3& cat)
@@ -158,7 +158,7 @@ static void build_album_groups_v3(MusicCatalogV3& cat)
         cat.album_groups[it->second].track_indices.push_back((TrackIndex16)i);
     }
 
-    LOGI("[GROUPS_V3] album groups=%d", (int)cat.album_groups.size());
+    LOGD("[GROUPS_V3] album groups=%d", (int)cat.album_groups.size());
 }
 
 void storage_build_groups_v3(MusicCatalogV3& cat)
@@ -181,7 +181,7 @@ void storage_build_groups_v3(MusicCatalogV3& cat)
     build_album_groups_v3(cat);
 
     // 记录分组内存使用信息
-    LOGI("[GROUPS][MEM] artist_groups=%d album_groups=%d sizeof(track_index)=%u",
+    LOGD("[GROUPS][MEM] artist_groups=%d album_groups=%d sizeof(track_index)=%u",
          (int)cat.artist_groups.size(),
          (int)cat.album_groups.size(),
          (unsigned)sizeof(uint16_t));

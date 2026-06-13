@@ -159,7 +159,7 @@ bool LyricsParser::parseOwnedBuffer(char* content, size_t len) {
         return false;
     }
 
-    LOGI("[LYRICS][PARSE] done text_len=%u lines=%d text_buf=%p",
+    LOGD("[LYRICS][PARSE] done text_len=%u lines=%d text_buf=%p",
          (unsigned)m_text_len, (int)m_lines.size(), m_text_buf);
 
     return true;
@@ -330,7 +330,7 @@ String LyricsParser::getLineText(int index) const {
 
 void LyricsParser::clear() {
     if (m_text_buf || !m_lines.empty()) {
-        LOGI("[LYRICS][PARSE] clear text_buf=%p lines=%d",
+        LOGD("[LYRICS][PARSE] clear text_buf=%p lines=%d",
              m_text_buf, (int)m_lines.size());
     }
 

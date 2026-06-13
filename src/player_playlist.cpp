@@ -192,7 +192,7 @@ void rebuild_group_cache_if_needed()
          (int)album_groups.size(),
          (unsigned long)s_group_cache_generation);
     
-    LOGI("[PLAYER][CACHE] group_cache tracks=%u bytes=%u (psram)",
+    LOGD("[PLAYER][CACHE] group_cache tracks=%u bytes=%u (psram)",
          (unsigned)n,
          (unsigned)(n * 4 * sizeof(CompactIndex)));
 }
@@ -219,7 +219,7 @@ void rebuild_playlist_pos_cache()
     s_playlist_pos_mode = g_play_mode;
     s_playlist_pos_group_idx = s_current_group_idx;
     
-    LOGI("[PLAYER][CACHE] playlist_pos tracks=%u bytes=%u (psram)",
+    LOGD("[PLAYER][CACHE] playlist_pos tracks=%u bytes=%u (psram)",
          (unsigned)n,
          (unsigned)(n * sizeof(CompactIndex)));
 }

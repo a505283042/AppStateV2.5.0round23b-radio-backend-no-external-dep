@@ -219,7 +219,7 @@ void player_recover_rebuild_path_index_if_needed()
 
     s_path_index_generation = cat.generation;
 
-    LOGI("[RECOVER] path index tracks=%u bytes=%u (psram)",
+    LOGD("[RECOVER] path index tracks=%u bytes=%u (psram)",
          (unsigned)n,
          (unsigned)(n * sizeof(RecoverTrackIndex)));
 }
@@ -241,7 +241,7 @@ int player_recover_find_track_idx_by_path(const String& path)
     if (normalized != path) {
         idx = recover_find_track_idx_by_rel_path(normalized);
         if (idx >= 0) {
-            LOGI("[RECOVER] path normalized match: %s -> %s -> idx=%d",
+            LOGD("[RECOVER] path normalized match: %s -> %s -> idx=%d",
                  path.c_str(), normalized.c_str(), idx);
             return idx;
         }

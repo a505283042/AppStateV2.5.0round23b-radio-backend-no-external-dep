@@ -2,6 +2,7 @@
 #include "board/board_pins.h"
 #include "board/board_spi.h"
 #include "storage/storage_io.h"
+#include "utils/log.h"
 
 #include <Arduino.h>
 #include <FS.h>
@@ -246,19 +247,23 @@ void storage_list_root(void)
         return;
     }
 
-    Serial.println("[STORAGE] list /");
-    SdFile f;
-    while (f.openNext(&root, O_RDONLY)) {
-        char name[128];
-        f.getName(name, sizeof(name));
+    #if LOG_LEVEL >= 3
+        // 根目录列表属于启动排查日志，日常 INFO 启动不打印。
+        Serial.println("[STORAGE] list /");
+        SdFile f;
+        while (f.openNext(&root, O_RDONLY)) {
+            char name[128];
+            f.getName(name, sizeof(name));
 
-        if (f.isDir()) {
-            Serial.printf("  %s <DIR>\n", name);
-        } else {
-            Serial.printf("  %s  %lu bytes\n", name, (unsigned long)f.fileSize());
+            if (f.isDir()) {
+                Serial.printf("  %s <DIR>\n", name);
+            } else {
+                Serial.printf("  %s  %lu bytes\n", name, (unsigned long)f.fileSize());
+            }
+            f.close();
         }
-        f.close();
-    }
+    #endif
+    
     root.close();
 
 }

@@ -601,7 +601,7 @@ void player_state_run(void)
         player_control_init_once();
         player_list_select_reset();
 
-        LOGI("[SCAN] albums=%d tracks=%d",
+        LOGD("[SCAN] albums=%d tracks=%d",
              (int)storage_catalog_v3_album_count(),
              track_count);
 
@@ -621,14 +621,19 @@ void player_state_run(void)
         player_recover_init_once();
         player_binding_init_once();
         
-        player_playlist_force_rebuild();
-        player_playlist_get_current();
         player_source_reset();
 
+        // 如果有开机快照，player_snapshot_begin_restore_on_player_enter()
+        // 内部会先恢复播放模式 / 分组，并重建一次播放列表。
+        // 因此这里不要提前重建，避免启动时 playlist_pos 重复构建两次。
         boot_restore_pending = player_snapshot_begin_restore_on_player_enter();
         if (boot_restore_pending) {
             return;
         }
+
+        // 没有快照时才按默认播放模式构建启动播放列表。
+        player_playlist_force_rebuild();
+        player_playlist_get_current();
 
         int start_idx = player_clamp_idx_for_dispatch(V3_TEST_START_INDEX);
         if (start_idx < 0) {

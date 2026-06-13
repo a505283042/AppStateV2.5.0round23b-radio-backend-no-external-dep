@@ -224,7 +224,7 @@ void mcp23017_u3_debug_dump() {
   const uint8_t gpio_a = mcp23017_u3_read_a();
   const uint8_t gpio_b = mcp23017_u3_read_b();
 
-  LOGI("[MCP23017] dump ready=%d GPIOA=0x%02X GPIOB=0x%02X OLATA=0x%02X OLATB=0x%02X",
+  LOGD("[MCP23017] dump ready=%d GPIOA=0x%02X GPIOB=0x%02X OLATA=0x%02X OLATB=0x%02X",
        s_ready ? 1 : 0,
        gpio_a,
        gpio_b,

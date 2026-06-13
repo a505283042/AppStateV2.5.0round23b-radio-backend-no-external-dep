@@ -14,6 +14,26 @@
 #define RUNTIME_MONITOR_PERIOD_MS 15000 // 运行时监控任务周期：15 秒
 #endif
 
+#ifndef RUNTIME_MONITOR_FIRST_DELAY_MS
+#define RUNTIME_MONITOR_FIRST_DELAY_MS 6000 // 首次监控延迟：避开开机初始化阶段的日志高峰
+#endif
+
+#ifndef RUNTIME_MONITOR_WARN_STACK_MARGIN_PCT
+#define RUNTIME_MONITOR_WARN_STACK_MARGIN_PCT 25 // 栈余量低于 25% 才在 INFO 模式下告警
+#endif
+
+#ifndef RUNTIME_MONITOR_WARN_INTERNAL_FREE_BYTES
+#define RUNTIME_MONITOR_WARN_INTERNAL_FREE_BYTES 81920 // 内部 RAM 低于 80KB 才告警
+#endif
+
+#ifndef RUNTIME_MONITOR_WARN_DMA_FREE_BYTES
+#define RUNTIME_MONITOR_WARN_DMA_FREE_BYTES 65536 // DMA RAM 低于 64KB 才告警
+#endif
+
+#ifndef PLAYER_ASSET_TASK_STACK_BYTES
+#define PLAYER_ASSET_TASK_STACK_BYTES 6144 // 需要与 player_assets.cpp 里的任务栈保持一致
+#endif
+
 static TaskHandle_t s_runtime_monitor_task = nullptr; // 运行时监控任务句柄
 
 static constexpr uint32_t kRuntimeMonStackBytes = 3072; // 运行时监控任务栈大小
@@ -35,17 +55,32 @@ static void log_task_stack_usage(const char* name, TaskHandle_t handle, uint32_t
     const uint32_t margin_pct = 
         (configured_stack_bytes > 0) ? (uint32_t)((100ULL * min_free_bytes) / configured_stack_bytes) : 0;
 
-    LOGI("[MON][STACK] %s stack=%uB min_free=%uB peak_used=%uB margin=%u%%", 
-         name, 
-         (unsigned)configured_stack_bytes, 
-         (unsigned)min_free_bytes, 
-         (unsigned)peak_used_bytes, 
-         (unsigned)margin_pct);
+    LOGD("[MON][STACK] %s stack=%uB min_free=%uB peak_used=%uB margin=%u%%", 
+        name, 
+        (unsigned)configured_stack_bytes, 
+        (unsigned)min_free_bytes, 
+        (unsigned)peak_used_bytes, 
+        (unsigned)margin_pct);
+
+    if (margin_pct <= RUNTIME_MONITOR_WARN_STACK_MARGIN_PCT) {
+        LOGW("[MON][STACK] low margin: %s stack=%uB min_free=%uB peak_used=%uB margin=%u%%",
+            name,
+            (unsigned)configured_stack_bytes,
+            (unsigned)min_free_bytes,
+            (unsigned)peak_used_bytes,
+            (unsigned)margin_pct);
+    }
 }
 
 // 运行时监控任务入口
 static void runtime_monitor_task_entry(void*) 
 {
+  #if RUNTIME_MONITOR_FIRST_DELAY_MS > 0
+    // 开机阶段 SD / UI / NFC / 曲库都在初始化，监控日志立即输出会把启动日志冲散。
+    // 延迟第一次输出，只影响日志时间，不影响播放器功能。
+    vTaskDelay(pdMS_TO_TICKS(RUNTIME_MONITOR_FIRST_DELAY_MS));
+  #endif
+
   for (;;) {
     const uint32_t free_heap = (uint32_t)ESP.getFreeHeap();
     const uint32_t min_free_heap = (uint32_t)ESP.getMinFreeHeap();
@@ -67,13 +102,13 @@ static void runtime_monitor_task_entry(void*)
         : 0u;
     const uint32_t psram_frag = has_psram ? calc_fragment_percent(free_psram, largest_psram) : 0u;
 
-    LOGI("[MON][MEM] heap free=%lu min=%lu largest=%lu frag=%lu%%",
+    LOGD("[MON][MEM] heap free=%lu min=%lu largest=%lu frag=%lu%%",
          (unsigned long)free_heap,
          (unsigned long)min_free_heap,
          (unsigned long)largest_heap,
          (unsigned long)heap_frag);
 
-    LOGI("[MON][MEM] internal free=%lu largest=%lu frag=%lu%% | dma free=%lu largest=%lu frag=%lu%%",
+    LOGD("[MON][MEM] internal free=%lu largest=%lu frag=%lu%% | dma free=%lu largest=%lu frag=%lu%%",
          (unsigned long)free_internal,
          (unsigned long)largest_internal,
          (unsigned long)internal_frag,
@@ -81,16 +116,27 @@ static void runtime_monitor_task_entry(void*)
          (unsigned long)largest_dma,
          (unsigned long)dma_frag);
 
-    LOGI("[MON][MEM] psram free=%lu largest=%lu frag=%lu%%",
+    LOGD("[MON][MEM] psram free=%lu largest=%lu frag=%lu%%",
          (unsigned long)free_psram,
          (unsigned long)largest_psram,
          (unsigned long)psram_frag);
+
+    if (free_internal < RUNTIME_MONITOR_WARN_INTERNAL_FREE_BYTES) {
+      LOGW("[MON][MEM] low internal RAM: free=%lu largest=%lu",
+          (unsigned long)free_internal,
+          (unsigned long)largest_internal);
+    }
+    if (free_dma < RUNTIME_MONITOR_WARN_DMA_FREE_BYTES) {
+      LOGW("[MON][MEM] low DMA RAM: free=%lu largest=%lu",
+          (unsigned long)free_dma,
+          (unsigned long)largest_dma);
+    }
 
     log_task_stack_usage("AudioTask", audio_service_get_task_handle(), 10240);
     log_task_stack_usage("UiTask", ui_get_task_handle(), 4096);
     log_task_stack_usage("loopTask", xTaskGetHandle("loopTask"), kLoopTaskStackBytes);
     log_task_stack_usage("RuntimeMon", s_runtime_monitor_task, kRuntimeMonStackBytes);
-    log_task_stack_usage("PlayerAssetTask", xTaskGetHandle("PlayerAssetTask"), 5120);
+    log_task_stack_usage("PlayerAssetTask", xTaskGetHandle("PlayerAssetTask"), PLAYER_ASSET_TASK_STACK_BYTES);
 
     TaskHandle_t rescan = xTaskGetHandle("rescan_v3");
     if (rescan) log_task_stack_usage("rescan_v3", rescan, 4096);

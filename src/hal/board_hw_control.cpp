@@ -470,7 +470,7 @@ void board_hw_debug_dump()
     (void)mcp23017_u3_read_b_bit(board::MCP_B_PG, &pg_level);
     (void)mcp23017_u3_read_b_bit(board::MCP_B_CHG_STAT, &chg_level);
 
-    LOGI("[HWCTRL] dump bat_raw=%u adc=%lumV bat=%lumV bt=%d mute=%d shdn=%d PG=%d CHG=%d",
+    LOGD("[HWCTRL] dump bat_raw=%u adc=%lumV bat=%lumV bt=%d mute=%d shdn=%d PG=%d CHG=%d",
          bat.raw,
          (unsigned long)bat.mv_adc,
          (unsigned long)bat.mv_battery,

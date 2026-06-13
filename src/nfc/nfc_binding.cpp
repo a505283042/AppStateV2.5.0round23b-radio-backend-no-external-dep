@@ -13,6 +13,9 @@ static std::vector<NfcBindingEntry> s_bindings;
 // dirty=true 表示当前内存绑定表比 TF 卡上的 /System/nfc_map.txt 更新。
 // 刷卡绑定时只改这里，避免播放中写 TF；关机时再统一 flush。
 static bool s_bindings_dirty = false;
+// true 表示正在从 TF 卡加载绑定表。加载期间复用 nfc_binding_set()，
+// 但不应该逐条输出“update”，也不应该把内存表标成脏数据。
+static bool s_loading_from_file = false;
 
 static void ensure_capacity_once()
 {
@@ -150,15 +153,21 @@ bool nfc_binding_set(const String& uid,
         s_bindings.push_back(entry);
     }
 
-    // NFC 绑定确认时只更新内存表并标记 dirty，不在播放中立即写 TF。
-    // 统一在关机流程停音频后再 flush 到 /System/nfc_map.txt。
-    s_bindings_dirty = true;
+    if (!s_loading_from_file) {
+        // NFC 绑定确认时只更新内存表并标记 dirty，不在播放中立即写 TF。
+        // 统一在关机流程停音频后再 flush 到 /System/nfc_map.txt。
+        s_bindings_dirty = true;
 
-    LOGI("[NFC_BIND] update uid=%s type=%s key=%s display=%s",
-         entry.uid.c_str(),
-         nfc_binding_type_to_cstr(entry.type),
-         entry.key.c_str(),
-         entry.display.c_str());
+        LOGI("[NFC_BIND] update uid=%s type=%s key=%s display=%s",
+            entry.uid.c_str(),
+            nfc_binding_type_to_cstr(entry.type),
+            entry.key.c_str(),
+            entry.display.c_str());
+    } else {
+        LOGD("[NFC_BIND] load entry uid=%s type=%s",
+            entry.uid.c_str(),
+            nfc_binding_type_to_cstr(entry.type));
+    }
 
     return true;
 }
@@ -210,6 +219,8 @@ bool nfc_binding_load(const char* path)
         return false;
     }
 
+    s_loading_from_file = true;
+
     while (f.available()) {
         String line = f.readStringUntil('\n');
         line.trim();
@@ -235,6 +246,8 @@ bool nfc_binding_load(const char* path)
             continue;
         }
     }
+
+    s_loading_from_file = false;
 
     f.close();
 

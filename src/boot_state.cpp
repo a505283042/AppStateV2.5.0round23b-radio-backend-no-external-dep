@@ -23,7 +23,11 @@ static void prepare_music_catalogs()
              (unsigned long)storage_catalog_v3_album_count(),
              (unsigned long)storage_catalog_v3_artist_count());
 
+        // 曲库内存明细有 8~9 行，日常开机只需要上面的汇总。
+        // 需要排查内存时，把 platformio.ini 里的 LOG_LEVEL 调到 3 再显示。
+        #if LOG_LEVEL >= 3
         storage_catalog_v3_log_memory_stats();
+        #endif
     } else {
         LOGE("[BOOT] V3 load/rebuild failed");
     }

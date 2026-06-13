@@ -8,13 +8,14 @@
 
 #include "ui/ui.h"
 #include "web/web_cover_cache.h"
+#include "web/web_settings.h"
 #include "ui/ui_internal.h"
 #include "audio/audio_service.h"
 #include "audio/audio.h"
 #include "lyrics/lyrics.h"
 #include "utils/log.h"
 
-static constexpr uint32_t kPlayerAssetTaskStackBytes = 5120; // 播放器资源任务栈大小
+static constexpr uint32_t kPlayerAssetTaskStackBytes = 6144; // 播放器资源任务栈大小：封面/歌词处理峰值较高，预留到 6KB
 static constexpr const char* kDefaultCoverPath = "/System/default_cover.jpg";
 
 #ifndef PLAYER_ASSET_TASK_PRIO // 播放器资源任务优先级
@@ -60,6 +61,12 @@ static DeferredCurrentCoverApply s_deferred_current_cover_apply{};
 
 static void player_assets_try_scale_primed_next_cover_after_current(const PlayerDeferredAssetJob& owner_job);
 
+static bool player_assets_web_cover_enabled()
+{
+    const WebRuntimeSettings& cfg = web_settings_get();
+    return cfg.wifi_enabled && cfg.show_cover;
+}
+
 static void player_assets_try_store_web_cover_from_ui_cache(int track_idx,
                                                             CoverSource cover_source,
                                                             const char* audio_path,
@@ -69,6 +76,13 @@ static void player_assets_try_store_web_cover_from_ui_cache(int track_idx,
 {
     if (track_idx < 0) {
         LOGI("[PLAYER] webcover skip: invalid track=%d", track_idx);
+        return;
+    }
+
+    // WiFi 关闭或 Web 封面显示关闭时，不需要预生成 172KB 左右的 Web BMP 缓存。
+    // 这样开机恢复只做本机屏幕封面，少占 PSRAM，也少一次 sprite->BMP 转换。
+    if (!player_assets_web_cover_enabled()) {
+        LOGD("[PLAYER] webcover skip disabled track=%d", track_idx);
         return;
     }
 
@@ -843,7 +857,7 @@ static void player_assets_try_scale_primed_next_cover_after_current(const Player
          scaled_ok ? 1 : 0,
          (unsigned long)scale_cost);
 
-    if (scaled_ok && s_primed_next_cover.has_meta) {
+    if (scaled_ok && s_primed_next_cover.has_meta && player_assets_web_cover_enabled()) {
         const uint32_t t_web0 = millis();
 
         player_assets_try_store_web_cover_from_ui_cache(target_idx,
