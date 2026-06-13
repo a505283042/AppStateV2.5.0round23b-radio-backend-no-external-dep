@@ -145,7 +145,7 @@ static bool read_response_header(const ParsedUrl& current, int& status_code, Str
   }
 
   status_code = parse_status_code(line);
-  LOGI("[RADIO] HTTP status: %s", line.c_str());
+  LOGD("[RADIO] HTTP status: %s", line.c_str());
 
   while (read_line_with_timeout(line, kHeaderTimeoutMs)) {
     if (line.length() == 0) {
@@ -163,9 +163,9 @@ static bool read_response_header(const ParsedUrl& current, int& status_code, Str
       if (key == "location") {
         location = make_redirect_url(current, value);
       } else if (key == "content-type") {
-        LOGI("[RADIO] HTTP content-type: %s", value.c_str());
+        LOGD("[RADIO] HTTP content-type: %s", value.c_str());
       } else if (key == "icy-name") {
-        LOGI("[RADIO] ICY name: %s", value.c_str());
+        LOGD("[RADIO] ICY name: %s", value.c_str());
       }
     }
   }
@@ -184,7 +184,7 @@ static bool open_http_stream_once(const char* url, String& redirect_url)
     return false;
   }
 
-  LOGI("[RADIO] HTTP connect host=%s port=%u path=%s", parsed.host.c_str(), parsed.port, parsed.path.c_str());
+  LOGD("[RADIO] HTTP connect host=%s port=%u path=%s", parsed.host.c_str(), parsed.port, parsed.path.c_str());
 
   g_client.stop();
   g_client.setTimeout(kConnectTimeoutMs);
@@ -224,7 +224,7 @@ static bool open_http_stream_once(const char* url, String& redirect_url)
       return false;
     }
 
-    LOGI("[RADIO] HTTP redirect -> %s", location.c_str());
+    LOGD("[RADIO] HTTP redirect -> %s", location.c_str());
     redirect_url = location;
     g_client.stop();
     return false;
@@ -332,7 +332,7 @@ bool audio_mp3_audiotools_source_open(const char* url, AudioMp3Source& out_sourc
   out_source.debug_name = s_url.c_str();
   out_source.is_stream = true;
 
-  LOGI("[RADIO] HTTP stream open ok: %s", s_url.c_str());
+  LOGD("[RADIO] HTTP stream open ok: %s", s_url.c_str());
   return true;
 }
 

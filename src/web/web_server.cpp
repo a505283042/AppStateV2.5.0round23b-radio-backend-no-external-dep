@@ -372,7 +372,7 @@ static bool web_load_wifi_config(std::vector<WebWifiNetwork>& nets, String& host
   StorageSdLockGuard guard(1200);
   if (!guard) { LOGW("[WEB] wifi config load skip: SD lock failed"); return false; }
   File32 f = sd.open(WEBCTRL_WIFI_CONFIG_PATH, O_RDONLY);
-  if (!f) { LOGI("[WEB] wifi config not found: %s", WEBCTRL_WIFI_CONFIG_PATH); return false; }
+  if (!f) { LOGW("[WEB] wifi config not found: %s", WEBCTRL_WIFI_CONFIG_PATH); return false; }
 
   WebWifiNetwork cur{}; bool in_network = false; bool any = false;
   while (f.available()) {
@@ -401,7 +401,7 @@ static bool web_load_wifi_config(std::vector<WebWifiNetwork>& nets, String& host
   }
   if (in_network && cur.ssid.length()) { nets.push_back(cur); any = true; }
   f.close();
-  LOGI("[WEB] wifi config loaded: %d network(s), hostname=%s", (int)nets.size(), hostname.c_str());
+  LOGD("[WEB] wifi config loaded: %d network(s), hostname=%s", (int)nets.size(), hostname.c_str());
   return any;
 }
 
@@ -417,7 +417,7 @@ static bool web_try_connect_one(const WebWifiNetwork& n, const String& hostname)
   } else {
     WiFi.begin(n.ssid.c_str(), n.password.c_str());
   }
-  LOGI("[WEB] connecting STA ssid=%s%s", n.ssid.c_str(), n.hidden ? " (hidden)" : "");
+  LOGD("[WEB] connecting STA ssid=%s%s", n.ssid.c_str(), n.hidden ? " (hidden)" : "");
   const uint32_t t0 = millis();
   while ((millis() - t0) < WEBCTRL_STA_CONNECT_TIMEOUT_MS) {
     if (WiFi.status() == WL_CONNECTED) {
@@ -488,7 +488,7 @@ static void web_send_radio_list_json() {
   const bool loaded = web_radio_catalog_ensure_loaded();
   const auto& items = radio_catalog_items();
 
-  LOGI("[WEB] radios total=%u (stream-batch)", (unsigned)items.size());
+  LOGD("[WEB] radios total=%u (stream-batch)", (unsigned)items.size());
 
   web_send_no_cache_headers();
   s_server.sendHeader("Connection", "close");
@@ -561,7 +561,7 @@ static void web_send_group_list_json(const std::vector<PlaylistGroup>& groups, b
   const MusicCatalogV3& cat = storage_catalog_v3();
   const int current_group_idx = player_playlist_get_current_group_idx();
 
-  LOGI("[WEB] group list type=%s total=%u (stream-batch)",
+  LOGD("[WEB] group list type=%s total=%u (stream-batch)",
        is_album ? "album" : "artist",
        (unsigned)groups.size());
 
@@ -674,7 +674,7 @@ static void web_send_group_detail_json(const std::vector<PlaylistGroup>& groups,
   if (offset > total_tracks) offset = total_tracks;
   const int end = (offset + limit > total_tracks) ? total_tracks : (offset + limit);
 
-  LOGI("[WEB] group detail idx=%d is_album=%d q=%s offset=%d limit=%d returned=%d total=%d",
+  LOGD("[WEB] group detail idx=%d is_album=%d q=%s offset=%d limit=%d returned=%d total=%d",
        group_idx,
        is_album ? 1 : 0,
        q.c_str(),
@@ -1058,7 +1058,7 @@ static void web_handle_radio_logo_current() {
 
   if (is_remote) {
     if (web_if_none_match_hit(etag)) {
-      LOGI("[WEB] radio logo 304 idx=%d remote=1", radio_idx);
+      LOGD("[WEB] radio logo 304 idx=%d remote=1", radio_idx);
       web_send_not_modified(etag);
       return;
     }
@@ -1071,7 +1071,7 @@ static void web_handle_radio_logo_current() {
   }
 
   if (web_if_none_match_hit(etag)) {
-    LOGI("[WEB] radio logo 304 idx=%d remote=0", radio_idx);
+    LOGD("[WEB] radio logo 304 idx=%d remote=0", radio_idx);
     web_send_not_modified(etag);
     return;
   }
@@ -1135,7 +1135,7 @@ static void web_handle_cover_current() {
   const String cover_rev = web_make_track_cover_rev(v);
   const String etag = String("\"cover-track-") + String(cur) + "-" + cover_rev + "\"";
   if (web_if_none_match_hit(etag)) {
-    LOGI("[WEB] cover 304 track=%d rev=%s", cur, cover_rev.c_str());
+    LOGD("[WEB] cover 304 track=%d rev=%s", cur, cover_rev.c_str());
     web_send_not_modified(etag);
     return;
   }
@@ -1157,7 +1157,7 @@ static void web_handle_cover_current() {
     return;
   }
 
-  LOGI("[WEB] cover bmp hit track=%d bytes=%u", cur, (unsigned)len);
+  LOGD("[WEB] cover bmp hit track=%d bytes=%u", cur, (unsigned)len);
 
   WiFiClient client = s_server.client();
   client.setTimeout(800);
@@ -2173,7 +2173,7 @@ void web_server_start_async()
         s_web_start_task = nullptr;
         LOGE("[WEB] create async start task failed");
     } else {
-        LOGI("[WEB] async start task created");
+        LOGD("[WEB] async start task created");
     }
 #else
     web_server_start();

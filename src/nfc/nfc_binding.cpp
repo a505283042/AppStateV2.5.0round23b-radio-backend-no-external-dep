@@ -130,12 +130,12 @@ bool nfc_binding_set(const String& uid,
     ensure_capacity_once();
 
     if (uid.isEmpty() || key.isEmpty()) {
-        LOGI("[NFC_BIND] set failed: empty uid/key");
+        LOGD("[NFC_BIND] set failed: empty uid/key");
         return false;
     }
 
     if (type == NFC_BIND_UNKNOWN) {
-        LOGI("[NFC_BIND] set failed: unknown type");
+        LOGD("[NFC_BIND] set failed: unknown type");
         return false;
     }
 
@@ -195,7 +195,7 @@ void nfc_binding_set_dirty(bool dirty)
 bool nfc_binding_flush_if_dirty(const char* path)
 {
     if (!s_bindings_dirty) {
-        LOGI("[NFC_BIND] flush skipped: no dirty binding");
+        LOGD("[NFC_BIND] flush skipped: no dirty binding");
         return true;
     }
 
@@ -209,7 +209,7 @@ bool nfc_binding_load(const char* path)
 
     StorageSdLockGuard sd_lock(1000);
     if (!sd_lock) {
-        LOGI("[NFC_BIND] load lock timeout: %s", path);
+        LOGD("[NFC_BIND] load lock timeout: %s", path);
         return false;
     }
 
@@ -231,18 +231,18 @@ bool nfc_binding_load(const char* path)
         // 新格式：UID|TYPE|KEY|DISPLAY
         String uid, type_s, key, display;
         if (!split4(line, uid, type_s, key, display)) {
-            LOGI("[NFC_BIND] skip bad line: %s", line.c_str());
+            LOGD("[NFC_BIND] skip bad line: %s", line.c_str());
             continue;
         }
 
         NfcBindType type = nfc_binding_type_from_str(type_s);
         if (type == NFC_BIND_UNKNOWN) {
-            LOGI("[NFC_BIND] skip unknown type: %s", line.c_str());
+            LOGD("[NFC_BIND] skip unknown type: %s", line.c_str());
             continue;
         }
 
         if (!nfc_binding_set(uid, type, key, display)) {
-            LOGI("[NFC_BIND] skip set failed: %s", line.c_str());
+            LOGD("[NFC_BIND] skip set failed: %s", line.c_str());
             continue;
         }
     }
@@ -265,13 +265,13 @@ bool nfc_binding_save(const char* path)
 
     StorageSdLockGuard sd_lock(1000);
     if (!sd_lock) {
-        LOGI("[NFC_BIND] save lock timeout: %s", path);
+        LOGD("[NFC_BIND] save lock timeout: %s", path);
         return false;
     }
 
     File32 f = sd.open(path, O_WRONLY | O_CREAT | O_TRUNC);
     if (!f) {
-        LOGI("[NFC_BIND] save open failed: %s", path);
+        LOGE("[NFC_BIND] save open failed: %s", path);
         return false;
     }
 

@@ -213,7 +213,7 @@ bool audio_mp3_start_source(const AudioMp3Source& source, const char* debug_name
   s_mp3_last_error = String();
 
   const uint32_t t_after_prefill = millis();
-  LOGI("[MP3] start source detail name=%s stream=%d init=%lums prefill=%lums total=%lums prefill_bytes=%d buf=%u psram=%d target=%u",
+  LOGD("[MP3] start source detail name=%s stream=%d init=%lums prefill=%lums total=%lums prefill_bytes=%d buf=%u psram=%d target=%u",
        s_debug_name ? s_debug_name : "<null>",
        g_source_is_stream ? 1 : 0,
        (unsigned long)(t_after_init - t0),

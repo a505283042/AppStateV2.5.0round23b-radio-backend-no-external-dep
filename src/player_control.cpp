@@ -57,7 +57,7 @@ static void player_save_radio_return_context_if_needed() {
     s_radio_return.group_idx = player_playlist_get_current_group_idx();
     s_radio_return.volume = audio_get_volume();
 
-    LOGI("[RADIO] save return ctx track=%d mode=%d group=%d vol=%u",
+    LOGD("[RADIO] save return ctx track=%d mode=%d group=%d vol=%u",
          cur,
          (int)s_radio_return.mode,
          s_radio_return.group_idx,
@@ -157,7 +157,7 @@ static void control_apply_radio_cover(const RadioItem& item)
 
     if (logo.length() > 0 && !control_is_remote_logo(logo)) {
         if (control_apply_cover_file(logo)) {
-            LOGI("[RADIO] logo applied: %s", logo.c_str());
+            LOGD("[RADIO] logo applied: %s", logo.c_str());
             return;
         }
         LOGW("[RADIO] logo load failed: %s", logo.c_str());
@@ -303,7 +303,7 @@ static void control_reset_net_track_shuffle(int start_idx)
     s_net_track_shuffle.count = count;
     s_net_track_shuffle.ready = true;
 
-    LOGI("[NETTRACK] shuffle reset method=fisher start=%d count=%lu",
+    LOGD("[NETTRACK] shuffle reset method=fisher start=%d count=%lu",
          start_idx,
          (unsigned long)count);
 }
@@ -329,7 +329,7 @@ static bool control_sync_net_track_shuffle_to_current(int current_idx)
     for (uint32_t i = 0; i < s_net_track_shuffle.order.size(); ++i) {
         if (s_net_track_shuffle.order[i] == (uint16_t)current_idx) {
             s_net_track_shuffle.pos = i;
-            LOGI("[NETTRACK] shuffle sync current=%d pos=%lu",
+            LOGD("[NETTRACK] shuffle sync current=%d pos=%lu",
                  current_idx,
                  (unsigned long)i);
             return true;
@@ -388,7 +388,7 @@ static int control_resolve_next_net_track_index(int current_idx, int step)
 
     const int next = control_net_track_shuffle_index_at(s_net_track_shuffle.pos);
 
-    LOGI("[NETTRACK] shuffle resolve cur=%d step=%d pos=%lu -> %d",
+    LOGD("[NETTRACK] shuffle resolve cur=%d step=%d pos=%lu -> %d",
          current_idx,
          step,
          (unsigned long)s_net_track_shuffle.pos,
@@ -768,7 +768,7 @@ static bool control_play_net_track_index_impl(int idx, bool reset_shuffle)
         const int cur = control_current_track_idx();
         if (cur >= 0 && cur < control_track_count()) {
             s_net_track_return_local_idx = cur;
-            LOGI("[NETTRACK] remember local return idx=%d", s_net_track_return_local_idx);
+            LOGD("[NETTRACK] remember local return idx=%d", s_net_track_return_local_idx);
         }
     }
 
@@ -1027,7 +1027,7 @@ void player_volume_step(int delta)
     if (v > 100) v = 100;
     audio_set_volume((uint8_t)v);
     ui_set_volume((uint8_t)v);
-    LOGI("[VOL] %d%%", v);
+    LOGD("[VOL] %d%%", v);
 }
 
 void player_next_group()

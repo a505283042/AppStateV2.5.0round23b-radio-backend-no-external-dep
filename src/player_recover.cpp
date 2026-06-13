@@ -247,7 +247,7 @@ int player_recover_find_track_idx_by_path(const String& path)
         }
     }
 
-    LOGI("[RECOVER] path lookup miss: %s", path.c_str());
+    LOGD("[RECOVER] path lookup miss: %s", path.c_str());
     return -1;
 }
 

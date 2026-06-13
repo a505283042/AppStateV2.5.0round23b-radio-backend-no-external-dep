@@ -176,45 +176,45 @@ void storage_catalog_v3_log_memory_stats(void)
   size_t total_core = track_bytes + album_bytes + artist_bytes + pool_bytes;
   size_t total_with_groups = total_core + groups_artist_idx_bytes + groups_album_idx_bytes;
 
-  LOGI("[CATALOG_V3][MEM] sizeof(TrackRowV3)=%u sizeof(AlbumRowV3)=%u sizeof(ArtistRowV3)=%u",
+  LOGD("[CATALOG_V3][MEM] sizeof(TrackRowV3)=%u sizeof(AlbumRowV3)=%u sizeof(ArtistRowV3)=%u",
        (unsigned)sizeof(TrackRowV3),
        (unsigned)sizeof(AlbumRowV3),
        (unsigned)sizeof(ArtistRowV3));
 
-  LOGI("[CATALOG_V3][MEM] tracks=%lu -> %lu bytes",
+  LOGD("[CATALOG_V3][MEM] tracks=%lu -> %lu bytes",
        (unsigned long)s_catalog_v3.track_count,
        (unsigned long)track_bytes);
 
-  LOGI("[CATALOG_V3][MEM] albums=%lu -> %lu bytes",
+  LOGD("[CATALOG_V3][MEM] albums=%lu -> %lu bytes",
        (unsigned long)s_catalog_v3.album_count,
        (unsigned long)album_bytes);
 
-  LOGI("[CATALOG_V3][MEM] artists=%lu -> %lu bytes",
+  LOGD("[CATALOG_V3][MEM] artists=%lu -> %lu bytes",
        (unsigned long)s_catalog_v3.artist_count,
        (unsigned long)artist_bytes);
 
-  LOGI("[CATALOG_V3][MEM] string_pool=%lu bytes",
+  LOGD("[CATALOG_V3][MEM] string_pool=%lu bytes",
        (unsigned long)pool_bytes);
 
-  LOGI("[CATALOG_V3][MEM] artist_groups=%d idx_bytes=%lu",
+  LOGD("[CATALOG_V3][MEM] artist_groups=%d idx_bytes=%lu",
        (int)s_catalog_v3.artist_groups.size(),
        (unsigned long)groups_artist_idx_bytes);
 
-  LOGI("[CATALOG_V3][MEM] album_groups=%d idx_bytes=%lu",
+  LOGD("[CATALOG_V3][MEM] album_groups=%d idx_bytes=%lu",
        (int)s_catalog_v3.album_groups.size(),
        (unsigned long)groups_album_idx_bytes);
 
-  LOGI("[CATALOG_V3][MEM] core_total=%lu bytes (%.2f KB, %.2f MB)",
+  LOGD("[CATALOG_V3][MEM] core_total=%lu bytes (%.2f KB, %.2f MB)",
        (unsigned long)total_core,
        total_core / 1024.0f,
        total_core / 1024.0f / 1024.0f);
 
-  LOGI("[CATALOG_V3][MEM] total_with_groups=%lu bytes (%.2f KB, %.2f MB)",
+  LOGD("[CATALOG_V3][MEM] total_with_groups=%lu bytes (%.2f KB, %.2f MB)",
        (unsigned long)total_with_groups,
        total_with_groups / 1024.0f,
        total_with_groups / 1024.0f / 1024.0f);
 
-  LOGI("[CATALOG_V3][MEM] note: group object/String overhead not fully included");
+  LOGD("[CATALOG_V3][MEM] note: group object/String overhead not fully included");
 }
 
 bool storage_catalog_v3_rebuild(const char* music_root,

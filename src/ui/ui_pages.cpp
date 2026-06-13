@@ -8,7 +8,7 @@
 void ui_show_message(const char* msg)
 {
   if (!msg) msg = "";
-  LOGI("[UI] message: %s", msg);
+  LOGD("[UI] message: %s", msg);
 
   ui_draw_lock();
   // 底部提示（对当前全屏封面 UI 安全）

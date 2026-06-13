@@ -392,7 +392,7 @@ PlayerSnapshotRestorePollResult player_snapshot_poll_restore()
 
         player_assets_schedule(asset_job);
 
-        LOGI("[SNAPSHOT] boot next-cover-only prefetch job armed track=%d", track_idx);
+        LOGD("[SNAPSHOT] boot next-cover-only prefetch job armed track=%d", track_idx);
     }
 
     ui_request_refresh_now();

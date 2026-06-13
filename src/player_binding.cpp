@@ -81,7 +81,7 @@ static void nfc_binding_apply_mode(NfcBindType type)
     g_play_mode = nfc_binding_mode_for_type(type);
     const bool is_random = nfc_binding_keep_random_flag();
 
-    LOGI("[NFC] apply mode type=%d -> mode=%d random=%d",
+    LOGD("[NFC] apply mode type=%d -> mode=%d random=%d",
          (int)type,
          (int)g_play_mode,
          is_random ? 1 : 0);
@@ -147,13 +147,13 @@ bool player_play_artist_binding(const String& artist)
         return false;
     }
 
-    LOGI("[PLAYER] artist binding request: %s", key.c_str());
+    LOGD("[PLAYER] artist binding request: %s", key.c_str());
 
     const MusicCatalogV3& cat = storage_catalog_v3();
     const auto& groups = binding_artist_groups();
     for (int i = 0; i < (int)groups.size(); i++) {
         if (playlist_group_name_string(cat, groups[i]) == key) {
-            LOGI("[PLAYER] artist binding matched: group=%d name=%s first_idx=%d",
+            LOGD("[PLAYER] artist binding matched: group=%d name=%s first_idx=%d",
                  i, playlist_group_name_cstr(cat, groups[i]),
                  groups[i].track_indices.empty() ? -1 : (int)groups[i].track_indices[0]);
             nfc_binding_apply_mode(NFC_BIND_ARTIST);
@@ -188,14 +188,14 @@ bool player_play_album_binding(const String& album)
         return false;
     }
 
-    LOGI("[PLAYER] album binding request: %s", key.c_str());
+    LOGD("[PLAYER] album binding request: %s", key.c_str());
 
     const MusicCatalogV3& cat = storage_catalog_v3();
     const auto& groups = binding_album_groups();
     for (int i = 0; i < (int)groups.size(); i++) {
         String group_key = playlist_group_display_string(cat, groups[i]);
         if (group_key == key) {
-            LOGI("[PLAYER] album binding matched: group=%d name=%s first_idx=%d",
+            LOGD("[PLAYER] album binding matched: group=%d name=%s first_idx=%d",
                  i, group_key.c_str(),
                  groups[i].track_indices.empty() ? -1 : (int)groups[i].track_indices[0]);
             nfc_binding_apply_mode(NFC_BIND_ALBUM);

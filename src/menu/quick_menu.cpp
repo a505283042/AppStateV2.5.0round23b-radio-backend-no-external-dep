@@ -197,7 +197,7 @@ void confirm_current()
             return;
 
         case QuickMenuItemType::Status:
-            LOGI("[MENU] status item: %s", item->label ? item->label : "");
+            LOGD("[MENU] status item: %s", item->label ? item->label : "");
             mark_dirty();
             return;
 
@@ -210,7 +210,7 @@ void confirm_current()
         case QuickMenuItemType::Toggle:
             if (item->on_confirm != nullptr) {
                 const bool changed = item->on_confirm();
-                LOGI("[MENU] action item=%s changed=%d",
+                LOGD("[MENU] action item=%s changed=%d",
                      item->label ? item->label : "",
                      changed ? 1 : 0);
                 mark_dirty();
@@ -276,7 +276,7 @@ void quick_menu_exit()
 
     mark_dirty();
 
-    LOGI("[MENU] exit");
+    LOGD("[MENU] exit");
 }
 
 void quick_menu_tick()
@@ -287,7 +287,7 @@ void quick_menu_tick()
 
     const uint32_t now = millis();
     if (now - s_last_action_ms >= MENU_AUTO_EXIT_MS) {
-        LOGI("[MENU] auto exit");
+        LOGD("[MENU] auto exit");
         quick_menu_exit();
     }
 

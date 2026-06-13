@@ -75,7 +75,7 @@ static void player_assets_try_store_web_cover_from_ui_cache(int track_idx,
                                                             uint32_t cover_size)
 {
     if (track_idx < 0) {
-        LOGI("[PLAYER] webcover skip: invalid track=%d", track_idx);
+        LOGD("[PLAYER] webcover skip: invalid track=%d", track_idx);
         return;
     }
 
@@ -94,7 +94,7 @@ static void player_assets_try_store_web_cover_from_ui_cache(int track_idx,
                         cover_path,
                         cover_offset,
                         cover_size)) {
-        LOGI("[PLAYER] webcover skip cached track=%d", track_idx);
+        LOGD("[PLAYER] webcover skip cached track=%d", track_idx);
         return;
     }
 
@@ -107,7 +107,7 @@ static void player_assets_try_store_web_cover_from_ui_cache(int track_idx,
         slot = 1;
     }
 
-    LOGI("[PLAYER] webcover from ui cache track=%d slot=%d ready0=%d idx0=%d ready1=%d idx1=%d",
+    LOGD("[PLAYER] webcover from ui cache track=%d slot=%d ready0=%d idx0=%d ready1=%d idx1=%d",
          track_idx,
          slot,
          s_coverCacheReady[0] ? 1 : 0,
@@ -123,9 +123,9 @@ static void player_assets_try_store_web_cover_from_ui_cache(int track_idx,
                                                           cover_offset,
                                                           cover_size,
                                                           *s_coverCacheSpr[slot]);
-        LOGI("[PLAYER] webcover store track=%d slot=%d ok=%d", track_idx, slot, ok ? 1 : 0);
+        LOGD("[PLAYER] webcover store track=%d slot=%d ok=%d", track_idx, slot, ok ? 1 : 0);
     } else {
-        LOGI("[PLAYER] webcover store skip track=%d slot=%d spr0=%p spr1=%p",
+        LOGD("[PLAYER] webcover store skip track=%d slot=%d spr0=%p spr1=%p",
              track_idx, slot, s_coverCacheSpr[0], s_coverCacheSpr[1]);
     }
 
@@ -199,7 +199,7 @@ static bool player_assets_apply_default_cover_for_current(const PlayerDeferredAs
 
     ui_request_refresh_now();
 
-    LOGI("[PLAYER] current cover fallback default track=%d", job.track_idx);
+    LOGD("[PLAYER] current cover fallback default track=%d", job.track_idx);
     return true;
 }
 
@@ -236,7 +236,7 @@ static void player_asset_task_entry(void*)
         if (job.need_cover) {
             if (s_deferred_current_cover_apply.active && 
                 s_deferred_current_cover_apply.track_idx == job.track_idx) {
-                LOGI("[PLAYER] defer current cover apply track=%d", job.track_idx);
+                LOGD("[PLAYER] defer current cover apply track=%d", job.track_idx);
             } else if (ui_cover_apply_cached(job.track_idx)) {
                 current_cover_cache_hit = true;
 
@@ -306,7 +306,7 @@ static void player_asset_task_entry(void*)
                 s_primed_current_cover.len = 0;
                 s_primed_current_cover.is_png = false;
 
-                LOGI("[PLAYER] primed current cover hit track=%d len=%u", 
+                LOGD("[PLAYER] primed current cover hit track=%d len=%u", 
                     job.track_idx, (unsigned)cover_len);
             } else {
                 (void)audio_service_fetch_cover(job.cover_source,

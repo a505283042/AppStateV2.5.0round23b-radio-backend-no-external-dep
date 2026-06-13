@@ -111,7 +111,7 @@ bool LyricsParser::loadFromFile(const char* path) {
     const bool result = parseOwnedBuffer(content, content_len);
     const uint32_t t_after_parse = millis();
 
-    LOGI("[LYRICS] Loaded: %s (%u bytes, read=%lums parse=%lums total=%lums)",
+    LOGD("[LYRICS] Loaded: %s (%u bytes, read=%lums parse=%lums total=%lums)",
          path,
          (unsigned)content_len,
          (unsigned long)(t_after_read - t0),

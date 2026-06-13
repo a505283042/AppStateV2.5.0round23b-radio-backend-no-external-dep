@@ -66,7 +66,7 @@ static void build_artist_groups_v3(MusicCatalogV3& cat)
     std::map<String, uint32_t> artist_name_to_off = build_artist_name_to_off_map_v3(cat);
 
     if (!cat.tracks || cat.track_count == 0) {
-        LOGI("[GROUPS_V3] no tracks, skip artist groups");
+        LOGD("[GROUPS_V3] no tracks, skip artist groups");
         return;
     }
 
@@ -167,7 +167,7 @@ void storage_build_groups_v3(MusicCatalogV3& cat)
     cat.album_groups.clear();
 
     if (!cat.tracks || cat.track_count == 0) {
-        LOGI("[GROUPS_V3] empty catalog");
+        LOGD("[GROUPS_V3] empty catalog");
         return;
     }
 

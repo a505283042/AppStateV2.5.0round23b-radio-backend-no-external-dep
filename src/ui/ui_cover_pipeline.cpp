@@ -497,7 +497,7 @@ bool cover_decode_to_sprite_from_track(const TrackInfo& t)
     bool ok = cover_blit_scaled_to_240(buf, fileSize, false);
 
     s_coverSprReady = ok;
-    LOGI("[COVER] default cover ok=%d", (int)ok);
+    LOGD("[COVER] default cover ok=%d", (int)ok);
     ui_unlock();
     return ok;
   }
@@ -515,7 +515,7 @@ bool cover_decode_to_sprite_from_track(const TrackInfo& t)
   uint32_t t4 = millis();
 
   s_coverSprReady = ok;
-  LOGI("[COVER] decode: init=%lums, load=%lums, scale=%lums, total=%lums", 
+  LOGD("[COVER] decode: init=%lums, load=%lums, scale=%lums, total=%lums", 
        t1-t0, t2-t1, t4-t3, t4-t0);
   ui_unlock();
   return ok;

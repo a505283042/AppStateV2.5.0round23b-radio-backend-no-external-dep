@@ -249,7 +249,7 @@ void nfc_admin_state_run(void)
             break;
 
         case ADMIN_SAVING: {
-            LOGI("[NFC_ADMIN] update binding in memory...");
+            LOGD("[NFC_ADMIN] update binding in memory...");
 
             bool ok = false;
             switch (s_admin.target.type) {
@@ -282,7 +282,7 @@ void nfc_admin_state_run(void)
             s_admin.save_ok = ok;
 
             if (ok) {
-                LOGI("[NFC_ADMIN] memory update ok, dirty=%d", nfc_binding_is_dirty() ? 1 : 0);
+                LOGD("[NFC_ADMIN] memory update ok, dirty=%d", nfc_binding_is_dirty() ? 1 : 0);
                 s_remove_miss_ms = 0;
                 ui_nfc_admin_show_wait_remove(s_admin.pending_uid);
                 admin_set_step(ADMIN_WAIT_REMOVE);
@@ -329,7 +329,7 @@ bool nfc_admin_state_consume_resume_request(void)
 
 void nfc_admin_state_on_key(NfcAdminKey key)
 {
-    LOGI("[NFC_ADMIN] on_key key=%d", (int)key);
+    LOGD("[NFC_ADMIN] on_key key=%d", (int)key);
     switch (key) {
         case NFC_ADMIN_KEY_MODE_SHORT:
             LOGI("[NFC_ADMIN] cancel by MODE");

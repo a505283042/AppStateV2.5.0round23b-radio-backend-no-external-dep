@@ -1780,7 +1780,7 @@ void ui_set_view(ui_player_view_t new_view)
 // 在旋转视图(ROTATE)和信息视图(INFO)之间切换
 void ui_toggle_view()
 {
-  LOGI("[UI] toggle_view: current=%d", (int)s_view);
+  LOGD("[UI] toggle_view: current=%d", (int)s_view);
 
   ui_player_view_t next = UI_VIEW_INFO;
 
@@ -1803,7 +1803,7 @@ void ui_toggle_view()
   }
 
   ui_set_view(next);
-  LOGI("[UI] toggle_view: new=%d", (int)s_view);
+  LOGD("[UI] toggle_view: new=%d", (int)s_view);
 }
 
 void ui_set_now_playing(const char* title, const char* artist)

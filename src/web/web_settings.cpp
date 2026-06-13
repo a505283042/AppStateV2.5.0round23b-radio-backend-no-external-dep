@@ -71,7 +71,7 @@ bool web_settings_load() {
   Preferences pref;
   if (!pref.begin(kPrefsNs, true)) {
     LOGW("[WEB] settings load failed: open NVS namespace");
-    LOGI("[WEB] settings use defaults");
+    LOGD("[WEB] settings use defaults");
     return false;
   }
 

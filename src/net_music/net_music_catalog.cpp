@@ -337,7 +337,7 @@ uint32_t net_music_catalog_search(const String& query,
 
   f.close();
 
-  LOGI("[NETMUSIC] search q=%s matched=%lu returned=%u",
+  LOGD("[NETMUSIC] search q=%s matched=%lu returned=%u",
        q.c_str(),
        (unsigned long)matched_total,
        out ? (unsigned)out->size() : 0);

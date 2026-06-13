@@ -48,7 +48,7 @@ static inline void scan_v3_maybe_log_progress(int scanned, const String& where)
     uint32_t now = millis();
     if ((uint32_t)(now - s_scan_v3_last_progress_log_ms) >= 1500) {
         s_scan_v3_last_progress_log_ms = now;
-        LOGI("[SCAN_V3] progress: tracks=%d dir=%s", scanned, where.c_str());
+        LOGD("[SCAN_V3] progress: tracks=%d dir=%s", scanned, where.c_str());
     }
 }
 
@@ -155,7 +155,7 @@ static String pick_cover_in_folder_v3(const String& folder)
         scan_v3_cooperate_wdt();
 
         if (g_abort_scan) {
-            LOGI("[SCAN_V3] cover scan aborted: %s", folder.c_str());
+            LOGD("[SCAN_V3] cover scan aborted: %s", folder.c_str());
             f.close();
             break;
         }

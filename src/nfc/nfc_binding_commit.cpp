@@ -24,7 +24,7 @@ static NfcBindingResumeCtx nfc_binding_capture_resume_ctx(bool allow_resume)
 
     const PlayerSourceState source = player_source_get();
     if (source.type != PlayerSourceType::LOCAL_TRACK) {
-        LOGI("[NFC_BIND] resume skipped: source is not local track");
+        LOGD("[NFC_BIND] resume skipped: source is not local track");
         return ctx;
     }
 
@@ -70,7 +70,7 @@ static bool nfc_binding_save_map_with_rollback()
         return true;
     }
 
-    LOGI("[NFC_BIND] save failed, reload file rollback");
+    LOGW("[NFC_BIND] save failed, reload file rollback");
     (void)nfc_binding_load("/System/nfc_map.txt");
     return false;
 }
@@ -86,7 +86,7 @@ bool nfc_binding_set_and_save_safely(const String& uid,
     nfc_binding_prepare_safe_commit(was_playing_before);
 
     if (!nfc_binding_set(uid, type, key, display)) {
-        LOGI("[NFC_BIND] safe set failed uid=%s", uid.c_str());
+        LOGW("[NFC_BIND] safe set failed uid=%s", uid.c_str());
         return false;
     }
 
@@ -103,7 +103,7 @@ bool nfc_binding_remove_and_save_safely(const String& uid,
     nfc_binding_prepare_safe_commit(was_playing_before);
 
     if (!nfc_binding_remove(uid)) {
-        LOGI("[NFC_BIND] safe remove failed uid=%s", uid.c_str());
+        LOGW("[NFC_BIND] safe remove failed uid=%s", uid.c_str());
         return false;
     }
 

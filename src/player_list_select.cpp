@@ -131,7 +131,7 @@ bool list_select_try_play_selected_group(const std::vector<PlaylistGroup>& list_
     const int current_group_idx = s_list_selected_idx;
     const auto& group = list_groups[current_group_idx];
 
-    LOGI("[LIST] 进入歌曲列表: %s (%d/%d)",
+    LOGD("[LIST] 进入歌曲列表: %s (%d/%d)",
          playlist_group_name_cstr(storage_catalog_v3(), group),
          current_group_idx + 1, group_count);
 
@@ -355,7 +355,7 @@ bool player_list_select_enter_local_tracks()
     list_select_prepare_view_on_enter();
     keys_sync_to_hw_state();
 
-    LOGI("[LIST] 进入本地全部歌曲列表，共 %d 首，当前 idx=%d",
+    LOGD("[LIST] 进入本地全部歌曲列表，共 %d 首，当前 idx=%d",
          total,
          s_list_selected_idx);
 
@@ -391,7 +391,7 @@ bool player_list_select_enter_radio()
     list_select_prepare_view_on_enter();
     keys_sync_to_hw_state();
 
-    LOGI("[LIST] 进入电台列表，共 %d 个，当前选中 idx=%d",
+    LOGD("[LIST] 进入电台列表，共 %d 个，当前选中 idx=%d",
          (int)radios.size(),
          s_list_selected_idx);
 
@@ -432,7 +432,7 @@ bool player_list_select_enter_net_track()
     list_select_prepare_view_on_enter();
     keys_sync_to_hw_state();
 
-    LOGI("[LIST] 进入 NAS 歌曲列表，共 %d 首，当前 idx=%d",
+    LOGD("[LIST] 进入 NAS 歌曲列表，共 %d 首，当前 idx=%d",
          total,
          s_list_selected_idx);
 
@@ -477,7 +477,7 @@ bool player_list_select_enter(play_mode_t mode)
         list_select_prepare_view_on_enter();
         keys_sync_to_hw_state();
 
-        LOGI("[LIST] 进入歌手列表，共 %d 个，当前选中 idx=%d",
+        LOGD("[LIST] 进入歌手列表，共 %d 个，当前选中 idx=%d",
              (int)groups.size(),
              s_list_selected_idx);
 
@@ -506,7 +506,7 @@ bool player_list_select_enter(play_mode_t mode)
         list_select_prepare_view_on_enter();
         keys_sync_to_hw_state();
 
-        LOGI("[LIST] 进入专辑列表，共 %d 个，当前选中 idx=%d",
+        LOGD("[LIST] 进入专辑列表，共 %d 个，当前选中 idx=%d",
              (int)groups.size(),
              s_list_selected_idx);
 
@@ -590,22 +590,22 @@ void player_list_select_handle_key(key_event_t evt)
     switch (evt) {
         case KEY_NEXT_SHORT:
             list_select_move_selection(+1, item_count, is_net_track);
-            LOGI("[LIST] 选择下一项: %d/%d", s_list_selected_idx + 1, item_count);
+            LOGD("[LIST] 选择下一项: %d/%d", s_list_selected_idx + 1, item_count);
             break;
 
         case KEY_PREV_SHORT:
             list_select_move_selection(-1, item_count, is_net_track);
-            LOGI("[LIST] 选择上一项: %d/%d", s_list_selected_idx + 1, item_count);
+            LOGD("[LIST] 选择上一项: %d/%d", s_list_selected_idx + 1, item_count);
             break;
 
         case KEY_PAGE_DOWN_SHORT:
             list_select_move_selection(+NET_TRACK_PAGE_SIZE, item_count, is_net_track);
-            LOGI("[LIST] 向下翻页: %d/%d", s_list_selected_idx + 1, item_count);
+            LOGD("[LIST] 向下翻页: %d/%d", s_list_selected_idx + 1, item_count);
             break;
 
         case KEY_PAGE_UP_SHORT:
             list_select_move_selection(-NET_TRACK_PAGE_SIZE, item_count, is_net_track);
-            LOGI("[LIST] 向上翻页: %d/%d", s_list_selected_idx + 1, item_count);
+            LOGD("[LIST] 向上翻页: %d/%d", s_list_selected_idx + 1, item_count);
             break;
 
         case KEY_PLAY_SHORT:
@@ -632,9 +632,9 @@ void player_list_select_handle_key(key_event_t evt)
                 ui_request_refresh_now();
 
                 keys_sync_to_hw_state();
-                LOGI("[LIST] 返回上一级列表");
+                LOGD("[LIST] 返回上一级列表");
             } else {
-                LOGI("[LIST] 取消选择");
+                LOGD("[LIST] 取消选择");
                 list_select_clear_state(true);
             }
             break;
@@ -659,7 +659,7 @@ void player_list_select_tick()
 
     const uint32_t timeout_ms = list_select_timeout_ms();
     if ((uint32_t)(millis() - s_list_last_action_ms) >= timeout_ms) {
-        LOGI("[LIST] 超时退出 state=%d timeout=%lu ms",
+        LOGD("[LIST] 超时退出 state=%d timeout=%lu ms",
              (int)s_list_state,
              (unsigned long)timeout_ms);
         list_select_clear_state(true);

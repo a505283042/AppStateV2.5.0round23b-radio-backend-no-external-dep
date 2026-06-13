@@ -322,7 +322,7 @@ static void ui_task_entry(void*)
             s_rotate_release_ms = now_ms;
             s_rotate_release_audio_ms = audio_ms_now;
             s_rotate_probe_frames_left = 6;
-            LOGI("[UI] rotate release audio_ms=%lu cover_age=%lums", (unsigned long)audio_ms_now, (unsigned long)(now_ms - s_cover_apply_ms));
+            LOGD("[UI] rotate release audio_ms=%lu cover_age=%lums", (unsigned long)audio_ms_now, (unsigned long)(now_ms - s_cover_apply_ms));
           } else {
             s_rot_last_ms = now_ms;
             const bool cover_spin_enabled = web_settings_get().web_cover_spin;
@@ -363,7 +363,7 @@ static void ui_task_entry(void*)
         if (s_rotate_probe_frames_left > 0) {
           const uint32_t audio_ms_now = audio_get_play_ms();
           const int frame_idx = 7 - s_rotate_probe_frames_left;
-          LOGI("[UI] rotate probe frame=%d audio_ms=%lu audio_since_release=%lums since_release=%lums draw=%lums total=%lums", frame_idx, (unsigned long)audio_ms_now, (unsigned long)(audio_ms_now > s_rotate_release_audio_ms ? (audio_ms_now - s_rotate_release_audio_ms) : 0), (unsigned long)(rotate_frame_begin - s_rotate_release_ms), (unsigned long)(rotate_frame_end - rotate_frame_begin), (unsigned long)(rotate_frame_end - rotate_frame_begin));
+          LOGD("[UI] rotate probe frame=%d audio_ms=%lu audio_since_release=%lums since_release=%lums draw=%lums total=%lums", frame_idx, (unsigned long)audio_ms_now, (unsigned long)(audio_ms_now > s_rotate_release_audio_ms ? (audio_ms_now - s_rotate_release_audio_ms) : 0), (unsigned long)(rotate_frame_begin - s_rotate_release_ms), (unsigned long)(rotate_frame_end - rotate_frame_begin), (unsigned long)(rotate_frame_end - rotate_frame_begin));
           --s_rotate_probe_frames_left;
         }
       } else {
