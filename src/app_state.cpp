@@ -136,7 +136,7 @@ static void app_handle_tf_removed()
 
 static void app_handle_tf_mounted()
 {
-    LOGI("[APP] TF mounted");
+    LOGD("[APP] TF mounted");
 
     const PlayerSourceState source_before_mount = player_source_get();
 
@@ -147,13 +147,13 @@ static void app_handle_tf_mounted()
     audio_file_prepare_music_root_cache();
 
     if (nfc_binding_load("/System/nfc_map.txt")) {
-        LOGI("[APP] NFC bindings reloaded: %d entries", nfc_binding_count());
+        LOGD("[APP] NFC bindings reloaded: %d entries", nfc_binding_count());
     } else {
-        LOGI("[APP] no NFC bindings after TF mounted");
+        LOGD("[APP] no NFC bindings after TF mounted");
     }
 
     if (radio_catalog_load()) {
-        LOGI("[APP] radio catalog reloaded: %d stations", (int)radio_catalog_count());
+        LOGD("[APP] radio catalog reloaded: %d stations", (int)radio_catalog_count());
     } else {
         LOGW("[APP] radio catalog reload failed");
     }
