@@ -39,3 +39,4 @@
 #define PIN_WS2812       board::PIN_WS2812
 #define PIN_POWER_CTRL   board::PIN_POWER_CTRL
 #define PIN_BAT_ADC      board::PIN_BAT_ADC
+#define PIN_HALL_OUT     board::PIN_HALL_OUT

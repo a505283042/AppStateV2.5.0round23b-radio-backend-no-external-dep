@@ -26,6 +26,9 @@ static constexpr int PIN_BAT_ADC = 1;
 // NFC
 static constexpr int PIN_NFC_IRQ = 4;
 
+// Hall sensor / magnetic switch
+static constexpr int PIN_HALL_OUT = 9;
+
 // Shared SPI for TFT + NFC
 static constexpr int PIN_SPI_MISO = 5;
 static constexpr int PIN_SPI_MOSI = 6;

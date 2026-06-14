@@ -20,6 +20,9 @@
 #define PIN_KEY_PREV   PIN_KEY_MCP_PREV_NFC
 #define PIN_KEY_NEXT   PIN_KEY_MCP_NEXT_LIST
 
+// HALL_OUT -> ESP32 GPIO9，用于磁吸 / 霍尔触发播放暂停。
+#define PIN_KEY_HALL_OUT PIN_HALL_OUT
+
 // 新板没有独立 VOL+/VOL- GPIO；先禁用旧音量按键，避免误触发。
 #define PIN_KEY_VOLDN  PIN_KEY_DISABLED
 #define PIN_KEY_VOLUP  PIN_KEY_DISABLED
