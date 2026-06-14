@@ -288,6 +288,8 @@ static bool player_play_trackinfo_core(const TrackInfo& t,
 
     // 先提交文字、模式、序号，让 UI 立刻跟上；不再等待封面/歌词准备完。
     ui_set_now_playing(t.title.c_str(), t.artist.c_str());
+    // 切歌/自动下一曲时，给全屏旋转视图一个短暂的歌名/歌手提示。
+    ui_show_track_change_popup(t.title.c_str(), t.artist.c_str());
     ui_set_album(t.album);
 
     // 根据播放模式显示正确的歌曲索引和总数

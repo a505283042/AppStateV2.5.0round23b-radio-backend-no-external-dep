@@ -108,6 +108,107 @@ static void draw_volume_step_hint_overlay(LGFX_Sprite* dst)
 }
 
 // =============================================================================
+// 全屏旋转视图切歌提示 Overlay
+// =============================================================================
+
+static constexpr uint32_t TRACK_CHANGE_POPUP_DURATION_MS = 2600;
+
+static volatile uint32_t s_track_change_popup_until_ms = 0;
+static String s_track_change_popup_title;
+static String s_track_change_popup_artist;
+
+template <typename CanvasT>
+static String track_popup_fit_text_px(CanvasT* dst, String text, int max_w)
+{
+  text.trim();
+  if (!dst || max_w <= 0 || text.length() == 0) {
+    return text;
+  }
+
+  if (dst->textWidth(text) <= max_w) {
+    return text;
+  }
+
+  const String ellipsis = "...";
+  String out = text;
+
+  // 按像素宽度裁剪，并回退到 UTF-8 字符边界，避免中文歌名被截坏。
+  while (out.length() > 0 && dst->textWidth(out + ellipsis) > max_w) {
+    int len = out.length();
+    do {
+      --len;
+    } while (len > 0 && ((static_cast<uint8_t>(out[len]) & 0xC0) == 0x80));
+
+    out = out.substring(0, len);
+  }
+
+  if (out.length() == 0) {
+    return ellipsis;
+  }
+
+  return out + ellipsis;
+}
+
+static bool track_change_popup_active(uint32_t now)
+{
+  return s_track_change_popup_until_ms != 0 &&
+         static_cast<int32_t>(s_track_change_popup_until_ms - now) > 0;
+}
+
+void ui_show_track_change_popup(const char* title, const char* artist)
+{
+  s_track_change_popup_title = title ? String(title) : String("");
+  s_track_change_popup_artist = artist ? String(artist) : String("");
+  s_track_change_popup_title.trim();
+  s_track_change_popup_artist.trim();
+
+  if (s_track_change_popup_title.isEmpty()) {
+    s_track_change_popup_title = "未知歌曲";
+  }
+  if (s_track_change_popup_artist.isEmpty()) {
+    s_track_change_popup_artist = "未知歌手";
+  }
+
+  s_track_change_popup_until_ms = millis() + TRACK_CHANGE_POPUP_DURATION_MS;
+  ui_request_refresh();
+}
+
+static void draw_track_change_popup_overlay(LGFX_Sprite* dst)
+{
+  if (!dst || !track_change_popup_active(millis())) {
+    return;
+  }
+
+  // 只用于全屏旋转封面页，放在偏下位置，不遮挡封面中心。
+  static constexpr int BOX_W = 214;
+  static constexpr int BOX_H = 58;
+  static constexpr int BOX_X = (240 - BOX_W) / 2;
+  static constexpr int BOX_Y = 158;
+  static constexpr int BOX_R = 14;
+  static constexpr int PAD_X = 12;
+  static constexpr int TEXT_MAX_W = BOX_W - PAD_X * 2;
+
+  dst->fillRoundRect(BOX_X, BOX_Y, BOX_W, BOX_H, BOX_R, TFT_BLACK);
+  dst->drawRoundRect(BOX_X, BOX_Y, BOX_W, BOX_H, BOX_R, TFT_DARKGREY);
+
+  dst->setFont(&g_font_cjk);
+  dst->setTextSize(1);
+  dst->setTextWrap(false);
+
+  const String title = track_popup_fit_text_px(dst, s_track_change_popup_title, TEXT_MAX_W);
+  const String artist = track_popup_fit_text_px(dst, s_track_change_popup_artist, TEXT_MAX_W);
+
+  dst->setTextDatum(middle_center);
+  dst->setTextColor(TFT_WHITE, TFT_BLACK);
+  dst->drawString(title, BOX_X + BOX_W / 2, BOX_Y + 20);
+
+  dst->setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+  dst->drawString(artist, BOX_X + BOX_W / 2, BOX_Y + 40);
+
+  dst->setTextDatum(top_left);
+}
+
+// =============================================================================
 // NFC 绑定类型选择 Overlay
 // =============================================================================
 
@@ -534,6 +635,9 @@ void cover_rotate_draw(float angle_deg)
     // 将源精灵旋转指定角度并绘制到后帧（不缩放）
     s_src->pushRotateZoom(dst, COVER_SIZE / 2, COVER_SIZE / 2, angle_deg, 1.0f, 1.0f);
   }
+
+  // 全屏旋转页切歌时显示歌名/歌手；音量和 NFC 弹窗在其上层。
+  draw_show_track_change_popup_overlay(dst);
 
   // 绘制音量步进小提示
   draw_volume_step_hint_overlay(dst);
