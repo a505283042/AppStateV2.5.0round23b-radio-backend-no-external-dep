@@ -373,9 +373,15 @@ static void ui_task_entry(void*)
       }
 
       ui_draw_unlock();
-    } else if (s_screen == UI_SCREEN_PLAYER) {
-      // 兜底：如果进入播放器界面超过5秒还没就绪，显示轻量占位页
-      if (s_player_enter_time > 0 && (now_ms - s_player_enter_time) > 5000 && !s_screen_cleared) {
+      } else if (s_screen == UI_SCREEN_PLAYER) {
+      // 播放器页但封面/帧缓冲还没 ready 时，会停留在启动或占位画面。
+      // NFC 弹窗必须在这种“未开播/无封面”状态下也能显示，所以这里额外处理一次。
+      const bool nfc_popup_visible = ui_nfc_bind_target_popup_is_visible();
+      const bool nfc_popup_dirty = ui_nfc_bind_target_popup_consume_dirty();
+      const bool placeholder_due =
+          (s_player_enter_time > 0 && (now_ms - s_player_enter_time) > 5000 && !s_screen_cleared);
+
+      if (placeholder_due || nfc_popup_visible || nfc_popup_dirty) {
         ui_draw_lock();
         tft.fillScreen(TFT_BLACK);
         tft.setFont(&g_font_cjk);
@@ -396,10 +402,14 @@ static void ui_task_entry(void*)
           draw_center_text("加载中...", 142);
           draw_center_text("请稍候", 166);
         }
+
+        // 未开播/无封面时，NFC 弹窗直接画到 TFT 上，而不是等封面精灵路径。
+        ui_draw_nfc_bind_target_popup_on_tft_if_visible();
         
         s_screen_cleared = true;
         ui_draw_unlock();
       }
+
       // 非 PLAYER：也刷新 rot 时钟，避免回到旋转 dt 累积
       s_rot_last_ms = now_ms;
     } else {

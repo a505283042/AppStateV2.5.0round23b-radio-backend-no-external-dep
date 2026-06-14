@@ -102,31 +102,30 @@ static void draw_volume_step_hint_overlay(LGFX_Sprite* dst)
 
 static volatile bool s_nfc_bind_target_popup_visible = false;
 static volatile uint8_t s_nfc_bind_target_popup_selected = 0;
+static volatile bool s_nfc_bind_target_popup_dirty = false;
 
-void ui_show_nfc_bind_target_popup(uint8_t selected)
+bool ui_nfc_bind_target_popup_is_visible()
 {
-  if (selected > 2) {
-    selected = 0;
-  }
-
-  s_nfc_bind_target_popup_selected = selected;
-  s_nfc_bind_target_popup_visible = true;
-  ui_request_refresh();
+  return s_nfc_bind_target_popup_visible;
 }
 
-void ui_hide_nfc_bind_target_popup()
+bool ui_nfc_bind_target_popup_consume_dirty()
 {
-  s_nfc_bind_target_popup_visible = false;
-  ui_request_refresh();
+  const bool dirty = s_nfc_bind_target_popup_dirty;
+  s_nfc_bind_target_popup_dirty = false;
+  return dirty;
 }
 
-static void draw_nfc_bind_target_popup_overlay(LGFX_Sprite* dst)
+template <typename CanvasT>
+static void draw_nfc_bind_target_popup_canvas(CanvasT* dst, uint8_t selected)
 {
-  if (!dst || !s_nfc_bind_target_popup_visible) {
+  if (!dst) {
     return;
   }
 
-  const uint8_t selected = s_nfc_bind_target_popup_selected;
+  if (selected > 2) {
+    selected = 0;
+  }
 
   // 保持和音量步进提示一致的“居中黑色圆角弹窗”风格，尺寸稍大以容纳三项选择。
   static constexpr int BOX_W = 168;
@@ -163,6 +162,7 @@ static void draw_nfc_bind_target_popup_overlay(LGFX_Sprite* dst)
     if (active) {
       dst->fillRoundRect(x, ITEM_Y, ITEM_W, ITEM_H, 8, TFT_DARKGREY);
     }
+
     dst->drawRoundRect(x, ITEM_Y, ITEM_W, ITEM_H, 8, border);
     dst->setTextColor(fg, active ? TFT_DARKGREY : TFT_BLACK);
     dst->drawString(labels[i], x + ITEM_W / 2, ITEM_Y + ITEM_H / 2);
@@ -171,6 +171,43 @@ static void draw_nfc_bind_target_popup_overlay(LGFX_Sprite* dst)
   dst->setTextColor(TFT_LIGHTGREY, TFT_BLACK);
   dst->drawString("旋钮选择  PLAY确认", BOX_X + BOX_W / 2, BOX_Y + 72);
   dst->setTextDatum(top_left);
+}
+
+void ui_show_nfc_bind_target_popup(uint8_t selected)
+{
+  if (selected > 2) {
+    selected = 0;
+  }
+
+  s_nfc_bind_target_popup_selected = selected;
+  s_nfc_bind_target_popup_visible = true;
+  s_nfc_bind_target_popup_dirty = true;
+  ui_request_refresh();
+}
+
+void ui_hide_nfc_bind_target_popup()
+{
+  s_nfc_bind_target_popup_visible = false;
+  s_nfc_bind_target_popup_dirty = true;
+  ui_request_refresh();
+}
+
+void ui_draw_nfc_bind_target_popup_on_tft_if_visible()
+{
+  if (!s_nfc_bind_target_popup_visible) {
+    return;
+  }
+
+  draw_nfc_bind_target_popup_canvas(&tft, s_nfc_bind_target_popup_selected);
+}
+
+static void draw_nfc_bind_target_popup_overlay(LGFX_Sprite* dst)
+{
+  if (!dst || !s_nfc_bind_target_popup_visible) {
+    return;
+  }
+
+  draw_nfc_bind_target_popup_canvas(dst, s_nfc_bind_target_popup_selected);
 }
 
 // =============================================================================
