@@ -69,11 +69,12 @@ static void draw_volume_step_hint_overlay(LGFX_Sprite* dst)
   const uint8_t volume = s_ui_volume;
 
   // 圆屏上中间小弹窗，显示当前音量值和本次旋钮步进。
-  static constexpr int BOX_W = 122;
-  static constexpr int BOX_H = 40;
+  // 弹窗宽度收窄，避免在圆屏安全区边缘显得太长。
+  static constexpr int BOX_W = 100;
+  static constexpr int BOX_H = 32;
   static constexpr int BOX_X = (240 - BOX_W) / 2;
   static constexpr int BOX_Y = (240 - BOX_H) / 2;
-  static constexpr int BOX_R = 12;
+  static constexpr int BOX_R = 9;
 
   const uint16_t border_color = step > 1 ? TFT_YELLOW : TFT_DARKGREY;
   const uint16_t icon_color = step > 1 ? TFT_YELLOW : TFT_LIGHTGREY;
@@ -84,7 +85,7 @@ static void draw_volume_step_hint_overlay(LGFX_Sprite* dst)
   dst->drawRoundRect(BOX_X, BOX_Y, BOX_W, BOX_H, BOX_R, border_color);
 
   // 复用项目已有音量图标。
-  draw_volume_icon(dst, BOX_X + 12, BOX_Y + 14, icon_color);
+  draw_volume_icon(dst, BOX_X + 9, BOX_Y + 10, icon_color);
 
   char volume_label[8];
   snprintf(volume_label, sizeof(volume_label), "%u%%", static_cast<unsigned>(volume));
@@ -98,11 +99,11 @@ static void draw_volume_step_hint_overlay(LGFX_Sprite* dst)
 
   dst->setTextDatum(middle_left);
   dst->setTextColor(text_color, TFT_BLACK);
-  dst->drawString(volume_label, BOX_X + 38, BOX_Y + BOX_H / 2);
+  dst->drawString(volume_label, BOX_X + 30, BOX_Y + BOX_H / 2);
 
   dst->setTextDatum(middle_right);
   dst->setTextColor(step_color, TFT_BLACK);
-  dst->drawString(step_label, BOX_X + BOX_W - 12, BOX_Y + BOX_H / 2);
+  dst->drawString(step_label, BOX_X + BOX_W - 9, BOX_Y + BOX_H / 2);
 
   dst->setTextDatum(top_left);
 }
@@ -179,13 +180,14 @@ static void draw_track_change_popup_overlay(LGFX_Sprite* dst)
     return;
   }
 
-  // 只用于全屏旋转封面页，放在偏下位置，不遮挡封面中心。
-  static constexpr int BOX_W = 214;
-  static constexpr int BOX_H = 58;
+  // 只用于全屏旋转封面页。圆屏底部横向安全宽度会变窄，
+  // 所以弹窗不能按 240 方屏铺太宽，否则左右下角会出圆屏。
+  static constexpr int BOX_W = 184;
+  static constexpr int BOX_H = 38;
   static constexpr int BOX_X = (240 - BOX_W) / 2;
-  static constexpr int BOX_Y = 158;
-  static constexpr int BOX_R = 14;
-  static constexpr int PAD_X = 12;
+  static constexpr int BOX_Y = 154;
+  static constexpr int BOX_R = 10;
+  static constexpr int PAD_X = 10;
   static constexpr int TEXT_MAX_W = BOX_W - PAD_X * 2;
 
   dst->fillRoundRect(BOX_X, BOX_Y, BOX_W, BOX_H, BOX_R, TFT_BLACK);
@@ -200,10 +202,10 @@ static void draw_track_change_popup_overlay(LGFX_Sprite* dst)
 
   dst->setTextDatum(middle_center);
   dst->setTextColor(TFT_WHITE, TFT_BLACK);
-  dst->drawString(title, BOX_X + BOX_W / 2, BOX_Y + 20);
+  dst->drawString(title, BOX_X + BOX_W / 2, BOX_Y + 12);
 
   dst->setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-  dst->drawString(artist, BOX_X + BOX_W / 2, BOX_Y + 40);
+  dst->drawString(artist, BOX_X + BOX_W / 2, BOX_Y + 27);
 
   dst->setTextDatum(top_left);
 }
@@ -637,7 +639,7 @@ void cover_rotate_draw(float angle_deg)
   }
 
   // 全屏旋转页切歌时显示歌名/歌手；音量和 NFC 弹窗在其上层。
-  draw_show_track_change_popup_overlay(dst);
+  draw_track_change_popup_overlay(dst);
 
   // 绘制音量步进小提示
   draw_volume_step_hint_overlay(dst);
