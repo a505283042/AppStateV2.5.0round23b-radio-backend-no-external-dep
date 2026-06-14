@@ -211,6 +211,203 @@ static void draw_nfc_bind_target_popup_overlay(LGFX_Sprite* dst)
 }
 
 // =============================================================================
+// NFC 刷卡结果 Overlay
+// =============================================================================
+
+static constexpr uint32_t NFC_SCAN_POPUP_DURATION_MS = 4200; // 弹窗时间3.2s
+
+static volatile bool s_nfc_scan_popup_visible = false;
+static volatile bool s_nfc_scan_popup_dirty = false;
+static volatile uint32_t s_nfc_scan_popup_until_ms = 0;
+static bool s_nfc_scan_popup_bound = false;
+static String s_nfc_scan_popup_uid;
+static String s_nfc_scan_popup_card_type;
+static String s_nfc_scan_popup_bind_type;
+static String s_nfc_scan_popup_bind_name;
+
+static String nfc_popup_fit_text(String text, size_t max_chars)
+{
+  text.trim();
+  if (text.length() <= max_chars) {
+    return text;
+  }
+
+  if (max_chars <= 3) {
+    return text.substring(0, max_chars);
+  }
+
+  String out = text.substring(0, max_chars - 3);
+  out += "...";
+  return out;
+}
+
+template <typename CanvasT>
+static String nfc_popup_fit_text_px(CanvasT* dst, String text, int max_w)
+{
+  text.trim();
+  if (!dst || max_w <= 0 || text.length() == 0) {
+    return text;
+  }
+
+  if (dst->textWidth(text) <= max_w) {
+    return text;
+  }
+
+  const String ellipsis = "...";
+  String out = text;
+
+  // 按像素宽度裁剪，并回退到 UTF-8 字符边界，避免中文歌名被截坏。
+  while (out.length() > 0 && dst->textWidth(out + ellipsis) > max_w) {
+    int len = out.length();
+    do {
+      --len;
+    } while (len > 0 && ((static_cast<uint8_t>(out[len]) & 0xC0) == 0x80));
+
+    out = out.substring(0, len);
+  }
+
+  if (out.length() == 0) {
+    return ellipsis;
+  }
+
+  return out + ellipsis;
+}
+
+static bool nfc_scan_popup_active(uint32_t now)
+{
+  if (!s_nfc_scan_popup_visible) {
+    return false;
+  }
+
+  if (static_cast<int32_t>(s_nfc_scan_popup_until_ms - now) > 0) {
+    return true;
+  }
+
+  s_nfc_scan_popup_visible = false;
+  s_nfc_scan_popup_dirty = true;
+  return false;
+}
+
+bool ui_nfc_scan_popup_is_visible()
+{
+  return nfc_scan_popup_active(millis());
+}
+
+bool ui_nfc_scan_popup_consume_dirty()
+{
+  const bool dirty = s_nfc_scan_popup_dirty;
+  s_nfc_scan_popup_dirty = false;
+  return dirty;
+}
+
+void ui_show_nfc_scan_popup(const String& uid,
+                            const String& card_type,
+                            const String& bind_type,
+                            const String& bind_name,
+                            bool bound)
+{
+  s_nfc_scan_popup_uid = uid;
+  s_nfc_scan_popup_uid.trim();
+  s_nfc_scan_popup_card_type = card_type;
+  s_nfc_scan_popup_card_type.trim();
+  s_nfc_scan_popup_bind_type = bind_type;
+  s_nfc_scan_popup_bind_type.trim();
+  s_nfc_scan_popup_bind_name = bind_name;
+  s_nfc_scan_popup_bind_name.trim();
+  s_nfc_scan_popup_bound = bound;
+
+  if (s_nfc_scan_popup_card_type.isEmpty()) {
+    s_nfc_scan_popup_card_type = "未知卡";
+  }
+  if (s_nfc_scan_popup_bind_type.isEmpty()) {
+    s_nfc_scan_popup_bind_type = bound ? String("已绑定") : String("未绑定");
+  }
+  if (!bound && s_nfc_scan_popup_bind_name.isEmpty()) {
+    s_nfc_scan_popup_bind_name = "长按上一曲可绑定";
+  }
+
+  s_nfc_scan_popup_visible = true;
+  s_nfc_scan_popup_dirty = true;
+  s_nfc_scan_popup_until_ms = millis() + NFC_SCAN_POPUP_DURATION_MS;
+  ui_request_refresh();
+}
+
+template <typename CanvasT>
+static void draw_nfc_scan_popup_canvas(CanvasT* dst)
+{
+  if (!dst || !nfc_scan_popup_active(millis())) {
+    return;
+  }
+
+  // 居中黑色圆角弹窗，和音量/NFC绑定弹窗保持一致风格。
+  // 标题和绑定状态合并到一行后，高度可以从 118px 收到 100px。
+  static constexpr int BOX_W = 220;
+  static constexpr int BOX_H = 100;
+  static constexpr int BOX_X = (240 - BOX_W) / 2;
+  static constexpr int BOX_Y = (240 - BOX_H) / 2;
+  static constexpr int BOX_R = 14;
+
+  const uint16_t status_color = s_nfc_scan_popup_bound ? TFT_GREEN : TFT_ORANGE;
+
+  dst->fillRoundRect(BOX_X, BOX_Y, BOX_W, BOX_H, BOX_R, TFT_BLACK);
+  dst->drawRoundRect(BOX_X, BOX_Y, BOX_W, BOX_H, BOX_R, status_color);
+
+  dst->setFont(&g_font_cjk);
+  dst->setTextSize(1);
+  dst->setTextWrap(false);
+
+  dst->setTextDatum(middle_center);
+  dst->setTextColor(status_color, TFT_BLACK);
+  dst->drawString(s_nfc_scan_popup_bound ? "NFC卡  已绑定" : "NFC卡  未绑定",
+                  BOX_X + BOX_W / 2,
+                  BOX_Y + 15);
+
+  dst->setTextDatum(middle_left);
+  dst->setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+
+  const int left = BOX_X + 12;
+  const int value_left = left + 38;
+
+  // 标题位置不动；下面几行每段间距各收 1px，让底部歌名离下边框更舒服。
+  static constexpr int Y_UID   = 35;
+  static constexpr int Y_CARD  = 52;
+  static constexpr int Y_TYPE  = 69;
+  static constexpr int Y_NAME  = 87;
+
+  dst->drawString("UID:", left, BOX_Y + Y_UID);
+  dst->drawString(nfc_popup_fit_text(s_nfc_scan_popup_uid, 30), value_left, BOX_Y + Y_UID);
+
+  dst->drawString("卡:", left, BOX_Y + Y_CARD);
+  dst->drawString(nfc_popup_fit_text(s_nfc_scan_popup_card_type, 22), value_left, BOX_Y + Y_CARD);
+
+  dst->drawString("类型:", left, BOX_Y + Y_TYPE);
+  dst->setTextColor(status_color, TFT_BLACK);
+  dst->drawString(nfc_popup_fit_text(s_nfc_scan_popup_bind_type, 20), value_left, BOX_Y + Y_TYPE);
+
+  // 绑定名称/歌名限制在弹窗框内：按像素宽度裁剪，超出才加省略号。
+  // 注意这里不用固定“字符数”截断，避免中文歌名明明放得下却被提前省略。
+  static constexpr int NAME_PAD_X = 12;
+  const int name_max_w = BOX_W - NAME_PAD_X * 2;
+  const String name_text = nfc_popup_fit_text_px(dst, s_nfc_scan_popup_bind_name, name_max_w);
+
+  dst->setTextDatum(middle_center);
+  dst->setTextColor(TFT_WHITE, TFT_BLACK);
+  dst->drawString(name_text, BOX_X + BOX_W / 2, BOX_Y + Y_NAME);
+
+  dst->setTextDatum(top_left);
+}
+
+void ui_draw_nfc_scan_popup_on_tft_if_visible()
+{
+  draw_nfc_scan_popup_canvas(&tft);
+}
+
+static void draw_nfc_scan_popup_overlay(LGFX_Sprite* dst)
+{
+  draw_nfc_scan_popup_canvas(dst);
+}
+
+// =============================================================================
 // 电池状态页脚绘制
 // =============================================================================
 
@@ -330,6 +527,7 @@ void cover_rotate_draw(float angle_deg)
   // 绘制音量步进小提示
   draw_volume_step_hint_overlay(dst);
   draw_nfc_bind_target_popup_overlay(dst);
+  draw_nfc_scan_popup_overlay(dst);
 
   // 将后帧推送到屏幕 (0, 0) 位置
   dst->pushSprite(0, 0);
@@ -1503,6 +1701,7 @@ void cover_panel_draw(float angle_deg)
   // 7. 绘制音量步进小提示
   draw_volume_step_hint_overlay(dst);
   draw_nfc_bind_target_popup_overlay(dst);
+  draw_nfc_scan_popup_overlay(dst);
 
   dst->pushSprite(0, 0);
 
@@ -1716,6 +1915,7 @@ void cover_info_draw()
   // 7) 音量步进小提示 Overlay
   draw_volume_step_hint_overlay(dst);
   draw_nfc_bind_target_popup_overlay(dst);
+  draw_nfc_scan_popup_overlay(dst);
 
   // 8) 推屏
   dst->pushSprite(0, 0);
@@ -1746,12 +1946,27 @@ bool ui_draw_cover_for_track(const TrackInfo& t, bool force_redraw)
   s_ui_play_ms  = 0;
   s_ui_total_ms = 0;
 
-  // 立即推送第一帧
+  // 立即推送第一帧。
+  // 如果此时有 NFC 弹窗，必须走当前播放器视图的完整绘制路径，
+  // 让弹窗作为 overlay 一起画进去，避免直接推封面把弹窗短暂盖掉。
   if (!s_screen_cleared) {
     tft.fillScreen(TFT_BLACK);
     s_screen_cleared = true;
   }
-  s_coverSpr.pushSprite(0, 0);
+
+  const bool nfc_overlay_visible =
+      s_nfc_bind_target_popup_visible || nfc_scan_popup_active(millis());
+  if (nfc_overlay_visible) {
+    if (s_view == UI_VIEW_COVER_PANEL) {
+      cover_panel_draw(0.0f);
+    } else if (s_view == UI_VIEW_INFO) {
+      cover_info_draw();
+    } else {
+      cover_rotate_draw(0.0f);
+    }
+  } else {
+    s_coverSpr.pushSprite(0, 0);
+  }
 
   s_angle_deg = 0.0f;
   s_rot_last_ms = millis();

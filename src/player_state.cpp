@@ -6,6 +6,7 @@
 #include "audio/audio.h"
 #include "audio/audio_service.h"
 #include "nfc/nfc.h"
+#include "nfc/nfc_binding.h"
 #include "lyrics/lyrics.h"
 #include "player_assets.h"
 #include "player_binding.h"
@@ -21,6 +22,40 @@
 #include "storage/storage.h"
 #include "ui/ui.h"
 #include "utils/log.h"
+
+static const char* player_nfc_bind_type_label(NfcBindType type)
+{
+    switch (type) {
+        case NFC_BIND_TRACK:  return "单曲";
+        case NFC_BIND_ARTIST: return "歌手";
+        case NFC_BIND_ALBUM:  return "专辑";
+        default:              return "未知";
+    }
+}
+
+static void player_show_nfc_scan_result_popup(const String& uid, const String& card_type)
+{
+    NfcBindingEntry entry;
+    if (nfc_binding_find(uid, entry)) {
+        String name = entry.display;
+        name.trim();
+        if (name.isEmpty()) {
+            name = entry.key;
+        }
+
+        ui_show_nfc_scan_popup(uid,
+                               card_type,
+                               player_nfc_bind_type_label(entry.type),
+                               name,
+                               true);
+    } else {
+        ui_show_nfc_scan_popup(uid,
+                               card_type,
+                               "未绑定",
+                               "长按上一曲可绑定",
+                               false);
+    }
+}
 
 static constexpr int  V3_TEST_START_INDEX = 0;
 
@@ -708,8 +743,13 @@ void player_state_run(void)
         nfc_poll();
 
         String uid;
-        if (nfc_take_last_uid(uid)) {
-            Serial.printf("[播放器] NFC uid=%s\n", uid.c_str());
+        String card_type;
+        if (nfc_take_last_card_info(uid, card_type)) {
+            Serial.printf("[播放器] NFC uid=%s type=%s\n", uid.c_str(), card_type.c_str());
+
+            // 无论是否已绑定，都先给用户一个刷卡结果反馈。
+            // 已绑定：显示 UID、卡类型、绑定类型和绑定名称；未绑定：提示可绑定。
+            player_show_nfc_scan_result_popup(uid, card_type);
 
             if (!player_binding_try_handle_nfc_uid(uid)) {
                 LOGI("[NFC] UID 未绑定：%s", uid.c_str());

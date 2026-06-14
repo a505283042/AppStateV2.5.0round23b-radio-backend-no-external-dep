@@ -98,6 +98,13 @@ void ui_show_volume_step_hint(uint8_t step);
 // 显示 / 隐藏 NFC 绑定类型小弹窗，selected: 0=单曲, 1=歌手, 2=专辑
 void ui_show_nfc_bind_target_popup(uint8_t selected);
 void ui_hide_nfc_bind_target_popup();
+// 刷 NFC 卡时显示识别结果弹窗。bound=false 时 bind_type 可传 "未绑定"。
+void ui_show_nfc_scan_popup(const String& uid,
+                            const String& card_type,
+                            const String& bind_type,
+                            const String& bind_name,
+                            bool bound);
+
 void ui_set_play_mode(play_mode_t mode);
 
 void ui_mode_switch_highlight();

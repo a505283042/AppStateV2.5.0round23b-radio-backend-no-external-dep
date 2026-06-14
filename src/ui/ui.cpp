@@ -157,6 +157,27 @@ void ui_hold_render(bool hold)
     }
   }
 }
+
+static bool ui_player_audio_active_for_cover_spin()
+{
+  // 未开播时 audio_service_is_paused() 通常为 false，不能只用“非暂停”判断。
+  // 只有音频服务明确处于播放状态时，旋转封面/面板视图才允许转动。
+  return audio_service_is_playing() && !audio_service_is_paused();
+}
+
+static bool ui_player_has_track_for_cover_angle()
+{
+  // 已暂停时保留当前角度，只是不继续转；完全未开播时才归零显示。
+  return audio_service_is_playing() || audio_service_is_paused();
+}
+
+static float ui_cover_draw_angle_or_zero()
+{
+  return (web_settings_get().web_cover_spin && ui_player_has_track_for_cover_angle())
+      ? s_angle_deg
+      : 0.0f;
+}
+
 static inline TickType_t ui_period_ticks()
 {
   // hold 期间：不画，但要"醒得勤快一点"，保证解除 hold 后立刻恢复（这里按旋转帧率）
@@ -175,24 +196,20 @@ static inline TickType_t ui_period_ticks()
   // 封面旋转关闭后降低刷新压力，但面板视图仍保留歌词/进度刷新。
   if (s_screen == UI_SCREEN_PLAYER) {
     const bool cover_spin_enabled = web_settings_get().web_cover_spin;
-    const bool player_active = audio_service_is_playing() && !audio_service_is_paused();
+    const bool player_active = ui_player_audio_active_for_cover_spin();
+    const bool cover_should_spin = cover_spin_enabled && player_active;
 
     if (s_view == UI_VIEW_ROTATE) {
-      const uint32_t fps = cover_spin_enabled
+      const uint32_t fps = cover_should_spin
           ? UI_FPS_ROTATE
           : UI_FPS_ROTATE_STATIC;
       return pdMS_TO_TICKS(1000 / fps);
     }
 
     if (s_view == UI_VIEW_COVER_PANEL) {
-      uint32_t fps = UI_FPS_COVER_PANEL;
-
-      if (!cover_spin_enabled) {
-        fps = player_active
-            ? UI_FPS_COVER_PANEL_STATIC_ACTIVE
-            : UI_FPS_COVER_PANEL_STATIC_IDLE;
-      }
-
+      const uint32_t fps = cover_should_spin
+          ? UI_FPS_COVER_PANEL
+          : (player_active ? UI_FPS_COVER_PANEL_STATIC_ACTIVE : UI_FPS_COVER_PANEL_STATIC_IDLE);
       return pdMS_TO_TICKS(1000 / fps);
     }
 
@@ -325,12 +342,13 @@ static void ui_task_entry(void*)
             LOGD("[界面] 旋转 release audio_ms=%lu 封面_age=%lums", (unsigned long)audio_ms_now, (unsigned long)(now_ms - s_cover_apply_ms));
           } else {
             s_rot_last_ms = now_ms;
-            const bool cover_spin_enabled = web_settings_get().web_cover_spin;
-            const float draw_angle_deg = cover_spin_enabled ? s_angle_deg : 0.0f;
+            const float draw_angle_deg = ui_cover_draw_angle_or_zero();
             if (s_view == UI_VIEW_COVER_PANEL) {
               cover_panel_draw(draw_angle_deg);
             } else {
-              s_coverSpr.pushSprite(0, 0);
+              // 旋转视图等待音频/封面预取期间也必须走完整绘制路径，
+              // 不能直接 push 原封面，否则会把 NFC 弹窗覆盖掉，表现为“弹窗-封面-弹窗”闪烁。
+              cover_rotate_draw(draw_angle_deg);
             }
             ui_draw_unlock();
             continue;
@@ -343,15 +361,15 @@ static void ui_task_entry(void*)
         // 防止任何阻塞导致 dt 过大（看起来像“后台一直在转”）
         if (dt > 0.20f) dt = 0.20f;
 
-        // 暂停时不旋转封面；用户关闭"封面旋转"时也不旋转。
-        const bool cover_spin_enabled = web_settings_get().web_cover_spin;
-        if (cover_spin_enabled && !audio_service_is_paused()) {
+        // 只有真正开播且未暂停时才旋转封面；未开播时保持 0 度静态显示。
+        const bool cover_should_spin = web_settings_get().web_cover_spin && ui_player_audio_active_for_cover_spin();
+        if (cover_should_spin) {
           s_angle_deg += COVER_DEG_PER_SEC * dt;
           if (s_angle_deg >= 360.0f) s_angle_deg -= 360.0f;
         }
 
-        // 关闭封面旋转时，使用 0 度静态封面，避免停在歪斜角度。
-        const float draw_angle_deg = cover_spin_enabled ? s_angle_deg : 0.0f;
+        // 未开播/关闭旋转时使用 0 度静态封面；暂停时保留当前角度但不继续转。
+        const float draw_angle_deg = ui_cover_draw_angle_or_zero();
 
         const uint32_t rotate_frame_begin = millis();
         if (s_view == UI_VIEW_COVER_PANEL) {
@@ -376,8 +394,12 @@ static void ui_task_entry(void*)
       } else if (s_screen == UI_SCREEN_PLAYER) {
       // 播放器页但封面/帧缓冲还没 ready 时，会停留在启动或占位画面。
       // NFC 弹窗必须在这种“未开播/无封面”状态下也能显示，所以这里额外处理一次。
-      const bool nfc_popup_visible = ui_nfc_bind_target_popup_is_visible();
-      const bool nfc_popup_dirty = ui_nfc_bind_target_popup_consume_dirty();
+      const bool nfc_bind_popup_visible = ui_nfc_bind_target_popup_is_visible();
+      const bool nfc_scan_popup_visible = ui_nfc_scan_popup_is_visible();
+      const bool nfc_bind_popup_dirty = ui_nfc_bind_target_popup_consume_dirty();
+      const bool nfc_scan_popup_dirty = ui_nfc_scan_popup_consume_dirty();
+      const bool nfc_popup_visible = nfc_bind_popup_visible || nfc_scan_popup_visible;
+      const bool nfc_popup_dirty = nfc_bind_popup_dirty || nfc_scan_popup_dirty;
       const bool placeholder_due =
           (s_player_enter_time > 0 && (now_ms - s_player_enter_time) > 5000 && !s_screen_cleared);
 
@@ -405,6 +427,7 @@ static void ui_task_entry(void*)
 
         // 未开播/无封面时，NFC 弹窗直接画到 TFT 上，而不是等封面精灵路径。
         ui_draw_nfc_bind_target_popup_on_tft_if_visible();
+        ui_draw_nfc_scan_popup_on_tft_if_visible();
         
         s_screen_cleared = true;
         ui_draw_unlock();
