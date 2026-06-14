@@ -390,6 +390,14 @@ static void handle_encoder_volume_step(int8_t step)
     ui_show_volume_step_hint(static_cast<uint8_t>(volume_step));
 }
 
+static void play_key_toggle_with_solenoid()
+{
+    // 播放键短按时，同时给 TC118S 输出一次电磁铁翻转短脉冲。
+    // 只在播放键语义里触发；菜单确认、NFC确认、HALL触发不走这里。
+    (void)board_hw_solenoid_flip();
+    player_toggle_play();
+}
+
 static void enter_quick_menu_from_player()
 {
     volume_fast_mode_exit();
@@ -816,7 +824,7 @@ static bool handle_backlight_sleep_mode(int8_t encoder_step)
 
   // 熄屏状态下，PLAY 短按仍然播放 / 暂停，长按关机。
   handle_key(k_play,
-            player_toggle_play,
+            play_key_toggle_with_solenoid,
             app_power_save_and_shutdown);
 
   // 熄屏状态下，PREV / NEXT 短按仍然切歌。
@@ -1011,8 +1019,8 @@ void keys_update()
   mode_click_reset();
   handle_key(k_mode, volume_fast_mode_toggle, nullptr);
 
-  // PLAY：短按播放/暂停，长按保存 NVS 后关机。
-  handle_key(k_play, player_toggle_play, app_power_save_and_shutdown);
+  // PLAY：短按输出一次电磁铁短脉冲 + 播放/暂停，长按保存 NVS 后关机。
+  handle_key(k_play, play_key_toggle_with_solenoid, app_power_save_and_shutdown);
 
   // PREV / NEXT：短按=切歌，长按 PREV=弹出 NFC 绑定类型选择，长按 NEXT=进入列表选择模式。
   handle_key(k_prev, player_prev_track, nfc_bind_popup_open);

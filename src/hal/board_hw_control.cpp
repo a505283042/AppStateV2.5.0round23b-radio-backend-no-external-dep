@@ -136,9 +136,74 @@ bool s_amp_mute_enabled = true;
 bool s_amp_shutdown_enabled = true;
 bool s_backlight_enabled = true;
 
+// TC118S / 电磁铁脉冲驱动：
+// SOL_CTRL_A = MCP23017 GPB0，SOL_CTRL_B = MCP23017 GPB1。
+// 默认停止态为 A=0/B=0，禁止长期通电。
+static constexpr uint32_t SOLENOID_PULSE_MIN_MS = 20;
+static constexpr uint32_t SOLENOID_PULSE_MAX_MS = 300;
+
+bool s_solenoid_busy = false;
+uint32_t s_solenoid_stop_at_ms = 0;
+SolenoidDirection s_solenoid_last_direction = SolenoidDirection::B;
+
 bool level_from_enabled(bool enabled, bool active_level)
 {
     return enabled ? active_level : !active_level;
+}
+
+uint32_t clamp_solenoid_pulse_ms(uint32_t pulse_ms)
+{
+    if (pulse_ms < SOLENOID_PULSE_MIN_MS) return SOLENOID_PULSE_MIN_MS;
+    if (pulse_ms > SOLENOID_PULSE_MAX_MS) return SOLENOID_PULSE_MAX_MS;
+    return pulse_ms;
+}
+
+bool write_solenoid_levels(bool a_level, bool b_level)
+{
+    if (!mcp23017_u3_is_ready()) {
+        return false;
+    }
+
+    // TC118S 是单路全桥控制，A/B 不能同时拉高；
+    // 电磁铁只做一次动作，停止态统一 A=0/B=0。
+    if (a_level && b_level) {
+        LOGW("[SOL] 拒绝 A/B 同时有效");
+        return false;
+    }
+
+    bool ok = true;
+    ok &= mcp23017_u3_set_b(board::MCP_B_SOL_CTRL_A, a_level);
+    ok &= mcp23017_u3_set_b(board::MCP_B_SOL_CTRL_B, b_level);
+    return ok;
+}
+
+bool start_solenoid_pulse(SolenoidDirection direction, uint32_t pulse_ms)
+{
+    if (!mcp23017_u3_is_ready()) {
+        return false;
+    }
+
+    const uint32_t safe_pulse_ms = clamp_solenoid_pulse_ms(pulse_ms);
+
+    // 先回到停止态，再给目标方向脉冲，避免方向切换瞬间交叉导通。
+    if (!write_solenoid_levels(false, false)) {
+        return false;
+    }
+
+    const bool a_level = direction == SolenoidDirection::A;
+    const bool b_level = direction == SolenoidDirection::B;
+
+    if (!write_solenoid_levels(a_level, b_level)) {
+        (void)write_solenoid_levels(false, false);
+        return false;
+    }
+
+    s_solenoid_busy = true;
+    s_solenoid_last_direction = direction;
+    s_solenoid_stop_at_ms = millis() + safe_pulse_ms;
+
+    LOGI("[SOL] pulse %s %lums", direction == SolenoidDirection::A ? "A" : "B", (unsigned long)safe_pulse_ms);
+    return true;
 }
 
 }  // namespace
@@ -157,6 +222,7 @@ bool board_hw_control_begin()
     board_hw_set_bt_switch(false);
     board_hw_set_amp_mute(true);
     board_hw_set_amp_shutdown(true);
+    board_hw_solenoid_begin();
 
     LOGI("[HWCTRL] begin ok BAT_ADC=%d BT_PWR=MCPB%d MUTE=MCPA%d SHDN=MCPA%d",
          PIN_BAT_ADC,
@@ -414,6 +480,69 @@ bool board_hw_set_backlight(bool enabled)
 bool board_hw_get_backlight()
 {
     return s_backlight_enabled;
+}
+
+bool board_hw_solenoid_begin()
+{
+    s_solenoid_busy = false;
+    s_solenoid_stop_at_ms = 0;
+
+    const bool ok = write_solenoid_levels(false, false);
+    LOGI("[SOL] begin %s A=MCPB%d B=MCPB%d",
+         ok ? "ok" : "fail",
+         board::MCP_B_SOL_CTRL_A,
+         board::MCP_B_SOL_CTRL_B);
+    return ok;
+}
+
+bool board_hw_solenoid_stop()
+{
+    const bool ok = write_solenoid_levels(false, false);
+    if (ok) {
+        s_solenoid_busy = false;
+        s_solenoid_stop_at_ms = 0;
+    }
+    return ok;
+}
+
+bool board_hw_solenoid_pulse_a(uint32_t pulse_ms)
+{
+    return start_solenoid_pulse(SolenoidDirection::A, pulse_ms);
+}
+
+bool board_hw_solenoid_pulse_b(uint32_t pulse_ms)
+{
+    return start_solenoid_pulse(SolenoidDirection::B, pulse_ms);
+}
+
+bool board_hw_solenoid_flip(uint32_t pulse_ms)
+{
+    const SolenoidDirection next =
+        s_solenoid_last_direction == SolenoidDirection::A
+            ? SolenoidDirection::B
+            : SolenoidDirection::A;
+
+    return start_solenoid_pulse(next, pulse_ms);
+}
+
+void board_hw_solenoid_tick()
+{
+    if (!s_solenoid_busy) {
+        return;
+    }
+
+    if (static_cast<int32_t>(s_solenoid_stop_at_ms - millis()) > 0) {
+        return;
+    }
+
+    if (board_hw_solenoid_stop()) {
+        LOGD("[SOL] auto stop");
+    }
+}
+
+bool board_hw_solenoid_is_busy()
+{
+    return s_solenoid_busy;
 }
 
 bool board_hw_pulse_bt_switch(uint32_t pulse_ms)

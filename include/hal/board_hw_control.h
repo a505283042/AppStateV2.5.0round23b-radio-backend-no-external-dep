@@ -91,4 +91,39 @@ bool board_hw_get_amp_mute();
 bool board_hw_set_amp_shutdown(bool enabled);
 bool board_hw_get_amp_shutdown();
 
+// ============================================================
+// TC118S / 电磁铁脉冲驱动
+// ============================================================
+
+enum class SolenoidDirection : uint8_t {
+    A = 0,  // SOL_CTRL_A=1, SOL_CTRL_B=0
+    B = 1,  // SOL_CTRL_A=0, SOL_CTRL_B=1
+};
+
+/**
+ * @brief 初始化 TC118S 控制脚，默认停止态。
+ *
+ * SOL_CTRL_A = MCP23017 GPB0
+ * SOL_CTRL_B = MCP23017 GPB1
+ */
+bool board_hw_solenoid_begin();
+
+/** @brief 立即停止电磁铁输出，A/B 全部拉低。 */
+bool board_hw_solenoid_stop();
+
+/** @brief 触发一次 A 方向短脉冲，默认 80ms，到时自动停止。 */
+bool board_hw_solenoid_pulse_a(uint32_t pulse_ms = 80);
+
+/** @brief 触发一次 B 方向短脉冲，默认 80ms，到时自动停止。 */
+bool board_hw_solenoid_pulse_b(uint32_t pulse_ms = 80);
+
+/** @brief 按上一次方向自动翻转，触发一次短脉冲。 */
+bool board_hw_solenoid_flip(uint32_t pulse_ms = 80);
+
+/** @brief 主循环里调用，用来在脉冲到时后自动断电。 */
+void board_hw_solenoid_tick();
+
+/** @brief 当前是否处在电磁铁脉冲输出期间。 */
+bool board_hw_solenoid_is_busy();
+
 void board_hw_debug_dump();

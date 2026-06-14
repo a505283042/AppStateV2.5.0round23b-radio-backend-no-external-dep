@@ -26,6 +26,7 @@
 #include "player_recover.h"
 #include "player_source.h"
 #include "web/web_server.h"
+#include "hal/board_hw_control.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -209,6 +210,8 @@ void app_state_update(void)
 {
     // 按键处理也需要高频调用，确保响应及时
     keys_update();
+    // TC118S 电磁铁只允许短脉冲输出，tick 到时后自动断电。
+    board_hw_solenoid_tick();
     web_server_poll();
 
     // 睡眠关机定时器到点后走统一安全关机流程。
