@@ -14,11 +14,11 @@ namespace {
 
 const QuickMenuItem ROOT_ITEMS[] = {
     {"播放控制", QuickMenuItemType::SubPage, QuickMenuPage::Playback, "", nullptr, nullptr, true, false},
-    {"播放源", QuickMenuItemType::SubPage, QuickMenuPage::Source, "", nullptr, nullptr, true, false},
+    {"播放来源", QuickMenuItemType::SubPage, QuickMenuPage::Source, "", nullptr, nullptr, true, false},
     {"显示设置", QuickMenuItemType::SubPage, QuickMenuPage::Display, "", nullptr, nullptr, true, false},
+    {"NFC管理", QuickMenuItemType::SubPage, QuickMenuPage::Nfc, "", nullptr, nullptr, true, false},
     {"网络设置", QuickMenuItemType::SubPage, QuickMenuPage::Network, "", nullptr, nullptr, true, false},
-    {"音频输出", QuickMenuItemType::SubPage, QuickMenuPage::AudioOutput, "", nullptr, nullptr, true, false},
-    {"NFC", QuickMenuItemType::SubPage, QuickMenuPage::Nfc, "", nullptr, nullptr, true, false},
+    {"音频输出", QuickMenuItemType::SubPage, QuickMenuPage::AudioOutput, "", nullptr, nullptr, true, false},    
     {"系统信息", QuickMenuItemType::SubPage, QuickMenuPage::SystemInfo, "", nullptr, nullptr, true, false},
     {"返回", QuickMenuItemType::Back, QuickMenuPage::Root, "", nullptr, nullptr, true, false},
 };
@@ -53,6 +53,12 @@ const QuickMenuPageDef& quick_menu_get_page_def(QuickMenuPage page)
 
         case QuickMenuPage::Nfc:
             return quick_menu_get_nfc_page();
+
+        case QuickMenuPage::NfcList:
+            return quick_menu_get_nfc_list_page();
+
+        case QuickMenuPage::NfcDetail:
+            return quick_menu_get_nfc_detail_page();
 
         case QuickMenuPage::SystemInfo:
             return quick_menu_get_system_page();

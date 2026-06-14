@@ -163,7 +163,7 @@ void draw_footer()
 
     tft.setTextColor(COLOR_DIM, COLOR_BG);
 tft.setTextColor(COLOR_DIM, COLOR_BG);
-draw_center_text("旋钮选择 按下确认 MODE返回/长退", 178);
+draw_center_text("旋钮选 按下确认 MODE返/长退", 178);
 draw_center_text(">进 !执行 +切换 =状态", 193);
 }
 
@@ -244,12 +244,40 @@ void draw_menu_row(const QuickMenuItemView& item, int row, bool draw_bg)
         value = "占位";
     }
 
-    const int value_w = value.length() > 0 ? tft.textWidth(value) : 0;
+    const QuickMenuPage current_page = quick_menu_get_page();
+    const bool nfc_list_row = current_page == QuickMenuPage::NfcList;
+    const bool nfc_detail_row = current_page == QuickMenuPage::NfcDetail;
+    const bool nfc_compact_row = nfc_list_row || nfc_detail_row;
 
-    int label_max_w = 150;
+    // NFC列表页左边需要完整显示“#序号 类型”，所以隐藏“!”标记并加宽左侧。
+    const bool hide_marker = nfc_list_row && item.type == QuickMenuItemType::Action && !placeholder;
+    const int row_label_x = hide_marker ? MARK_X : LABEL_X;
+    const int row_value_x = nfc_compact_row ? 218 : VALUE_X;
+
+    const int value_max_w = nfc_list_row ? 108 : (nfc_detail_row ? 124 : 96);
+    const int value_w = value.length() > 0
+        ? min(tft.textWidth(value), value_max_w)
+        : 0;
+
+    int label_max_w = nfc_list_row ? 82 : (nfc_detail_row ? 74 : 150);
     if (value_w > 0) {
-        label_max_w = VALUE_X - LABEL_X - value_w - 10;
-        if (label_max_w < 56) {
+        label_max_w = row_value_x - row_label_x - value_w - 8;
+
+        if (nfc_list_row) {
+            if (label_max_w < 64) {
+                label_max_w = 64;
+            }
+            if (label_max_w > 82) {
+                label_max_w = 82;
+            }
+        } else if (nfc_detail_row) {
+            if (label_max_w < 44) {
+                label_max_w = 44;
+            }
+            if (label_max_w > 74) {
+                label_max_w = 74;
+            }
+        } else if (label_max_w < 56) {
             label_max_w = 56;
         }
     }
@@ -258,17 +286,19 @@ void draw_menu_row(const QuickMenuItemView& item, int row, bool draw_bg)
 
     tft.setTextDatum(middle_left);
     tft.setTextColor(marker_color, bg);
-    tft.drawString(menu_type_marker(item.type, placeholder), MARK_X, row_y);
+    if (!hide_marker) {
+        tft.drawString(menu_type_marker(item.type, placeholder), MARK_X, row_y);
+    }
 
     tft.setTextColor(label_color, bg);
-    tft.drawString(label, LABEL_X, row_y);
+    tft.drawString(label, row_label_x, row_y);
 
     if (value.length() > 0) {
-        value = clip_utf8_for_tft(value, 96);
+        value = clip_utf8_for_tft(value, value_max_w);
 
         tft.setTextDatum(middle_right);
         tft.setTextColor(value_color, bg);
-        tft.drawString(value, VALUE_X, row_y);
+        tft.drawString(value, row_value_x, row_y);
     }
 
     tft.setTextDatum(top_left);

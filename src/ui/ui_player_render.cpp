@@ -66,33 +66,44 @@ static void draw_volume_step_hint_overlay(LGFX_Sprite* dst)
   }
 
   const uint8_t step = s_volume_step_hint;
+  const uint8_t volume = s_ui_volume;
 
-  // 圆屏上中间小弹窗，尽量避开边缘裁切。
-  static constexpr int BOX_W = 72;
-  static constexpr int BOX_H = 32;
+  // 圆屏上中间小弹窗，显示当前音量值和本次旋钮步进。
+  static constexpr int BOX_W = 122;
+  static constexpr int BOX_H = 40;
   static constexpr int BOX_X = (240 - BOX_W) / 2;
   static constexpr int BOX_Y = (240 - BOX_H) / 2;
-  static constexpr int BOX_R = 10;
+  static constexpr int BOX_R = 12;
 
   const uint16_t border_color = step > 1 ? TFT_YELLOW : TFT_DARKGREY;
   const uint16_t icon_color = step > 1 ? TFT_YELLOW : TFT_LIGHTGREY;
   const uint16_t text_color = TFT_WHITE;
+  const uint16_t step_color = step > 1 ? TFT_YELLOW : TFT_LIGHTGREY;
 
   dst->fillRoundRect(BOX_X, BOX_Y, BOX_W, BOX_H, BOX_R, TFT_BLACK);
   dst->drawRoundRect(BOX_X, BOX_Y, BOX_W, BOX_H, BOX_R, border_color);
 
   // 复用项目已有音量图标。
-  draw_volume_icon(dst, BOX_X + 12, BOX_Y + 10, icon_color);
+  draw_volume_icon(dst, BOX_X + 12, BOX_Y + 14, icon_color);
 
-  char label[8];
-  snprintf(label, sizeof(label), "x%u", static_cast<unsigned>(step));
+  char volume_label[8];
+  snprintf(volume_label, sizeof(volume_label), "%u%%", static_cast<unsigned>(volume));
+
+  char step_label[8];
+  snprintf(step_label, sizeof(step_label), "x%u", static_cast<unsigned>(step));
 
   dst->setFont(&g_font_cjk);
   dst->setTextSize(1);
   dst->setTextWrap(false);
-  dst->setTextColor(text_color, TFT_BLACK);
+
   dst->setTextDatum(middle_left);
-  dst->drawString(label, BOX_X + 38, BOX_Y + BOX_H / 2);
+  dst->setTextColor(text_color, TFT_BLACK);
+  dst->drawString(volume_label, BOX_X + 38, BOX_Y + BOX_H / 2);
+
+  dst->setTextDatum(middle_right);
+  dst->setTextColor(step_color, TFT_BLACK);
+  dst->drawString(step_label, BOX_X + BOX_W - 12, BOX_Y + BOX_H / 2);
+
   dst->setTextDatum(top_left);
 }
 

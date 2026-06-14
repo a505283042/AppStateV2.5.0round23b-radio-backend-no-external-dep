@@ -3,7 +3,12 @@
 #include <Arduino.h>
 
 #include "menu/quick_menu_pages.h"
+#include "menu/quick_menu_page_nfc.h"
 #include "utils/log.h"
+
+// quick_menu.cpp 在匿名命名空间前面就会调用页面定义表，
+// 这里显式声明一次，避免本地头文件包含顺序不一致时编译器看不到声明。
+const QuickMenuPageDef& quick_menu_get_page_def(QuickMenuPage page);
 
 namespace {
 
@@ -89,6 +94,9 @@ static bool quick_menu_page_is_dynamic(QuickMenuPage page)
         case QuickMenuPage::MemoryInfo:
         case QuickMenuPage::StackInfo:
         case QuickMenuPage::BatteryInfo:
+        case QuickMenuPage::Nfc:
+        case QuickMenuPage::NfcList:
+        case QuickMenuPage::NfcDetail:
             return true;
 
         default:
@@ -103,7 +111,15 @@ const QuickMenuPageDef& current_page_def()
 
 static void open_page(QuickMenuPage page)
 {
+    const QuickMenuPage prev_page = s_page;
+
     save_current_selection();
+
+    // 从 NFC管理 重新进入 NFC列表管理 时，从第一页开始。
+    // 从 NFC详情 返回/跳回 NFC列表管理 时，不重置页码，方便继续看刚才那一页。
+    if (page == QuickMenuPage::NfcList && prev_page != QuickMenuPage::NfcDetail) {
+        quick_menu_nfc_list_reset_page();
+    }
 
     s_page = page;
 
@@ -262,6 +278,15 @@ void quick_menu_enter()
     arm_confirm_guard();
 }
 
+void quick_menu_open_page(QuickMenuPage page)
+{
+    if (!s_active) {
+        return;
+    }
+
+    open_page(page);
+}
+
 void quick_menu_exit()
 {
     if (!s_active) {
@@ -316,12 +341,72 @@ void quick_menu_handle_key(QuickMenuKey key)
     }
 
     switch (key) {
-        case QuickMenuKey::Up:
+        case QuickMenuKey::Up: {
+            // NFC列表页只显示实际存在的条目。
+            // 在当前页第一条绑定处继续向上拨动旋钮时，自动翻到上一页。
+            const QuickMenuPageDef& def = current_page_def();
+            if (s_page == QuickMenuPage::NfcList && def.item_count > 2 && s_selected == 1) {
+                if (quick_menu_nfc_list_prev_page()) {
+                    s_selected = 1;
+                    touch_menu();
+                    mark_dirty();
+                    return;
+                }
+            }
             move_selection(-1);
             return;
+        }
 
-        case QuickMenuKey::Down:
+        case QuickMenuKey::Down: {
+            // NFC列表页有两种形态：
+            // 1) 非末页：绑定数量 + 4条绑定，没有“返回”；最后一条绑定是 def.item_count - 1。
+            // 2) 末页：绑定数量 + 若干绑定 + 返回；最后一条绑定是“返回”前一行。
+            const QuickMenuPageDef& def = current_page_def();
+            if (s_page == QuickMenuPage::NfcList && def.item_count > 1) {
+                int last_binding_index = static_cast<int>(def.item_count) - 1;
+                if (def.items[def.item_count - 1].type == QuickMenuItemType::Back) {
+                    last_binding_index = static_cast<int>(def.item_count) - 2;
+                }
+
+                if (s_selected >= 1 && s_selected == last_binding_index) {
+                    if (quick_menu_nfc_list_next_page()) {
+                        s_selected = 1;
+                        touch_menu();
+                        mark_dirty();
+                        return;
+                    }
+                }
+            }
             move_selection(+1);
+            return;
+        }
+
+        case QuickMenuKey::PageUp:
+            if (s_page == QuickMenuPage::NfcList) {
+                if (quick_menu_nfc_list_prev_page()) {
+                    s_selected = 1;
+                    touch_menu();
+                    mark_dirty();
+                } else {
+                    move_selection(-1);
+                }
+            } else {
+                move_selection(-1);
+            }
+            return;
+
+        case QuickMenuKey::PageDown:
+            if (s_page == QuickMenuPage::NfcList) {
+                if (quick_menu_nfc_list_next_page()) {
+                    s_selected = 1;
+                    touch_menu();
+                    mark_dirty();
+                } else {
+                    move_selection(+1);
+                }
+            } else {
+                move_selection(+1);
+            }
             return;
 
         case QuickMenuKey::Confirm:
@@ -377,7 +462,7 @@ bool quick_menu_get_item_view(uint8_t index, QuickMenuItemView& out)
 
     const QuickMenuItem& item = info.items[index];
 
-    out.label = item.label ? item.label : "";
+    out.label = item.get_label ? item.get_label() : (item.label ? item.label : "");
     out.value = item_value(item);
     out.type = item.type;
     out.selected = static_cast<int>(index) == s_selected;

@@ -849,13 +849,15 @@ void keys_update()
                [](){ quick_menu_handle_key(QuickMenuKey::Back); },
                [](){ quick_menu_handle_key(QuickMenuKey::Exit); });
 
+    // 快捷菜单中：上一曲/下一曲短按作为翻页键。
+    // 普通菜单页里等价于上一项/下一项；NFC列表页里是真正上一页/下一页。
     handle_key(k_prev,
-               [](){ quick_menu_handle_key(QuickMenuKey::Up); },
-               nullptr);
+              [](){ quick_menu_handle_key(QuickMenuKey::PageUp); },
+              nullptr);
 
     handle_key(k_next,
-               [](){ quick_menu_handle_key(QuickMenuKey::Down); },
-               nullptr);
+              [](){ quick_menu_handle_key(QuickMenuKey::PageDown); },
+              nullptr);
 
     return;
   }
@@ -864,7 +866,10 @@ void keys_update()
   if (g_app_state == STATE_NFC_ADMIN) {
     mode_click_reset();
     handle_key(k_mode, [](){ nfc_admin_state_on_key(NFC_ADMIN_KEY_MODE_SHORT); }, nullptr);
+
+    // 绑定刷卡后的确认页：PLAY 和编码器按下都作为“确认绑定”。
     handle_key(k_play, [](){ nfc_admin_state_on_key(NFC_ADMIN_KEY_PLAY_SHORT); }, nullptr);
+    handle_key(k_ec06e, [](){ nfc_admin_state_on_key(NFC_ADMIN_KEY_PLAY_SHORT); }, nullptr);
     return;
   }
 

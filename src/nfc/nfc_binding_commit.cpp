@@ -5,6 +5,7 @@
 #include "player_source.h"
 #include "player_state.h"
 #include "utils/log.h"
+#include <vector>
 
 namespace {
 
@@ -110,6 +111,77 @@ bool nfc_binding_remove_and_save_safely(const String& uid,
     if (!nfc_binding_save_map_with_rollback()) {
         return false;
     }
+
+    nfc_binding_try_resume_after_commit(resume_ctx);
+    return true;
+}
+
+bool nfc_binding_remove_target_and_save_safely(NfcBindType type,
+                                               const String& key,
+                                               int* removed_count,
+                                               bool* was_playing_before,
+                                               bool resume_playback_after_commit)
+{
+    if (removed_count) {
+        *removed_count = 0;
+    }
+
+    if (type == NFC_BIND_UNKNOWN || key.isEmpty()) {
+        LOGW("[NFC绑定] 按目标删除失败: type/key 无效");
+        return false;
+    }
+
+    std::vector<String> uids;
+    uids.reserve(4);
+
+    const int total = nfc_binding_count();
+    for (int i = 0; i < total; ++i) {
+        NfcBindingEntry entry;
+        if (!nfc_binding_get(i, entry)) {
+            continue;
+        }
+
+        if (entry.type == type && entry.key == key) {
+            uids.push_back(entry.uid);
+        }
+    }
+
+    if (uids.empty()) {
+        LOGI("[NFC绑定] 按目标删除: 没有匹配绑定 type=%s key=%s",
+             nfc_binding_type_to_cstr(type),
+             key.c_str());
+        return false;
+    }
+
+    const NfcBindingResumeCtx resume_ctx =
+        nfc_binding_capture_resume_ctx(resume_playback_after_commit);
+
+    nfc_binding_prepare_safe_commit(was_playing_before);
+
+    int removed = 0;
+    for (const String& uid : uids) {
+        if (nfc_binding_remove(uid)) {
+            ++removed;
+        }
+    }
+
+    if (removed_count) {
+        *removed_count = removed;
+    }
+
+    if (removed <= 0) {
+        LOGW("[NFC绑定] 按目标删除失败: 收集到 UID 但实际未删除");
+        return false;
+    }
+
+    if (!nfc_binding_save_map_with_rollback()) {
+        return false;
+    }
+
+    LOGI("[NFC绑定] 已删除目标绑定 %d 条 type=%s key=%s",
+         removed,
+         nfc_binding_type_to_cstr(type),
+         key.c_str());
 
     nfc_binding_try_resume_after_commit(resume_ctx);
     return true;

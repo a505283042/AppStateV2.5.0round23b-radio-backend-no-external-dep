@@ -1,13 +1,12 @@
 #include "nfc/nfc_binding.h"
 #include "utils/log.h"
 #include "storage/storage_io.h"
-
 #include <SdFat.h>
+
+#include <vector>
 
 // 外部声明全局 SD 对象（定义在 storage.cpp）
 extern SdFat sd;
-
-#include <vector>
 
 static std::vector<NfcBindingEntry> s_bindings;
 // dirty=true 表示当前内存绑定表比 TF 卡上的 /System/nfc_map.txt 更新。
@@ -299,3 +298,4 @@ bool nfc_binding_save(const char* path)
     LOGI("[NFC绑定] 已保存 %d 条绑定到 %s", (int)s_bindings.size(), path);
     return true;
 }
+

@@ -250,7 +250,8 @@ void ui_nfc_admin_show_confirm(const String& uid, NfcUiConfirmState state, NfcUi
   }
   
   tft.setTextColor(TFT_GREEN, TFT_BLACK);
-  draw_center_text("PLAY：保存  MODE：返回", 200);
+  draw_center_text("PLAY键 / 旋钮按下：保存", 200);
+  draw_center_text("MODE键：返回", 216);
   ui_draw_unlock();
   ui_request_refresh();
 }

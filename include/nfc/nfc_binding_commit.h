@@ -22,3 +22,15 @@ bool nfc_binding_set_and_save_safely(const String& uid,
 bool nfc_binding_remove_and_save_safely(const String& uid,
                                         bool* was_playing_before = nullptr,
                                         bool resume_playback_after_commit = false);
+
+/**
+ * @brief 安全删除所有绑定到同一个播放目标的 UID，并保存到 nfc_map.txt。
+ *
+ * 例如：删除所有“绑定到当前歌曲 audio_path”的卡片绑定。
+ * removed_count 非空时返回本次实际删除条数。
+ */
+bool nfc_binding_remove_target_and_save_safely(NfcBindType type,
+                                               const String& key,
+                                               int* removed_count = nullptr,
+                                               bool* was_playing_before = nullptr,
+                                               bool resume_playback_after_commit = false);

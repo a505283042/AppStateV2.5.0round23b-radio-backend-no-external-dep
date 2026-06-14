@@ -8,6 +8,9 @@ bool quick_menu_is_active();
 void quick_menu_enter();
 void quick_menu_exit();
 
+// 供菜单 Action 在执行后跳转到另一个菜单页，例如 NFC 列表进入详情页。
+void quick_menu_open_page(QuickMenuPage page);
+
 void quick_menu_tick();
 void quick_menu_handle_key(QuickMenuKey key);
 

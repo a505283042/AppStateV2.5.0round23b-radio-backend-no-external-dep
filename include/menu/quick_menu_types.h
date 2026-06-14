@@ -5,6 +5,8 @@
 enum class QuickMenuKey : uint8_t {
     Up,
     Down,
+    PageUp,
+    PageDown,
     Confirm,
     Back,
     Exit,
@@ -19,6 +21,8 @@ enum class QuickMenuPage : uint8_t {
     AudioOutput,
     Bluetooth,
     Nfc,
+    NfcList,
+    NfcDetail,
     SystemInfo,
     MemoryInfo,
     StackInfo,
@@ -45,6 +49,7 @@ struct QuickMenuItemView {
 };
 
 using QuickMenuValueGetter = const char* (*)();
+using QuickMenuLabelGetter = const char* (*)();
 using QuickMenuConfirmHandler = bool (*)();
 
 struct QuickMenuItem {
@@ -56,6 +61,7 @@ struct QuickMenuItem {
     QuickMenuConfirmHandler on_confirm;
     bool enabled;
     bool placeholder;
+    QuickMenuLabelGetter get_label;
 };
 
 struct QuickMenuPageDef {
