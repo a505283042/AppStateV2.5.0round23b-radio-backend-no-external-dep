@@ -14,6 +14,7 @@
 #include "menu/quick_menu_page_nfc.h"
 #include "utils/log.h"
 #include "web/web_server.h"
+#include "web/web_settings.h"
 #include "board/board_pins_pcb1_mcp23017.h"
 #include "hal/mcp23017_u3.h"
 #include "hal/board_hw_control.h"
@@ -392,9 +393,11 @@ static void handle_encoder_volume_step(int8_t step)
 
 static void play_key_toggle_with_solenoid()
 {
-    // 播放键短按时，同时给 TC118S 输出一次电磁铁翻转短脉冲。
+    // 播放键短按时，可选给 TC118S 输出一次电磁铁翻转短脉冲。
     // 只在播放键语义里触发；菜单确认、NFC确认、HALL触发不走这里。
-    (void)board_hw_solenoid_flip();
+    if (web_settings_get().solenoid_enabled) {
+        (void)board_hw_solenoid_flip();
+    }
     player_toggle_play();
 }
 
@@ -482,6 +485,12 @@ static void handle_hall_out_play_pause()
 
     // 扫描 / NFC 绑定确认页不处理霍尔输入，避免管理流程中误触发播放状态。
     if (g_rescanning || g_app_state == STATE_NFC_ADMIN) {
+        return;
+    }
+
+    // 霍尔控制总开关关闭时，仍同步当前电平，避免重新开启后误触发。
+    if (!web_settings_get().hall_control_enabled) {
+        hall_out_sync_to_hw_state();
         return;
     }
 

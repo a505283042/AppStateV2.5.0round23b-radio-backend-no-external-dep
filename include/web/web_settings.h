@@ -33,6 +33,15 @@ struct WebRuntimeSettings {
   // 是否在屏幕 / Web 状态里显示 WiFi 信息。
   // 这只是显示开关，不影响 WiFi 本身。
   bool show_wifi_info = true;
+
+  // HALL_OUT 霍尔输入总开关。
+  // 关闭后 GPIO9 仍保持输入，但不再控制播放 / 暂停。
+  bool hall_control_enabled = true;
+
+  // TC118S 电磁铁动作总开关。
+  // 关闭后播放键不再输出电磁铁短脉冲，驱动层仍保持停止态保护。
+  bool solenoid_enabled = true;
+
 };
 
 // 启动时从 NVS 加载网页运行设置；没有则使用默认值。

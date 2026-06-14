@@ -15,7 +15,9 @@ static bool web_settings_equal(const WebRuntimeSettings& a, const WebRuntimeSett
       && a.show_cover == b.show_cover
       && a.web_cover_spin == b.web_cover_spin
       && a.wifi_enabled == b.wifi_enabled
-      && a.show_wifi_info == b.show_wifi_info;
+      && a.show_wifi_info == b.show_wifi_info
+      && a.hall_control_enabled == b.hall_control_enabled
+      && a.solenoid_enabled == b.solenoid_enabled;
 }
 
 const WebRuntimeSettings& web_settings_get() { return s_cfg; }
@@ -117,6 +119,8 @@ bool web_settings_load() {
   s_cfg.web_cover_spin = pref.getBool("cover_spin", s_cfg.web_cover_spin);
   s_cfg.wifi_enabled = pref.getBool("wifi_en", s_cfg.wifi_enabled);
   s_cfg.show_wifi_info = pref.getBool("wifi_info", s_cfg.show_wifi_info);
+  s_cfg.hall_control_enabled = pref.getBool("hall_en", s_cfg.hall_control_enabled);
+  s_cfg.solenoid_enabled = pref.getBool("sol_en", s_cfg.solenoid_enabled);
   pref.end();
   s_dirty = false;
 
@@ -144,7 +148,9 @@ bool web_settings_save() {
                && pref.putBool("show_cover", s_cfg.show_cover)
                && pref.putBool("cover_spin", s_cfg.web_cover_spin)
                && pref.putBool("wifi_en", s_cfg.wifi_enabled)
-               && pref.putBool("wifi_info", s_cfg.show_wifi_info);
+               && pref.putBool("wifi_info", s_cfg.show_wifi_info)
+               && pref.putBool("hall_en", s_cfg.hall_control_enabled)
+               && pref.putBool("sol_en", s_cfg.solenoid_enabled);
   pref.end();
 
   if (!ok) {

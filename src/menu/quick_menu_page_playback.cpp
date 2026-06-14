@@ -7,15 +7,22 @@
 #include "app_flags.h"
 #include "app_power.h"
 #include "app_state.h"
+#include "hal/board_hw_control.h"
 #include "player_control.h"
 #include "player_list_select.h"
 #include "player_source.h"
 #include "storage/storage.h"
 #include "ui/ui.h"
+#include "web/web_settings.h"
 
 namespace {
 
 #define MENU_COUNT(arr) static_cast<uint8_t>(sizeof(arr) / sizeof((arr)[0]))
+
+const char* bool_label(bool enabled)
+{
+    return enabled ? "开" : "关";
+}
 
 const char* value_play_order()
 {
@@ -114,6 +121,16 @@ const char* value_tf_status()
     return storage_is_ready() ? "已就绪" : "未就绪";
 }
 
+const char* value_hall_control_enabled()
+{
+    return bool_label(web_settings_get().hall_control_enabled);
+}
+
+const char* value_solenoid_enabled()
+{
+    return bool_label(web_settings_get().solenoid_enabled);
+}
+
 bool action_toggle_play_order()
 {
     ui_mode_switch_highlight();
@@ -145,9 +162,33 @@ bool action_open_current_source_list()
         : player_list_select_enter(g_play_mode);
 
     // 从“播放控制”进入列表时保留快捷菜单会话。
-    // 这样列表里短按 MODE 只退回“播放控制”菜单，长按 MODE 才退出到播放器界面，
-    // 行为和“播放源”里的本地/电台/NAS列表一致。
+    // 这样列表里短按 MODE 只退回"播放控制"菜单，长按 MODE 才退出到播放器界面，
+    // 行为和"播放源"里的本地/电台/NAS列表一致。
     return ok;
+}
+
+bool action_toggle_hall_control()
+{
+    WebRuntimeSettings ws = web_settings_get();
+    ws.hall_control_enabled = !ws.hall_control_enabled;
+    web_settings_set(ws);
+    (void)web_settings_save();
+    return true;
+}
+
+bool action_toggle_solenoid()
+{
+    WebRuntimeSettings ws = web_settings_get();
+    ws.solenoid_enabled = !ws.solenoid_enabled;
+    web_settings_set(ws);
+
+    // 关闭时立即停止一次输出，保证不会残留在通电状态。
+    if (!ws.solenoid_enabled) {
+        (void)board_hw_solenoid_stop();
+    }
+
+    (void)web_settings_save();
+    return true;
 }
 
 bool action_cycle_sleep_timer()
@@ -171,6 +212,8 @@ const QuickMenuItem PLAYBACK_ITEMS[] = {
     {"播放大类", QuickMenuItemType::Toggle, QuickMenuPage::Playback, "", value_play_category, action_cycle_play_category, true, false},
     {"本地浏览方式", QuickMenuItemType::Toggle, QuickMenuPage::Playback, "", value_local_browse_mode, action_cycle_local_browse_mode, true, false},
     {"当前源列表", QuickMenuItemType::Action, QuickMenuPage::Playback, "", value_open, action_open_current_source_list, true, false},
+    {"霍尔控制", QuickMenuItemType::Toggle, QuickMenuPage::Playback, "", value_hall_control_enabled, action_toggle_hall_control, true, false},
+    {"电磁铁动作", QuickMenuItemType::Toggle, QuickMenuPage::Playback, "", value_solenoid_enabled, action_toggle_solenoid, true, false},
     {"睡眠关机", QuickMenuItemType::Toggle, QuickMenuPage::Playback, "", value_sleep_timer, action_cycle_sleep_timer, true, false},
     {"重扫曲库", QuickMenuItemType::Action, QuickMenuPage::Playback, "", value_execute, action_start_rescan, true, false},
     {"TF卡状态", QuickMenuItemType::Status, QuickMenuPage::Playback, "", value_tf_status, nullptr, true, false},
