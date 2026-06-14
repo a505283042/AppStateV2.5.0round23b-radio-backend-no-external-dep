@@ -97,6 +97,83 @@ static void draw_volume_step_hint_overlay(LGFX_Sprite* dst)
 }
 
 // =============================================================================
+// NFC 绑定类型选择 Overlay
+// =============================================================================
+
+static volatile bool s_nfc_bind_target_popup_visible = false;
+static volatile uint8_t s_nfc_bind_target_popup_selected = 0;
+
+void ui_show_nfc_bind_target_popup(uint8_t selected)
+{
+  if (selected > 2) {
+    selected = 0;
+  }
+
+  s_nfc_bind_target_popup_selected = selected;
+  s_nfc_bind_target_popup_visible = true;
+  ui_request_refresh();
+}
+
+void ui_hide_nfc_bind_target_popup()
+{
+  s_nfc_bind_target_popup_visible = false;
+  ui_request_refresh();
+}
+
+static void draw_nfc_bind_target_popup_overlay(LGFX_Sprite* dst)
+{
+  if (!dst || !s_nfc_bind_target_popup_visible) {
+    return;
+  }
+
+  const uint8_t selected = s_nfc_bind_target_popup_selected;
+
+  // 保持和音量步进提示一致的“居中黑色圆角弹窗”风格，尺寸稍大以容纳三项选择。
+  static constexpr int BOX_W = 168;
+  static constexpr int BOX_H = 88;
+  static constexpr int BOX_X = (240 - BOX_W) / 2;
+  static constexpr int BOX_Y = (240 - BOX_H) / 2;
+  static constexpr int BOX_R = 14;
+
+  dst->fillRoundRect(BOX_X, BOX_Y, BOX_W, BOX_H, BOX_R, TFT_BLACK);
+  dst->drawRoundRect(BOX_X, BOX_Y, BOX_W, BOX_H, BOX_R, TFT_YELLOW);
+
+  dst->setFont(&g_font_cjk);
+  dst->setTextSize(1);
+  dst->setTextWrap(false);
+
+  dst->setTextColor(TFT_WHITE, TFT_BLACK);
+  dst->setTextDatum(middle_center);
+  dst->drawString("NFC绑定", BOX_X + BOX_W / 2, BOX_Y + 17);
+
+  static const char* labels[3] = { "单曲", "歌手", "专辑" };
+  static constexpr int ITEM_W = 44;
+  static constexpr int ITEM_H = 24;
+  static constexpr int ITEM_GAP = 7;
+  static constexpr int ITEMS_W = ITEM_W * 3 + ITEM_GAP * 2;
+  static constexpr int ITEM_X0 = BOX_X + (BOX_W - ITEMS_W) / 2;
+  static constexpr int ITEM_Y = BOX_Y + 34;
+
+  for (uint8_t i = 0; i < 3; ++i) {
+    const int x = ITEM_X0 + i * (ITEM_W + ITEM_GAP);
+    const bool active = (i == selected);
+    const uint16_t border = active ? TFT_YELLOW : TFT_DARKGREY;
+    const uint16_t fg = active ? TFT_YELLOW : TFT_LIGHTGREY;
+
+    if (active) {
+      dst->fillRoundRect(x, ITEM_Y, ITEM_W, ITEM_H, 8, TFT_DARKGREY);
+    }
+    dst->drawRoundRect(x, ITEM_Y, ITEM_W, ITEM_H, 8, border);
+    dst->setTextColor(fg, active ? TFT_DARKGREY : TFT_BLACK);
+    dst->drawString(labels[i], x + ITEM_W / 2, ITEM_Y + ITEM_H / 2);
+  }
+
+  dst->setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+  dst->drawString("旋钮选择  PLAY确认", BOX_X + BOX_W / 2, BOX_Y + 72);
+  dst->setTextDatum(top_left);
+}
+
+// =============================================================================
 // 电池状态页脚绘制
 // =============================================================================
 
@@ -215,6 +292,7 @@ void cover_rotate_draw(float angle_deg)
 
   // 绘制音量步进小提示
   draw_volume_step_hint_overlay(dst);
+  draw_nfc_bind_target_popup_overlay(dst);
 
   // 将后帧推送到屏幕 (0, 0) 位置
   dst->pushSprite(0, 0);
@@ -1387,6 +1465,7 @@ void cover_panel_draw(float angle_deg)
 
   // 7. 绘制音量步进小提示
   draw_volume_step_hint_overlay(dst);
+  draw_nfc_bind_target_popup_overlay(dst);
 
   dst->pushSprite(0, 0);
 
@@ -1599,6 +1678,7 @@ void cover_info_draw()
 
   // 7) 音量步进小提示 Overlay
   draw_volume_step_hint_overlay(dst);
+  draw_nfc_bind_target_popup_overlay(dst);
 
   // 8) 推屏
   dst->pushSprite(0, 0);
