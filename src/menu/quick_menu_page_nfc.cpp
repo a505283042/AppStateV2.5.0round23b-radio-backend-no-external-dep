@@ -518,14 +518,27 @@ static const char* value_nfc_list_next()
 static bool action_nfc_list_prev_page()
 {
     const int total = nfc_binding_count();
-    if (total <= 0 || s_nfc_list_offset <= 0) {
+    if (total <= 0) {
         s_nfc_list_offset = 0;
         return false;
     }
 
-    s_nfc_list_offset -= NFC_LIST_PAGE_SIZE;
-    if (s_nfc_list_offset < 0) {
-        s_nfc_list_offset = 0;
+    const int old_offset = s_nfc_list_offset;
+
+    if (s_nfc_list_offset <= 0) {
+        // 和歌曲列表一致：第一个往前，循环到最后一页。
+        s_nfc_list_offset = ((total - 1) / NFC_LIST_PAGE_SIZE) * NFC_LIST_PAGE_SIZE;
+    } else {
+        s_nfc_list_offset -= NFC_LIST_PAGE_SIZE;
+        if (s_nfc_list_offset < 0) {
+            s_nfc_list_offset = 0;
+        }
+    }
+
+    nfc_list_clamp_offset();
+
+    if (s_nfc_list_offset == old_offset) {
+        return false;
     }
 
     // 只有真正换页时才请求整屏刷新；普通上下滚动不闪屏。
@@ -535,13 +548,28 @@ static bool action_nfc_list_prev_page()
 
 static bool action_nfc_list_next_page()
 {
-    nfc_list_clamp_offset();
-    if (!nfc_list_current_page_has_next()) {
+    const int total = nfc_binding_count();
+    if (total <= 0) {
+        s_nfc_list_offset = 0;
         return false;
     }
 
-    s_nfc_list_offset += NFC_LIST_PAGE_SIZE;
     nfc_list_clamp_offset();
+    const int old_offset = s_nfc_list_offset;
+
+    if (s_nfc_list_offset + NFC_LIST_PAGE_SIZE >= total) {
+        // 和歌曲列表一致：最后一个往后，循环到第一页。
+        s_nfc_list_offset = 0;
+    } else {
+        s_nfc_list_offset += NFC_LIST_PAGE_SIZE;
+    }
+
+    nfc_list_clamp_offset();
+
+    if (s_nfc_list_offset == old_offset) {
+        return false;
+    }
+
     quick_menu_request_full_refresh();
     return true;
 }
