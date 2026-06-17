@@ -37,7 +37,18 @@ uint32_t net_music_catalog_search(const String& query,
                                   uint16_t limit,
                                   std::vector<NetMusicSearchHit>* out);
 
-/** 加载 /System/net_music_base.txt 和 /System/net_music.txt，并建立行偏移索引。 */
+/** 只加载 /System/net_music_base.txt，开机阶段调用；不会加载 NAS 歌曲列表。 */
+bool net_music_catalog_load_base();
+
+/**
+ * @brief 从 NAS 下载 net_music.txt 到内存，并建立行偏移索引。
+ *
+ * 注意：
+ * - 不读取 /System/net_music.txt
+ * - 不写入 /System/net_music.txt
+ * - 不写入 /System/net_music.tmp
+ * - 打开 NAS 时不会和本地播放抢 TF 卡
+ */
 bool net_music_catalog_load();
 
 /** 当前网络歌曲索引是否已加载。 */
@@ -58,7 +69,7 @@ String net_music_catalog_base_url();
 /** 最近一次错误。 */
 String net_music_catalog_error();
 
-/** 列表文件路径。 */
+/** 列表来源说明；当前 NAS 列表只保存在内存中，不落盘。 */
 const char* net_music_catalog_path();
 
 /** base url 文件路径。 */

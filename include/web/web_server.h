@@ -21,6 +21,14 @@ bool web_server_ready();
  */
 bool web_server_retry_sta_from_config();
 
+/**
+ * @brief 按 /System/config/wifi.conf 里的网络顺序切换到下一个 WiFi。
+ *
+ * 当前已连接时，会优先尝试当前 SSID 后面的下一个配置；
+ * 只有一个配置时，相当于重新连接当前 WiFi。
+ */
+bool web_server_switch_wifi_from_config();
+
 bool web_wifi_is_enabled();
 void web_wifi_set_enabled(bool enabled);
 void web_wifi_toggle();

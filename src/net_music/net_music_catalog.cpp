@@ -1,6 +1,9 @@
 #include "net_music/net_music_catalog.h"
 
+#include <HTTPClient.h>
 #include <SdFat.h>
+#include <WiFi.h>
+#include <esp_heap_caps.h>
 #include <vector>
 
 #include "storage/storage_io.h"
@@ -12,12 +15,22 @@ namespace {
 
 std::vector<uint32_t> s_offsets;
 bool s_loaded = false;
+bool s_base_loaded = false;
 String s_error;
 String s_base_url;
 
-constexpr const char* kNetMusicListPath = "/System/net_music.txt";
+// NAS 歌曲列表只放内存，不写入 TF。
+// s_offsets 记录每一行在 s_list_buf 里的起始位置。
+char* s_list_buf = nullptr;
+uint32_t s_list_len = 0;
+uint32_t s_list_cap = 0;
+
+constexpr const char* kNetMusicListName = "net_music.txt";
+constexpr const char* kNetMusicMemoryPath = "memory:http/net_music.txt";
 constexpr const char* kNetMusicBasePath = "/System/net_music_base.txt";
 constexpr uint32_t kMaxNetMusicLineLen = 768;
+constexpr uint32_t kHttpChunkSize = 256;
+constexpr uint32_t kHttpIdleTimeoutMs = 8000;
 
 static String trim_copy(const String& in) {
   String s = in;
@@ -34,13 +47,75 @@ static void strip_utf8_bom(String& s) {
   }
 }
 
+static void free_remote_list_buffer() {
+  if (s_list_buf) {
+    heap_caps_free(s_list_buf);
+  }
+
+  s_list_buf = nullptr;
+  s_list_len = 0;
+  s_list_cap = 0;
+}
+
+static bool reserve_remote_list_capacity(uint32_t required_len) {
+  // 多留 1 字节放 '\0'，方便调试和安全截断。
+  const uint32_t required_cap = required_len + 1;
+  if (required_cap <= s_list_cap) {
+    return true;
+  }
+
+  uint32_t new_cap = s_list_cap ? s_list_cap : 4096;
+  while (new_cap < required_cap) {
+    new_cap *= 2;
+  }
+
+  void* p = heap_caps_realloc(s_list_buf,
+                              new_cap,
+                              MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+
+  if (p) {
+    LOGI("[网络音乐] 列表内存使用 PSRAM cap=%lu", (unsigned long)new_cap);
+  } else {
+    LOGW("[网络音乐] PSRAM 分配失败，尝试内部 RAM cap=%lu", (unsigned long)new_cap);
+    p = heap_caps_realloc(s_list_buf, new_cap, MALLOC_CAP_8BIT);
+  }
+
+  if (!p) {
+    s_error = "net_music_memory_alloc_failed";
+    LOGE("[网络音乐] 列表内存分配失败 need=%lu cap=%lu",
+         (unsigned long)required_len,
+         (unsigned long)new_cap);
+    return false;
+  }
+
+  s_list_buf = static_cast<char*>(p);
+  s_list_cap = new_cap;
+  return true;
+}
+
+static bool append_remote_list_bytes(const uint8_t* data, uint32_t len) {
+  if (!data || len == 0) {
+    return true;
+  }
+
+  if (!reserve_remote_list_capacity(s_list_len + len)) {
+    return false;
+  }
+
+  memcpy(s_list_buf + s_list_len, data, len);
+  s_list_len += len;
+  s_list_buf[s_list_len] = '\0';
+  return true;
+}
+
 static bool read_base_url_locked() {
   s_base_url = "";
+  s_base_loaded = false;
 
   File32 f = sd.open(kNetMusicBasePath, O_RDONLY);
   if (!f) {
     s_error = "net_music_base_missing";
-    LOGW("[网络音乐] base 文件 未找到: %s", kNetMusicBasePath);
+    LOGW("[网络音乐] base 文件未找到: %s", kNetMusicBasePath);
     return false;
   }
 
@@ -67,6 +142,142 @@ static bool read_base_url_locked() {
   if (!s_base_url.endsWith("/")) {
     s_base_url += "/";
   }
+
+  s_base_loaded = true;
+  s_error = "";
+
+  LOGI("[网络音乐] base 加载成功: %s", s_base_url.c_str());
+  return true;
+}
+
+static bool load_base_from_tf(uint32_t lock_timeout_ms) {
+  StorageSdLockGuard guard(lock_timeout_ms);
+  if (!guard) {
+    s_error = "sd_lock_failed_base";
+    LOGW("[网络音乐] 读取 base 失败：获取 SD 锁超时");
+    return false;
+  }
+
+  return read_base_url_locked();
+}
+
+static bool ensure_base_loaded() {
+  if (s_base_loaded && s_base_url.length()) {
+    return true;
+  }
+
+  // 正常情况下开机已经读取过 base。
+  // 这里是兜底：如果开机没读到，打开 NAS 时再读一次很小的 base 文件。
+  return load_base_from_tf(800);
+}
+
+static String build_remote_list_url() {
+  String url = s_base_url;
+  if (!url.endsWith("/")) {
+    url += "/";
+  }
+  url += kNetMusicListName;
+  return url;
+}
+
+static bool download_remote_list_to_memory() {
+  free_remote_list_buffer();
+
+  if (!WiFi.isConnected()) {
+    s_error = "wifi_not_connected";
+    LOGW("[网络音乐] 下载列表失败：WiFi 未连接");
+    return false;
+  }
+
+  const String url = build_remote_list_url();
+  LOGI("[网络音乐] 下载列表到内存: %s", url.c_str());
+
+  HTTPClient http;
+  http.setTimeout(6000);
+  http.setReuse(false);
+
+  if (!http.begin(url)) {
+    s_error = "http_begin_failed";
+    LOGW("[网络音乐] HTTP begin 失败: %s", url.c_str());
+    return false;
+  }
+
+  const int code = http.GET();
+  if (code != HTTP_CODE_OK) {
+    s_error = "http_get_failed";
+    LOGW("[网络音乐] 下载列表失败 HTTP=%d URL=%s", code, url.c_str());
+    http.end();
+    return false;
+  }
+
+  const int content_len = http.getSize();
+  if (content_len > 0) {
+    (void)reserve_remote_list_capacity((uint32_t)content_len);
+  }
+
+  WiFiClient* stream = http.getStreamPtr();
+  uint8_t chunk[kHttpChunkSize];
+  uint32_t last_data_ms = millis();
+
+  while (http.connected()) {
+    const int avail = stream ? stream->available() : 0;
+
+    if (avail > 0) {
+      const uint32_t want =
+          (uint32_t)avail > kHttpChunkSize ? kHttpChunkSize : (uint32_t)avail;
+
+      const int got = stream->readBytes(chunk, want);
+      if (got > 0) {
+        if (!append_remote_list_bytes(chunk, (uint32_t)got)) {
+          http.end();
+          free_remote_list_buffer();
+          return false;
+        }
+
+        last_data_ms = millis();
+
+        if (content_len > 0 && s_list_len >= (uint32_t)content_len) {
+          break;
+        }
+
+        continue;
+      }
+    }
+
+    if (content_len > 0 && s_list_len >= (uint32_t)content_len) {
+      break;
+    }
+
+    if (millis() - last_data_ms > kHttpIdleTimeoutMs) {
+      s_error = "http_idle_timeout";
+      LOGW("[网络音乐] 下载列表超时 bytes=%lu URL=%s",
+           (unsigned long)s_list_len,
+           url.c_str());
+      http.end();
+      free_remote_list_buffer();
+      return false;
+    }
+
+    // 网络暂时没数据时主动让出 CPU，避免 AudioTask / WiFi 轮询触发看门狗。
+    delay(1);
+  }
+
+  http.end();
+
+  if (s_list_len == 0 || !s_list_buf) {
+    s_error = "net_music_list_empty";
+    LOGW("[网络音乐] 下载到的列表为空: %s", url.c_str());
+    free_remote_list_buffer();
+    return false;
+  }
+
+  // 保险补 '\0'，后面不会依赖它遍历，但方便调试。
+  if (reserve_remote_list_capacity(s_list_len)) {
+    s_list_buf[s_list_len] = '\0';
+  }
+
+  LOGI("[网络音乐] 列表下载到内存完成 bytes=%lu",
+       (unsigned long)s_list_len);
 
   return true;
 }
@@ -141,32 +352,50 @@ static bool parse_line(const String& raw, NetMusicItem* out) {
   return item.valid;
 }
 
-static bool read_item_locked(uint32_t idx, NetMusicItem* out) {
+static bool copy_line_from_memory(uint32_t line_start, String& out) {
+  out = "";
+
+  if (!s_list_buf || line_start >= s_list_len) {
+    s_error = "net_music_index_out_of_range";
+    return false;
+  }
+
+  uint32_t pos = line_start;
+  while (pos < s_list_len && s_list_buf[pos] != '\n') {
+    ++pos;
+  }
+
+  uint32_t line_len = pos - line_start;
+
+  // 去掉 Windows 文本里的 '\r'
+  if (line_len > 0 && s_list_buf[line_start + line_len - 1] == '\r') {
+    --line_len;
+  }
+
+  if (line_len > kMaxNetMusicLineLen) {
+    s_error = "net_music_line_too_long";
+    LOGW("[网络音乐] 行 too long offset=%lu len=%lu",
+         (unsigned long)line_start,
+         (unsigned long)line_len);
+    return false;
+  }
+
+  out.reserve(line_len + 1);
+  for (uint32_t i = 0; i < line_len; ++i) {
+    out += s_list_buf[line_start + i];
+  }
+
+  return true;
+}
+
+static bool read_item_from_memory(uint32_t idx, NetMusicItem* out) {
   if (!out || idx >= s_offsets.size()) {
     s_error = "net_music_index_out_of_range";
     return false;
   }
 
-  File32 f = sd.open(kNetMusicListPath, O_RDONLY);
-  if (!f) {
-    s_error = "net_music_list_open_failed";
-    return false;
-  }
-
-  if (!f.seek(s_offsets[idx])) {
-    f.close();
-    s_error = "net_music_seek_failed";
-    return false;
-  }
-
-  String line = f.readStringUntil('\n');
-  f.close();
-
-  if (line.length() > kMaxNetMusicLineLen) {
-    s_error = "net_music_line_too_long";
-    LOGW("[网络音乐] 行 too long idx=%lu le数量=%u",
-         (unsigned long)idx,
-         (unsigned)line.length());
+  String line;
+  if (!copy_line_from_memory(s_offsets[idx], line)) {
     return false;
   }
 
@@ -181,51 +410,67 @@ static bool read_item_locked(uint32_t idx, NetMusicItem* out) {
 
 }  // namespace
 
+bool net_music_catalog_load_base() {
+  return load_base_from_tf(800);
+}
+
 bool net_music_catalog_load() {
   s_offsets.clear();
   s_loaded = false;
   s_error = "";
+  free_remote_list_buffer();
 
-  StorageSdLockGuard guard(1500);
-  if (!guard) {
-    s_error = "sd_lock_failed";
-    LOGW("[网络音乐] 跳过目录加载：获取 SD 锁失败");
+  // 打开 NAS 时不读 /System/net_music.txt，也不写 /System/net_music.txt。
+  // 这里只使用开机已读入的 base；如果没有，再兜底读一次很小的 base 文件。
+  if (!ensure_base_loaded()) {
     return false;
   }
 
-  if (!read_base_url_locked()) {
-    return false;
-  }
-
-  File32 f = sd.open(kNetMusicListPath, O_RDONLY);
-  if (!f) {
-    s_error = "net_music_list_missing";
-    LOGW("[网络音乐] 列表文件未找到：%s", kNetMusicListPath);
+  // 从 NAS 下载 net_music.txt 到内存。
+  if (!download_remote_list_to_memory()) {
+    s_loaded = false;
     return false;
   }
 
   uint32_t valid_count = 0;
+  uint32_t pos = 0;
 
-  while (f.available()) {
-    const uint32_t line_start = (uint32_t)f.position();
-    String line = f.readStringUntil('\n');
+  while (pos < s_list_len) {
+    const uint32_t line_start = pos;
 
-    NetMusicItem probe{};
-    if (line.length() <= kMaxNetMusicLineLen && parse_line(line, &probe)) {
-      s_offsets.push_back(line_start);
-      ++valid_count;
+    while (pos < s_list_len && s_list_buf[pos] != '\n') {
+      ++pos;
+    }
+
+    String line;
+    if (copy_line_from_memory(line_start, line)) {
+      NetMusicItem probe{};
+      if (parse_line(line, &probe)) {
+        s_offsets.push_back(line_start);
+        ++valid_count;
+      }
+    }
+
+    if (pos < s_list_len && s_list_buf[pos] == '\n') {
+      ++pos;
     }
   }
 
-  f.close();
+  if (valid_count == 0) {
+    s_loaded = false;
+    s_error = "net_music_no_valid_items";
+    LOGW("[网络音乐] 远程列表没有有效 MP3 条目");
+    free_remote_list_buffer();
+    return false;
+  }
 
   s_loaded = true;
+  s_error = "";
 
-  LOGI("[网络音乐] 目录 加载ed 歌曲s=%lu 偏移s=%u base=%s 路径=%s",
+  LOGI("[网络音乐] 目录 加载ed 歌曲s=%lu 偏移s=%u base=%s 来源=memory",
        (unsigned long)valid_count,
        (unsigned)s_offsets.size(),
-       s_base_url.c_str(),
-       kNetMusicListPath);
+       s_base_url.c_str());
 
   return true;
 }
@@ -244,13 +489,8 @@ bool net_music_catalog_get(uint32_t idx, NetMusicItem* out) {
     return false;
   }
 
-  StorageSdLockGuard guard(1200);
-  if (!guard) {
-    s_error = "sd_lock_failed";
-    return false;
-  }
-
-  return read_item_locked(idx, out);
+  // NAS 列表在内存里，不再读 TF，不会和本地播放抢 SD 锁。
+  return read_item_from_memory(idx, out);
 }
 
 uint32_t net_music_catalog_search(const String& query,
@@ -282,28 +522,11 @@ uint32_t net_music_catalog_search(const String& query,
     limit = 50;
   }
 
-  StorageSdLockGuard guard(1800);
-  if (!guard) {
-    s_error = "sd_lock_failed";
-    return 0;
-  }
-
-  File32 f = sd.open(kNetMusicListPath, O_RDONLY);
-  if (!f) {
-    s_error = "net_music_list_open_failed";
-    return 0;
-  }
-
   uint32_t matched_total = 0;
 
   for (uint32_t i = 0; i < s_offsets.size(); ++i) {
-    if (!f.seek(s_offsets[i])) {
-      continue;
-    }
-
-    String line = f.readStringUntil('\n');
-
-    if (line.length() > kMaxNetMusicLineLen) {
+    String line;
+    if (!copy_line_from_memory(s_offsets[i], line)) {
       continue;
     }
 
@@ -335,8 +558,6 @@ uint32_t net_music_catalog_search(const String& query,
     }
   }
 
-  f.close();
-
   LOGD("[网络音乐] search q=%s matched=%lu 返回数量=%u",
        q.c_str(),
        (unsigned long)matched_total,
@@ -362,7 +583,7 @@ String net_music_catalog_error() {
 }
 
 const char* net_music_catalog_path() {
-  return kNetMusicListPath;
+  return kNetMusicMemoryPath;
 }
 
 const char* net_music_catalog_base_path() {
@@ -372,6 +593,8 @@ const char* net_music_catalog_base_path() {
 void net_music_catalog_clear() {
   s_offsets.clear();
   s_loaded = false;
+  s_base_loaded = false;
   s_error = "";
   s_base_url = "";
+  free_remote_list_buffer();
 }

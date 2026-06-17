@@ -63,6 +63,11 @@ static uint32_t s_last_action_ms = 0;
 static uint32_t s_revision = 1;
 static uint32_t s_confirm_guard_until_ms = 0;
 
+// 某些页面内部有自己的分页，例如 NFC列表管理。
+// 它翻页时 QuickMenuPage 没变、start_idx 也可能没变，
+// 所以需要额外告诉 UI：下一帧必须整屏重绘。
+static bool s_force_full_refresh = false;
+
 void mark_dirty()
 {
     ++s_revision;
@@ -91,12 +96,10 @@ static bool quick_menu_page_is_dynamic(QuickMenuPage page)
     switch (page) {
         case QuickMenuPage::Playback:
         case QuickMenuPage::Source:
+        case QuickMenuPage::Network:
         case QuickMenuPage::MemoryInfo:
         case QuickMenuPage::StackInfo:
         case QuickMenuPage::BatteryInfo:
-        case QuickMenuPage::Nfc:
-        case QuickMenuPage::NfcList:
-        case QuickMenuPage::NfcDetail:
             return true;
 
         default:
@@ -134,12 +137,68 @@ static void open_page(QuickMenuPage page)
     arm_confirm_guard();
 }
 
+static uint8_t nfc_list_first_select_index(const QuickMenuPageDef& def)
+{
+    if (def.item_count <= 1) {
+        return 0;
+    }
+
+    // NFC列表第0行通常是“绑定数量 / 页码”状态行，
+    // 翻到新页后优先选中第1行，也就是第一条绑定记录。
+    return 1;
+}
+
+static uint8_t nfc_list_last_select_index(const QuickMenuPageDef& def)
+{
+    if (def.item_count == 0) {
+        return 0;
+    }
+
+    return static_cast<uint8_t>(def.item_count - 1);
+}
+
 static void move_selection(int8_t delta)
 {
     const QuickMenuPageDef& def = current_page_def();
 
     if (def.item_count == 0) {
         return;
+    }
+
+    // NFC列表管理是“同一个 QuickMenuPage 内部翻页”。
+    // 普通菜单只知道 item_count，不知道 NFC 列表页码，
+    // 所以这里单独处理旋钮越界翻页。
+    if (s_page == QuickMenuPage::NfcList) {
+        const bool at_first = s_selected <= 0;
+        const bool at_last = s_selected >= static_cast<int>(def.item_count - 1);
+
+        // 反向旋转到第一页之前：翻到上一页。
+        // 特别修复：最后一页只有“返回”时，s_selected 永远是0，
+        // 如果不在这里处理，就只能在“返回”上打转，回不到上一页。
+        if (delta < 0 && at_first) {
+            if (quick_menu_nfc_list_prev_page()) {
+                const QuickMenuPageDef& new_def = current_page_def();
+                s_selected = nfc_list_last_select_index(new_def);
+                save_current_selection();
+
+                touch_menu();
+                quick_menu_request_full_refresh();
+                return;
+            }
+        }
+
+        // 正向旋转越过本页最后一项：翻到下一页。
+        if (delta > 0 && at_last) {
+            if (quick_menu_nfc_list_next_page()) {
+                const QuickMenuPageDef& new_def = current_page_def();
+                s_selected = nfc_list_first_select_index(new_def);
+                save_current_selection();
+
+                touch_menu();
+                quick_menu_request_full_refresh();
+                return;
+            }
+        }
     }
 
     if (delta > 0) {
@@ -298,6 +357,7 @@ void quick_menu_exit()
     s_selected = 0;
     s_last_action_ms = 0;
     s_confirm_guard_until_ms = 0;
+    s_force_full_refresh = false;
 
     mark_dirty();
 
@@ -326,6 +386,38 @@ void quick_menu_tick()
             mark_dirty();
         }
     }
+}
+
+void quick_menu_request_refresh()
+{
+    if (!s_active) {
+        return;
+    }
+
+    // 只刷新显示内容，不延长菜单自动退出时间。
+    mark_dirty();
+}
+
+void quick_menu_request_full_refresh()
+{
+    if (!s_active) {
+        return;
+    }
+
+    s_force_full_refresh = true;
+    mark_dirty();
+}
+
+bool quick_menu_take_full_refresh_request()
+{
+    if (!s_active) {
+        s_force_full_refresh = false;
+        return false;
+    }
+
+    const bool requested = s_force_full_refresh;
+    s_force_full_refresh = false;
+    return requested;
 }
 
 void quick_menu_handle_key(QuickMenuKey key)

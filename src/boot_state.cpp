@@ -13,6 +13,7 @@
 #include "utils/runtime_monitor.h"
 #include "web/web_server.h"
 #include "player_snapshot.h"
+#include "net_music/net_music_catalog.h"
 
 static void prepare_music_catalogs()
 {
@@ -96,9 +97,16 @@ void boot_state_run(void)
     } else {
         LOGW("[启动] 加载电台列表失败");    
     }
+
     // NAS/HTTP 歌曲索引不在开机阶段预加载。
-    // 进入 NAS 歌曲列表或 Web NAS 页面时再按需 net_music_catalog_load()，
-    // 避免开机阶段额外读取 TF 卡、拖慢进系统。
+    // 开机只读取很小的 /System/net_music_base.txt。
+    // 打开 NAS 歌曲列表或 Web NAS 页面时，再从 base URL 下载 net_music.txt 到内存。
+    // 注意：不会读取/写入 /System/net_music.txt，避免和本地播放抢 TF 卡。
+    if (storage_is_ready() && net_music_catalog_load_base()) {
+        LOGD("[启动] NAS base 加载成功: %s", net_music_catalog_base_url().c_str());
+    } else {
+        LOGW("[启动] NAS base 未加载");
+    }
 
     // 提前从 NVS 读取待恢复快照；真正恢复播放在首次进入 player 状态时执行。
     // 注意：只有存储就绪时才读取 snapshot，因为 snapshot key 依赖卡身份。

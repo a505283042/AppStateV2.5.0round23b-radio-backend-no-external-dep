@@ -14,6 +14,16 @@ void quick_menu_open_page(QuickMenuPage page);
 void quick_menu_tick();
 void quick_menu_handle_key(QuickMenuKey key);
 
+// 外部状态变化时请求刷新菜单内容，例如 WiFi 连接成功后刷新网络设置页。
+void quick_menu_request_refresh();
+
+// 请求快捷菜单下一帧整屏重绘。
+// 用于 NFC 列表这种“同一个 QuickMenuPage 内部翻页”的场景。
+void quick_menu_request_full_refresh();
+
+// UI 绘制层读取并清除整屏重绘请求。
+bool quick_menu_take_full_refresh_request();
+
 QuickMenuPage quick_menu_get_page();
 const char* quick_menu_get_page_title();
 

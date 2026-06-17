@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <string.h>
 #include <stdlib.h>
+#include <new>
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -11,6 +12,7 @@
 #include "audio/audio_service.h"
 #include "audio/audio.h"
 #include "audio/audio_file.h"
+#include "audio/audio_mp3.h"
 #include "audio/audio_i2s.h"
 #include "audio/audio_output_route.h"
 #include "storage/storage_io.h"
@@ -529,10 +531,15 @@ static void audio_task_entry(void*){
     } else if (!s_playing_cache || s_paused) {
       vTaskDelay(10);
     } else {
-      // 正常播放中不要固定 sleep 1ms。
-      // 某些 FLAC 解码已经接近实时上限，额外 1ms 会持续消耗缓冲余量。
-      // I2S 写入本身会阻塞/让出，这里只做 yield。
-      taskYIELD();
+      // 网络 MP3 的 WiFiClient::available()/read 可能被 AudioTask 高频轮询，
+      // 如果这里只 taskYIELD，低优先级 IDLE0 仍然可能长期得不到运行，触发 task_wdt。
+      // 仅对网络 MP3 每轮让出 1 tick；本地 FLAC/MP3 仍保持原来的轻量 yield，
+      // 避免本地高码率解码被额外延时拖慢。
+      if (audio_mp3_is_active() && audio_mp3_is_stream_source()) {
+        vTaskDelay(1);
+      } else {
+        taskYIELD();
+      }
     }
   }
 }
@@ -582,35 +589,57 @@ static bool send_cmd(AudioCmd& cmd, bool wait)
   return ack == 1;
 }
 
+static AudioCmd* audio_cmd_new()
+{
+  AudioCmd* cmd = new (std::nothrow) AudioCmd();
+  if (!cmd) {
+    LOGE("[音频] 分配命令对象失败：size=%u", (unsigned)sizeof(AudioCmd));
+  }
+  return cmd;
+}
+
+static bool send_cmd_heap(AudioCmd* cmd, bool wait)
+{
+  if (!cmd) return false;
+  const bool ok = send_cmd(*cmd, wait);
+  delete cmd;
+  return ok;
+}
+
 bool audio_service_play(const char* path, bool wait)
 {
   if (!path) return false;
 
-  AudioCmd cmd{};
-  cmd.type = CMD_PLAY;
-  strncpy(cmd.path, path, sizeof(cmd.path) - 1);
-  cmd.path[sizeof(cmd.path) - 1] = '\0';
+  AudioCmd* cmd = audio_cmd_new();
+  if (!cmd) return false;
+  cmd->type = CMD_PLAY;
+  strncpy(cmd->path, path, sizeof(cmd->path) - 1);
+  cmd->path[sizeof(cmd->path) - 1] = '\0';
 
-  return send_cmd(cmd, wait);
+  return send_cmd_heap(cmd, wait);
 }
 
 
 bool audio_service_play_stream_mp3(const char* url, bool wait)
 {
   if (!url) return false;
-  AudioCmd cmd{};
-  cmd.type = CMD_PLAY_STREAM_MP3;
-  strncpy(cmd.path, url, sizeof(cmd.path) - 1);
-  cmd.path[sizeof(cmd.path) - 1] = '\0';
-  return send_cmd(cmd, wait);
+
+  // AudioCmd 超过 1KB；不要放在 loopTask 栈上，避免长 URL 自动切歌时压爆栈。
+  AudioCmd* cmd = audio_cmd_new();
+  if (!cmd) return false;
+  cmd->type = CMD_PLAY_STREAM_MP3;
+  strncpy(cmd->path, url, sizeof(cmd->path) - 1);
+  cmd->path[sizeof(cmd->path) - 1] = '\0';
+  return send_cmd_heap(cmd, wait);
 }
 
 bool audio_service_stop(bool wait)
 {
-  AudioCmd cmd{};
-  cmd.type = CMD_STOP;
-  cmd.path[0] = 0;
-  return send_cmd(cmd, wait);
+  AudioCmd* cmd = audio_cmd_new();
+  if (!cmd) return false;
+  cmd->type = CMD_STOP;
+  cmd->path[0] = 0;
+  return send_cmd_heap(cmd, wait);
 }
 
 bool audio_service_is_playing(void)
@@ -621,13 +650,13 @@ bool audio_service_is_playing(void)
 bool audio_service_fetch_total_ms(const char* path, uint32_t* out_total_ms, bool wait)
 {
   if (!path || !out_total_ms) return false;
-  AudioCmd cmd{};
-  cmd.type = CMD_FETCH_TOTAL_MS;
-  strncpy(cmd.path, path, sizeof(cmd.path) - 1);
-  cmd.path[sizeof(cmd.path) - 1] = '\0';
-  cmd.notify_to = wait ? xTaskGetCurrentTaskHandle() : nullptr;
-  cmd.out_total_ms = out_total_ms;
-  return send_cmd(cmd, wait);
+  AudioCmd* cmd = audio_cmd_new();
+  if (!cmd) return false;
+  cmd->type = CMD_FETCH_TOTAL_MS;
+  strncpy(cmd->path, path, sizeof(cmd->path) - 1);
+  cmd->path[sizeof(cmd->path) - 1] = '\0';
+  cmd->out_total_ms = out_total_ms;
+  return send_cmd_heap(cmd, wait);
 }
 
 bool audio_service_fetch_lyrics(const char* path, char** out_text, size_t* out_len, bool wait)
@@ -636,13 +665,14 @@ bool audio_service_fetch_lyrics(const char* path, char** out_text, size_t* out_l
   *out_text = nullptr;
   *out_len = 0;
 
-  AudioCmd cmd{};
-  cmd.type = CMD_FETCH_LYRICS;
-  strncpy(cmd.path, path, sizeof(cmd.path) - 1);
-  cmd.path[sizeof(cmd.path) - 1] = '\0';
-  cmd.out_text = out_text;
-  cmd.out_text_len = out_len;
-  return send_cmd(cmd, wait);
+  AudioCmd* cmd = audio_cmd_new();
+  if (!cmd) return false;
+  cmd->type = CMD_FETCH_LYRICS;
+  strncpy(cmd->path, path, sizeof(cmd->path) - 1);
+  cmd->path[sizeof(cmd->path) - 1] = '\0';
+  cmd->out_text = out_text;
+  cmd->out_text_len = out_len;
+  return send_cmd_heap(cmd, wait);
 }
 
 bool audio_service_fetch_cover(CoverSource cover_source,
@@ -660,23 +690,24 @@ bool audio_service_fetch_cover(CoverSource cover_source,
   *out_len = 0;
   *out_is_png = false;
 
-  AudioCmd cmd{};
-  cmd.type = CMD_FETCH_COVER;
-  cmd.cover_source = cover_source;
-  cmd.cover_offset = cover_offset;
-  cmd.cover_size = cover_size;
+  AudioCmd* cmd = audio_cmd_new();
+  if (!cmd) return false;
+  cmd->type = CMD_FETCH_COVER;
+  cmd->cover_source = cover_source;
+  cmd->cover_offset = cover_offset;
+  cmd->cover_size = cover_size;
   if (audio_path) {
-    strncpy(cmd.path, audio_path, sizeof(cmd.path) - 1);
-    cmd.path[sizeof(cmd.path) - 1] = '\0';
+    strncpy(cmd->path, audio_path, sizeof(cmd->path) - 1);
+    cmd->path[sizeof(cmd->path) - 1] = '\0';
   }
   if (cover_path) {
-    strncpy(cmd.cover_path, cover_path, sizeof(cmd.cover_path) - 1);
-    cmd.cover_path[sizeof(cmd.cover_path) - 1] = '\0';
+    strncpy(cmd->cover_path, cover_path, sizeof(cmd->cover_path) - 1);
+    cmd->cover_path[sizeof(cmd->cover_path) - 1] = '\0';
   }
-  cmd.out_buf = out_buf;
-  cmd.out_buf_len = out_len;
-  cmd.out_is_png = out_is_png;
-  return send_cmd(cmd, wait);
+  cmd->out_buf = out_buf;
+  cmd->out_buf_len = out_len;
+  cmd->out_is_png = out_is_png;
+  return send_cmd_heap(cmd, wait);
 }
 
 // 供外部调用的暂停控制接口

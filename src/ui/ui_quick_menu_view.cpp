@@ -409,15 +409,23 @@ void ui_draw_quick_menu()
     const bool selection_changed = selected != s_last_selected_idx;
     const bool total_changed = total != s_last_total;
     const bool content_changed = revision != s_last_revision;
+    const bool full_refresh_requested = quick_menu_take_full_refresh_request();
 
     // 没有任何变化，直接返回。
-    if (!s_first_draw && !page_changed && !start_changed && !selection_changed && !total_changed && !content_changed) {
+    if (!s_first_draw &&
+        !page_changed &&
+        !start_changed &&
+        !selection_changed &&
+        !total_changed &&
+        !content_changed &&
+        !full_refresh_requested) {
         return;
     }
 
-    // 情况 A：首次进入、切换页面、翻页，才整屏重画。
-    // 注意：菜单行数变化不能直接 fillScreen，否则音频输出页切换模式时容易造成整屏闪烁。
-    if (s_first_draw || page_changed || start_changed) {
+   // 情况 A：首次进入、切换页面、翻页，才整屏重画。
+    // NFC列表管理内部翻页时，QuickMenuPage 和 start_idx 可能都不变，
+    // 所以通过 full_refresh_requested 强制整屏重画，避免旧页残影。
+    if (s_first_draw || page_changed || start_changed || full_refresh_requested) {
         draw_menu_frame(title, start_idx, total);
         reset_row_cache();
         draw_visible_rows(start_idx, total, true);

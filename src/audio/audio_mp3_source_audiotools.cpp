@@ -259,6 +259,10 @@ static int http_source_read(void* ctx, uint8_t* dst, size_t bytes)
       s_open = false;
       return AUDIO_MP3_SOURCE_EOF;
     }
+
+    // 网络流暂时没数据时不要在 AudioTask 里紧密轮询 available()。
+    // 这里短暂让出 CPU0，避免 IDLE0 长时间无法运行导致 task_wdt。
+    delay(1);
     return AUDIO_MP3_SOURCE_WOULD_BLOCK;
   }
 
@@ -268,11 +272,13 @@ static int http_source_read(void* ctx, uint8_t* dst, size_t bytes)
   const int n = client->read(dst, want);
   if (n > 0) return n;
 
-  if (!WiFi.isConnected() || !client->connected()) {
+  if (!WiFi.isConnected() || !client->connected()) {  
     s_open = false;
     return AUDIO_MP3_SOURCE_EOF;
   }
 
+  // read() 没拿到数据但连接仍在，给系统一点调度时间。
+  delay(1);
   return AUDIO_MP3_SOURCE_WOULD_BLOCK;
 }
 

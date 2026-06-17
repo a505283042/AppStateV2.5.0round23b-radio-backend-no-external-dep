@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "web/web_server.h"
+#include "web/web_config.h"
 #include "web/web_settings.h"
 
 namespace {
@@ -74,17 +75,30 @@ const char* value_current_ip()
     return "-";
 }
 
-const char* value_web_addr()
+const char* value_wifi_name()
 {
     static char buf[40];
 
-    const char* ip = value_current_ip();
-    if (!ip || strcmp(ip, "-") == 0) {
-        return "不可用";
+    if (!web_wifi_is_enabled()) {
+        return "-";
     }
 
-    snprintf(buf, sizeof(buf), "http://%s", ip);
-    return buf;
+    if (WiFi.status() == WL_CONNECTED) {
+        const String ssid = WiFi.SSID();
+        if (ssid.length()) {
+            snprintf(buf, sizeof(buf), "%s", ssid.c_str());
+            return buf;
+        }
+        return "已连接";
+    }
+
+    const wifi_mode_t mode = WiFi.getMode();
+    if (mode == WIFI_AP || mode == WIFI_AP_STA) {
+        snprintf(buf, sizeof(buf), "%s", WEBCTRL_AP_SSID);
+        return buf;
+    }
+
+    return "-";
 }
 
 const char* value_show_wifi_info()
@@ -105,14 +119,20 @@ bool action_retry_wifi()
     return web_server_retry_sta_from_config();
 }
 
+bool action_switch_wifi()
+{
+    return web_server_switch_wifi_from_config();
+}
+
 const QuickMenuItem NETWORK_ITEMS[] = {
     {"WiFi", QuickMenuItemType::Toggle, QuickMenuPage::Network, "", value_wifi_enabled, action_toggle_wifi, true, false},
     {"STA状态", QuickMenuItemType::Status, QuickMenuPage::Network, "", value_sta_status, nullptr, true, false},
     {"AP模式", QuickMenuItemType::Status, QuickMenuPage::Network, "", value_ap_status, nullptr, true, false},
     {"当前IP", QuickMenuItemType::Status, QuickMenuPage::Network, "", value_current_ip, nullptr, true, false},
-    {"Web地址", QuickMenuItemType::Status, QuickMenuPage::Network, "", value_web_addr, nullptr, true, false},
+    {"网络名", QuickMenuItemType::Status, QuickMenuPage::Network, "", value_wifi_name, nullptr, true, false},
+    {"切换WiFi", QuickMenuItemType::Action, QuickMenuPage::Network, "", value_execute, action_switch_wifi, true, false},
     {"显示WiFi信息", QuickMenuItemType::Toggle, QuickMenuPage::Network, "", value_show_wifi_info, action_toggle_show_wifi_info, true, false},
-    {"重连WiFi", QuickMenuItemType::Action, QuickMenuPage::Network, "", value_execute, action_retry_wifi, true, false},
+    {"重连WiFi", QuickMenuItemType::Action, QuickMenuPage::Network, "", value_execute, action_retry_wifi, true, false},    
     {"返回", QuickMenuItemType::Back, QuickMenuPage::Root, "", nullptr, nullptr, true, false},
 };
 

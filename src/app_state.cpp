@@ -160,8 +160,14 @@ static void app_handle_tf_mounted()
     }
     
     // TF 卡插入后不主动加载 NAS/HTTP 歌曲索引。
-    // 后续进入 NAS 歌曲列表或 Web NAS 页面时再按需加载。
+    // 这里只清空旧的 NAS 内存列表，然后重新读取很小的 base 文件。
+    // 后续进入 NAS 歌曲列表或 Web NAS 页面时，再从 HTTP 下载 net_music.txt 到内存。
     net_music_catalog_clear();
+    if (net_music_catalog_load_base()) {
+        LOGD("[应用] NAS base 重新加载成功: %s", net_music_catalog_base_url().c_str());
+    } else {
+        LOGW("[应用] NAS base 重新加载失败");
+    }
     // TF 卡插入后不再自动重连 WiFi。
     // WiFi 总开关由 NVS 保存；如需联网，由用户在菜单中手动开启/重连。
     // 这样可以避免插卡后 WiFi 扫描/连接影响本地播放稳定性。

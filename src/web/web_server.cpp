@@ -26,6 +26,7 @@
 #include "storage/storage_io.h"
 #include "storage/storage_groups_v3.h"
 #include "ui/ui.h"
+#include "menu/quick_menu.h"
 #include "utils/log.h"
 #include "web/web_config.h"
 #include "web/web_page.h"
@@ -118,6 +119,7 @@ void web_wifi_set_enabled(bool enabled)
         WiFi.disconnect(true, true);
         WiFi.mode(WIFI_OFF);
 
+        quick_menu_request_refresh();
         return;
     }
 
@@ -127,6 +129,7 @@ void web_wifi_set_enabled(bool enabled)
 
     // 重新启动 Web/WiFi 流程，不阻塞菜单/UI。
     web_server_start_async();
+    quick_menu_request_refresh();
 #endif
 }
 
@@ -452,6 +455,7 @@ static bool web_try_connect_sta_from_config() {
     s_ap_mode = false;
     s_wifi_source = "existing_sta";
     LOGD("[网页] 复用已有 STA 连接，IP=%s", WiFi.localIP().toString().c_str());
+    quick_menu_request_refresh();
     return true;
   }
 
@@ -2063,6 +2067,75 @@ static void web_setup_routes() {
   s_server.onNotFound([](){ web_send_json_err("not_found", 404); });
 }
 
+bool web_server_switch_wifi_from_config()
+{
+#if WEBCTRL_ENABLED
+  if (!s_wifi_enabled) {
+    LOGI("[网页] WiFi 当前关闭，切换 WiFi 将先启用 WiFi");
+    web_wifi_set_enabled(true);
+    quick_menu_request_refresh();
+    return true;
+  }
+
+  std::vector<WebWifiNetwork> nets;
+  String hostname;
+  if (!web_load_wifi_config(nets, hostname) || nets.empty()) {
+    LOGW("[网页] 切换 WiFi 失败：没有可用配置");
+    quick_menu_request_refresh();
+    return false;
+  }
+
+  const String current_ssid = WiFi.status() == WL_CONNECTED ? WiFi.SSID() : String("");
+  int current_index = -1;
+  for (int i = 0; i < (int)nets.size(); ++i) {
+    if (current_ssid.length() && nets[i].ssid == current_ssid) {
+      current_index = i;
+      break;
+    }
+  }
+
+  LOGI("[网页] 切换 WiFi：当前=%s 配置数量=%d",
+       current_ssid.length() ? current_ssid.c_str() : "-",
+       (int)nets.size());
+
+  // 切换 WiFi 前先停掉网络音频，避免 AudioTask 正在 WiFiClient::read() 时断网。
+  web_stop_network_audio_before_wifi_down("switch WiFi");
+
+  const int total = (int)nets.size();
+  const int start = current_index >= 0 ? ((current_index + 1) % total) : 0;
+
+  for (int step = 0; step < total; ++step) {
+    const int idx = (start + step) % total;
+
+    // 多个配置时，优先跳过当前 SSID；只有一个配置时允许重连当前 SSID。
+    if (total > 1 && current_ssid.length() && nets[idx].ssid == current_ssid) {
+      continue;
+    }
+
+    LOGI("[网页] 尝试切换到 WiFi：%s", nets[idx].ssid.c_str());
+    if (web_try_connect_one(nets[idx], hostname)) {
+      s_ap_mode = false;
+      s_wifi_source = "config_switch";
+      s_hostname_runtime = hostname;
+
+      if (!s_started) {
+        web_server_start_async();
+      }
+
+      quick_menu_request_refresh();
+      return true;
+    }
+  }
+
+  LOGW("[网页] 切换 WiFi 失败，恢复 AP 兜底模式");
+  web_start_ap_fallback();
+  quick_menu_request_refresh();
+  return false;
+#else
+  return false;
+#endif
+}
+
 bool web_server_retry_sta_from_config()
 {
 #if WEBCTRL_ENABLED
@@ -2083,6 +2156,7 @@ bool web_server_retry_sta_from_config()
   // 如果已经是 STA 且连接正常，不重复切换。
   if (!s_ap_mode && WiFi.status() == WL_CONNECTED) {
     LOGD("[网页] STA 已连接，IP=%s", WiFi.localIP().toString().c_str());
+    quick_menu_request_refresh();
     return true;
   }
 
@@ -2093,6 +2167,7 @@ bool web_server_retry_sta_from_config()
   if (ok) {
     // s_server 已经 begin 过，WiFi 从 AP 切 STA 后一般不需要重新注册路由。
     LOGI("[网页] 已切换到 STA，IP=%s", WiFi.localIP().toString().c_str());
+    quick_menu_request_refresh();
     return true;
   }
 
