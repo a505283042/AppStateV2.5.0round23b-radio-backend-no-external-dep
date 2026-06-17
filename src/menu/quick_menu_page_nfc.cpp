@@ -269,7 +269,7 @@ static bool action_clear_current_track_binding()
     return ok;
 }
 
-static constexpr int NFC_LIST_PAGE_SIZE = 4;
+static constexpr int NFC_LIST_PAGE_SIZE = 5;
 static int s_nfc_list_offset = 0;
 static String s_nfc_detail_uid;
 
@@ -282,15 +282,9 @@ static int nfc_list_data_page_count()
     return (total + NFC_LIST_PAGE_SIZE - 1) / NFC_LIST_PAGE_SIZE;
 }
 
-static bool nfc_list_needs_return_only_page()
-{
-    const int total = nfc_binding_count();
-    return total > 0 && (total % NFC_LIST_PAGE_SIZE) == 0;
-}
-
 static int nfc_list_total_page_count()
 {
-    return nfc_list_data_page_count() + (nfc_list_needs_return_only_page() ? 1 : 0);
+    return nfc_list_data_page_count();
 }
 
 static int nfc_list_current_page_index()
@@ -298,10 +292,6 @@ static int nfc_list_current_page_index()
     const int total = nfc_binding_count();
     if (total <= 0) {
         return 0;
-    }
-
-    if (s_nfc_list_offset >= total) {
-        return nfc_list_total_page_count() - 1;
     }
 
     return s_nfc_list_offset / NFC_LIST_PAGE_SIZE;
@@ -319,12 +309,6 @@ static void nfc_list_clamp_offset()
         s_nfc_list_offset = 0;
     }
 
-    // 如果绑定数正好是 4 的倍数，额外允许一个“返回页”：
-    // 前面每页都只显示 4 条绑定，不把“返回”挤进满页，避免最后一条被吞。
-    if (nfc_list_needs_return_only_page() && s_nfc_list_offset == total) {
-        return;
-    }
-
     if (s_nfc_list_offset >= total) {
         s_nfc_list_offset = ((total - 1) / NFC_LIST_PAGE_SIZE) * NFC_LIST_PAGE_SIZE;
     }
@@ -335,7 +319,7 @@ static int nfc_list_visible_count()
     nfc_list_clamp_offset();
 
     const int total = nfc_binding_count();
-    if (total <= 0 || s_nfc_list_offset >= total) {
+    if (total <= 0) {
         return 0;
     }
 
@@ -356,12 +340,7 @@ static bool nfc_list_current_page_has_next()
         return false;
     }
 
-    if (s_nfc_list_offset + NFC_LIST_PAGE_SIZE < total) {
-        return true;
-    }
-
-    return nfc_list_needs_return_only_page() &&
-           s_nfc_list_offset + NFC_LIST_PAGE_SIZE == total;
+    return s_nfc_list_offset + NFC_LIST_PAGE_SIZE < total;
 }
 
 static String nfc_entry_name(const NfcBindingEntry& entry)
@@ -445,19 +424,9 @@ static void nfc_set_detail_from_slot(int slot)
     s_nfc_detail_uid = entry.uid;
 }
 
-static const char* value_nfc_list_count()
+static const char* value_nfc_list_empty()
 {
-    static char buf[24];
-    const int total = nfc_binding_count();
-    if (total <= 0) {
-        return "0条";
-    }
-
-    nfc_list_clamp_offset();
-    const int page = nfc_list_current_page_index() + 1;
-    const int pages = nfc_list_total_page_count();
-    snprintf(buf, sizeof(buf), "%d条 %d/%d", total, page, pages);
-    return buf;
+    return "";
 }
 
 static const char* label_nfc_list_entry(int slot)
@@ -554,20 +523,12 @@ static bool action_nfc_list_prev_page()
         return false;
     }
 
-    // 从“返回页”回到最后一个数据页。
-    if (s_nfc_list_offset >= total) {
-        s_nfc_list_offset = total - NFC_LIST_PAGE_SIZE;
-        if (s_nfc_list_offset < 0) {
-            s_nfc_list_offset = 0;
-        }
-        quick_menu_request_full_refresh();
-        return true;
-    }
-
     s_nfc_list_offset -= NFC_LIST_PAGE_SIZE;
     if (s_nfc_list_offset < 0) {
         s_nfc_list_offset = 0;
     }
+
+    // 只有真正换页时才请求整屏刷新；普通上下滚动不闪屏。
     quick_menu_request_full_refresh();
     return true;
 }
@@ -685,38 +646,38 @@ const QuickMenuItem NFC_ITEMS[] = {
     {"返回", QuickMenuItemType::Back, QuickMenuPage::Root, "", nullptr, nullptr, true, false},
 };
 
-    const QuickMenuItem NFC_LIST_ITEMS_RETURN[] = {
-        {"绑定数量", QuickMenuItemType::Status, QuickMenuPage::NfcList, "", value_nfc_list_count, nullptr, true, false},
-        {"返回", QuickMenuItemType::Back, QuickMenuPage::Nfc, "", nullptr, nullptr, true, false},
+    const QuickMenuItem NFC_LIST_ITEMS_EMPTY[] = {
+        {"暂无绑定", QuickMenuItemType::Placeholder, QuickMenuPage::NfcList, "", value_nfc_list_empty, nullptr, true, true},
     };
 
-    const QuickMenuItem NFC_LIST_ITEMS_1_LAST[] = {
-        {"绑定数量", QuickMenuItemType::Status, QuickMenuPage::NfcList, "", value_nfc_list_count, nullptr, true, false},
+    const QuickMenuItem NFC_LIST_ITEMS_1[] = {
         {"", QuickMenuItemType::Action, QuickMenuPage::NfcList, "", value_nfc_list_entry_0, action_open_nfc_detail_0, true, false, label_nfc_list_entry_0},
-        {"返回", QuickMenuItemType::Back, QuickMenuPage::Nfc, "", nullptr, nullptr, true, false},
     };
 
-    const QuickMenuItem NFC_LIST_ITEMS_2_LAST[] = {
-        {"绑定数量", QuickMenuItemType::Status, QuickMenuPage::NfcList, "", value_nfc_list_count, nullptr, true, false},
+    const QuickMenuItem NFC_LIST_ITEMS_2[] = {
         {"", QuickMenuItemType::Action, QuickMenuPage::NfcList, "", value_nfc_list_entry_0, action_open_nfc_detail_0, true, false, label_nfc_list_entry_0},
         {"", QuickMenuItemType::Action, QuickMenuPage::NfcList, "", value_nfc_list_entry_1, action_open_nfc_detail_1, true, false, label_nfc_list_entry_1},
-        {"返回", QuickMenuItemType::Back, QuickMenuPage::Nfc, "", nullptr, nullptr, true, false},
     };
 
-    const QuickMenuItem NFC_LIST_ITEMS_3_LAST[] = {
-        {"绑定数量", QuickMenuItemType::Status, QuickMenuPage::NfcList, "", value_nfc_list_count, nullptr, true, false},
+    const QuickMenuItem NFC_LIST_ITEMS_3[] = {
         {"", QuickMenuItemType::Action, QuickMenuPage::NfcList, "", value_nfc_list_entry_0, action_open_nfc_detail_0, true, false, label_nfc_list_entry_0},
         {"", QuickMenuItemType::Action, QuickMenuPage::NfcList, "", value_nfc_list_entry_1, action_open_nfc_detail_1, true, false, label_nfc_list_entry_1},
         {"", QuickMenuItemType::Action, QuickMenuPage::NfcList, "", value_nfc_list_entry_2, action_open_nfc_detail_2, true, false, label_nfc_list_entry_2},
-        {"返回", QuickMenuItemType::Back, QuickMenuPage::Nfc, "", nullptr, nullptr, true, false},
     };
 
-    const QuickMenuItem NFC_LIST_ITEMS_4_DATA[] = {
-        {"绑定数量", QuickMenuItemType::Status, QuickMenuPage::NfcList, "", value_nfc_list_count, nullptr, true, false},
+    const QuickMenuItem NFC_LIST_ITEMS_4[] = {
         {"", QuickMenuItemType::Action, QuickMenuPage::NfcList, "", value_nfc_list_entry_0, action_open_nfc_detail_0, true, false, label_nfc_list_entry_0},
         {"", QuickMenuItemType::Action, QuickMenuPage::NfcList, "", value_nfc_list_entry_1, action_open_nfc_detail_1, true, false, label_nfc_list_entry_1},
         {"", QuickMenuItemType::Action, QuickMenuPage::NfcList, "", value_nfc_list_entry_2, action_open_nfc_detail_2, true, false, label_nfc_list_entry_2},
         {"", QuickMenuItemType::Action, QuickMenuPage::NfcList, "", value_nfc_list_entry_3, action_open_nfc_detail_3, true, false, label_nfc_list_entry_3},
+    };
+
+    const QuickMenuItem NFC_LIST_ITEMS_5[] = {
+        {"", QuickMenuItemType::Action, QuickMenuPage::NfcList, "", value_nfc_list_entry_0, action_open_nfc_detail_0, true, false, label_nfc_list_entry_0},
+        {"", QuickMenuItemType::Action, QuickMenuPage::NfcList, "", value_nfc_list_entry_1, action_open_nfc_detail_1, true, false, label_nfc_list_entry_1},
+        {"", QuickMenuItemType::Action, QuickMenuPage::NfcList, "", value_nfc_list_entry_2, action_open_nfc_detail_2, true, false, label_nfc_list_entry_2},
+        {"", QuickMenuItemType::Action, QuickMenuPage::NfcList, "", value_nfc_list_entry_3, action_open_nfc_detail_3, true, false, label_nfc_list_entry_3},
+        {"", QuickMenuItemType::Action, QuickMenuPage::NfcList, "", value_nfc_list_entry_4, action_open_nfc_detail_4, true, false, label_nfc_list_entry_4},
     };
 
         const QuickMenuItem NFC_DETAIL_ITEMS[] = {
@@ -763,34 +724,37 @@ const QuickMenuPageDef& quick_menu_get_nfc_page()
 
 const QuickMenuPageDef& quick_menu_get_nfc_list_page()
 {
-    // NFC列表页只有 5 行内容区。
-    // 非末页：绑定数量 + 4 条绑定，完全不显示“返回”。
-    // 末页：有多少条显示多少条，最后一行放“返回”。
+    // NFC列表页参考普通歌曲列表：内容区固定最多 5 行，
+    // 不再占用一行显示“绑定数量”，也不在列表页放“返回”。
+    // 返回 NFC管理 使用 MODE 键，和歌曲列表的返回方式一致。
     static QuickMenuPageDef page = {
         "NFC列表管理",
         QuickMenuPage::NfcList,
         QuickMenuPage::Nfc,
-        NFC_LIST_ITEMS_RETURN,
-        MENU_COUNT(NFC_LIST_ITEMS_RETURN),
+        NFC_LIST_ITEMS_EMPTY,
+        MENU_COUNT(NFC_LIST_ITEMS_EMPTY),
     };
 
     const int visible = nfc_list_visible_count();
 
-    if (visible >= 4) {
-        page.items = NFC_LIST_ITEMS_4_DATA;
-        page.item_count = MENU_COUNT(NFC_LIST_ITEMS_4_DATA);
+    if (visible >= 5) {
+        page.items = NFC_LIST_ITEMS_5;
+        page.item_count = MENU_COUNT(NFC_LIST_ITEMS_5);
+    } else if (visible == 4) {
+        page.items = NFC_LIST_ITEMS_4;
+        page.item_count = MENU_COUNT(NFC_LIST_ITEMS_4);
     } else if (visible == 3) {
-        page.items = NFC_LIST_ITEMS_3_LAST;
-        page.item_count = MENU_COUNT(NFC_LIST_ITEMS_3_LAST);
+        page.items = NFC_LIST_ITEMS_3;
+        page.item_count = MENU_COUNT(NFC_LIST_ITEMS_3);
     } else if (visible == 2) {
-        page.items = NFC_LIST_ITEMS_2_LAST;
-        page.item_count = MENU_COUNT(NFC_LIST_ITEMS_2_LAST);
+        page.items = NFC_LIST_ITEMS_2;
+        page.item_count = MENU_COUNT(NFC_LIST_ITEMS_2);
     } else if (visible == 1) {
-        page.items = NFC_LIST_ITEMS_1_LAST;
-        page.item_count = MENU_COUNT(NFC_LIST_ITEMS_1_LAST);
+        page.items = NFC_LIST_ITEMS_1;
+        page.item_count = MENU_COUNT(NFC_LIST_ITEMS_1);
     } else {
-        page.items = NFC_LIST_ITEMS_RETURN;
-        page.item_count = MENU_COUNT(NFC_LIST_ITEMS_RETURN);
+        page.items = NFC_LIST_ITEMS_EMPTY;
+        page.item_count = MENU_COUNT(NFC_LIST_ITEMS_EMPTY);
     }
 
     return page;

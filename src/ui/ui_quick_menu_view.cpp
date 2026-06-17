@@ -413,9 +413,6 @@ void ui_draw_quick_menu()
     const bool total_changed = total != s_last_total;
     const bool content_changed = revision != s_last_revision;
     const bool full_refresh_requested = full_refresh_seq != s_last_full_refresh_seq;
-    // NFC列表页参考普通歌曲列表：只要有变化就整屏清掉重画，避免旧页残影。
-    const bool nfc_list_force_full = page == QuickMenuPage::NfcList &&
-                                     (selection_changed || total_changed || content_changed || full_refresh_requested);
 
     // 没有任何变化，直接返回。
     if (!s_first_draw &&
@@ -424,15 +421,14 @@ void ui_draw_quick_menu()
         !selection_changed &&
         !total_changed &&
         !content_changed &&
-        !full_refresh_requested &&
-        !nfc_list_force_full) {
+        !full_refresh_requested) {
         return;
     }
 
-   // 情况 A：首次进入、切换页面、翻页，才整屏重画。
-    // NFC列表管理内部翻页时，QuickMenuPage 和 start_idx 可能都不变，
-    // 所以通过 full_refresh_requested 强制整屏重画，避免旧页残影。
-    if (s_first_draw || page_changed || start_changed || full_refresh_requested || nfc_list_force_full) {
+    // 情况 A：首次进入、切换页面、翻到新页，才整屏重画。
+    // NFC列表页现在参考普通歌曲列表：普通上下滚动只重画旧行/新行，
+    // 只有真正翻到下一页/上一页时，由 quick_menu_request_full_refresh() 触发整屏刷新。
+    if (s_first_draw || page_changed || start_changed || full_refresh_requested) {
         draw_menu_frame(title, start_idx, total);
         reset_row_cache();
         draw_visible_rows(start_idx, total, true);

@@ -144,13 +144,11 @@ static void open_page(QuickMenuPage page)
 
 static uint8_t nfc_list_first_select_index(const QuickMenuPageDef& def)
 {
-    if (def.item_count <= 1) {
-        return 0;
-    }
+    (void)def;
 
-    // NFC列表第0行通常是“绑定数量 / 页码”状态行，
-    // 翻到新页后优先选中第1行，也就是第一条绑定记录。
-    return 1;
+    // NFC列表参考普通歌曲列表：每页 5 行全是绑定条目，
+    // 不再有“绑定数量”状态行，所以新页从第 0 行开始选中。
+    return 0;
 }
 
 static uint8_t nfc_list_last_select_index(const QuickMenuPageDef& def)
@@ -174,7 +172,7 @@ static void move_selection(int8_t delta)
     // 普通菜单只知道 item_count，不知道 NFC 列表页码，
     // 所以这里单独处理旋钮越界翻页。
     if (s_page == QuickMenuPage::NfcList) {
-        const bool at_first = s_selected <= 0 || (def.item_count <= 2 && delta < 0);
+        const bool at_first = s_selected <= 0;
         const bool at_last = s_selected >= static_cast<int>(def.item_count - 1);
 
         // 反向旋转到第一页之前：翻到上一页。
@@ -438,50 +436,18 @@ void quick_menu_handle_key(QuickMenuKey key)
     }
 
     switch (key) {
-        case QuickMenuKey::Up: {
-            // NFC列表页只显示实际存在的条目。
-            // 在当前页第一条绑定处继续向上拨动旋钮时，自动翻到上一页。
-            const QuickMenuPageDef& def = current_page_def();
-            if (s_page == QuickMenuPage::NfcList && def.item_count > 2 && s_selected == 1) {
-                if (quick_menu_nfc_list_prev_page()) {
-                    s_selected = 1;
-                    touch_menu();
-                    quick_menu_request_full_refresh();
-                    return;
-                }
-            }
+        case QuickMenuKey::Up:
             move_selection(-1);
             return;
-        }
 
-        case QuickMenuKey::Down: {
-            // NFC列表页有两种形态：
-            // 1) 非末页：绑定数量 + 4条绑定，没有“返回”；最后一条绑定是 def.item_count - 1。
-            // 2) 末页：绑定数量 + 若干绑定 + 返回；最后一条绑定是“返回”前一行。
-            const QuickMenuPageDef& def = current_page_def();
-            if (s_page == QuickMenuPage::NfcList && def.item_count > 1) {
-                int last_binding_index = static_cast<int>(def.item_count) - 1;
-                if (def.items[def.item_count - 1].type == QuickMenuItemType::Back) {
-                    last_binding_index = static_cast<int>(def.item_count) - 2;
-                }
-
-                if (s_selected >= 1 && s_selected == last_binding_index) {
-                    if (quick_menu_nfc_list_next_page()) {
-                        s_selected = 1;
-                        touch_menu();
-                        quick_menu_request_full_refresh();
-                        return;
-                    }
-                }
-            }
+        case QuickMenuKey::Down:
             move_selection(+1);
             return;
-        }
 
         case QuickMenuKey::PageUp:
             if (s_page == QuickMenuPage::NfcList) {
                 if (quick_menu_nfc_list_prev_page()) {
-                    s_selected = 1;
+                    s_selected = 0;
                     touch_menu();
                     quick_menu_request_full_refresh();
                 } else {
@@ -495,7 +461,7 @@ void quick_menu_handle_key(QuickMenuKey key)
         case QuickMenuKey::PageDown:
             if (s_page == QuickMenuPage::NfcList) {
                 if (quick_menu_nfc_list_next_page()) {
-                    s_selected = 1;
+                    s_selected = 0;
                     touch_menu();
                     quick_menu_request_full_refresh();
                 } else {
