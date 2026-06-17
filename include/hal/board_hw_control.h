@@ -111,14 +111,14 @@ bool board_hw_solenoid_begin();
 /** @brief 立即停止电磁铁输出，A/B 全部拉低。 */
 bool board_hw_solenoid_stop();
 
-/** @brief 触发一次 A 方向短脉冲，默认 80ms，到时自动停止。 */
-bool board_hw_solenoid_pulse_a(uint32_t pulse_ms = 80);
+/** @brief 触发一次 A 方向短脉冲，默认 150ms，到时自动停止。 */
+bool board_hw_solenoid_pulse_a(uint32_t pulse_ms = 150);
 
-/** @brief 触发一次 B 方向短脉冲，默认 80ms，到时自动停止。 */
-bool board_hw_solenoid_pulse_b(uint32_t pulse_ms = 80);
+/** @brief 触发一次 B 方向短脉冲，默认 150ms，到时自动停止。 */
+bool board_hw_solenoid_pulse_b(uint32_t pulse_ms = 150);
 
 /** @brief 按上一次方向自动翻转，触发一次短脉冲。 */
-bool board_hw_solenoid_flip(uint32_t pulse_ms = 80);
+bool board_hw_solenoid_flip(uint32_t pulse_ms = 150);
 
 /** @brief 主循环里调用，用来在脉冲到时后自动断电。 */
 void board_hw_solenoid_tick();

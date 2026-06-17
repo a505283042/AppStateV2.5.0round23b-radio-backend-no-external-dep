@@ -560,6 +560,7 @@ static bool action_nfc_list_prev_page()
         if (s_nfc_list_offset < 0) {
             s_nfc_list_offset = 0;
         }
+        quick_menu_request_full_refresh();
         return true;
     }
 
@@ -567,6 +568,7 @@ static bool action_nfc_list_prev_page()
     if (s_nfc_list_offset < 0) {
         s_nfc_list_offset = 0;
     }
+    quick_menu_request_full_refresh();
     return true;
 }
 
@@ -579,6 +581,7 @@ static bool action_nfc_list_next_page()
 
     s_nfc_list_offset += NFC_LIST_PAGE_SIZE;
     nfc_list_clamp_offset();
+    quick_menu_request_full_refresh();
     return true;
 }
 
@@ -742,6 +745,7 @@ void quick_menu_nfc_list_reset_page()
     // 从详情页返回列表时不调用这里，保留原来的页码。
     s_nfc_list_offset = 0;
     s_nfc_detail_uid = "";
+    quick_menu_request_full_refresh();
 }
 
 const QuickMenuPageDef& quick_menu_get_nfc_page()

@@ -1566,17 +1566,6 @@ static void draw_cover_panel_info(LGFX_Sprite* dst)
                                   c_lyrics_next,
                                   COVER_PANEL_TEXT_SAFE_PAD);
     }
-  } else {
-      // 切歌后歌词通常会晚于歌名/封面加载完成。
-      // 前几秒显示“歌词加载中...”，避免刚切歌时误显示“暂无歌词”。
-      const uint32_t play_ms = audio_get_play_ms();
-      const char* lyric_hint = play_ms < 2000 ? "歌词加载中..." : "暂无歌词";
-
-      draw_cover_panel_center_text(dst,
-                                  lyric_hint,
-                                  COVER_PANEL_LYRIC_CUR_Y,
-                                  c_lyrics_next,
-                                  COVER_PANEL_TEXT_SAFE_PAD);
   }
 }
 

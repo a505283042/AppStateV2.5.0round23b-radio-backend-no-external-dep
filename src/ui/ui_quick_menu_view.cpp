@@ -34,6 +34,7 @@ static int s_last_start_idx = -1;
 static int s_last_selected_idx = -1;
 static int s_last_total = -1;
 static uint32_t s_last_revision = 0;
+static uint32_t s_last_full_refresh_seq = 0;
 static String s_last_row_signature[ROW_COUNT];
 static bool s_last_row_valid[ROW_COUNT] = {};
 
@@ -387,6 +388,7 @@ void ui_quick_menu_view_reset()
     s_last_selected_idx = -1;
     s_last_total = -1;
     s_last_revision = 0;
+    s_last_full_refresh_seq = 0;
     reset_row_cache();
 }
 
@@ -403,13 +405,17 @@ void ui_draw_quick_menu()
     const int selected = quick_menu_get_selected_index();
     const int start_idx = calc_page_start_index(selected, total);
     const uint32_t revision = quick_menu_get_revision();
+    const uint32_t full_refresh_seq = quick_menu_get_full_refresh_seq();
 
     const bool page_changed = page != s_last_page;
     const bool start_changed = start_idx != s_last_start_idx;
     const bool selection_changed = selected != s_last_selected_idx;
     const bool total_changed = total != s_last_total;
     const bool content_changed = revision != s_last_revision;
-    const bool full_refresh_requested = quick_menu_take_full_refresh_request();
+    const bool full_refresh_requested = full_refresh_seq != s_last_full_refresh_seq;
+    // NFC列表页参考普通歌曲列表：只要有变化就整屏清掉重画，避免旧页残影。
+    const bool nfc_list_force_full = page == QuickMenuPage::NfcList &&
+                                     (selection_changed || total_changed || content_changed || full_refresh_requested);
 
     // 没有任何变化，直接返回。
     if (!s_first_draw &&
@@ -418,14 +424,15 @@ void ui_draw_quick_menu()
         !selection_changed &&
         !total_changed &&
         !content_changed &&
-        !full_refresh_requested) {
+        !full_refresh_requested &&
+        !nfc_list_force_full) {
         return;
     }
 
    // 情况 A：首次进入、切换页面、翻页，才整屏重画。
     // NFC列表管理内部翻页时，QuickMenuPage 和 start_idx 可能都不变，
     // 所以通过 full_refresh_requested 强制整屏重画，避免旧页残影。
-    if (s_first_draw || page_changed || start_changed || full_refresh_requested) {
+    if (s_first_draw || page_changed || start_changed || full_refresh_requested || nfc_list_force_full) {
         draw_menu_frame(title, start_idx, total);
         reset_row_cache();
         draw_visible_rows(start_idx, total, true);
@@ -465,5 +472,6 @@ void ui_draw_quick_menu()
     s_last_selected_idx = selected;
     s_last_total = total;
     s_last_revision = revision;
+    s_last_full_refresh_seq = full_refresh_seq;
 
 }

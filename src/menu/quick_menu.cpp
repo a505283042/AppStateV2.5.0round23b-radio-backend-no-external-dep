@@ -63,10 +63,9 @@ static uint32_t s_last_action_ms = 0;
 static uint32_t s_revision = 1;
 static uint32_t s_confirm_guard_until_ms = 0;
 
-// 某些页面内部有自己的分页，例如 NFC列表管理。
-// 它翻页时 QuickMenuPage 没变、start_idx 也可能没变，
-// 所以需要额外告诉 UI：下一帧必须整屏重绘。
-static bool s_force_full_refresh = false;
+// 整屏重绘序号。
+// NFC列表内部换页时 QuickMenuPage 可能不变，所以额外用这个序号通知 UI 必须清屏重画。
+static uint32_t s_full_refresh_seq = 1;
 
 void mark_dirty()
 {
@@ -134,6 +133,12 @@ static void open_page(QuickMenuPage page)
 
     touch_menu();
     mark_dirty();
+    if (page == QuickMenuPage::NfcList) {
+        ++s_full_refresh_seq;
+        if (s_full_refresh_seq == 0) {
+            s_full_refresh_seq = 1;
+        }
+    }
     arm_confirm_guard();
 }
 
@@ -169,7 +174,7 @@ static void move_selection(int8_t delta)
     // 普通菜单只知道 item_count，不知道 NFC 列表页码，
     // 所以这里单独处理旋钮越界翻页。
     if (s_page == QuickMenuPage::NfcList) {
-        const bool at_first = s_selected <= 0;
+        const bool at_first = s_selected <= 0 || (def.item_count <= 2 && delta < 0);
         const bool at_last = s_selected >= static_cast<int>(def.item_count - 1);
 
         // 反向旋转到第一页之前：翻到上一页。
@@ -357,7 +362,10 @@ void quick_menu_exit()
     s_selected = 0;
     s_last_action_ms = 0;
     s_confirm_guard_until_ms = 0;
-    s_force_full_refresh = false;
+    ++s_full_refresh_seq;
+    if (s_full_refresh_seq == 0) {
+        s_full_refresh_seq = 1;
+    }
 
     mark_dirty();
 
@@ -404,20 +412,17 @@ void quick_menu_request_full_refresh()
         return;
     }
 
-    s_force_full_refresh = true;
+    ++s_full_refresh_seq;
+    if (s_full_refresh_seq == 0) {
+        s_full_refresh_seq = 1;
+    }
+
     mark_dirty();
 }
 
-bool quick_menu_take_full_refresh_request()
+uint32_t quick_menu_get_full_refresh_seq()
 {
-    if (!s_active) {
-        s_force_full_refresh = false;
-        return false;
-    }
-
-    const bool requested = s_force_full_refresh;
-    s_force_full_refresh = false;
-    return requested;
+    return s_full_refresh_seq;
 }
 
 void quick_menu_handle_key(QuickMenuKey key)
@@ -441,7 +446,7 @@ void quick_menu_handle_key(QuickMenuKey key)
                 if (quick_menu_nfc_list_prev_page()) {
                     s_selected = 1;
                     touch_menu();
-                    mark_dirty();
+                    quick_menu_request_full_refresh();
                     return;
                 }
             }
@@ -464,7 +469,7 @@ void quick_menu_handle_key(QuickMenuKey key)
                     if (quick_menu_nfc_list_next_page()) {
                         s_selected = 1;
                         touch_menu();
-                        mark_dirty();
+                        quick_menu_request_full_refresh();
                         return;
                     }
                 }
@@ -478,7 +483,7 @@ void quick_menu_handle_key(QuickMenuKey key)
                 if (quick_menu_nfc_list_prev_page()) {
                     s_selected = 1;
                     touch_menu();
-                    mark_dirty();
+                    quick_menu_request_full_refresh();
                 } else {
                     move_selection(-1);
                 }
@@ -492,7 +497,7 @@ void quick_menu_handle_key(QuickMenuKey key)
                 if (quick_menu_nfc_list_next_page()) {
                     s_selected = 1;
                     touch_menu();
-                    mark_dirty();
+                    quick_menu_request_full_refresh();
                 } else {
                     move_selection(+1);
                 }

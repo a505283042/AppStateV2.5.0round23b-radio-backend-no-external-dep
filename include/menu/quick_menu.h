@@ -21,8 +21,8 @@ void quick_menu_request_refresh();
 // 用于 NFC 列表这种“同一个 QuickMenuPage 内部翻页”的场景。
 void quick_menu_request_full_refresh();
 
-// UI 绘制层读取并清除整屏重绘请求。
-bool quick_menu_take_full_refresh_request();
+// 整屏重绘序号，UI 绘制层通过序号变化判断是否必须清屏重画。
+uint32_t quick_menu_get_full_refresh_seq();
 
 QuickMenuPage quick_menu_get_page();
 const char* quick_menu_get_page_title();
