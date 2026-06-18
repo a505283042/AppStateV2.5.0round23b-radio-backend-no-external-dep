@@ -1973,9 +1973,7 @@ void cover_info_draw()
   uint32_t t_status = millis();
 
   // 5) 标题/歌手（支持滚动显示长文本）
-  extern void draw_note_icon_img(LGFX_Sprite* dst, int x, int y, uint16_t color);
-  extern void draw_artist_icon_img(LGFX_Sprite* dst, int x, int y, uint16_t color);
-  
+    
   // 更新滚动偏移（像素滚动，30ms间隔）
   uint32_t now = millis();
   if (now - s_scroll_last_ms > 30) {
@@ -1987,7 +1985,6 @@ void cover_info_draw()
     if (title_scroll) {
       s_title_scroll_x += SCROLL_SPEED;
       // 滚动范围：文本宽度 + 间距
-      extern lgfx::U8g2font g_font_cjk;
       dst->setFont(&g_font_cjk);
       int title_w = dst->textWidth(s_np_title.c_str());
       if (s_title_scroll_x > title_w + SCROLL_GAP) {
@@ -2002,7 +1999,6 @@ void cover_info_draw()
                                                         14, c_artist, safe_pad, draw_artist_icon_img);
     if (artist_scroll) {
       s_artist_scroll_x += SCROLL_SPEED;
-      extern lgfx::U8g2font g_font_cjk;
       dst->setFont(&g_font_cjk);
       int artist_w = dst->textWidth(s_np_artist.c_str());
       if (s_artist_scroll_x > artist_w + SCROLL_GAP) {

@@ -50,8 +50,6 @@ static void drawScrollingTextPixel(const String& text,
                                    uint16_t text_color,
                                    uint16_t bg_color)
 {
-  extern lgfx::U8g2font g_font_cjk;
-
   tft.setFont(&g_font_cjk);
   tft.setTextSize(1);
   tft.setTextWrap(false);
@@ -213,8 +211,6 @@ static ListScrollState s_scroll_state; // 滚动状态
 //       visible - 可见项目数
 static void drawListFrame(const char* title, int start_idx, int total, int visible)
 {
-  extern lgfx::U8g2font g_font_cjk;
-
   // 绘制标题
   tft.setFont(&g_font_cjk);
   tft.setTextSize(1);
@@ -307,7 +303,6 @@ static String track_display_name(TrackIndex16 track_idx)
 static void drawListItem(const PlaylistGroup& group, int idx, int list_pos,
                          bool is_selected, int scroll_offset = 0, bool draw_bg = true)
 {
-  extern lgfx::U8g2font g_font_cjk;
   tft.setFont(&g_font_cjk);
   tft.setTextSize(1);
   tft.setTextWrap(false);
@@ -406,7 +401,6 @@ static void drawListItem(const PlaylistGroup& group, int idx, int list_pos,
 static void drawRadioItem(const RadioItem& item, int idx, int list_pos,
                           bool is_selected, int scroll_offset = 0, bool draw_bg = true)
 {
-  extern lgfx::U8g2font g_font_cjk;
   tft.setFont(&g_font_cjk);
   tft.setTextSize(1);
   tft.setTextWrap(false);
@@ -504,7 +498,6 @@ static void drawNetMusicItem(const NetMusicItem& item,
                              int scroll_offset = 0,
                              bool draw_bg = true)
 {
-  extern lgfx::U8g2font g_font_cjk;
   tft.setFont(&g_font_cjk);
   tft.setTextSize(1);
   tft.setTextWrap(false);
@@ -607,7 +600,6 @@ static void drawNetMusicItem(const NetMusicItem& item,
 static void drawTrackItem(TrackIndex16 track_idx, int idx, int list_pos,
                           bool is_selected, int scroll_offset = 0, bool draw_bg = true)
 {
-  extern lgfx::U8g2font g_font_cjk;
   tft.setFont(&g_font_cjk);
   tft.setTextSize(1);
   tft.setTextWrap(false);
@@ -697,7 +689,6 @@ void ui_draw_list_select(const std::vector<PlaylistGroup>& groups, int selected_
 {
   if (groups.empty()) return;
 
-  extern lgfx::U8g2font g_font_cjk;
   tft.setFont(&g_font_cjk);
   tft.setTextSize(1);
   tft.setTextWrap(false);
@@ -807,7 +798,6 @@ void ui_draw_radio_select(const std::vector<RadioItem>& radios, int selected_idx
 {
   if (radios.empty()) return;
 
-  extern lgfx::U8g2font g_font_cjk;
   tft.setFont(&g_font_cjk);
   tft.setTextSize(1);
   tft.setTextWrap(false);
@@ -894,7 +884,6 @@ void ui_draw_net_music_select(const std::vector<NetMusicItem>& items,
 {
   if (items.empty() || total <= 0) return;
 
-  extern lgfx::U8g2font g_font_cjk;
   tft.setFont(&g_font_cjk);
   tft.setTextSize(1);
   tft.setTextWrap(false);
@@ -1010,7 +999,6 @@ void ui_draw_track_select(const std::vector<TrackIndex16>& tracks, int selected_
 {
   if (tracks.empty()) return;
 
-  extern lgfx::U8g2font g_font_cjk;
   tft.setFont(&g_font_cjk);
   tft.setTextSize(1);
   tft.setTextWrap(false);
