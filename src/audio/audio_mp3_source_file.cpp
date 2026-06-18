@@ -76,13 +76,3 @@ void audio_mp3_file_source_close()
   }
   s_path = String();
 }
-
-bool audio_mp3_file_source_is_open()
-{
-  return s_open;
-}
-
-const char* audio_mp3_file_source_path()
-{
-  return s_path.c_str();
-}

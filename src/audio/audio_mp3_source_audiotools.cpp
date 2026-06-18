@@ -351,16 +351,6 @@ void audio_mp3_audiotools_source_close()
   s_url = String();
 }
 
-bool audio_mp3_audiotools_source_is_open()
-{
-  return s_open;
-}
-
-const char* audio_mp3_audiotools_source_url()
-{
-  return s_url.c_str();
-}
-
 int audio_mp3_audiotools_source_available()
 {
   if (!s_open) return 0;
