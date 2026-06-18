@@ -24,11 +24,9 @@
  * 按键输入模块。
  *
  * 当前 MODE 键的语义：
- * - 单击：切换小类（顺序 / 随机）
- * - 双击：切换大类（全部 / 歌手 / 专辑）
- * - 长按：触发重扫
- *
- * 说明：为了支持双击识别，MODE 单击会有一个短暂等待窗口。
+ * - 普通播放页：短按切换音量步进模式（X1 / X5）
+ * - 列表页 / 快捷菜单 / NFC 管理页：作为返回、退出或取消键
+ * - 扫描状态：作为取消扫描键
  */
 
 static inline bool pressed(int level) { return level == LOW; } // 按下接地
@@ -66,10 +64,6 @@ static uint32_t s_voldn_click_deadline = 0;
 static constexpr uint32_t VOLDN_DOUBLE_CLICK_MS = 320;
 
 static bool s_rescan_cancel_armed = false;
-
-static bool s_mode_click_pending = false;
-static uint32_t s_mode_click_deadline = 0;
-static constexpr uint32_t MODE_DOUBLE_CLICK_MS = 320;
 
 // EC06 旋钮相关
 static int s_enc_last = 0;
@@ -528,38 +522,6 @@ static void voldn_click_commit_double()
   s_voldn_click_deadline = 0;
 }
 
-static void mode_click_reset()
-{
-  s_mode_click_pending = false;
-  s_mode_click_deadline = 0;
-}
-
-/* MODE 单击提交：仅切小类，不改变大类。 */
-static void mode_click_commit_single()
-{
-  ui_mode_switch_highlight();
-  player_toggle_random();
-  mode_click_reset();
-}
-
-/* MODE 双击提交：仅切大类，保留当前顺序/随机状态。 */
-static void mode_click_commit_double()
-{
-  ui_mode_switch_highlight();
-  player_cycle_mode_category();
-  mode_click_reset();
-}
-
-/* 由 MODE 长按触发重扫；会先记录当前歌曲路径用于后续恢复。 */
-static void start_rescan()
-{
-  if (app_request_start_rescan()) {
-    // 由 MODE 长按进入重扫时，当前 MODE 仍可能保持按下。
-    // 扫描态的取消逻辑必须等待这次长按先松开，再接受下一次按下沿。
-    s_rescan_cancel_armed = false;
-  }
-}
-
 static void handle_key(KeyCtx& k,
                        void (*on_short)(),
                        void (*on_long)(),
@@ -683,8 +645,6 @@ void keys_sync_to_hw_state()
   sync_one(k_voldn);
   sync_one(k_volup);
   hall_out_sync_to_hw_state();
-
-  mode_click_reset();
 }
 
 /*
@@ -848,8 +808,7 @@ void keys_update()
 
   // --- 列表选择模式 ---
   if (player_list_select_is_active()) {
-    mode_click_reset();
-
+    
     // 列表页里旋钮也用于上下移动，不再调音量。
     if (encoder_step > 0) {
       player_list_select_handle_key(KEY_NEXT_SHORT);
@@ -886,7 +845,6 @@ void keys_update()
 
   // --- 快捷菜单：旋钮导航，按下确认；菜单内不再调整音量 ---
   if (quick_menu_is_active()) {
-    mode_click_reset();
     quick_menu_tick();
 
     if (quick_menu_is_active() && encoder_step > 0) {
@@ -922,7 +880,6 @@ void keys_update()
 
   // --- NFC 管理状态下，按键转给 admin 状态机处理 ---
   if (g_app_state == STATE_NFC_ADMIN) {
-    mode_click_reset();
     handle_key(k_mode, [](){ nfc_admin_state_on_key(NFC_ADMIN_KEY_MODE_SHORT); }, nullptr);
 
     // 绑定刷卡后的确认页：PLAY 和编码器按下都作为“确认绑定”。
@@ -933,8 +890,6 @@ void keys_update()
 
   // --- 扫描状态下的紧急处理 ---
   if (g_rescanning) {
-    mode_click_reset();
-
     // 扫描时只允许 MODE 取消，但必须用“按下沿”而不是电平。
     // 否则由 MODE 长按启动重扫后，会因为按键仍保持按下而立刻触发取消。
     int s = read_key_pin(k_mode.pin);
@@ -979,7 +934,6 @@ void keys_update()
   handle_key(k_ec06e, enter_quick_menu_from_player, nullptr);
 
   // MODE：短按切换大步音量模式。
-  mode_click_reset();
   handle_key(k_mode, volume_fast_mode_toggle, nullptr);
 
   // PLAY：短按输出一次电磁铁短脉冲 + 播放/暂停，长按保存 NVS 后关机。
