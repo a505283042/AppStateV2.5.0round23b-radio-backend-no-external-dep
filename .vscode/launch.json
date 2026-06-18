@@ -12,9 +12,9 @@
             "type": "platformio-debug",
             "request": "launch",
             "name": "PIO Debug",
-            "executable": "d:/Trae CN xiangmu/AppStateV2.5.0round23b-radio-backend-no-external-dep/.pio/build/esp32-s3-devkitc-1/firmware.elf",
+            "executable": "C:/Users/YCB/Desktop/AppStateV2.5.0round23b-radio-backend-no-external-dep/.pio/build/esp32-s3-devkitc-1/firmware.elf",
             "projectEnvName": "esp32-s3-devkitc-1",
-            "toolchainBinDir": "C:/.platformio/packages/toolchain-xtensa-esp32s3/bin",
+            "toolchainBinDir": "C:/Users/YCB/.platformio/packages/toolchain-xtensa-esp32s3/bin",
             "internalConsoleOptions": "openOnSessionStart",
             "preLaunchTask": {
                 "type": "PlatformIO",
@@ -25,18 +25,18 @@
             "type": "platformio-debug",
             "request": "launch",
             "name": "PIO Debug (skip Pre-Debug)",
-            "executable": "d:/Trae CN xiangmu/AppStateV2.5.0round23b-radio-backend-no-external-dep/.pio/build/esp32-s3-devkitc-1/firmware.elf",
+            "executable": "C:/Users/YCB/Desktop/AppStateV2.5.0round23b-radio-backend-no-external-dep/.pio/build/esp32-s3-devkitc-1/firmware.elf",
             "projectEnvName": "esp32-s3-devkitc-1",
-            "toolchainBinDir": "C:/.platformio/packages/toolchain-xtensa-esp32s3/bin",
+            "toolchainBinDir": "C:/Users/YCB/.platformio/packages/toolchain-xtensa-esp32s3/bin",
             "internalConsoleOptions": "openOnSessionStart"
         },
         {
             "type": "platformio-debug",
             "request": "launch",
             "name": "PIO Debug (without uploading)",
-            "executable": "d:/Trae CN xiangmu/AppStateV2.5.0round23b-radio-backend-no-external-dep/.pio/build/esp32-s3-devkitc-1/firmware.elf",
+            "executable": "C:/Users/YCB/Desktop/AppStateV2.5.0round23b-radio-backend-no-external-dep/.pio/build/esp32-s3-devkitc-1/firmware.elf",
             "projectEnvName": "esp32-s3-devkitc-1",
-            "toolchainBinDir": "C:/.platformio/packages/toolchain-xtensa-esp32s3/bin",
+            "toolchainBinDir": "C:/Users/YCB/.platformio/packages/toolchain-xtensa-esp32s3/bin",
             "internalConsoleOptions": "openOnSessionStart",
             "loadMode": "manual"
         }

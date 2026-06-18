@@ -514,7 +514,9 @@ static bool player_play_trackinfo_core(const TrackInfo& t,
 
             if (scaled_ok) {
                 cover_primed = true;
-                asset_job.need_cover = false;
+                // 屏幕封面已经在播放前缩放进 UI cache，但不要关闭 asset_job.need_cover。
+                // 后台资源任务还需要走一次 ui_cover_apply_cached()，把 UI cache 转成网页端 BMP 缓存。
+                // 否则 NFC 刷卡播放时本机有封面，网页端 cover_ready_for_web 一直为 false，显示“封面加载中”。
                 need_decode_cover = false;
                 (void)ui_cover_apply_cached(s_cur);
                 s_cover_idx = s_cur;
