@@ -186,11 +186,6 @@ bool nfc_binding_is_dirty()
     return s_bindings_dirty;
 }
 
-void nfc_binding_set_dirty(bool dirty)
-{
-    s_bindings_dirty = dirty;
-}
-
 bool nfc_binding_flush_if_dirty(const char* path)
 {
     if (!s_bindings_dirty) {

@@ -293,49 +293,6 @@ void app_state_update(void)
     }
 }
 
-/* 请求进入 NFC 管理状态 */
-bool app_request_enter_nfc_admin()
-{
-    // 只允许从播放器主状态进入
-    if (g_app_state != STATE_PLAYER) {
-        LOGD("[应用] 进入 NFC admin 被拒绝: not in player 状态");
-        return false;
-    }
-
-    // 扫描中不允许进入
-    if (g_rescanning) {
-        LOGD("[应用] 进入 NFC admin 被拒绝: rescanning");
-        return false;
-    }
-
-    // 列表选择模式不允许进入
-    if (player_list_select_is_active()) {
-        LOGD("[应用] 拒绝进入 NFC 管理：正在列表选择模式");
-        return false;
-    }
-
-    LOGI("[应用] 进入ing NFC admin");
-
-    // 冻结一下 UI 渲染，避免切页时和旧界面打架
-    ui_hold_render(true);
-
-    // 同步按键状态到硬件，避免"长按进入后，松手又触发别的键行为"
-    keys_sync_to_hw_state();
-
-    // 清理旧的 NFC 待处理事件，防止刚进 admin 就吃到上一次遗留 UID
-    String dummy;
-    while (nfc_take_last_uid(dummy)) {
-        // drain pending uid
-    }
-
-    // 先切状态，再调用 nfc_admin_state_enter() 让它自己处理 UI
-    g_app_state = STATE_NFC_ADMIN;
-    nfc_admin_state_enter();
-
-    ui_hold_render(false);
-    return true;
-}
-
 /* 请求进入 NFC 管理状态并指定目标 */
 bool app_request_enter_nfc_admin_with_target(const NfcAdminTarget& target)
 {

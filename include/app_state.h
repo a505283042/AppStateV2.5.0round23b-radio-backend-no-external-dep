@@ -19,7 +19,6 @@ void app_state_init(void);    /* 初始化应用状态 */
 void app_state_update(void);  /* 更新应用状态 */
 
 /* NFC 管理状态入口函数 */
-bool app_request_enter_nfc_admin();  /* 请求进入 NFC 管理状态 */
 void app_request_exit_nfc_admin();   /* 请求退出 NFC 管理状态 */
 
 bool app_request_enter_nfc_admin_with_target(const NfcAdminTarget& target); /* 请求进入 NFC 管理状态并指定目标 */

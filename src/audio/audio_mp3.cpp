@@ -238,7 +238,6 @@ uint32_t audio_mp3_get_sample_rate() { return s_mp3_sample_rate; }
 uint8_t audio_mp3_get_channels() { return s_mp3_channels; }
 uint32_t audio_mp3_get_bitrate_kbps() { return s_mp3_bitrate_kbps; }
 const char* audio_mp3_get_last_error() { return s_mp3_last_error.c_str(); }
-const char* audio_mp3_get_debug_name() { return s_mp3_debug_name.c_str(); }
 
 bool audio_mp3_start_file(SdFat& sd, const char* path)
 {

@@ -18,4 +18,4 @@ uint32_t audio_mp3_get_sample_rate();
 uint8_t audio_mp3_get_channels();
 uint32_t audio_mp3_get_bitrate_kbps();
 const char* audio_mp3_get_last_error();
-const char* audio_mp3_get_debug_name();
+
