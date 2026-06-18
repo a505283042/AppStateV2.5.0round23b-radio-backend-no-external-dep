@@ -37,7 +37,7 @@
 static TaskHandle_t s_runtime_monitor_task = nullptr; // 运行时监控任务句柄
 
 static constexpr uint32_t kRuntimeMonStackBytes = 3072; // 运行时监控任务栈大小
-static constexpr uint32_t kLoopTaskStackBytes = 5120; // loopTask 任务栈大小
+static constexpr uint32_t kLoopTaskStackBytes = 8192; // loopTask 任务栈大小，与 platformio.ini 的 ARDUINO_LOOP_STACK_SIZE 保持一致
 
 // 计算内存碎片百分比
 static uint32_t calc_fragment_percent(uint32_t free_bytes, uint32_t largest_block) 

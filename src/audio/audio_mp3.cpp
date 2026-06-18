@@ -116,6 +116,7 @@ static void clear_source()
   g_source_active = false;
   g_source_is_stream = false;
   s_debug_name = nullptr;
+  s_mp3_debug_name = String();
 }
 
 static bool fill_input_buffer(size_t min_fill_target, uint32_t wait_timeout_ms = 0)
@@ -180,7 +181,14 @@ bool audio_mp3_start_source(const AudioMp3Source& source, const char* debug_name
   g_source = source;
   g_source_active = true;
   g_source_is_stream = source.is_stream;
-  s_debug_name = debug_name ? debug_name : source.debug_name;
+
+  // debug_name 不能直接保存外部指针。
+  // NAS 播放时传进来的 url 可能来自 AudioTask 栈上的 AudioCmd.path，
+  // 命令处理完后该栈内存会被复用；继续用旧指针打印日志可能造成崩溃。
+  s_mp3_debug_name = debug_name
+      ? String(debug_name)
+      : (source.debug_name ? String(source.debug_name) : String());
+  s_debug_name = s_mp3_debug_name.length() ? s_mp3_debug_name.c_str() : nullptr;
 
   if (!select_input_buffer_for_source(g_source_is_stream)) {
     audio_mp3_stop();
@@ -209,7 +217,6 @@ bool audio_mp3_start_source(const AudioMp3Source& source, const char* debug_name
 
   // 设置主线状态
   s_mp3_active = true;
-  s_mp3_debug_name = debug_name ? String(debug_name) : String();
   s_mp3_last_error = String();
 
   const uint32_t t_after_prefill = millis();
