@@ -481,9 +481,6 @@ static bool web_start_ap_fallback() {
   return true;
 }
 
-static uint32_t web_clamp_u32_arg(const char* name, uint32_t defv, uint32_t lo, uint32_t hi) {
-  String s = s_server.arg(name); if (!s.length()) return defv; long v = s.toInt(); if (v < (long)lo) v = (long)lo; if (v > (long)hi) v = (long)hi; return (uint32_t)v;
-}
 static bool web_parse_int_arg(const char* name, int& out) {
   String s = s_server.arg(name);
   if (!s.length()) return false;
@@ -565,12 +562,7 @@ static void web_send_radio_list_json() {
   if (!web_send_chunk("]}")) return;
   web_end_stream_response();
 }
-static String web_track_album_name_string(const MusicCatalogV3& cat, const TrackRowV3& row) {
-  if (row.album_id == INVALID_ID32 || !cat.albums || row.album_id >= cat.album_count) {
-    return String("");
-  }
-  return String(pool_str_v3(cat.pool, cat.albums[row.album_id].name_off));
-}
+
 static void web_send_group_list_json(const std::vector<PlaylistGroup>& groups, bool is_album) {
   const WebPlayerSnapshot snap = web_snapshot_capture();
   const MusicCatalogV3& cat = storage_catalog_v3();
