@@ -64,8 +64,6 @@ extern volatile int s_ui_track_idx;
 extern volatile int s_ui_track_total;
 extern volatile uint32_t s_ui_volume_active_time;
 extern volatile uint32_t s_ui_mode_switch_time;
-extern volatile uint32_t s_ui_play_ms;
-extern volatile uint32_t s_ui_total_ms;
 
 /* 当前封面 + 双槽下一首封面缓存。 */
 extern LGFX_Sprite s_coverSpr;

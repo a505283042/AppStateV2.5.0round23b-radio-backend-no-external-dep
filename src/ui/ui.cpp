@@ -55,8 +55,6 @@ volatile int s_ui_track_idx = 0;
 volatile int s_ui_track_total = 0;
 volatile uint32_t s_ui_volume_active_time = UINT32_MAX;
 volatile uint32_t s_ui_mode_switch_time = 0;
-volatile uint32_t s_ui_play_ms = 0;
-volatile uint32_t s_ui_total_ms = 0;
 
 LGFX_Sprite s_coverSpr(&tft);
 LGFX_Sprite s_coverMasked(&tft);

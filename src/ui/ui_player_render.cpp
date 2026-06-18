@@ -1048,35 +1048,6 @@ static void draw_cover_panel_prev_next(LGFX_Sprite* dst,
   }
 }
 
-static bool cover_panel_inner_span(int y, int& x0, int& w)
-{
-  static constexpr int CX = 120;
-  static constexpr int CY = 120;
-  const int R = COVER_PANEL_INNER_R;
-
-  const int dy = y - CY;
-  if (dy < -R || dy > R) {
-    x0 = 0;
-    w = 0;
-    return false;
-  }
-
-  const int half = (int)sqrtf((float)(R * R - dy * dy));
-  x0 = CX - half;
-  w  = half * 2 + 1;
-
-  if (x0 < 0) {
-    w += x0;
-    x0 = 0;
-  }
-
-  if (x0 + w > 240) {
-    w = 240 - x0;
-  }
-
-  return w > 0;
-}
-
 // 接近洋红也透明
 static bool is_cover_panel_skin_transparent(uint16_t c)
 {
@@ -1983,10 +1954,6 @@ bool ui_draw_cover_for_track(const TrackInfo& t, bool force_redraw)
   s_angle_deg = 0.0f;
   s_rot_last_ms = 0;   // 让 UiTask 下次自己初始化 dt
 
-  // 切歌：先清空总时长，等待播放层重新喂入
-  s_ui_play_ms  = 0;
-  s_ui_total_ms = 0;
-
   // 立即推送第一帧。
   // 如果此时有 NFC 弹窗，必须走当前播放器视图的完整绘制路径，
   // 让弹窗作为 overlay 一起画进去，避免直接推封面把弹窗短暂盖掉。
@@ -2016,33 +1983,6 @@ bool ui_draw_cover_for_track(const TrackInfo& t, bool force_redraw)
 
   return true;
 }
-
-// =============================================================================
-// 可选的覆盖层 API（目前保持为轻量级存根）
-// =============================================================================
-void ui_player_draw_overlay(const TrackInfo&, uint32_t, uint32_t,
-                            const char*, const char*, const char*)
-{
-  // 最小化构建：无覆盖层
-}
-
-void ui_player_update_progress(uint32_t play_ms, uint32_t total_ms)
-{
-  s_ui_play_ms  = play_ms;
-  s_ui_total_ms = total_ms;   // 0 表示未知
-
-  g_lyricsDisplay.updateTime(play_ms);
-
-  player_assets_try_apply_deferred_current_cover(player_state_current_index());
-
-  ui_request_refresh();
-}
-
-void ui_player_update_lyrics(const char*, const char*)
-{
-  // 最小化构建：无覆盖层
-}
-
 
 enum ui_player_view_t ui_get_view() { return s_view; }
 

@@ -53,10 +53,6 @@ void ui_enter_player(void)
   s_rotate_wait_audio_start = false;
   s_rotate_wait_prefetch_done = false;
 
-  // 重置进度（新进入播放器/切歌时由播放层重新喂入）
-  s_ui_play_ms  = 0;
-  s_ui_total_ms = 0;
-
   // 重置清屏标志，确保下次渲染时清屏
   s_screen_cleared = false;
 
