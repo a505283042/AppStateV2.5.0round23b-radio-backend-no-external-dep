@@ -2278,12 +2278,20 @@ void web_server_start_async()
 #endif
 }
 
-void web_server_poll() {
-  #if WEBCTRL_ENABLED
+void web_server_poll()
+{
+#if WEBCTRL_ENABLED
     if (!s_ready) return;
     s_server.handleClient();
-  #endif
-  }
-  bool web_server_started() { return s_started; }
-  bool web_server_ready() { return s_ready; 
+#endif
+}
+
+bool web_server_started()
+{
+    return s_started;
+}
+
+bool web_server_ready()
+{
+    return s_ready;
 }

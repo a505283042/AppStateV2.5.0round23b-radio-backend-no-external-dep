@@ -69,7 +69,6 @@ static bool player_play_trackinfo_core(const TrackInfo& t,
                                        bool verbose,
                                        bool force_cover);
 static int player_clamp_idx_for_dispatch(int idx);
-bool player_play_idx_v3(uint32_t idx, bool verbose, bool force_cover);
 static int player_assets_hook_get_current_track_idx();
 static void player_assets_hook_on_current_cover_ready(int track_idx);
 static void player_assets_init_once();

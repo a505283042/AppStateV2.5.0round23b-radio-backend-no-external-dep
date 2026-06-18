@@ -238,10 +238,6 @@ static bool cover_blit_scaled_to_240(const uint8_t* ptr, size_t len, bool is_png
   return cover_blit_scaled_to_pair(ptr, len, is_png, s_coverSpr, s_coverMasked);
 }
 
-// 前向声明
-void cover_sprite_init_once();
-void cover_cache_sprite_init_once();
-
 static void ui_arm_rotate_start_after_audio_if_needed()
 {
   if (s_view == UI_VIEW_ROTATE || s_view == UI_VIEW_COVER_PANEL) {
