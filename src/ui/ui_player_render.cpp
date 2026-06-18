@@ -575,8 +575,7 @@ void ui_draw_battery_footer(LGFX_Sprite* dst)
         return;
     }
 
-    // 圆屏底部可视区域很窄，所以放在底部中间，整体高度控制在 12px。
-    static constexpr int FOOTER_H = 12;
+    // 圆屏底部可视区域很窄，所以放在底部中间。
     static constexpr int Y = 220;
     // 电池图标约 18px，闪电约 5px，中间 1px 间隔。
     // ICON_W 包含：电池 + 闪电 + 1px 余量。

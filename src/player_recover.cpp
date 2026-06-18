@@ -33,7 +33,6 @@ struct StringKeyLess {
 
 PlayerRecoverHooks s_hooks{};
 using RecoverTrackIndex = uint16_t;
-static constexpr RecoverTrackIndex kInvalidRecoverTrackIndex = 0xFFFF;
 
 RecoverTrackIndex* s_track_idx_sorted_by_path = nullptr;
 size_t s_track_idx_sorted_count = 0;

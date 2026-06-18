@@ -273,30 +273,6 @@ static constexpr int NFC_LIST_PAGE_SIZE = 5;
 static int s_nfc_list_offset = 0;
 static String s_nfc_detail_uid;
 
-static int nfc_list_data_page_count()
-{
-    const int total = nfc_binding_count();
-    if (total <= 0) {
-        return 1;
-    }
-    return (total + NFC_LIST_PAGE_SIZE - 1) / NFC_LIST_PAGE_SIZE;
-}
-
-static int nfc_list_total_page_count()
-{
-    return nfc_list_data_page_count();
-}
-
-static int nfc_list_current_page_index()
-{
-    const int total = nfc_binding_count();
-    if (total <= 0) {
-        return 0;
-    }
-
-    return s_nfc_list_offset / NFC_LIST_PAGE_SIZE;
-}
-
 static void nfc_list_clamp_offset()
 {
     const int total = nfc_binding_count();
@@ -333,16 +309,6 @@ static int nfc_list_visible_count()
     return remain;
 }
 
-static bool nfc_list_current_page_has_next()
-{
-    const int total = nfc_binding_count();
-    if (total <= 0) {
-        return false;
-    }
-
-    return s_nfc_list_offset + NFC_LIST_PAGE_SIZE < total;
-}
-
 static String nfc_entry_name(const NfcBindingEntry& entry)
 {
     String name = entry.display;
@@ -352,48 +318,6 @@ static String nfc_entry_name(const NfcBindingEntry& entry)
     }
     name.trim();
     return name;
-}
-
-static String nfc_utf8_chunk_by_bytes(const String& text, int chunk, size_t max_bytes)
-{
-    if (chunk < 0 || max_bytes == 0) {
-        return "";
-    }
-
-    String current;
-    int current_chunk = 0;
-
-    const int len = text.length();
-    for (int i = 0; i < len;) {
-        const uint8_t c = static_cast<uint8_t>(text[i]);
-        int cp_len = 1;
-        if ((c & 0x80) == 0x00) {
-            cp_len = 1;
-        } else if ((c & 0xE0) == 0xC0) {
-            cp_len = 2;
-        } else if ((c & 0xF0) == 0xE0) {
-            cp_len = 3;
-        } else if ((c & 0xF8) == 0xF0) {
-            cp_len = 4;
-        }
-
-        if (i + cp_len > len) {
-            cp_len = len - i;
-        }
-
-        if (current.length() > 0 && current.length() + cp_len > max_bytes) {
-            if (current_chunk == chunk) {
-                return current;
-            }
-            ++current_chunk;
-            current = "";
-        }
-
-        current += text.substring(i, i + cp_len);
-        i += cp_len;
-    }
-
-    return current_chunk == chunk ? current : String("");
 }
 
 static bool nfc_get_detail_entry(NfcBindingEntry& out)
@@ -503,17 +427,6 @@ static bool action_open_nfc_detail_1() { return action_open_nfc_detail_slot(1); 
 static bool action_open_nfc_detail_2() { return action_open_nfc_detail_slot(2); }
 static bool action_open_nfc_detail_3() { return action_open_nfc_detail_slot(3); }
 static bool action_open_nfc_detail_4() { return action_open_nfc_detail_slot(4); }
-
-static const char* value_nfc_list_prev()
-{
-    return s_nfc_list_offset > 0 ? "可用" : "首页";
-}
-
-static const char* value_nfc_list_next()
-{
-    nfc_list_clamp_offset();
-    return (s_nfc_list_offset + NFC_LIST_PAGE_SIZE < nfc_binding_count()) ? "可用" : "末页";
-}
 
 static bool action_nfc_list_prev_page()
 {

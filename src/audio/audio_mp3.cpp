@@ -19,7 +19,6 @@
 #include "../../lib/minimp3/minimp3.h"
 
 namespace {
-static SdFat* g_sd = nullptr;
 static mp3dec_t g_dec;
 static AudioMp3Source g_source{};
 static bool g_source_active = false;

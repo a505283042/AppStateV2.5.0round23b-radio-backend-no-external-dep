@@ -69,38 +69,6 @@ static void drawScrollingTextPixel(const String& text,
   tft.setTextDatum(top_left);
 }
 
-// 按字符偏移截取子串，支持UTF-8中文字符
-// 参数: text - 原始字符串
-//       charOffset - 字符偏移量（不是字节偏移）
-// 返回: 从偏移位置开始的子串
-static String getSubStrByCharOffset(const String& text, int charOffset)
-{
-  if (charOffset <= 0) return text;
-  
-  int char_count = 0;
-  int byte_pos = 0;
-  while (char_count < charOffset && byte_pos < text.length()) {
-    unsigned char c = text.charAt(byte_pos);
-    if ((c & 0x80) == 0) {
-      byte_pos++;  // ASCII字符，1字节
-    } else if ((c & 0xE0) == 0xC0) {
-      byte_pos += 2;  // 2字节UTF-8字符
-    } else if ((c & 0xF0) == 0xE0) {
-      byte_pos += 3;  // 3字节UTF-8字符（中文）
-    } else if ((c & 0xF8) == 0xF0) {
-      byte_pos += 4;  // 4字节UTF-8字符
-    } else {
-      byte_pos++;
-    }
-    char_count++;
-  }
-  
-  if (byte_pos < text.length()) {
-    return text.substring(byte_pos);
-  }
-  return "";
-}
-
 // =============================================================================
 // 滚动控制结构体
 struct ListScrollState {
