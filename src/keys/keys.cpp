@@ -688,47 +688,6 @@ void keys_sync_to_hw_state()
 }
 
 /*
- * MODE 正常态处理：
- * - 短按进入单击/双击判定窗口
- * - 长按直接触发重扫
- */
-static void handle_mode_key_normal()
-{
-  uint32_t now = millis();
-  int s = read_key_pin(k_mode.pin);
-
-  if (s != k_mode.last) {
-    k_mode.last = s;
-    if (pressed(s)) {
-      k_mode.t_down = now;
-      k_mode.long_fired = false;
-      k_mode.t_repeat = now;
-    } else {
-      if (!k_mode.long_fired && (now - k_mode.t_down) > 25) {
-        if (s_mode_click_pending && now <= s_mode_click_deadline) {
-          mode_click_commit_double();
-        } else {
-          s_mode_click_pending = true;
-          s_mode_click_deadline = now + MODE_DOUBLE_CLICK_MS;
-        }
-      }
-    }
-  }
-
-  if (pressed(k_mode.last) && !k_mode.long_fired && (now - k_mode.t_down) >= 800) {
-    k_mode.long_fired = true;
-    mode_click_reset();
-    start_rescan();
-  }
-
-  if (s_mode_click_pending && (int32_t)(now - s_mode_click_deadline) >= 0) {
-    mode_click_commit_single();
-  }
-
-  yield();
-}
-
-/*
  * VOLDN 正常态处理：
  * - 双击=切换 WiFi
  * - 按住连发=音量-

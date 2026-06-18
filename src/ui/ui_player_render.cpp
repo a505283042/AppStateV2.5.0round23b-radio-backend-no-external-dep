@@ -1096,37 +1096,6 @@ static bool is_cover_panel_skin_transparent(uint16_t c)
   return false;
 }
 
-static bool cover_panel_skin_transparent_at_screen(int sx, int sy)
-{
-  const int lx = sx;
-  const int ly = sy - COVER_PANEL_SKIN_Y;
-
-  if (lx < 0 || lx >= COVER_PANEL_SKIN_W ||
-      ly < 0 || ly >= COVER_PANEL_SKIN_H) {
-    return true;
-  }
-
-  const uint16_t c =
-      pgm_read_word(&g_cover_panel_skin_240x140[ly * COVER_PANEL_SKIN_W + lx]);
-
-  return is_cover_panel_skin_transparent(c);
-}
-
-static void draw_pixel_if_skin_transparent(LGFX_Sprite* dst,
-                                           int x,
-                                           int y,
-                                           uint16_t color)
-{
-  if (!dst) return;
-  if ((unsigned)x >= 240 || (unsigned)y >= 240) return;
-
-  if (!cover_panel_skin_transparent_at_screen(x, y)) {
-    return;
-  }
-
-  dst->drawPixel(x, y, color);
-}
-
 static void draw_cover_panel_skin(LGFX_Sprite* dst)
 {
   if (!dst) return;
@@ -1145,40 +1114,6 @@ static void draw_cover_panel_skin(LGFX_Sprite* dst)
       dst->drawPixel(x, sy, c);
     }
   }
-}
-
-static void draw_cover_panel_shell(LGFX_Sprite* dst)
-{
-  if (!dst) return;
-
-  const uint16_t panel    = 0x1082;
-  const uint16_t hub_line = 0x2104;
-
-  // 下半圆面板：从 COVER_PANEL_Y 往下，只填充圆屏内部区域。
-  for (int y = COVER_PANEL_Y; y < 240; ++y) {
-    int x0 = 0;
-    int w = 0;
-
-    if (!cover_panel_inner_span(y, x0, w)) {
-      continue;
-    }
-
-    dst->fillRect(x0, y, w, 1, panel);
-  }
-
-  // 上方小凸起，盖住封面。
-  dst->fillCircle(120, COVER_PANEL_BUMP_CY, COVER_PANEL_BUMP_R, panel);
-
-  // 补一下凸起和下方面板的连接处，避免中间有缝。
-  dst->fillRect(120 - COVER_PANEL_BUMP_R,
-                COVER_PANEL_Y,
-                COVER_PANEL_BUMP_R * 2,
-                COVER_PANEL_BUMP_R,
-                panel);
-
-  // 中间唱片孔 / 转轴。
-  dst->fillCircle(120, COVER_PANEL_BUMP_CY, COVER_PANEL_HUB_R, TFT_BLACK);
-  dst->drawCircle(120, COVER_PANEL_BUMP_CY, COVER_PANEL_HUB_R, hub_line);
 }
 
 // COVER_PANEL title scroll state
