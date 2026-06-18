@@ -1,0 +1,49 @@
+--- a/include/menu/quick_menu_pages.h
++++ b/include/menu/quick_menu_pages.h
+@@ -1,7 +1,8 @@
+ #pragma once
+ 
+ #include "menu/quick_menu_types.h"
+ 
++const QuickMenuPageDef& quick_menu_get_page_def(QuickMenuPage page);
+ const QuickMenuPageDef& quick_menu_get_nfc_page();
+ const QuickMenuPageDef& quick_menu_get_nfc_list_page();
+ const QuickMenuPageDef& quick_menu_get_nfc_detail_page();--- a/src/menu/quick_menu.cpp
++++ b/src/menu/quick_menu.cpp
+@@ -4,12 +4,8 @@
+ 
+ #include "menu/quick_menu_pages.h"
+ #include "menu/quick_menu_page_nfc.h"
+ #include "utils/log.h"
+-
+-// quick_menu.cpp 在匿名命名空间前面就会调用页面定义表，
+-// 这里显式声明一次，避免本地头文件包含顺序不一致时编译器看不到声明。
+-const QuickMenuPageDef& quick_menu_get_page_def(QuickMenuPage page);
+ 
+ namespace {
+ 
+ static constexpr uint32_t MENU_AUTO_EXIT_MS = 30000;
+--- a/include/menu/quick_menu_page_nfc.h
++++ b/include/menu/quick_menu_page_nfc.h
+@@ -1,9 +1,7 @@
+ #pragma once
+ 
+ #include "menu/quick_menu_types.h"
+-
+-const QuickMenuPageDef& quick_menu_get_nfc_page();
+ 
+ // 供播放器页的 NFC 绑定类型小弹窗直接调用。
+ const QuickMenuPageDef& quick_menu_get_nfc_page();
+ const QuickMenuPageDef& quick_menu_get_nfc_list_page();
+--- a/include/player_assets.h
++++ b/include/player_assets.h
+@@ -108,9 +108,8 @@
+ void player_assets_try_apply_deferred_current_cover(int current_track_idx);
+ /** 清空延后应用状态。 */
+ void player_assets_clear_deferred_current_cover_apply();
+ 
+-void player_assets_block_next_cover_prefetch_for(uint32_t delay_ms);
+ 
+ // 网页封面缓存：缓存浏览器可直接使用的 JPEG/PNG 原始字节（PSRAM）
+ bool player_assets_has_web_cover_blob(int track_idx,
+                                       CoverSource cover_source,

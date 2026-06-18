@@ -1,5 +1,6 @@
 #pragma once
 #include <stdbool.h>
+#include <stdint.h>
 #include <SdFat.h>
 
 #include "audio/audio_mp3_source.h"

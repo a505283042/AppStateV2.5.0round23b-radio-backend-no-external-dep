@@ -1,5 +1,6 @@
 #pragma once
 #include <stdbool.h>
+#include <stdint.h>
 #include <SdFat.h>
 
 bool audio_flac_start(SdFat& sd, const char* path);

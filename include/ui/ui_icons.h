@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stdint.h>
+
 #include "ui/gc9a01_lgfx.h"
 
 void draw_volume_icon(LGFX_Sprite* dst, int x, int y, uint16_t color);

@@ -18,8 +18,8 @@ struct AudioMp3Source {
   // 返回值语义：
   // >0  : 实际读到的字节数
   //  0  : 暂时没有数据（流式 source 可用）
-  // -1  : 错误
-  // -2  : 真正结束 / EOF
+  // -1  : 真正结束 / EOF
+  // -2  : 错误
   int (*read)(void* ctx, uint8_t* dst, size_t bytes) = nullptr;
 
   void (*close)(void* ctx) = nullptr;

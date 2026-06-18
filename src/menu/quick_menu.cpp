@@ -6,10 +6,6 @@
 #include "menu/quick_menu_page_nfc.h"
 #include "utils/log.h"
 
-// quick_menu.cpp 在匿名命名空间前面就会调用页面定义表，
-// 这里显式声明一次，避免本地头文件包含顺序不一致时编译器看不到声明。
-const QuickMenuPageDef& quick_menu_get_page_def(QuickMenuPage page);
-
 namespace {
 
 static constexpr uint32_t MENU_AUTO_EXIT_MS = 30000;

@@ -623,19 +623,7 @@ void player_assets_cancel_pending_cover_prefetch()
     s_cover_prefetch_track_idx = -1;
     s_cover_prefetch_track = TrackInfo();
 }
-// 安排待处理的封面预取任务
-void player_assets_arm_pending_cover_prefetch(const TrackInfo& t, int track_idx, uint32_t delay_ms)
-{
-    (void)t;
-    (void)track_idx;
-    (void)delay_ms;
-    player_assets_cancel_pending_cover_prefetch();
-}
-// 尝试运行待处理的封面预取任务
-void player_assets_try_run_pending_cover_prefetch()
-{
-    return;
-}
+
 // 安排播放器资源请求
 void player_assets_schedule(PlayerDeferredAssetJob& job)
 {

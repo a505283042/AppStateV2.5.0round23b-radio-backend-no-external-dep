@@ -19,11 +19,6 @@
 #include "hal/mcp23017_u3.h"
 #include "hal/board_hw_control.h"
 
-// 播放器页 NFC 小弹窗直接复用快捷菜单里已经写好的绑定入口。
-// 这里再声明一次，避免不同编译单元包含顺序造成未声明报错。
-bool quick_menu_nfc_bind_current_track();
-bool quick_menu_nfc_bind_current_artist();
-bool quick_menu_nfc_bind_current_album();
 
 /*
  * 按键输入模块。
