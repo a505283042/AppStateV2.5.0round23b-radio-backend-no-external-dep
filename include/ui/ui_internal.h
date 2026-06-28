@@ -22,8 +22,8 @@
 
 static constexpr int COVER_SIZE = 240;                      // 封面大小
 static constexpr float COVER_DEG_PER_SEC = 15.0f;           // 封面旋转角度 FPS
-static constexpr uint32_t UI_FPS_ROTATE = 20;               // 封面旋转 FPS
-static constexpr uint32_t UI_FPS_COVER_PANEL = 20;          // 封面面板滚动 FPS（优化后与全屏旋转页一致）
+static constexpr uint32_t UI_FPS_ROTATE = 15;               // 封面旋转 FPS
+static constexpr uint32_t UI_FPS_COVER_PANEL = 13;          // 封面面板滚动 FPS
 static constexpr uint32_t UI_FPS_INFO_ACTIVE = 12;          // 信息面板滚动 FPS
 static constexpr uint32_t UI_FPS_INFO_IDLE = 5;             // 信息面板空闲滚动 FPS 
 static constexpr uint32_t UI_FPS_OTHER = 1;                 // 其他元素滚动 FPS

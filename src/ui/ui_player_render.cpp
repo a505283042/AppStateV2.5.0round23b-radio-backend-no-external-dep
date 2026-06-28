@@ -20,6 +20,56 @@
 #undef LOG_TAG
 #define LOG_TAG "UI"
 
+#ifndef UI_RENDER_PROFILING
+#define UI_RENDER_PROFILING 0
+#endif
+
+#if UI_RENDER_PROFILING
+struct UiRenderProfStat {
+  uint32_t sum_us = 0;
+  uint32_t max_us = 0;
+  uint32_t count = 0;
+  uint32_t last_log_ms = 0;
+};
+
+static void ui_render_prof_sample(UiRenderProfStat& st, const char* label, uint32_t dt_us)
+{
+  st.sum_us += dt_us;
+  if (dt_us > st.max_us) st.max_us = dt_us;
+  st.count++;
+
+  const uint32_t now_ms = millis();
+  if (st.count > 0 && now_ms - st.last_log_ms >= 1000) {
+    Serial.printf("[UI-PROF] %-26s avg=%lu us max=%lu us frames=%lu\n",
+                  label,
+                  (unsigned long)(st.sum_us / st.count),
+                  (unsigned long)st.max_us,
+                  (unsigned long)st.count);
+    st.sum_us = 0;
+    st.max_us = 0;
+    st.count = 0;
+    st.last_log_ms = now_ms;
+  }
+}
+
+#define UI_PROF_T0() micros()
+#define UI_PROF_SAMPLE(stat, label, t0) ui_render_prof_sample((stat), (label), micros() - (t0))
+
+static UiRenderProfStat s_prof_cover_rotate_total;
+static UiRenderProfStat s_prof_cover_rotate_push;
+static UiRenderProfStat s_prof_fullscreen_bilinear;
+static UiRenderProfStat s_prof_panel_total;
+static UiRenderProfStat s_prof_panel_cover;
+static UiRenderProfStat s_prof_panel_record;
+static UiRenderProfStat s_prof_panel_skin;
+static UiRenderProfStat s_prof_panel_info;
+static UiRenderProfStat s_prof_panel_progress;
+static UiRenderProfStat s_prof_panel_push;
+#else
+#define UI_PROF_T0() 0
+#define UI_PROF_SAMPLE(stat, label, t0) do {} while (0)
+#endif
+
 void cover_panel_invalidate_source_cache();
 
 // 全屏旋转页抗锯齿开关。
@@ -633,6 +683,8 @@ void ui_draw_battery_footer(LGFX_Sprite* dst)
 //      使用双缓冲技术避免闪烁，交换前后帧索引
 void cover_rotate_draw(float angle_deg)
 {
+  const uint32_t prof_total_t0 = UI_PROF_T0();
+
   // 检查旋转帧是否已初始化以及源精灵是否有效
   if (!s_rotFramesInited || !s_src) return;
 
@@ -667,7 +719,10 @@ void cover_rotate_draw(float angle_deg)
   draw_nfc_scan_popup_overlay(dst);
 
   // 将后帧推送到屏幕 (0, 0) 位置
+  const uint32_t prof_push_t0 = UI_PROF_T0();
   dst->pushSprite(0, 0);
+  UI_PROF_SAMPLE(s_prof_cover_rotate_push, "cover_rotate.push", prof_push_t0);
+  UI_PROF_SAMPLE(s_prof_cover_rotate_total, "cover_rotate.total", prof_total_t0);
 
   // 交换前后帧索引（双缓冲）
   uint8_t tmp = s_rotFront;
@@ -1048,6 +1103,8 @@ static uint16_t cover_bilinear_mix_rgb565(uint16_t c00,
 
 static bool draw_fullscreen_rotated_cover_bilinear(LGFX_Sprite* dst, LGFX_Sprite* src, float angle_deg)
 {
+  const uint32_t prof_t0 = UI_PROF_T0();
+
   if (!dst || !src) return false;
 
   if (!cover_panel_ensure_source_cache(src) || !s_cover_panel_src_cache) {
@@ -1108,6 +1165,7 @@ static bool draw_fullscreen_rotated_cover_bilinear(LGFX_Sprite* dst, LGFX_Sprite
     }
   }
 
+  UI_PROF_SAMPLE(s_prof_fullscreen_bilinear, "fullscreen.bilinear", prof_t0);
   return true;
 }
 
@@ -2053,24 +2111,36 @@ static void draw_cover_panel_progress_ring(LGFX_Sprite* dst)
 
 void cover_panel_draw(float angle_deg)
 {
+  const uint32_t prof_total_t0 = UI_PROF_T0();
+
   if (!s_rotFramesInited || !s_src) return;
 
   auto* dst = s_rotFrame[s_rotBack];
 
   // 1. 只画上半圆旋转封面
+  uint32_t prof_step_t0 = UI_PROF_T0();
   draw_upper_rotated_cover_sampled(dst, s_src, angle_deg);
+  UI_PROF_SAMPLE(s_prof_panel_cover, "panel.cover", prof_step_t0);
 
   // 2. 半透明唱片圆：封面前、面板后
-  draw_cover_panel_record_overlay(dst);   
-  
+  prof_step_t0 = UI_PROF_T0();
+  draw_cover_panel_record_overlay(dst);
+  UI_PROF_SAMPLE(s_prof_panel_record, "panel.record", prof_step_t0);
+
   // 3. 下半固定面板覆盖
+  prof_step_t0 = UI_PROF_T0();
   draw_cover_panel_skin(dst);
+  UI_PROF_SAMPLE(s_prof_panel_skin, "panel.skin", prof_step_t0);
 
   // 4. 面板文字和按钮
+  prof_step_t0 = UI_PROF_T0();
   draw_cover_panel_info(dst);
+  UI_PROF_SAMPLE(s_prof_panel_info, "panel.info", prof_step_t0);
 
   // 5. 最后画外圈进度弧，避免被面板覆盖
+  prof_step_t0 = UI_PROF_T0();
   draw_cover_panel_progress_ring(dst);
+  UI_PROF_SAMPLE(s_prof_panel_progress, "panel.progress", prof_step_t0);
 
   // 6. 电池状态页脚
   ui_draw_battery_footer(dst);
@@ -2080,7 +2150,10 @@ void cover_panel_draw(float angle_deg)
   draw_nfc_bind_target_popup_overlay(dst);
   draw_nfc_scan_popup_overlay(dst);
 
+  prof_step_t0 = UI_PROF_T0();
   dst->pushSprite(0, 0);
+  UI_PROF_SAMPLE(s_prof_panel_push, "panel.push", prof_step_t0);
+  UI_PROF_SAMPLE(s_prof_panel_total, "panel.total", prof_total_t0);
 
   uint8_t tmp = s_rotFront;
   s_rotFront = s_rotBack;
