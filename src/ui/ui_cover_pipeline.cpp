@@ -493,6 +493,7 @@ bool cover_decode_to_sprite_from_track(const TrackInfo& t)
     bool ok = cover_blit_scaled_to_240(buf, fileSize, false);
 
     s_coverSprReady = ok;
+    cover_panel_invalidate_source_cache();
     LOGD("[封面] 默认封面成功=%d", (int)ok);
     ui_unlock();
     return ok;
@@ -511,6 +512,7 @@ bool cover_decode_to_sprite_from_track(const TrackInfo& t)
   uint32_t t4 = millis();
 
   s_coverSprReady = ok;
+  cover_panel_invalidate_source_cache();
   LOGD("[封面] 解码: init=%lums, 加载=%lums, 缩放=%lums, 总计=%lums", 
        t1-t0, t2-t1, t4-t3, t4-t0);
   ui_unlock();
@@ -531,6 +533,7 @@ static bool ui_cover_scale_common(const uint8_t* ptr, size_t len, bool is_png)
   ui_lock();
   bool ok = cover_blit_scaled_to_240(ptr, len, is_png);
   s_coverSprReady = ok;
+  cover_panel_invalidate_source_cache();
   if (ok) {
     s_src = &s_coverSpr;
     ui_arm_rotate_start_after_audio_if_needed();
@@ -608,6 +611,7 @@ bool ui_cover_apply_cached(int track_idx)
   s_coverCacheSpr[slot]->pushSprite(&s_coverSpr, 0, 0);
   s_coverCacheMasked[slot]->pushSprite(&s_coverMasked, 0, 0);
   s_coverSprReady = true;
+  cover_panel_invalidate_source_cache();
   s_src = &s_coverSpr;
   s_cover_apply_ms = millis();
   s_rotate_release_ms = 0;

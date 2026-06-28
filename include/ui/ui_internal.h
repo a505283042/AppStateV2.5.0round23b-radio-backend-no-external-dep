@@ -23,7 +23,7 @@
 static constexpr int COVER_SIZE = 240;                      // 封面大小
 static constexpr float COVER_DEG_PER_SEC = 15.0f;           // 封面旋转角度 FPS
 static constexpr uint32_t UI_FPS_ROTATE = 20;               // 封面旋转 FPS
-static constexpr uint32_t UI_FPS_COVER_PANEL = 12;          // 封面面板滚动 FPS
+static constexpr uint32_t UI_FPS_COVER_PANEL = 20;          // 封面面板滚动 FPS（优化后与全屏旋转页一致）
 static constexpr uint32_t UI_FPS_INFO_ACTIVE = 12;          // 信息面板滚动 FPS
 static constexpr uint32_t UI_FPS_INFO_IDLE = 5;             // 信息面板空闲滚动 FPS 
 static constexpr uint32_t UI_FPS_OTHER = 1;                 // 其他元素滚动 FPS
@@ -129,6 +129,8 @@ bool cover_decode_to_sprite_from_track(const TrackInfo& t);
 void cover_rotate_draw(float angle_deg);
 void cover_panel_draw(float angle_deg);
 void cover_info_draw();
+// 面板页 bilinear 源封面缓存失效：s_coverSpr 内容变化后必须调用，避免切歌仍显示旧封面。
+void cover_panel_invalidate_source_cache();
 
 /* NFC 绑定类型弹窗：播放器无封面/未开播占位页也需要能绘制。 */
 bool ui_nfc_bind_target_popup_is_visible();
