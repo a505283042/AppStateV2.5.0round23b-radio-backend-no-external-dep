@@ -11,6 +11,7 @@
 #include "audio/audio_service.h"
 #include "audio/audio_file.h"
 #include "utils/runtime_monitor.h"
+#include "utils/panic_diag.h"
 #include "web/web_server.h"
 #include "player_snapshot.h"
 #include "net_music/net_music_catalog.h"
@@ -53,6 +54,10 @@ void boot_state_run(void)
 
     const bool sd_ok = storage_init();
     if (sd_ok) {
+        // 上一次如果是 Guru Meditation / WDT / panic，ESP-IDF 会先把 core dump 写入 flash。
+        // 这里等 TF 卡和 SdFat 已经稳定挂载后，再复制到 /System/coredump_xxxxxxxx.bin。
+        panic_diag_flush_to_sd();
+
         audio_file_prepare_music_root_cache();
 
         // 加载 NFC 绑定文件

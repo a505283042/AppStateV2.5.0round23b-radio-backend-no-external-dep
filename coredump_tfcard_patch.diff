@@ -1,0 +1,593 @@
+diff -ruN "/mnt/data/proj_orig/AppStateV2.5.0round23b-radio-backend-no-external-dep - #U526f#U672c/include/utils/panic_diag.h" ./include/utils/panic_diag.h
+--- "/mnt/data/proj_orig/AppStateV2.5.0round23b-radio-backend-no-external-dep - #U526f#U672c/include/utils/panic_diag.h"	1970-01-01 00:00:00.000000000 +0000
++++ ./include/utils/panic_diag.h	2026-06-28 12:44:22.677775334 +0000
+@@ -0,0 +1,12 @@
++#pragma once
++
++#include <stdbool.h>
++
++// 在 TF 卡挂载成功后调用。
++// 如果上一次发生 panic/WDT 并且 flash 里存在 core dump，
++// 会复制到 /System/coredump_xxxxxx.bin，同时写 /System/panic_xxxxxx.txt 和 /System/panic_summary.txt。
++bool panic_diag_flush_to_sd(void);
++
++// 仅写入 reset reason 摘要，不要求一定有 core dump。
++// 通常不需要直接调用，panic_diag_flush_to_sd() 内部会处理。
++const char* panic_diag_reset_reason_name(int reason);
+diff -ruN "/mnt/data/proj_orig/AppStateV2.5.0round23b-radio-backend-no-external-dep - #U526f#U672c/partitions_16mb_coredump.csv" ./partitions_16mb_coredump.csv
+--- "/mnt/data/proj_orig/AppStateV2.5.0round23b-radio-backend-no-external-dep - #U526f#U672c/partitions_16mb_coredump.csv"	1970-01-01 00:00:00.000000000 +0000
++++ ./partitions_16mb_coredump.csv	2026-06-28 12:44:22.665347651 +0000
+@@ -0,0 +1,9 @@
++# ESP32-S3 16MB flash partition table with OTA + coredump
++# Keep app0/app1 compatible with Arduino default_16MB.csv style, reserve 512KB at flash end for coredump.
++# Name,     Type, SubType, Offset,   Size,     Flags
++nvs,        data, nvs,     0x9000,   0x5000,
++otadata,    data, ota,     0xe000,   0x2000,
++app0,       app,  ota_0,   0x10000,  0x640000,
++app1,       app,  ota_1,   0x650000, 0x640000,
++spiffs,     data, spiffs,  0xc90000, 0x2f0000,
++coredump,   data, coredump,0xf80000, 0x80000,
+diff -ruN "/mnt/data/proj_orig/AppStateV2.5.0round23b-radio-backend-no-external-dep - #U526f#U672c/platformio.ini" ./platformio.ini
+--- "/mnt/data/proj_orig/AppStateV2.5.0round23b-radio-backend-no-external-dep - #U526f#U672c/platformio.ini"	2026-06-18 22:09:38.000000000 +0000
++++ ./platformio.ini	2026-06-28 12:44:23.737557222 +0000
+@@ -4,7 +4,7 @@
+ framework = arduino ; Arduino 框架
+ 
+ board_upload.flash_size = 16MB ; 16MB 闪存大小
+-board_build.partitions = default_16MB.csv ; 默认分区表
++board_build.partitions = partitions_16mb_coredump.csv ; 自定义分区表：保留 512KB coredump 分区
+ 
+ ; Serial
+ monitor_speed = 115200 ; 115200 波特率
+diff -ruN "/mnt/data/proj_orig/AppStateV2.5.0round23b-radio-backend-no-external-dep - #U526f#U672c/src/boot_state.cpp" ./src/boot_state.cpp
+--- "/mnt/data/proj_orig/AppStateV2.5.0round23b-radio-backend-no-external-dep - #U526f#U672c/src/boot_state.cpp"	2026-06-17 22:28:26.000000000 +0000
++++ ./src/boot_state.cpp	2026-06-28 12:44:23.737937146 +0000
+@@ -1,122 +1,127 @@
+-#include "boot_state.h"
+-#include "app_state.h"
+-#include "nfc/nfc.h"
+-#include "nfc/nfc_binding.h"
+-#include "board/board_spi.h"
+-#include "storage/storage.h"
+-#include "storage/storage_catalog_v3.h"
+-#include "ui/ui.h"
+-#include "ui/ui_cover_mem.h"
+-#include "utils/log.h"
+-#include "audio/audio_service.h"
+-#include "audio/audio_file.h"
+-#include "utils/runtime_monitor.h"
+-#include "web/web_server.h"
+-#include "player_snapshot.h"
+-#include "net_music/net_music_catalog.h"
+-
+-static void prepare_music_catalogs()
+-{
+-    if (storage_catalog_v3_load_or_rebuild("/Music",
+-                                           "/System/music_index_v3.bin")) {
+-        LOGD("[启动] V3歌曲库 加载成功: 音乐=%lu 专辑=%lu 歌手=%lu",
+-             (unsigned long)storage_catalog_v3_track_count(),
+-             (unsigned long)storage_catalog_v3_album_count(),
+-             (unsigned long)storage_catalog_v3_artist_count());
+-
+-        // 曲库内存明细有 8~9 行，日常开机只需要上面的汇总。
+-        // 需要排查内存时，把 platformio.ini 里的 LOG_LEVEL 调到 3 再显示。
+-        #if LOG_LEVEL >= 3
+-        storage_catalog_v3_log_memory_stats();
+-        #endif
+-    } else {
+-        LOGE("[启动] V3歌曲库 加载失败");
+-    }
+-}
+-
+-void boot_state_run(void)
+-{
+-    static bool done = false;
+-    if (done) return;
+-    done = true;
+-
+-    Serial.begin(115200);
+-    delay(300);
+-    Serial.println("[启动] 开始");
+-
+-    Serial.printf("[内存] PSRAM存在=%d，总容量=%u，可用=%u\n",
+-                (int)psramFound(), (unsigned)ESP.getPsramSize(), (unsigned)ESP.getFreePsram());
+-    Serial.printf("[内存] 内部堆可用=%u\n", (unsigned)ESP.getFreeHeap());
+-
+-    // 1) 初始化两条 SPI：默认SPI=UI，SPI_SD=SD
+-    board_spi_init();
+-
+-    const bool sd_ok = storage_init();
+-    if (sd_ok) {
+-        audio_file_prepare_music_root_cache();
+-
+-        // 加载 NFC 绑定文件
+-        if (nfc_binding_load("/System/nfc_map.txt")) {
+-            LOGD("[启动] NFC 绑定表 加载成功: %d 条", nfc_binding_count());
+-        } else {
+-            LOGI("[启动] 未找到 NFC 绑定表");
+-        }
+-    } else {
+-        LOGW("[启动] 没有 TF 卡，不加载本地库");
+-        nfc_binding_clear();
+-        storage_catalog_v3_clear();
+-    }
+-
+-    // 初始化封面缓冲区（固定大小，避免 PSRAM 碎片）
+-    if (!cover_init_buffer()) {
+-        Serial.println("[启动] 封面缓冲区初始化失败");
+-    }
+-
+-    // 2) 先点亮屏幕  启动 UI（TFT_eSPI 用默认 SPI，不会再打架）
+-    ui_init();
+-
+-    // ✅ 启动音频专用任务（双核：音频与UI分离，避免旋转推屏导致卡顿）
+-    audio_service_start();
+-    runtime_monitor_start();
+-
+-    nfc_init();
+-
+-    // 让用户看到"启动中..."界面
+-    // delay(1000);
+-
+-    if (storage_is_ready()) {
+-        prepare_music_catalogs();
+-    } else {
+-        LOGW("[启动] 本地库加载失败，存储未就绪");
+-    }
+-
+-    // 预加载电台列表到内存中
+-    #include "radio/radio_catalog.h"
+-    if (storage_is_ready() && radio_catalog_load()) {
+-        LOGD("[启动] 电台列表 加载成功: %d 个电台", (int)radio_catalog_count());
+-    } else {
+-        LOGW("[启动] 加载电台列表失败");    
+-    }
+-
+-    // NAS/HTTP 歌曲索引不在开机阶段预加载。
+-    // 开机只读取很小的 /System/net_music_base.txt。
+-    // 打开 NAS 歌曲列表或 Web NAS 页面时，再从 base URL 下载 net_music.txt 到内存。
+-    // 注意：不会读取/写入 /System/net_music.txt，避免和本地播放抢 TF 卡。
+-    if (storage_is_ready() && net_music_catalog_load_base()) {
+-        LOGD("[启动] NAS base 加载成功: %s", net_music_catalog_base_url().c_str());
+-    } else {
+-        LOGW("[启动] NAS base 未加载");
+-    }
+-
+-    // 提前从 NVS 读取待恢复快照；真正恢复播放在首次进入 player 状态时执行。
+-    // 注意：只有存储就绪时才读取 snapshot，因为 snapshot key 依赖卡身份。
+-    if (storage_is_ready()) {
+-        player_snapshot_load_pending_from_nvs();
+-    }
+-
+-    Serial.println("[启动] 初始化完成，进入播放器");
+-    g_app_state = STATE_PLAYER;
+-
+-    // Web/WiFi 异步启动，不阻塞进入播放器。
+-    web_server_start_async();
++#include "boot_state.h"
++#include "app_state.h"
++#include "nfc/nfc.h"
++#include "nfc/nfc_binding.h"
++#include "board/board_spi.h"
++#include "storage/storage.h"
++#include "storage/storage_catalog_v3.h"
++#include "ui/ui.h"
++#include "ui/ui_cover_mem.h"
++#include "utils/log.h"
++#include "audio/audio_service.h"
++#include "audio/audio_file.h"
++#include "utils/runtime_monitor.h"
++#include "utils/panic_diag.h"
++#include "web/web_server.h"
++#include "player_snapshot.h"
++#include "net_music/net_music_catalog.h"
++
++static void prepare_music_catalogs()
++{
++    if (storage_catalog_v3_load_or_rebuild("/Music",
++                                           "/System/music_index_v3.bin")) {
++        LOGD("[启动] V3歌曲库 加载成功: 音乐=%lu 专辑=%lu 歌手=%lu",
++             (unsigned long)storage_catalog_v3_track_count(),
++             (unsigned long)storage_catalog_v3_album_count(),
++             (unsigned long)storage_catalog_v3_artist_count());
++
++        // 曲库内存明细有 8~9 行，日常开机只需要上面的汇总。
++        // 需要排查内存时，把 platformio.ini 里的 LOG_LEVEL 调到 3 再显示。
++        #if LOG_LEVEL >= 3
++        storage_catalog_v3_log_memory_stats();
++        #endif
++    } else {
++        LOGE("[启动] V3歌曲库 加载失败");
++    }
++}
++
++void boot_state_run(void)
++{
++    static bool done = false;
++    if (done) return;
++    done = true;
++
++    Serial.begin(115200);
++    delay(300);
++    Serial.println("[启动] 开始");
++
++    Serial.printf("[内存] PSRAM存在=%d，总容量=%u，可用=%u\n",
++                (int)psramFound(), (unsigned)ESP.getPsramSize(), (unsigned)ESP.getFreePsram());
++    Serial.printf("[内存] 内部堆可用=%u\n", (unsigned)ESP.getFreeHeap());
++
++    // 1) 初始化两条 SPI：默认SPI=UI，SPI_SD=SD
++    board_spi_init();
++
++    const bool sd_ok = storage_init();
++    if (sd_ok) {
++        // 上一次如果是 Guru Meditation / WDT / panic，ESP-IDF 会先把 core dump 写入 flash。
++        // 这里等 TF 卡和 SdFat 已经稳定挂载后，再复制到 /System/coredump_xxxxxxxx.bin。
++        panic_diag_flush_to_sd();
++
++        audio_file_prepare_music_root_cache();
++
++        // 加载 NFC 绑定文件
++        if (nfc_binding_load("/System/nfc_map.txt")) {
++            LOGD("[启动] NFC 绑定表 加载成功: %d 条", nfc_binding_count());
++        } else {
++            LOGI("[启动] 未找到 NFC 绑定表");
++        }
++    } else {
++        LOGW("[启动] 没有 TF 卡，不加载本地库");
++        nfc_binding_clear();
++        storage_catalog_v3_clear();
++    }
++
++    // 初始化封面缓冲区（固定大小，避免 PSRAM 碎片）
++    if (!cover_init_buffer()) {
++        Serial.println("[启动] 封面缓冲区初始化失败");
++    }
++
++    // 2) 先点亮屏幕  启动 UI（TFT_eSPI 用默认 SPI，不会再打架）
++    ui_init();
++
++    // ✅ 启动音频专用任务（双核：音频与UI分离，避免旋转推屏导致卡顿）
++    audio_service_start();
++    runtime_monitor_start();
++
++    nfc_init();
++
++    // 让用户看到"启动中..."界面
++    // delay(1000);
++
++    if (storage_is_ready()) {
++        prepare_music_catalogs();
++    } else {
++        LOGW("[启动] 本地库加载失败，存储未就绪");
++    }
++
++    // 预加载电台列表到内存中
++    #include "radio/radio_catalog.h"
++    if (storage_is_ready() && radio_catalog_load()) {
++        LOGD("[启动] 电台列表 加载成功: %d 个电台", (int)radio_catalog_count());
++    } else {
++        LOGW("[启动] 加载电台列表失败");    
++    }
++
++    // NAS/HTTP 歌曲索引不在开机阶段预加载。
++    // 开机只读取很小的 /System/net_music_base.txt。
++    // 打开 NAS 歌曲列表或 Web NAS 页面时，再从 base URL 下载 net_music.txt 到内存。
++    // 注意：不会读取/写入 /System/net_music.txt，避免和本地播放抢 TF 卡。
++    if (storage_is_ready() && net_music_catalog_load_base()) {
++        LOGD("[启动] NAS base 加载成功: %s", net_music_catalog_base_url().c_str());
++    } else {
++        LOGW("[启动] NAS base 未加载");
++    }
++
++    // 提前从 NVS 读取待恢复快照；真正恢复播放在首次进入 player 状态时执行。
++    // 注意：只有存储就绪时才读取 snapshot，因为 snapshot key 依赖卡身份。
++    if (storage_is_ready()) {
++        player_snapshot_load_pending_from_nvs();
++    }
++
++    Serial.println("[启动] 初始化完成，进入播放器");
++    g_app_state = STATE_PLAYER;
++
++    // Web/WiFi 异步启动，不阻塞进入播放器。
++    web_server_start_async();
+ }
+\ No newline at end of file
+diff -ruN "/mnt/data/proj_orig/AppStateV2.5.0round23b-radio-backend-no-external-dep - #U526f#U672c/src/utils/panic_diag.cpp" ./src/utils/panic_diag.cpp
+--- "/mnt/data/proj_orig/AppStateV2.5.0round23b-radio-backend-no-external-dep - #U526f#U672c/src/utils/panic_diag.cpp"	1970-01-01 00:00:00.000000000 +0000
++++ ./src/utils/panic_diag.cpp	2026-06-28 12:44:22.684090203 +0000
+@@ -0,0 +1,295 @@
++#include "utils/panic_diag.h"
++
++#include <Arduino.h>
++#include <SdFat.h>
++#include <stdarg.h>
++#include <stdio.h>
++#include <string.h>
++
++#include "storage/storage.h"
++#include "storage/storage_io.h"
++#include "utils/log.h"
++
++#include "esp_err.h"
++#include "esp_idf_version.h"
++#include "esp_partition.h"
++#include "esp_system.h"
++
++#if __has_include("esp_core_dump.h")
++  #include "esp_core_dump.h"
++  #define PANIC_DIAG_HAS_CORE_DUMP_HEADER 1
++#else
++  #define PANIC_DIAG_HAS_CORE_DUMP_HEADER 0
++#endif
++
++#if PANIC_DIAG_HAS_CORE_DUMP_HEADER && \
++    ((defined(CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH) && CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH) || \
++     (defined(CONFIG_ESP32_ENABLE_COREDUMP_TO_FLASH) && CONFIG_ESP32_ENABLE_COREDUMP_TO_FLASH))
++  #define PANIC_DIAG_CORE_DUMP_TO_FLASH 1
++#else
++  #define PANIC_DIAG_CORE_DUMP_TO_FLASH 0
++#endif
++
++extern SdFat sd;
++
++static void file_printf(File32& f, const char* fmt, ...)
++{
++    char buf[256];
++    va_list ap;
++    va_start(ap, fmt);
++    vsnprintf(buf, sizeof(buf), fmt, ap);
++    va_end(ap);
++    f.print(buf);
++}
++
++const char* panic_diag_reset_reason_name(int reason)
++{
++    switch ((esp_reset_reason_t)reason) {
++        case ESP_RST_UNKNOWN:   return "ESP_RST_UNKNOWN";
++        case ESP_RST_POWERON:   return "ESP_RST_POWERON";
++        case ESP_RST_EXT:       return "ESP_RST_EXT";
++        case ESP_RST_SW:        return "ESP_RST_SW";
++        case ESP_RST_PANIC:     return "ESP_RST_PANIC";
++        case ESP_RST_INT_WDT:   return "ESP_RST_INT_WDT";
++        case ESP_RST_TASK_WDT:  return "ESP_RST_TASK_WDT";
++        case ESP_RST_WDT:       return "ESP_RST_WDT";
++        case ESP_RST_DEEPSLEEP: return "ESP_RST_DEEPSLEEP";
++        case ESP_RST_BROWNOUT:  return "ESP_RST_BROWNOUT";
++        case ESP_RST_SDIO:      return "ESP_RST_SDIO";
++        default:                return "ESP_RST_OTHER";
++    }
++}
++
++static bool is_abnormal_reset(esp_reset_reason_t reason)
++{
++    return reason == ESP_RST_PANIC ||
++           reason == ESP_RST_INT_WDT ||
++           reason == ESP_RST_TASK_WDT ||
++           reason == ESP_RST_WDT ||
++           reason == ESP_RST_BROWNOUT;
++}
++
++static uint32_t next_panic_sequence()
++{
++    // 避免引入 Arduino Preferences 额外依赖，使用 NVS 底层 API 会更长。
++    // 这里用 reset 后仍可区分的随机数作为文件后缀；文件名不要求连续，只要求不易覆盖。
++    uint32_t v = esp_random();
++    if (v == 0) v = (uint32_t)millis() ^ 0xA5A50001UL;
++    return v;
++}
++
++static void write_summary(File32& f,
++                          esp_reset_reason_t reset_reason,
++                          bool abnormal,
++                          bool coredump_enabled,
++                          esp_err_t coredump_check,
++                          size_t coredump_addr,
++                          size_t coredump_size,
++                          const char* coredump_file,
++                          bool copied)
++{
++    file_printf(f, "========== panic/reset summary ==========" "\n");
++    file_printf(f, "reset_reason=%s(%d)\n",
++                panic_diag_reset_reason_name((int)reset_reason),
++                (int)reset_reason);
++    file_printf(f, "abnormal_reset=%s\n", abnormal ? "yes" : "no");
++    file_printf(f, "sdk=%s\n", ESP.getSdkVersion());
++    file_printf(f, "chip=%s rev=%u cores=%u\n",
++                ESP.getChipModel(),
++                (unsigned)ESP.getChipRevision(),
++                (unsigned)ESP.getChipCores());
++    file_printf(f, "free_heap=%u min_free_heap=%u\n",
++                (unsigned)ESP.getFreeHeap(),
++                (unsigned)ESP.getMinFreeHeap());
++    file_printf(f, "psram_found=%d free_psram=%u\n",
++                (int)psramFound(),
++                (unsigned)ESP.getFreePsram());
++    file_printf(f, "sketch_size=%u sketch_md5=%s\n",
++                (unsigned)ESP.getSketchSize(),
++                ESP.getSketchMD5().c_str());
++    file_printf(f, "coredump_to_flash_enabled=%s\n", coredump_enabled ? "yes" : "no");
++    file_printf(f, "coredump_check=%s(%d)\n", esp_err_to_name(coredump_check), (int)coredump_check);
++    file_printf(f, "coredump_flash_addr=0x%08x\n", (unsigned)coredump_addr);
++    file_printf(f, "coredump_size=%u\n", (unsigned)coredump_size);
++    file_printf(f, "coredump_saved=%s\n", copied ? "yes" : "no");
++    if (coredump_file && coredump_file[0]) {
++        file_printf(f, "coredump_file=%s\n", coredump_file);
++    }
++
++#if PANIC_DIAG_CORE_DUMP_TO_FLASH && ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
++    char panic_reason[256] = {0};
++    if (esp_core_dump_get_panic_reason(panic_reason, sizeof(panic_reason)) == ESP_OK) {
++        file_printf(f, "panic_reason=%s\n", panic_reason);
++    }
++#endif
++
++    file_printf(f, "note=Use firmware.elf + esp-coredump/idf.py to decode coredump binary.\n");
++    file_printf(f, "========== end ==========" "\n\n");
++}
++
++#if PANIC_DIAG_CORE_DUMP_TO_FLASH
++static bool copy_coredump_partition_to_file(const char* path, size_t image_size)
++{
++    const esp_partition_t* part = esp_partition_find_first(
++        ESP_PARTITION_TYPE_DATA,
++        ESP_PARTITION_SUBTYPE_DATA_COREDUMP,
++        nullptr);
++
++    if (!part) {
++        LOGE("[崩溃诊断] 未找到 coredump 分区");
++        return false;
++    }
++
++    if (image_size == 0 || image_size > part->size) {
++        LOGE("[崩溃诊断] coredump 大小异常: %u partition=%u",
++             (unsigned)image_size,
++             (unsigned)part->size);
++        return false;
++    }
++
++    File32 out = sd.open(path, O_WRONLY | O_CREAT | O_TRUNC);
++    if (!out) {
++        LOGE("[崩溃诊断] 打开 coredump 输出文件失败: %s", path);
++        return false;
++    }
++
++    const size_t chunk_size = 1024;
++    uint8_t* buf = (uint8_t*)malloc(chunk_size);
++    if (!buf) {
++        out.close();
++        LOGE("[崩溃诊断] 分配复制缓冲区失败");
++        return false;
++    }
++
++    size_t offset = 0;
++    bool ok = true;
++    while (offset < image_size) {
++        const size_t n = min(chunk_size, image_size - offset);
++        esp_err_t err = esp_partition_read(part, offset, buf, n);
++        if (err != ESP_OK) {
++            LOGE("[崩溃诊断] 读取 coredump flash 失败 offset=%u err=%s",
++                 (unsigned)offset,
++                 esp_err_to_name(err));
++            ok = false;
++            break;
++        }
++
++        const size_t written = out.write(buf, n);
++        if (written != n) {
++            LOGE("[崩溃诊断] 写入 coredump 文件失败 offset=%u written=%u need=%u",
++                 (unsigned)offset,
++                 (unsigned)written,
++                 (unsigned)n);
++            ok = false;
++            break;
++        }
++        offset += n;
++    }
++
++    out.flush();
++    out.close();
++    free(buf);
++
++    if (!ok) {
++        sd.remove(path);
++    }
++    return ok;
++}
++#endif
++
++bool panic_diag_flush_to_sd(void)
++{
++    if (!storage_is_ready()) {
++        return false;
++    }
++
++    StorageSdLockGuard sd_lock(3000);
++    if (!sd_lock) {
++        LOGW("[崩溃诊断] 等待 SD 锁超时");
++        return false;
++    }
++
++    sd.mkdir("/System");
++
++    const esp_reset_reason_t reset_reason = esp_reset_reason();
++    const bool abnormal = is_abnormal_reset(reset_reason);
++
++    esp_err_t coredump_check = ESP_ERR_NOT_SUPPORTED;
++    size_t coredump_addr = 0;
++    size_t coredump_size = 0;
++    bool copied = false;
++    char coredump_path[64] = {0};
++    char panic_path[64] = {0};
++
++#if PANIC_DIAG_CORE_DUMP_TO_FLASH
++    coredump_check = esp_core_dump_image_check();
++    if (coredump_check == ESP_OK) {
++        esp_err_t get_err = esp_core_dump_image_get(&coredump_addr, &coredump_size);
++        if (get_err != ESP_OK) {
++            LOGE("[崩溃诊断] 获取 coredump 地址/大小失败: %s", esp_err_to_name(get_err));
++            coredump_check = get_err;
++        }
++    }
++#endif
++
++    // 正常上电/正常软件重启且没有 coredump 时，不刷文件，避免每次开机都写 TF。
++    if (!abnormal && coredump_check != ESP_OK) {
++        return false;
++    }
++
++    const uint32_t seq = next_panic_sequence();
++    snprintf(coredump_path, sizeof(coredump_path), "/System/coredump_%08lX.bin", (unsigned long)seq);
++    snprintf(panic_path, sizeof(panic_path), "/System/panic_%08lX.txt", (unsigned long)seq);
++
++#if PANIC_DIAG_CORE_DUMP_TO_FLASH
++    if (coredump_check == ESP_OK && coredump_size > 0) {
++        copied = copy_coredump_partition_to_file(coredump_path, coredump_size);
++        if (copied) {
++            LOGI("[崩溃诊断] 已保存 coredump: %s size=%u",
++                 coredump_path,
++                 (unsigned)coredump_size);
++            // 成功复制后擦除 flash 里的旧 coredump，避免每次开机重复保存同一个崩溃。
++            esp_err_t erase_err = esp_core_dump_image_erase();
++            if (erase_err != ESP_OK) {
++                LOGW("[崩溃诊断] 擦除 flash coredump 失败: %s", esp_err_to_name(erase_err));
++            }
++        }
++    }
++#endif
++
++    File32 per = sd.open(panic_path, O_WRONLY | O_CREAT | O_TRUNC);
++    if (per) {
++        write_summary(per,
++                      reset_reason,
++                      abnormal,
++                      PANIC_DIAG_CORE_DUMP_TO_FLASH != 0,
++                      coredump_check,
++                      coredump_addr,
++                      coredump_size,
++                      copied ? coredump_path : "",
++                      copied);
++        per.flush();
++        per.close();
++    } else {
++        LOGE("[崩溃诊断] 写 panic 明细失败: %s", panic_path);
++    }
++
++    File32 sum = sd.open("/System/panic_summary.txt", O_WRONLY | O_CREAT | O_APPEND);
++    if (sum) {
++        write_summary(sum,
++                      reset_reason,
++                      abnormal,
++                      PANIC_DIAG_CORE_DUMP_TO_FLASH != 0,
++                      coredump_check,
++                      coredump_addr,
++                      coredump_size,
++                      copied ? coredump_path : "",
++                      copied);
++        sum.flush();
++        sum.close();
++    } else {
++        LOGE("[崩溃诊断] 写 panic_summary.txt 失败");
++    }
++
++    return copied || abnormal;
++}
