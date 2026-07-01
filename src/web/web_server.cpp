@@ -19,6 +19,7 @@
 #include "player_recover.h"
 #include "radio/radio_catalog.h"
 #include "net_music/net_music_catalog.h"
+#include "net_music/net_music_embedded_cover.h"
 #include "player_list_select.h"
 #include "player_playlist.h"
 #include "storage/storage_catalog_v3.h"
@@ -1133,6 +1134,68 @@ static void web_handle_radio_logo_current() {
 }
 
 static void web_handle_cover_current() {
+  const PlayerSourceState source = player_source_get();
+  if (source.type == PlayerSourceType::NET_TRACK &&
+      (s_server.hasArg("net") || player_state_current_index() < 0)) {
+    int req_idx = source.net_track_idx;
+    (void)web_parse_int_arg("idx", req_idx);
+
+    uint32_t cover_offset = 0;
+    uint32_t cover_size = 0;
+    String cover_rev;
+    if (!net_music_embedded_cover_get_current(req_idx,
+                                              source.net_track_url,
+                                              &cover_offset,
+                                              &cover_size,
+                                              &cover_rev)) {
+      web_send_json_err("NAS 封面尚未就绪", 404);
+      return;
+    }
+
+    const String etag = String("\"cover-net-") + String(req_idx) + "-" + cover_rev + "\"";
+    if (web_if_none_match_hit(etag)) {
+      LOGD("[网页] NAS 封面 304 idx=%d 版本=%s", req_idx, cover_rev.c_str());
+      web_send_not_modified(etag);
+      return;
+    }
+
+    uint8_t* buf = nullptr;
+    size_t len = 0;
+    const bool ok = web_cover_cache_copy_bmp(req_idx,
+                                            COVER_MP3_APIC,
+                                            source.net_track_url.c_str(),
+                                            "",
+                                            cover_offset,
+                                            cover_size,
+                                            &buf,
+                                            &len);
+    if (!ok || !buf || len == 0) {
+      if (buf) free(buf);
+      web_send_json_err("NAS 封面缓存尚未就绪", 404);
+      return;
+    }
+
+    LOGD("[网页] NAS 封面 BMP 命中 idx=%d 字节=%u", req_idx, (unsigned)len);
+
+    WiFiClient client = s_server.client();
+    client.setTimeout(800);
+    client.print("HTTP/1.1 200 OK\r\n");
+    client.print("Content-Type: image/bmp\r\n");
+    client.printf("Content-Length: %u\r\n", (unsigned)len);
+    client.print("Cache-Control: public, max-age=86400, immutable\r\n");
+    client.printf("ETag: %s\r\n", etag.c_str());
+    client.print("Connection: close\r\n");
+    client.print("\r\n");
+    const size_t written = client.write(buf, len);
+    client.flush();
+    if (written != len) {
+      LOGW("[网页] NAS 封面 发送写入不足 idx=%d 字节=%u/%u", req_idx, (unsigned)written, (unsigned)len);
+    }
+
+    free(buf);
+    return;
+  }
+
   int cur = player_state_current_index();
   int req_track = -1;
   if (web_parse_int_arg("track", req_track)) cur = req_track;

@@ -4,6 +4,7 @@
 #include <WiFi.h>
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include <freertos/task.h>
 #include <string.h>
 
@@ -23,6 +24,87 @@ static constexpr uint16_t kCoverTaskStackBytes = 12288;
 static constexpr UBaseType_t kCoverTaskPrio = 1;
 
 volatile uint32_t s_cover_job_generation = 0;
+
+struct NetCoverRuntimeState {
+  bool valid = false;
+  int idx = -1;
+  String url;
+  uint32_t offset = 0;
+  uint32_t size = 0;
+  String rev;
+};
+
+static NetCoverRuntimeState s_runtime_cover;
+static StaticSemaphore_t s_runtime_cover_mu_buf;
+static SemaphoreHandle_t s_runtime_cover_mu = nullptr;
+
+static SemaphoreHandle_t runtime_cover_mutex()
+{
+  if (!s_runtime_cover_mu) {
+    s_runtime_cover_mu = xSemaphoreCreateMutexStatic(&s_runtime_cover_mu_buf);
+  }
+  return s_runtime_cover_mu;
+}
+
+static uint32_t fnv1a_add_bytes(uint32_t h, const char* s)
+{
+  if (!s) return h;
+  const uint8_t* p = reinterpret_cast<const uint8_t*>(s);
+  while (*p) {
+    h ^= *p++;
+    h *= 16777619u;
+  }
+  return h;
+}
+
+static uint32_t fnv1a_add_u32(uint32_t h, uint32_t v)
+{
+  for (int i = 0; i < 4; ++i) {
+    h ^= (uint8_t)((v >> (i * 8)) & 0xFF);
+    h *= 16777619u;
+  }
+  return h;
+}
+
+static String make_runtime_cover_rev(int idx, const String& url, uint32_t offset, uint32_t size)
+{
+  uint32_t h = 2166136261u;
+  h = fnv1a_add_u32(h, (uint32_t)idx);
+  h = fnv1a_add_u32(h, offset);
+  h = fnv1a_add_u32(h, size);
+  h = fnv1a_add_bytes(h, url.c_str());
+  char buf[16];
+  snprintf(buf, sizeof(buf), "%08lx", (unsigned long)h);
+  return String(buf);
+}
+
+static void clear_runtime_cover_state()
+{
+  SemaphoreHandle_t mu = runtime_cover_mutex();
+  if (!mu) return;
+  if (xSemaphoreTake(mu, pdMS_TO_TICKS(30)) != pdTRUE) return;
+  s_runtime_cover.valid = false;
+  s_runtime_cover.idx = -1;
+  s_runtime_cover.url = String();
+  s_runtime_cover.offset = 0;
+  s_runtime_cover.size = 0;
+  s_runtime_cover.rev = String();
+  xSemaphoreGive(mu);
+}
+
+static void set_runtime_cover_state(int idx, const String& url, uint32_t offset, uint32_t size)
+{
+  SemaphoreHandle_t mu = runtime_cover_mutex();
+  if (!mu) return;
+  if (xSemaphoreTake(mu, pdMS_TO_TICKS(30)) != pdTRUE) return;
+  s_runtime_cover.valid = true;
+  s_runtime_cover.idx = idx;
+  s_runtime_cover.url = url;
+  s_runtime_cover.offset = offset;
+  s_runtime_cover.size = size;
+  s_runtime_cover.rev = make_runtime_cover_rev(idx, url, offset, size);
+  xSemaphoreGive(mu);
+}
 
 static bool is_current_job(uint32_t generation, int idx, const String& url)
 {
@@ -363,11 +445,23 @@ static void net_cover_task_entry(void* arg)
   heap_caps_free(cover_buf);
 
   if (scaled_ok && is_current_job(generation, idx, url)) {
+    const bool web_ok = ui_cover_store_current_web_cache(idx,
+                                                         COVER_MP3_APIC,
+                                                         url.c_str(),
+                                                         "",
+                                                         loc.offset,
+                                                         loc.size);
+    if (web_ok) {
+      set_runtime_cover_state(idx, url, loc.offset, loc.size);
+    } else {
+      LOGW("[网络封面] 网页封面缓存写入失败 idx=%d", idx);
+    }
     ui_request_refresh_now();
-    LOGI("[网络封面] NAS 内嵌封面已应用 idx=%d size=%u png=%u 耗时=%lums",
+    LOGI("[网络封面] NAS 内嵌封面已应用 idx=%d size=%u png=%u web=%u 耗时=%lums",
          idx,
          (unsigned)cover_len,
          cover_is_png ? 1 : 0,
+         web_ok ? 1 : 0,
          (unsigned long)(millis() - t0));
   } else {
     LOGW("[网络封面] NAS 内嵌封面缩放失败 idx=%d size=%u", idx, (unsigned)cover_len);
@@ -385,6 +479,7 @@ void net_music_embedded_cover_start(int net_track_idx, const String& mp3_url)
   }
 
   const uint32_t generation = ++s_cover_job_generation;
+  clear_runtime_cover_state();
 
   NetCoverJob* job = new NetCoverJob();
   if (!job) {
@@ -412,4 +507,29 @@ void net_music_embedded_cover_start(int net_track_idx, const String& mp3_url)
 void net_music_embedded_cover_cancel()
 {
   ++s_cover_job_generation;
+  clear_runtime_cover_state();
+}
+
+bool net_music_embedded_cover_get_current(int net_track_idx,
+                                          const String& mp3_url,
+                                          uint32_t* out_offset,
+                                          uint32_t* out_size,
+                                          String* out_rev)
+{
+  SemaphoreHandle_t mu = runtime_cover_mutex();
+  if (!mu) return false;
+  if (xSemaphoreTake(mu, pdMS_TO_TICKS(20)) != pdTRUE) return false;
+
+  const bool ok = s_runtime_cover.valid &&
+                  s_runtime_cover.idx == net_track_idx &&
+                  s_runtime_cover.url == mp3_url &&
+                  s_runtime_cover.size > 0;
+  if (ok) {
+    if (out_offset) *out_offset = s_runtime_cover.offset;
+    if (out_size) *out_size = s_runtime_cover.size;
+    if (out_rev) *out_rev = s_runtime_cover.rev;
+  }
+
+  xSemaphoreGive(mu);
+  return ok;
 }

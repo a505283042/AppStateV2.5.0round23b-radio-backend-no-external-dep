@@ -68,6 +68,14 @@ bool ui_cover_scale_from_memory();                 // 从共享内存缩放到�
 
 // 从调用方提供的原始图片缓冲解码缩放到精灵（不访问 SD）
 bool ui_cover_scale_from_buffer(const uint8_t* ptr, size_t len, bool is_png);
+// 将当前已经缩放到屏幕用 Sprite 的封面同步生成网页 BMP 缓存。
+// 主要供 NAS/HTTP 内嵌封面这种“没有本地 TrackViewV3”的运行时封面使用。
+bool ui_cover_store_current_web_cache(int track_idx,
+                                      CoverSource cover_source,
+                                      const char* audio_path,
+                                      const char* cover_path,
+                                      uint32_t cover_offset,
+                                      uint32_t cover_size);
 // 预读并缩放到“下一首封面缓存”，不立即显示；命中后可瞬时切换
 bool ui_cover_scale_to_cache_from_buffer(const uint8_t* ptr, size_t len, bool is_png, int track_idx);
 bool ui_cover_apply_cached(int track_idx);

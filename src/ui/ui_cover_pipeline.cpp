@@ -579,6 +579,29 @@ bool ui_cover_scale_from_buffer(const uint8_t* ptr, size_t len, bool is_png)
   return ui_cover_scale_common(ptr, len, is_png);
 }
 
+bool ui_cover_store_current_web_cache(int track_idx,
+                                      CoverSource cover_source,
+                                      const char* audio_path,
+                                      const char* cover_path,
+                                      uint32_t cover_offset,
+                                      uint32_t cover_size)
+{
+  if (track_idx < 0 || !audio_path || !audio_path[0]) return false;
+  if (!s_coverSprInited || !s_coverSprReady) return false;
+
+  bool ok = false;
+  ui_lock();
+  ok = web_cover_cache_store_from_sprite(track_idx,
+                                         cover_source,
+                                         audio_path,
+                                         cover_path ? cover_path : "",
+                                         cover_offset,
+                                         cover_size,
+                                         s_coverSpr);
+  ui_unlock();
+  return ok;
+}
+
 bool ui_cover_scale_to_cache_from_buffer(const uint8_t* ptr, size_t len, bool is_png, int track_idx)
 {
   if (!ptr || len == 0 || track_idx < 0) return false;

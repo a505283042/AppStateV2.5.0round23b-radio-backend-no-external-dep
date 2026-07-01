@@ -11,6 +11,7 @@
 #include "audio/audio_radio_backend.h"
 #include "radio/radio_catalog.h"
 #include "net_music/net_music_catalog.h"
+#include "net_music/net_music_embedded_cover.h"
 #include "storage/storage_catalog_v3.h"
 #include "ui/ui.h"
 #include "storage/storage_view_v3.h"
@@ -306,11 +307,30 @@ WebPlayerSnapshot web_snapshot_capture() {
     snap.next_lyric_start_ms = 0;
     snap.following_lyric_start_ms = 0;
 
-    snap.cover_loading = false;
-    snap.has_cover = false;
-    snap.cover_url = "";
-    snap.cover_rev = "";
-    snap.cover_ready_for_web = false;
+    uint32_t net_cover_offset = 0;
+    uint32_t net_cover_size = 0;
+    String net_cover_rev;
+    const bool net_cover_known = net_music_embedded_cover_get_current(source.net_track_idx,
+                                                                      source.net_track_url,
+                                                                      &net_cover_offset,
+                                                                      &net_cover_size,
+                                                                      &net_cover_rev);
+    const bool net_cover_ready = net_cover_known &&
+        web_cover_cache_has(source.net_track_idx,
+                            COVER_MP3_APIC,
+                            source.net_track_url.c_str(),
+                            "",
+                            net_cover_offset,
+                            net_cover_size);
+
+    snap.cover_loading = !net_cover_ready && source.net_track_active;
+    snap.has_cover = net_cover_ready;
+    snap.cover_ready_for_web = net_cover_ready;
+    snap.cover_rev = net_cover_ready ? net_cover_rev : String();
+    snap.cover_url = net_cover_ready
+        ? (String("/api/cover/current?net=1&idx=") + String(source.net_track_idx) +
+           "&rev=" + net_cover_rev)
+        : String();
 
     snap.display_pos = source.net_track_idx;
     snap.display_total = (int)net_music_catalog_count();
