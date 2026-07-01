@@ -19,7 +19,7 @@ namespace {
 
 static constexpr uint32_t kHttpRangeWindowBytes = 16 * 1024u;
 static constexpr uint32_t kHttpCoverChunkBytes = 8 * 1024u;
-static constexpr uint32_t kMaxRemoteCoverBytes = 768 * 1024u;
+static constexpr uint32_t kMaxRemoteCoverBytes = 512 * 1024u;
 static constexpr uint32_t kMaxRemoteLyricsBytes = 64 * 1024u;
 static constexpr uint32_t kRemoteLyricsChunkBytes = 512u;
 static constexpr uint32_t kLyricsJobDelayMs = 250;
