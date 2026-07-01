@@ -800,7 +800,12 @@ static bool control_play_net_track_index_impl(int idx, bool reset_shuffle)
     (void)control_apply_cover_file("/System/default_cover.jpg");
     ui_request_refresh_now();
 
-    const bool ok = audio_service_play_stream_mp3(url.c_str(), true);
+    uint32_t stream_start_offset = 0;
+    (void)net_music_mp3_probe_audio_start_offset(url, &stream_start_offset);
+
+    const bool ok = (stream_start_offset > 0)
+        ? audio_service_play_stream_mp3_from_offset(url.c_str(), stream_start_offset, true)
+        : audio_service_play_stream_mp3(url.c_str(), true);
     if (ok) {
         player_source_set_net_track_status(true, String("playing"), String());
 
@@ -819,10 +824,11 @@ static bool control_play_net_track_index_impl(int idx, bool reset_shuffle)
         // 避免起播被 ID3/APIC 网络读取拖慢。
         net_music_embedded_cover_start(idx, url);
 
-        LOGI("[网络歌曲] 播放网络歌曲 索引=%d 标题=%s 时长=%lums URL=%s",
+        LOGI("[网络歌曲] 播放网络歌曲 索引=%d 标题=%s 时长=%lums offset=%lu URL=%s",
             idx,
             item.title.c_str(),
             (unsigned long)item.duration_ms,
+            (unsigned long)stream_start_offset,
             url.c_str());
         return true;
     }

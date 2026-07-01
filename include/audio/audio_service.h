@@ -12,6 +12,7 @@ void audio_service_start(void);
 // wait=true: 阻塞等待命令执行完成（用于 stop 后立刻读封面/扫描，避免 SD 并发）
 bool audio_service_play(const char* path, bool wait);
 bool audio_service_play_stream_mp3(const char* url, bool wait);
+bool audio_service_play_stream_mp3_from_offset(const char* url, uint32_t start_offset, bool wait);
 bool audio_service_stop(bool wait);
 
 // 播放状态（由 AudioTask 维护）

@@ -62,6 +62,7 @@ struct AudioCmd {
   CoverSource cover_source = COVER_NONE;
   uint32_t cover_offset = 0;
   uint32_t cover_size = 0;
+  uint32_t stream_start_offset = 0; // HTTP MP3 Range 起播偏移，0=普通起播
 
   char** out_text = nullptr;
   size_t* out_text_len = nullptr;
@@ -419,7 +420,21 @@ static void audio_task_entry(void*){
 
         (void)audio_output_route_set_amp_mute(true);
 
-        bool ok = (cmd.type == CMD_PLAY_STREAM_MP3) ? audio_play_stream_mp3(cmd.path) : audio_play(cmd.path);
+        bool ok = false;
+        if (cmd.type == CMD_PLAY_STREAM_MP3) {
+          if (cmd.stream_start_offset > 0) {
+            ok = audio_play_stream_mp3_from_offset(cmd.path, cmd.stream_start_offset);
+            if (!ok) {
+              LOGW("[音频] Range 起播失败，回退普通 URL 起播 offset=%lu",
+                   (unsigned long)cmd.stream_start_offset);
+              ok = audio_play_stream_mp3(cmd.path);
+            }
+          } else {
+            ok = audio_play_stream_mp3(cmd.path);
+          }
+        } else {
+          ok = audio_play(cmd.path);
+        }
         const uint32_t t_done = millis();
         ack = ok ? 1 : 0;
 
@@ -630,6 +645,23 @@ bool audio_service_play_stream_mp3(const char* url, bool wait)
   cmd->type = CMD_PLAY_STREAM_MP3;
   strncpy(cmd->path, url, sizeof(cmd->path) - 1);
   cmd->path[sizeof(cmd->path) - 1] = '\0';
+  return send_cmd_heap(cmd, wait);
+}
+
+bool audio_service_play_stream_mp3_from_offset(const char* url, uint32_t start_offset, bool wait)
+{
+  if (!url) return false;
+
+  if (start_offset == 0) {
+    return audio_service_play_stream_mp3(url, wait);
+  }
+
+  AudioCmd* cmd = audio_cmd_new();
+  if (!cmd) return false;
+  cmd->type = CMD_PLAY_STREAM_MP3;
+  strncpy(cmd->path, url, sizeof(cmd->path) - 1);
+  cmd->path[sizeof(cmd->path) - 1] = '\0';
+  cmd->stream_start_offset = start_offset;
   return send_cmd_heap(cmd, wait);
 }
 

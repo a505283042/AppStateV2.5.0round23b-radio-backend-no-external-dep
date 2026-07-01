@@ -394,11 +394,24 @@ static void enter_quick_menu_from_player()
 {
     volume_fast_mode_exit();
     quick_menu_enter();
+    ui_request_refresh_now();
 
     // 进入快捷菜单后立即同步一次按键状态。
     // 这样本轮按键扫描后半段不会继续按“播放器页”语义处理 PREV/NEXT，
     // 可避免开机第一次进菜单时残留按键边沿被误当成切歌。
     keys_sync_to_hw_state();
+}
+
+static void quick_menu_key_and_refresh(QuickMenuKey key)
+{
+    quick_menu_handle_key(key);
+    ui_request_refresh_now();
+}
+
+static void list_select_key_and_refresh(key_event_t evt)
+{
+    player_list_select_handle_key(evt);
+    ui_request_refresh_now();
 }
 
 static int read_mcp_a_active_low(uint8_t bit)
@@ -811,32 +824,32 @@ void keys_update()
     
     // 列表页里旋钮也用于上下移动，不再调音量。
     if (encoder_step > 0) {
-      player_list_select_handle_key(KEY_NEXT_SHORT);
+      list_select_key_and_refresh(KEY_NEXT_SHORT);
     } else if (encoder_step < 0) {
-      player_list_select_handle_key(KEY_PREV_SHORT);
+      list_select_key_and_refresh(KEY_PREV_SHORT);
     }
 
     // MODE：短按=返回上一级；长按=退出到播放器
     handle_key(k_mode,
-               [](){ player_list_select_handle_key(KEY_MODE_SHORT); },
-               [](){ player_list_select_handle_key(KEY_MODE_LONG); });
+               [](){ list_select_key_and_refresh(KEY_MODE_SHORT); },
+               [](){ list_select_key_and_refresh(KEY_MODE_LONG); });
 
     // 编码器按下 / PLAY：短按=确认选择。
     handle_key(k_ec06e,
-              [](){ player_list_select_handle_key(KEY_PLAY_SHORT); },
+              [](){ list_select_key_and_refresh(KEY_PLAY_SHORT); },
               nullptr);
 
     handle_key(k_play,
-              [](){ player_list_select_handle_key(KEY_PLAY_SHORT); },
+              [](){ list_select_key_and_refresh(KEY_PLAY_SHORT); },
               nullptr);
 
     // PREV / NEXT：短按=翻页，编码器旋转负责逐项移动。
     handle_key(k_prev,
-              [](){ player_list_select_handle_key(KEY_PAGE_UP_SHORT); },
+              [](){ list_select_key_and_refresh(KEY_PAGE_UP_SHORT); },
               nullptr);
 
     handle_key(k_next,
-              [](){ player_list_select_handle_key(KEY_PAGE_DOWN_SHORT); },
+              [](){ list_select_key_and_refresh(KEY_PAGE_DOWN_SHORT); },
               nullptr);
 
     // 旧 VOL 翻页入口已移除，避免残留旧板逻辑影响新交互。
@@ -848,31 +861,31 @@ void keys_update()
     quick_menu_tick();
 
     if (quick_menu_is_active() && encoder_step > 0) {
-      quick_menu_handle_key(QuickMenuKey::Down);
+      quick_menu_key_and_refresh(QuickMenuKey::Down);
     } else if (quick_menu_is_active() && encoder_step < 0) {
-      quick_menu_handle_key(QuickMenuKey::Up);
+      quick_menu_key_and_refresh(QuickMenuKey::Up);
     }
 
     handle_key(k_ec06e,
-               [](){ quick_menu_handle_key(QuickMenuKey::Confirm); },
-               [](){ quick_menu_handle_key(QuickMenuKey::Exit); });
+               [](){ quick_menu_key_and_refresh(QuickMenuKey::Confirm); },
+               [](){ quick_menu_key_and_refresh(QuickMenuKey::Exit); });
 
     handle_key(k_play,
-               [](){ quick_menu_handle_key(QuickMenuKey::Confirm); },
+               [](){ quick_menu_key_and_refresh(QuickMenuKey::Confirm); },
                nullptr);
 
     handle_key(k_mode,
-               [](){ quick_menu_handle_key(QuickMenuKey::Back); },
-               [](){ quick_menu_handle_key(QuickMenuKey::Exit); });
+               [](){ quick_menu_key_and_refresh(QuickMenuKey::Back); },
+               [](){ quick_menu_key_and_refresh(QuickMenuKey::Exit); });
 
     // 快捷菜单中：上一曲/下一曲短按作为翻页键。
     // 普通菜单页里等价于上一项/下一项；NFC列表页里是真正上一页/下一页。
     handle_key(k_prev,
-              [](){ quick_menu_handle_key(QuickMenuKey::PageUp); },
+              [](){ quick_menu_key_and_refresh(QuickMenuKey::PageUp); },
               nullptr);
 
     handle_key(k_next,
-              [](){ quick_menu_handle_key(QuickMenuKey::PageDown); },
+              [](){ quick_menu_key_and_refresh(QuickMenuKey::PageDown); },
               nullptr);
 
     return;

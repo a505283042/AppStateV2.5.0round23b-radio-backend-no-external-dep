@@ -380,6 +380,28 @@ bool get_row_for_item(int item_idx, int start_idx, int total, int& row)
 
 } // namespace
 
+bool ui_quick_menu_view_needs_draw()
+{
+    const int total = quick_menu_get_item_count();
+    if (total <= 0) {
+        return false;
+    }
+
+    const QuickMenuPage page = quick_menu_get_page();
+    const int selected = quick_menu_get_selected_index();
+    const int start_idx = calc_page_start_index(selected, total);
+    const uint32_t revision = quick_menu_get_revision();
+    const uint32_t full_refresh_seq = quick_menu_get_full_refresh_seq();
+
+    return s_first_draw ||
+           page != s_last_page ||
+           start_idx != s_last_start_idx ||
+           selected != s_last_selected_idx ||
+           total != s_last_total ||
+           revision != s_last_revision ||
+           full_refresh_seq != s_last_full_refresh_seq;
+}
+
 void ui_quick_menu_view_reset()
 {
     s_first_draw = true;

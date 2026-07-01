@@ -269,6 +269,25 @@ bool audio_mp3_start_url(const char* url)
   return true;
 }
 
+bool audio_mp3_start_url_from_offset(const char* url, uint32_t start_offset)
+{
+  if (start_offset == 0) {
+    return audio_mp3_start_url(url);
+  }
+
+  AudioMp3Source src{};
+  if (!audio_mp3_audiotools_source_open_from_offset(url, start_offset, src)) {
+    return false;
+  }
+
+  if (!audio_mp3_start_source(src, url)) {
+    audio_mp3_audiotools_source_close();
+    return false;
+  }
+
+  return true;
+}
+
 void audio_mp3_stop()
 {
   s_pending_off = 0;

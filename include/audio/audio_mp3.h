@@ -7,6 +7,7 @@
 
 bool audio_mp3_start_file(SdFat& sd, const char* path);
 bool audio_mp3_start_url(const char* url);
+bool audio_mp3_start_url_from_offset(const char* url, uint32_t start_offset);
 bool audio_mp3_start_source(const AudioMp3Source& source, const char* debug_name = nullptr);
 
 void audio_mp3_stop();

@@ -174,7 +174,7 @@ static bool read_response_header(const ParsedUrl& current, int& status_code, Str
   return false;
 }
 
-static bool open_http_stream_once(const char* url, String& redirect_url)
+static bool open_http_stream_once(const char* url, uint32_t start_offset, String& redirect_url)
 {
   redirect_url = String();
 
@@ -207,6 +207,11 @@ static bool open_http_stream_once(const char* url, String& redirect_url)
   g_client.print("\r\n");
   g_client.print("User-Agent: ESP32S3-Player/1.0\r\n");
   g_client.print("Accept: audio/mpeg, audio/mp3, */*\r\n");
+  if (start_offset > 0) {
+    g_client.print("Range: bytes=");
+    g_client.print(start_offset);
+    g_client.print("-\r\n");
+  }
   g_client.print("Icy-MetaData: 0\r\n");
   g_client.print("Connection: close\r\n\r\n");
 
@@ -226,6 +231,15 @@ static bool open_http_stream_once(const char* url, String& redirect_url)
 
     LOGD("[电台] HTTP 重定向 -> %s", location.c_str());
     redirect_url = location;
+    g_client.stop();
+    return false;
+  }
+
+  if (start_offset > 0 && status_code != 206) {
+    LOGW("[电台] Range 起播被服务器拒绝或忽略 状态=%d offset=%lu URL=%s",
+         status_code,
+         (unsigned long)start_offset,
+         url);
     g_client.stop();
     return false;
   }
@@ -294,7 +308,7 @@ static void http_source_close_impl(void* ctx)
 
 } // namespace
 
-bool audio_mp3_audiotools_source_open(const char* url, AudioMp3Source& out_source)
+bool audio_mp3_audiotools_source_open_from_offset(const char* url, uint32_t start_offset, AudioMp3Source& out_source)
 {
   audio_mp3_audiotools_source_close();
 
@@ -313,7 +327,7 @@ bool audio_mp3_audiotools_source_open(const char* url, AudioMp3Source& out_sourc
 
   for (int attempt = 0; attempt <= kMaxRedirects; ++attempt) {
     String redirect_url;
-    ok = open_http_stream_once(current_url.c_str(), redirect_url);
+    ok = open_http_stream_once(current_url.c_str(), start_offset, redirect_url);
     if (ok) break;
 
     if (redirect_url.length() == 0) {
@@ -324,7 +338,7 @@ bool audio_mp3_audiotools_source_open(const char* url, AudioMp3Source& out_sourc
   }
 
   if (!ok) {
-    LOGE("[电台] HTTP 流 打开失败：%s", url);
+    LOGE("[电台] HTTP 流 打开失败：%s offset=%lu", url, (unsigned long)start_offset);
     return false;
   }
 
@@ -338,8 +352,13 @@ bool audio_mp3_audiotools_source_open(const char* url, AudioMp3Source& out_sourc
   out_source.debug_name = s_url.c_str();
   out_source.is_stream = true;
 
-  LOGD("[电台] HTTP 流打开成功：%s", s_url.c_str());
+  LOGD("[电台] HTTP 流打开成功：%s offset=%lu", s_url.c_str(), (unsigned long)start_offset);
   return true;
+}
+
+bool audio_mp3_audiotools_source_open(const char* url, AudioMp3Source& out_source)
+{
+  return audio_mp3_audiotools_source_open_from_offset(url, 0, out_source);
 }
 
 void audio_mp3_audiotools_source_close()

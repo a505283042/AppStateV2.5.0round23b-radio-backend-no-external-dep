@@ -25,6 +25,8 @@ static constexpr float COVER_DEG_PER_SEC = 15.0f;           // 封面旋转角�
 static constexpr uint32_t UI_FPS_ROTATE = 15;               // 封面旋转 FPS
 static constexpr uint32_t UI_FPS_COVER_PANEL = 13;          // 封面面板滚动 FPS
 static constexpr uint32_t UI_FPS_INFO_ACTIVE = 12;          // 信息面板滚动 FPS
+static constexpr uint32_t UI_FPS_QUICK_MENU = 4;             // 快捷菜单空闲刷新 FPS：按键会主动唤醒，空闲时降低 UI 抢占
+static constexpr uint32_t UI_FPS_LIST_SELECT = 10;           // 列表选择页刷新 FPS：按键会主动唤醒，避免 NAS 播放时持续高频重绘
 static constexpr uint32_t UI_FPS_INFO_IDLE = 5;             // 信息面板空闲滚动 FPS 
 static constexpr uint32_t UI_FPS_OTHER = 1;                 // 其他元素滚动 FPS
 

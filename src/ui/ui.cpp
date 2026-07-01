@@ -185,10 +185,10 @@ static inline TickType_t ui_period_ticks()
   // 列表选择模式优先于快捷菜单。
   // 从快捷菜单进入列表时菜单仍保持 active，帧率判断也要优先按列表处理，
   // 避免列表刷新被菜单状态降级或延后。
-  if (player_list_select_is_active()) return pdMS_TO_TICKS(1000 / 20);
+  if (player_list_select_is_active()) return pdMS_TO_TICKS(1000 / UI_FPS_LIST_SELECT);
 
   // 快捷菜单：不需要高帧率，但需要比 1fps 更跟手。
-  if (quick_menu_is_active()) return pdMS_TO_TICKS(1000 / 10);
+  if (quick_menu_is_active()) return pdMS_TO_TICKS(1000 / UI_FPS_QUICK_MENU);
 
   // PLAYER 界面：按视图区分帧率。
   // 封面旋转关闭后降低刷新压力，但面板视图仍保留歌词/进度刷新。
@@ -247,6 +247,8 @@ static void ui_task_entry(void*)
 
     if (player_list_select_is_active()) {
       s_list_select_was_active = true;
+      // 菜单/列表覆盖播放器时，暂停封面旋转时钟，避免退出后 dt 累积导致角度跳变。
+      s_rot_last_ms = now_ms;
 
       ui_draw_lock();
 
@@ -297,9 +299,14 @@ static void ui_task_entry(void*)
         s_quick_menu_was_active = true;
       }
 
-      ui_draw_lock();
-      ui_draw_quick_menu();
-      ui_draw_unlock();
+      // 菜单覆盖播放器期间暂停封面旋转时钟；菜单空闲且内容未变化时不进绘图锁，
+      // 避免 NAS 播放时持续抢占 SPI/CPU。按键会主动唤醒 UI，因此空闲低频不会影响跟手性。
+      s_rot_last_ms = now_ms;
+      if (ui_quick_menu_view_needs_draw()) {
+        ui_draw_lock();
+        ui_draw_quick_menu();
+        ui_draw_unlock();
+      }
       continue;
     }
 

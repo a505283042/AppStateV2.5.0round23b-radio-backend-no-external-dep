@@ -385,6 +385,22 @@ bool audio_play_stream_mp3(const char* url)
   return ok;
 }
 
+bool audio_play_stream_mp3_from_offset(const char* url, uint32_t start_offset)
+{
+  if (start_offset == 0) {
+    return audio_play_stream_mp3(url);
+  }
+
+  audio_stop();
+  audio_reset_play_pos();
+  s_total_ms = 0;
+  if (!url) return false;
+  LOGD("[音频] 播放 MP3 Range 流: offset=%lu URL=%s", (unsigned long)start_offset, url);
+  bool ok = audio_mp3_start_url_from_offset(url, start_offset);
+  if (ok) g_dec = DEC_MP3;
+  return ok;
+}
+
 void audio_loop()
 {
   if (g_dec == DEC_MP3) { 
