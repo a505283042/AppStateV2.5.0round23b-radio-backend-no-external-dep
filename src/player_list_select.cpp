@@ -1,4 +1,6 @@
 #include "player_list_select.h"
+
+#include <Preferences.h>
 #include "ui/ui_list_select_view.h"
 #include "ui/ui.h"
 
@@ -27,6 +29,18 @@ std::vector<NetMusicItem> s_list_net_tracks;
 static constexpr int NET_TRACK_PAGE_SIZE = 5;
 int s_net_track_page_start_idx = 0;
 int s_net_track_total = 0;
+
+// NAS 歌曲列表上次浏览位置。
+// 与本地列表进入时定位当前播放歌曲类似：
+// - 正在播放 NAS 歌曲时，优先定位当前播放索引；
+// - 非 NAS 播放时，恢复上次在 NAS 列表停留的位置；
+// - 运行中只更新内存；关机/显式保存时再写 NVS，避免高频浏览写 flash。
+int s_last_net_track_list_idx = -1;
+bool s_last_net_track_list_dirty = false;
+bool s_last_net_track_list_loaded = false;
+
+static constexpr const char* kListPrefsNs = "plist";
+static constexpr const char* kNetTrackListIdxKey = "net_idx";
 
 static uint32_t s_list_last_action_ms = 0;
 
@@ -58,6 +72,64 @@ static void list_select_prepare_view_on_enter()
 {
     ui_clear_list_select();
     ui_request_refresh_now();
+}
+
+static inline int list_select_clamp_index(int idx, int total)
+{
+    if (total <= 0) return 0;
+    if (idx < 0) return 0;
+    if (idx >= total) return total - 1;
+    return idx;
+}
+
+static inline void list_select_set_net_track_position_memory(int idx, int total, bool mark_dirty)
+{
+    int next_idx = -1;
+    if (total > 0 && idx >= 0) {
+        next_idx = list_select_clamp_index(idx, total);
+    }
+
+    if (s_last_net_track_list_idx != next_idx) {
+        s_last_net_track_list_idx = next_idx;
+        if (mark_dirty) {
+            s_last_net_track_list_dirty = true;
+        }
+    }
+}
+
+static inline void list_select_remember_net_track_position()
+{
+    if (s_list_state != ListSelectState::NET_TRACK) {
+        return;
+    }
+
+    const int total = (int)net_music_catalog_count();
+    list_select_set_net_track_position_memory(s_list_selected_idx, total, true);
+}
+
+static void list_select_load_net_track_position_from_nvs_once()
+{
+    if (s_last_net_track_list_loaded) {
+        return;
+    }
+    s_last_net_track_list_loaded = true;
+
+    Preferences pref;
+    if (!pref.begin(kListPrefsNs, true)) {
+        LOGW("[列表] NAS 位置 NVS 读取失败: 打开 namespace");
+        return;
+    }
+
+    const int saved_idx = pref.getInt(kNetTrackListIdxKey, -1);
+    pref.end();
+
+    if (saved_idx >= 0) {
+        s_last_net_track_list_idx = saved_idx;
+        s_last_net_track_list_dirty = false;
+        LOGD("[列表] NAS 位置 已从 NVS 读取: idx=%d", saved_idx);
+    } else {
+        LOGD("[列表] NAS 位置 NVS 无保存值");
+    }
 }
 
 // 记录二级列表的父级状态
@@ -192,6 +264,7 @@ void list_select_move_selection(int delta, int item_count, bool is_net_track)
 
     if (is_net_track) {
         (void)list_select_load_net_track_page_for_selected();
+        list_select_remember_net_track_position();
     }
 
     // 旋钮/按键移动后立刻唤醒 UiTask，避免等下一帧才看到高亮变化。
@@ -210,6 +283,7 @@ bool list_select_load_net_track_page_for_selected()
     if (total <= 0) {
         s_list_net_tracks.clear();
         s_net_track_page_start_idx = 0;
+        list_select_set_net_track_position_memory(-1, 0, true);
         return false;
     }
 
@@ -282,6 +356,7 @@ bool list_select_try_play_selected_net_track()
     }
 
     const int selected_idx = s_list_selected_idx;
+    list_select_set_net_track_position_memory(selected_idx, total, true);
 
     LOGI("[列表] 确认 NAS 歌曲：位置=%d/%d 索引=%d",
         selected_idx + 1,
@@ -308,6 +383,50 @@ void player_list_select_setup_hooks(const PlayerListSelectHooks& hooks)
 void player_list_select_reset()
 {
     list_select_clear_state(false);
+}
+
+bool player_list_select_flush_persistent_state()
+{
+    list_select_load_net_track_position_from_nvs_once();
+
+    const int total = (int)net_music_catalog_count();
+
+    if (s_list_state == ListSelectState::NET_TRACK) {
+        list_select_set_net_track_position_memory(s_list_selected_idx, total, true);
+    } else {
+        const PlayerSourceState source = player_source_get();
+        if (source.type == PlayerSourceType::NET_TRACK && source.net_track_idx >= 0) {
+            list_select_set_net_track_position_memory(source.net_track_idx, total, true);
+        }
+    }
+
+    if (s_last_net_track_list_idx < 0) {
+        LOGD("[列表] NAS 位置 无有效索引，跳过 NVS 保存");
+        return true;
+    }
+
+    if (!s_last_net_track_list_dirty) {
+        LOGD("[列表] NAS 位置 未变化，跳过 NVS 保存 idx=%d", s_last_net_track_list_idx);
+        return true;
+    }
+
+    Preferences pref;
+    if (!pref.begin(kListPrefsNs, false)) {
+        LOGE("[列表] NAS 位置 保存失败: 打开 NVS namespace");
+        return false;
+    }
+
+    const size_t written = pref.putInt(kNetTrackListIdxKey, s_last_net_track_list_idx);
+    pref.end();
+
+    if (written == 0) {
+        LOGE("[列表] NAS 位置 保存失败: idx=%d", s_last_net_track_list_idx);
+        return false;
+    }
+
+    s_last_net_track_list_dirty = false;
+    LOGI("[列表] NAS 位置 已保存到 NVS: idx=%d", s_last_net_track_list_idx);
+    return true;
 }
 
 bool player_list_select_enter_local_tracks()
@@ -411,15 +530,22 @@ bool player_list_select_enter_net_track()
         return false;
     }
 
+    list_select_load_net_track_position_from_nvs_once();
+
     const PlayerSourceState source = player_source_get();
 
     s_list_groups = nullptr;
     s_list_tracks.clear();
     s_list_net_tracks.clear();
     s_list_state = ListSelectState::NET_TRACK;
-    s_list_selected_idx = source.net_track_idx;
 
-    if (s_list_selected_idx < 0 || s_list_selected_idx >= total) {
+    if (source.type == PlayerSourceType::NET_TRACK &&
+        source.net_track_idx >= 0 &&
+        source.net_track_idx < total) {
+        s_list_selected_idx = source.net_track_idx;
+    } else if (s_last_net_track_list_idx >= 0) {
+        s_list_selected_idx = list_select_clamp_index(s_last_net_track_list_idx, total);
+    } else {
         s_list_selected_idx = 0;
     }
 
@@ -428,13 +554,15 @@ bool player_list_select_enter_net_track()
         return false;
     }
 
+    list_select_remember_net_track_position();
     list_select_touch_activity();
     list_select_prepare_view_on_enter();
     keys_sync_to_hw_state();
 
-    LOGD("[列表] 进入 NAS 歌曲列表，共 %d 首，当前 索引=%d",
+    LOGD("[列表] 进入 NAS 歌曲列表，共 %d 首，当前 索引=%d 上次=%d",
          total,
-         s_list_selected_idx);
+         s_list_selected_idx,
+         s_last_net_track_list_idx);
 
     return true;
 }
@@ -634,12 +762,18 @@ void player_list_select_handle_key(key_event_t evt)
                 keys_sync_to_hw_state();
                 LOGD("[列表] 返回上一级列表");
             } else {
+                if (is_net_track) {
+                    list_select_remember_net_track_position();
+                }
                 LOGD("[列表] 取消选择");
                 list_select_clear_state(true);
             }
             break;
 
         case KEY_MODE_LONG:
+            if (is_net_track) {
+                list_select_remember_net_track_position();
+            }
             LOGD("[列表] 退出到播放器");
             list_select_exit_to_player();
             break;  
@@ -662,6 +796,9 @@ void player_list_select_tick()
         LOGD("[列表] 超时退出 状态=%d 超时=%lu ms",
              (int)s_list_state,
              (unsigned long)timeout_ms);
+        if (s_list_state == ListSelectState::NET_TRACK) {
+            list_select_remember_net_track_position();
+        }
         list_select_clear_state(true);
         ui_request_refresh_now();
     }

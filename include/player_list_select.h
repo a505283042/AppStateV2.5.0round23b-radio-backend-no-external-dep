@@ -51,6 +51,12 @@ struct PlayerListSelectHooks {
 void player_list_select_setup_hooks(const PlayerListSelectHooks& hooks);
 /** 清空列表选择状态。 */
 void player_list_select_reset();
+/**
+ * @brief 将 NAS 歌曲列表最后浏览/播放位置写入 NVS。
+ *
+ * 平时只更新内存，不在旋钮翻页时频繁写 flash；关机流程调用一次。
+ */
+bool player_list_select_flush_persistent_state();
 
 /**
  * @brief 按当前大类模式进入列表选择。

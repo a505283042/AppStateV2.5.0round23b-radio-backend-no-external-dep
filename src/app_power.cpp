@@ -7,6 +7,7 @@
 #include "menu/quick_menu.h"
 #include "nfc/nfc_binding.h"
 #include "player_snapshot.h"
+#include "player_list_select.h"
 #include "ui/ui_power_prompt.h"
 #include "web/web_settings.h"
 #include "utils/log.h"
@@ -56,6 +57,7 @@ void app_power_save_and_shutdown()
     (void)board_hw_set_amp_mute(true);
 
     const bool snapshot_ok = player_snapshot_save_to_nvs();
+    const bool list_ok = player_list_select_flush_persistent_state();
     const bool web_ok = web_settings_save_if_dirty();
 
     // NFC 绑定在刷卡确认时只写内存并标记 dirty。
@@ -64,12 +66,13 @@ void app_power_save_and_shutdown()
 
     const bool nfc_ok = nfc_binding_flush_if_dirty("/System/nfc_map.txt");
 
-    LOGI("[电源] 保存 result snapshot=%d 网页=%d nfc=%d",
+    LOGI("[电源] 保存 result snapshot=%d list=%d 网页=%d nfc=%d",
          snapshot_ok ? 1 : 0,
+         list_ok ? 1 : 0,
          web_ok ? 1 : 0,
          nfc_ok ? 1 : 0);
 
-    if (snapshot_ok && web_ok && nfc_ok) {
+    if (snapshot_ok && list_ok && web_ok && nfc_ok) {
         ui_power_show_shutdown_stage("保存完成", "正在关机...");
     } else {
         ui_power_show_shutdown_stage("部分保存失败", "仍将关机...");

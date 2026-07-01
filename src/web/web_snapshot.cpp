@@ -298,15 +298,6 @@ WebPlayerSnapshot web_snapshot_capture() {
 
     snap.total_ms = source.net_track_duration_ms;
 
-    snap.has_lyrics = false;
-    snap.lyrics_loading = false;
-    snap.current_lyric = "";
-    snap.next_lyric = "";
-    snap.following_lyric = "";
-    snap.current_lyric_start_ms = 0;
-    snap.next_lyric_start_ms = 0;
-    snap.following_lyric_start_ms = 0;
-
     uint32_t net_cover_offset = 0;
     uint32_t net_cover_size = 0;
     String net_cover_rev;
