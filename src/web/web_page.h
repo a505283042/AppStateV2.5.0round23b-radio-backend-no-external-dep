@@ -99,6 +99,11 @@ static const char WEBCTRL_INDEX_HTML[] PROGMEM = R"HTML(
     .volrow{display:flex;align-items:center;gap:12px;margin-top:8px}
     .volrow input[type=range]{flex:1}
     input[type=range]{accent-color:#79c0ff}
+    .nettrack-only{display:none}
+    body.nettrack-mode .nettrack-only{display:block}
+    body.nettrack-mode .hide-when-nettrack{display:none!important}
+    .nettrack-controls{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+    .nettrack-controls button{min-width:92px}
   </style>
 </head>
 <body>
@@ -119,6 +124,7 @@ static const char WEBCTRL_INDEX_HTML[] PROGMEM = R"HTML(
         <a class="linkbtn secondary" href="/albums" style="padding:10px 12px;font-size:14px">专辑页</a>
         <a class="linkbtn secondary" href="/nfc" style="padding:10px 12px;font-size:14px">NFC管理</a>
         <a class="linkbtn secondary" href="/radios" style="padding:10px 12px;font-size:14px">电台页</a>
+        <a class="linkbtn secondary" href="/netmusic" style="padding:10px 12px;font-size:14px">NAS页</a>
         <a class="linkbtn secondary" href="/settings" style="padding:10px 12px;font-size:14px">网页设置</a>
       </div>
     </div>
@@ -167,7 +173,7 @@ static const char WEBCTRL_INDEX_HTML[] PROGMEM = R"HTML(
       <div class="next" id="lyricNext">-</div>
     </div>
 
-    <div class="card">
+    <div class="card hide-when-nettrack" id="mainControlCard">
       <div class="controls">
         <button class="secondary" id="prevBtn" onclick="handlePrev()">上一首</button>
         <button id="playPauseBtn" onclick="sendCmd('/api/playpause')">播放/暂停</button>
@@ -185,6 +191,19 @@ static const char WEBCTRL_INDEX_HTML[] PROGMEM = R"HTML(
         <div></div>
       </div>
       <div class="small" style="margin-top:8px">保存到设备内部 NVS：音量、当前歌曲、播放模式、当前分组与视图</div>
+    </div>
+
+    <div class="card nettrack-only" id="netTrackControlCard">
+      <div style="font-size:18px;font-weight:800">NAS 播放控制</div>
+      <div class="muted" id="netTrackNow">-</div>
+
+      <div class="nettrack-controls">
+        <button onclick="nasControl('/api/netmusic/prev')">上一首</button>
+        <button onclick="nasControl('/api/netmusic/toggle')">播放/暂停</button>
+        <button onclick="nasControl('/api/netmusic/next')">下一首</button>
+        <button onclick="nasControl('/api/netmusic/mode')" id="netTrackModeBtn">顺序/随机</button>
+        <button class="secondary" onclick="nasControl('/api/netmusic/return-local')">返回本地播放</button>
+      </div>
     </div>
   </div>
 
@@ -427,6 +446,7 @@ async function fetchStatus(){
     lastStatusAt = Date.now();
     lastStatus = j;
     syncVolumeLockFromStatus(j);
+    applyNetTrackMode(j);
     render(j);
     currentPollMs = Math.max(120, Number(j.next_poll_ms) || POLL_MS);
     if(Number(j.refresh_poll_ms) > 0) POLL_MS = Number(j.refresh_poll_ms);
@@ -564,6 +584,60 @@ async function toggleViewFromCover(){
   scheduleNext(500);
   setTimeout(()=>{coverToggleBusy=false;},250);
 }
+
+function applyNetTrackMode(j){
+  const isNetTrack = j && j.source_type === 'net_track';
+
+  document.body.classList.toggle('nettrack-mode', isNetTrack);
+
+  const mainCard = document.getElementById('mainControlCard');
+  if(mainCard){
+    mainCard.style.display = isNetTrack ? 'none' : '';
+  }
+
+  const netCard = document.getElementById('netTrackControlCard');
+  if(netCard){
+    netCard.style.display = isNetTrack ? 'block' : 'none';
+  }
+
+  const now = document.getElementById('netTrackNow');
+  if(now){
+    if(isNetTrack){
+      const title = j.net_track_title || j.title || '-';
+      const artist = j.net_track_artist && j.net_track_artist !== 'NAS'
+        ? ` · ${j.net_track_artist}`
+        : '';
+      const idx = Number.isInteger(j.net_track_idx) ? `#${j.net_track_idx + 1}` : '';
+      now.textContent = `${idx} ${title}${artist}`;
+    }else{
+      now.textContent = '-';
+    }
+  }
+
+  const modeBtn = document.getElementById('netTrackModeBtn');
+  if(modeBtn){
+    const mode = j && j.mode ? j.mode : '';
+    modeBtn.textContent = mode.indexOf('rnd') >= 0 ? '随机播放中' : '顺序播放中';
+  }
+}
+
+async function nasControl(path){
+  if(pageLocked) return;
+
+  try{
+    const r = await fetch(path, {method:'POST'});
+    const j = await r.json();
+
+    if(!j || !j.ok){
+      alert((j && (j.message || j.error)) || '操作失败');
+    }
+  }catch(e){
+    alert('NAS 控制失败');
+  }
+
+  scheduleNext(300);
+}
+
 function render(j){
   document.getElementById('title').textContent=j.title||'(无曲目)';
   document.getElementById('artist').textContent=j.artist||'-';
@@ -715,6 +789,11 @@ window.addEventListener('pagehide', pausePagePolling);
 loadLockState();
 applyLockState();
 applyVolumeLockState();
+
+const netCardInit = document.getElementById('netTrackControlCard');
+if(netCardInit){
+  netCardInit.style.display = 'none';
+}
 
 setTimeout(fetchStatus, 200 + Math.floor(Math.random() * 900));
 </script>
@@ -909,6 +988,7 @@ static const char WEBCTRL_ARTISTS_HTML[] PROGMEM = R"HTML(
         <a class="secondary" href="/albums">专辑页</a>
         <a class="secondary" href="/nfc">NFC管理</a>
         <a class="secondary" href="/radios">电台页</a>
+        <a class="secondary" href="/netmusic">NAS页</a>
         <a class="secondary" href="/settings">网页设置</a>
       </div>
     </div>
@@ -1423,6 +1503,7 @@ static const char WEBCTRL_ALBUMS_HTML[] PROGMEM = R"HTML(
         <a class="secondary" href="/artists">歌手页</a>
         <a class="secondary" href="/nfc">NFC管理</a>
         <a class="secondary" href="/radios">电台页</a>
+        <a class="secondary" href="/netmusic">NAS页</a>
         <a class="secondary" href="/settings">网页设置</a>
       </div>
     </div>
@@ -2168,6 +2249,7 @@ async function loadStatus(){
     if(j.radio_error){ document.getElementById('err').textContent = j.radio_error; }
   }catch(e){}
 }
+
 loadRadios(); loadStatus();
 
 // 悬浮回到顶部按钮功能
@@ -2182,6 +2264,478 @@ document.body.appendChild(scrollToTopBtn);
 window.addEventListener('scroll', () => {
   const scrollY = window.scrollY;
   if (scrollY > 300) {
+    scrollToTopBtn.classList.add('visible');
+  } else {
+    scrollToTopBtn.classList.remove('visible');
+  }
+});
+</script>
+</body>
+</html>
+)HTML";
+
+static const char WEBCTRL_NETMUSIC_HTML[] PROGMEM = R"HTML(
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>ESP32S3 NAS音乐页</title>
+  <style>
+    body{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:#111;color:#eee}
+    .wrap{max-width:760px;margin:0 auto;padding:16px}
+    .card{background:#1b1b1b;border-radius:16px;padding:16px;margin-bottom:12px;box-shadow:0 4px 18px rgba(0,0,0,.25)}
+    .topbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:space-between}
+    .nav{display:flex;gap:8px;flex-wrap:wrap}
+    a,button{border:none;border-radius:12px;padding:10px 12px;background:#2f6feb;color:#fff;font-size:14px;font-weight:600;text-decoration:none}
+    a.secondary,button.secondary{background:#444}
+    button:disabled{opacity:.45}
+    .muted{color:#aaa;font-size:13px}
+    .err{color:#ff8f8f;font-size:13px;white-space:pre-wrap}
+    .list{display:grid;gap:10px}
+    .item{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;padding:10px 12px;border-radius:12px;background:#161616;border:1px solid #2a2a2a}
+    .item.active{border-color:#2f6feb;background:#182235}
+    .name{font-size:15px;font-weight:700;word-break:break-word;line-height:1.35}
+    .meta{font-size:12px;color:#999;margin-top:4px;word-break:break-word;line-height:1.3}
+    .pager{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:12px}
+    select{background:#222;color:#eee;border:1px solid #444;border-radius:10px;padding:9px}
+    .scrollToTopBtn{position:fixed;bottom:20px;right:20px;width:50px;height:50px;border-radius:50%;background:#2f6feb;color:#fff;border:none;font-size:24px;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,.3);opacity:0;transform:translateY(20px);transition:opacity .3s,transform .3s;z-index:1000;display:flex;align-items:center;justify-content:center}
+    .scrollToTopBtn.visible{opacity:1;transform:translateY(0)}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <div class="topbar">
+      <div>
+        <div style="font-size:22px;font-weight:800">NAS音乐</div>
+        <div class="muted">通过 /System/net_music.txt 按需分页读取，不全量加载到网页</div>
+      </div>
+      <div class="nav" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:12px">
+        <a class="secondary" href="/">控制页</a>
+        <a class="secondary" href="/artists">歌手页</a>
+        <a class="secondary" href="/albums">专辑页</a>
+        <a class="secondary" href="/radios">电台页</a>
+        <a class="secondary" href="/settings">网页设置</a>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div id="statusText">加载中...</div>
+    <div id="err" class="err"></div>
+  </div>
+
+  <div class="card">
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <input id="searchInput" placeholder="搜索歌名 / 歌手 / 专辑"
+             style="flex:1;min-width:180px;background:#222;color:#eee;border:1px solid #444;border-radius:12px;padding:10px;font-size:14px">
+      <button onclick="searchNetMusic()">搜索</button>
+      <button class="secondary" onclick="clearSearch()">清除</button>
+    </div>
+    <div class="muted" id="searchInfo" style="margin-top:8px">未搜索</div>
+  </div>
+
+  <div class="card">
+    <div class="muted" id="pathInfo">-</div>
+    <div class="pager">
+      <button onclick="prevPage()">上一页</button>
+      <button onclick="nextPage()">下一页</button>
+      <button class="secondary" onclick="refreshPage()">刷新</button>
+      <button class="secondary" onclick="focusCurrentPlaying()">定位当前播放</button>
+
+      <label class="muted">每页</label>
+      <select id="limitSelect" onchange="changeLimit()">
+        <option value="20">20</option>
+        <option value="30">30</option>
+        <option value="50">50</option>
+      </select>
+
+      <input id="pageInput" type="number" min="1" placeholder="页码"
+             style="width:78px;background:#222;color:#eee;border:1px solid #444;border-radius:10px;padding:9px">
+      <button class="secondary" onclick="goToPage()">跳页</button>
+
+      <input id="indexInput" type="number" min="1" placeholder="序号"
+             style="width:78px;background:#222;color:#eee;border:1px solid #444;border-radius:10px;padding:9px">
+      <button class="secondary" onclick="goToIndex()">跳序号</button>
+
+      <span class="muted" id="pageInfo">-</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="list" id="musicList"></div>
+  </div>
+</div>
+
+<script>
+let offset = 0;
+let limit = 20;
+let total = 0;
+let currentIdx = -1;
+let searchMode = false;
+let searchQuery = '';
+
+function setText(id, text){
+  const el = document.getElementById(id);
+  if(el) el.textContent = text;
+}
+
+function clearNode(el){
+  while(el && el.firstChild) el.removeChild(el.firstChild);
+}
+
+function formatDuration(ms){
+  ms = Number(ms || 0);
+  if(!ms || ms < 0) return '';
+  const totalSec = Math.floor(ms / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+function renderNetMusicItems(items){
+  const box = document.getElementById('musicList');
+  clearNode(box);
+
+  (items || []).forEach(it => {
+    const row = document.createElement('div');
+    row.className = 'item';
+    if(it.idx === currentIdx) row.classList.add('active');
+
+    const left = document.createElement('div');
+
+    const name = document.createElement('div');
+    name.className = 'name';
+    name.textContent = `${it.idx + 1}. ${it.title || '-'}`;
+
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+
+    const artist = it.artist || '';
+    const album = it.album || '';
+    const format = it.format || 'mp3';
+
+    let metaParts = [];
+    if (artist && artist !== 'NAS') metaParts.push(artist);
+    if (album && album !== 'NAS') metaParts.push(album);
+    metaParts.push(format.toUpperCase());
+
+    const dur = formatDuration(it.duration_ms);
+    if (dur) metaParts.push(dur);
+
+    meta.textContent = metaParts.join(' · ');
+
+    left.appendChild(name);
+    left.appendChild(meta);
+
+    const btn = document.createElement('button');
+    btn.textContent = '播放';
+    btn.onclick = async () => {
+      const resp = await fetch(`/api/netmusic/play?idx=${it.idx}`, {method:'POST'});
+      const ret = await resp.json();
+      alert(ret && ret.ok ? (ret.message || '已开始播放 NAS 歌曲') : (ret.message || '操作失败'));
+      await loadStatus();
+      if (searchMode) {
+        await searchNetMusic(false);
+      } else {
+        await loadNetMusic();
+      }
+    };
+
+    row.appendChild(left);
+    row.appendChild(btn);
+    box.appendChild(row);
+  });
+}
+
+async function loadNetMusic(){
+  searchMode = false;
+  try{
+    const r = await fetch(`/api/netmusic?offset=${offset}&limit=${limit}`, {cache:'no-store'});
+    const j = await r.json();
+
+    total = j.total || 0;
+    if(offset >= total && total > 0){
+      offset = Math.max(0, total - limit);
+    }
+
+    setText('pathInfo', `Base：${j.base || '-'} / 共 ${total} 首`);
+    setText('err', j.ok ? '' : `加载提示：${j.error || 'unknown'}`);
+
+    const pageNo = total > 0 ? Math.floor(offset / limit) + 1 : 0;
+    const pageTotal = total > 0 ? Math.ceil(total / limit) : 0;
+    setText('pageInfo', `第 ${pageNo} / ${pageTotal} 页，当前 ${offset + 1} - ${Math.min(offset + limit, total)}`);
+    setText('searchInfo', '未搜索');
+
+    const pageInput = document.getElementById('pageInput');
+    if(pageInput && pageNo > 0){
+      pageInput.value = pageNo;
+    }
+
+    const indexInput = document.getElementById('indexInput');
+    if(indexInput){
+      indexInput.value = offset + 1;
+    }
+
+    renderNetMusicItems(j.items || []);
+  }catch(e){
+    setText('err', 'NAS音乐列表获取失败');
+  }
+}
+
+async function searchNetMusic(showAlert = true){
+  const input = document.getElementById('searchInput');
+  const q = (input && input.value ? input.value : '').trim();
+
+  if(!q){
+    if(showAlert) alert('请输入搜索关键词');
+    return;
+  }
+
+  searchMode = true;
+  searchQuery = q;
+
+  try{
+    const r = await fetch(`/api/netmusic/search?q=${encodeURIComponent(q)}&limit=50`, {cache:'no-store'});
+    const j = await r.json();
+
+    total = j.matched || 0;
+
+    setText('pathInfo', `搜索：${q}`);
+    setText('pageInfo', `匹配 ${j.matched || 0} 首，显示 ${j.returned || 0} 首`);
+    setText('searchInfo', `搜索模式：${q}`);
+    setText('err', j.ok ? '' : `搜索提示：${j.error || 'unknown'}`);
+
+    renderNetMusicItems(j.items || []);
+  }catch(e){
+    setText('err', 'NAS音乐搜索失败');
+  }
+}
+
+function clearSearch(){
+  const input = document.getElementById('searchInput');
+  if(input) input.value = '';
+  searchMode = false;
+  searchQuery = '';
+  offset = 0;
+  loadNetMusic();
+}
+
+async function loadStatus(){
+  try{
+    const r = await fetch('/api/status', {cache:'no-store'});
+    const j = await r.json();
+
+    currentIdx = Number.isInteger(j.net_track_idx) ? j.net_track_idx : -1;
+
+    let t = '当前源：-';
+    if(j.source_type === 'net_track'){
+      t = `当前源：NAS / ${j.net_track_title || j.title || '-'}`;
+      if(j.net_track_state) t += ` / ${j.net_track_state}`;
+    }else if(j.source_type === 'radio'){
+      t = `当前源：电台 / ${j.radio_name || '-'}`;
+      if(j.radio_state) t += ` / ${j.radio_state}`;
+    }else{
+      t = `当前源：${j.source_type || '-'}`;
+      if(j.title) t += ` / ${j.title}`;
+    }
+
+    setText('statusText', t);
+    if(j.net_track_error){
+      setText('err', j.net_track_error);
+    }
+
+    return j;
+  }catch(e){
+    return null;
+  }
+}
+
+function pageTotal(){
+  if(!total || !limit) return 0;
+  return Math.ceil(total / limit);
+}
+
+function clampPage(page){
+  const maxPage = pageTotal();
+  if(maxPage <= 0) return 1;
+  if(page < 1) return 1;
+  if(page > maxPage) return maxPage;
+  return page;
+}
+
+function goToPage(){
+  if(searchMode){
+    alert('搜索模式下不能跳页，请先清除搜索');
+    return;
+  }
+
+  const input = document.getElementById('pageInput');
+  const page = clampPage(parseInt(input && input.value ? input.value : '1', 10));
+
+  offset = (page - 1) * limit;
+  loadNetMusic();
+}
+
+function goToIndex(){
+  if(searchMode){
+    alert('搜索模式下不能跳序号，请先清除搜索');
+    return;
+  }
+
+  const input = document.getElementById('indexInput');
+  let idx = parseInt(input && input.value ? input.value : '1', 10);
+
+  if(!total || total <= 0){
+    return;
+  }
+
+  if(idx < 1) idx = 1;
+  if(idx > total) idx = total;
+
+  // 用户输入的是 1-based 序号，内部 offset 是 0-based。
+  const zeroBased = idx - 1;
+  offset = Math.floor(zeroBased / limit) * limit;
+
+  loadNetMusic();
+}
+
+function prevPage(){
+  if(searchMode) return;
+  offset -= limit;
+  if(offset < 0) offset = 0;
+  loadNetMusic();
+}
+
+function nextPage(){
+  if(searchMode) return;
+  offset += limit;
+  if(offset >= total){
+    offset = Math.max(0, Math.floor((Math.max(total - 1, 0)) / limit) * limit);
+  }
+  loadNetMusic();
+}
+
+function refreshPage(){
+  loadStatus().then(loadNetMusic);
+}
+
+function changeLimit(){
+  if(searchMode) return;
+  const v = parseInt(document.getElementById('limitSelect').value || '20', 10);
+  limit = Math.max(1, Math.min(50, v));
+  offset = Math.floor(offset / limit) * limit;
+  loadNetMusic();
+}
+
+function goToPage(){
+  if(searchMode) return;
+  const input = document.getElementById('pageInput');
+  const page = parseInt(input && input.value ? input.value : '0', 10);
+  if(!page || page < 1){
+    alert('请输入有效页码');
+    return;
+  }
+  const pageTotal = total > 0 ? Math.ceil(total / limit) : 0;
+  if(page > pageTotal){
+    alert(`最大页码为 ${pageTotal}`);
+    return;
+  }
+  offset = (page - 1) * limit;
+  loadNetMusic();
+}
+
+function goToIndex(){
+  if(searchMode) return;
+  const input = document.getElementById('indexInput');
+  const idx = parseInt(input && input.value ? input.value : '0', 10);
+  if(!idx || idx < 1){
+    alert('请输入有效序号');
+    return;
+  }
+  if(idx > total){
+    alert(`最大序号为 ${total}`);
+    return;
+  }
+  offset = idx - 1;
+  loadNetMusic();
+}
+
+async function focusCurrentPlaying(){
+  const status = await loadStatus();
+
+  if(!status || status.source_type !== 'net_track'){
+    alert('当前没有播放 NAS 歌曲');
+    return;
+  }
+
+  const idx = Number.isInteger(status.net_track_idx) ? status.net_track_idx : -1;
+  if(idx < 0){
+    alert('当前 NAS 歌曲序号无效');
+    return;
+  }
+
+  searchMode = false;
+  searchQuery = '';
+
+  const input = document.getElementById('searchInput');
+  if(input) input.value = '';
+
+  currentIdx = idx;
+  offset = Math.floor(idx / limit) * limit;
+
+  await loadNetMusic();
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const searchInput = document.getElementById('searchInput');
+  if(searchInput){
+    searchInput.addEventListener('keydown', (e) => {
+      if(e.key === 'Enter'){
+        searchNetMusic();
+      }
+    });
+  }
+
+  const pageInput = document.getElementById('pageInput');
+  if(pageInput){
+    pageInput.addEventListener('keydown', (e) => {
+      if(e.key === 'Enter'){
+        goToPage();
+      }
+    });
+  }
+
+  const indexInput = document.getElementById('indexInput');
+  if(indexInput){
+    indexInput.addEventListener('keydown', (e) => {
+      if(e.key === 'Enter'){
+        goToIndex();
+      }
+    });
+  }
+});
+
+loadStatus().then((status) => {
+  if(status && status.source_type === 'net_track' && Number.isInteger(status.net_track_idx) && status.net_track_idx >= 0){
+    currentIdx = status.net_track_idx;
+    offset = Math.floor(currentIdx / limit) * limit;
+  }
+  return loadNetMusic();
+});
+
+setInterval(loadStatus, 2000);
+
+const scrollToTopBtn = document.createElement('button');
+scrollToTopBtn.className = 'scrollToTopBtn';
+scrollToTopBtn.innerHTML = '↑';
+scrollToTopBtn.title = '回到顶部';
+scrollToTopBtn.onclick = () => window.scrollTo({top:0,behavior:'smooth'});
+document.body.appendChild(scrollToTopBtn);
+
+window.addEventListener('scroll', () => {
+  if (window.scrollY > 300) {
     scrollToTopBtn.classList.add('visible');
   } else {
     scrollToTopBtn.classList.remove('visible');

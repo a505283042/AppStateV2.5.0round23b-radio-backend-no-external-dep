@@ -33,7 +33,6 @@ struct StringKeyLess {
 
 PlayerRecoverHooks s_hooks{};
 using RecoverTrackIndex = uint16_t;
-static constexpr RecoverTrackIndex kInvalidRecoverTrackIndex = 0xFFFF;
 
 RecoverTrackIndex* s_track_idx_sorted_by_path = nullptr;
 size_t s_track_idx_sorted_count = 0;
@@ -130,7 +129,7 @@ static bool ensure_recover_path_index_buf(size_t n)
         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
     );
     if (!p) {
-        LOGE("[RECOVER] alloc path index failed: count=%u bytes=%u",
+        LOGE("[恢复] 分配 路径 index 失败: 数量=%u 字节=%u",
              (unsigned)n,
              (unsigned)(n * sizeof(RecoverTrackIndex)));
         return false;
@@ -185,7 +184,7 @@ void player_recover_rebuild_path_index_if_needed()
     const size_t n = (size_t)cat.track_count;
 
     if (n > 65535) {
-        LOGE("[RECOVER] track count too large for uint16 path index: %u", (unsigned)n);
+        LOGE("[恢复] 歌曲 数量 过大 for uint16 路径 index: %u", (unsigned)n);
         free_recover_path_index();
         s_path_index_generation = 0;
         return;
@@ -219,7 +218,7 @@ void player_recover_rebuild_path_index_if_needed()
 
     s_path_index_generation = cat.generation;
 
-    LOGI("[RECOVER] path index tracks=%u bytes=%u (psram)",
+    LOGD("[恢复] 路径 index 歌曲s=%u 字节=%u (psram)",
          (unsigned)n,
          (unsigned)(n * sizeof(RecoverTrackIndex)));
 }
@@ -241,13 +240,13 @@ int player_recover_find_track_idx_by_path(const String& path)
     if (normalized != path) {
         idx = recover_find_track_idx_by_rel_path(normalized);
         if (idx >= 0) {
-            LOGI("[RECOVER] path normalized match: %s -> %s -> idx=%d",
+            LOGD("[恢复] 路径 normalized match: %s -> %s -> 索引=%d",
                  path.c_str(), normalized.c_str(), idx);
             return idx;
         }
     }
 
-    LOGI("[RECOVER] path lookup miss: %s", path.c_str());
+    LOGD("[恢复] 路径查找未命中：%s", path.c_str());
     return -1;
 }
 
@@ -279,10 +278,10 @@ void player_recover_prepare_rescan_restore_current()
     String path;
     if (player_recover_get_current_track_path(path)) {
         s_rescan_restore_path = path;
-        LOGD("[PLAYER] rescan restore path saved: %s", s_rescan_restore_path.c_str());
+        LOGD("[播放器] rescan 恢复 路径 保存的: %s", s_rescan_restore_path.c_str());
     } else {
         s_rescan_restore_path = "";
-        LOGD("[PLAYER] rescan restore path unavailable");
+        LOGD("[播放器] rescan 恢复 路径 unavailable");
     }
 }
 
@@ -307,7 +306,7 @@ bool player_recover_try_handle_rescan_done()
     int start_idx = -1;
     if (!s_rescan_restore_path.isEmpty()) {
         start_idx = player_recover_find_track_idx_by_path(s_rescan_restore_path);
-        LOGD("[PLAYER] rescan restore lookup: %s -> %d",
+        LOGD("[播放器] rescan 恢复 lo成功up: %s -> %d",
              s_rescan_restore_path.c_str(), start_idx);
     }
     if (start_idx < 0) {
@@ -328,10 +327,10 @@ bool player_recover_try_handle_rescan_done()
             (void)recover_play_track_dispatch(start_idx, true, true);
         }
     } else {
-        LOGI("[PLAYER] rescan aborted/failed, keep current catalog");
+        LOGW("[播放器] rescan aborted/失败, keep 当前 目录");
         ui_return_to_player();
         if (start_idx >= 0) {
-            LOGI("[PLAYER] restore previous track after rescan abort/fail: idx=%d", start_idx);
+            LOGD("[播放器] 恢复 上一首 歌曲 after rescan abort/fail: 索引=%d", start_idx);
             (void)player_playlist_align_group_context_for_track(start_idx, true);
             player_playlist_force_rebuild();
             player_playlist_update_for_current_track(start_idx, true);

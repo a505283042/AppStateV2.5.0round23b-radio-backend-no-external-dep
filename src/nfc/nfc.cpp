@@ -28,6 +28,7 @@ static uint32_t s_last_poll_ms = 0;
 static uint32_t s_last_uid_ms = 0;
 static String   s_last_uid;
 static String   s_pending_uid;
+static String   s_pending_card_type;
 static bool     s_has_pending_uid = false;
 
 static bool     s_uid_active = false;
@@ -50,9 +51,38 @@ static String format_uid_hex(const MFRC522::Uid& uid)
     return out;
 }
 
+static String format_card_type(uint8_t sak, byte uid_size)
+{
+    // RC522 读到的 SAK 能粗略判断常见 13.56MHz 卡类型。
+    // 不同卡厂可能有差异，所以未知类型保留 SAK/UID 长度，方便排查。
+    switch (sak) {
+        case 0x00:
+            return (uid_size >= 7) ? String("NTAG/Ultralight") : String("MIFARE? SAK00");
+        case 0x08:
+            return String("MIFARE 1K");
+        case 0x09:
+            return String("MIFARE Mini");
+        case 0x18:
+            return String("MIFARE 4K");
+        case 0x10:
+            return String("MIFARE Plus 2K");
+        case 0x11:
+            return String("MIFARE Plus 4K");
+        case 0x20:
+            return String("ISO14443-4");
+        case 0x28:
+            return String("DESFire");
+        default: {
+            char buf[24];
+            snprintf(buf, sizeof(buf), "SAK%02X UID%u", sak, (unsigned)uid_size);
+            return String(buf);
+        }
+    }
+}
+
 void nfc_init(void)
 {
-    Serial.println("[NFC] init...");
+    Serial.println("[NFC] 初始化...");
 
     // board_spi_init() 已经把全局 SPI 绑到 UI SPI 那组引脚
     // 这里只做 RC522 初始化
@@ -68,34 +98,34 @@ void nfc_init(void)
 
     board_spi_ui_unlock();
 
-    Serial.printf("[NFC] PCD_Init=%s\n", ok ? "OK" : "FAIL");
-    Serial.printf("[NFC] MFRC522 version: 0x%02X\n", ver);
+    Serial.printf("[NFC] RC522 初始化=%s\n", ok ? "成功" : "失败");
+    Serial.printf("[NFC] MFRC522 版本寄存器：0x%02X\n", ver);
 
     switch (ver) {
         case 0x88:
-            Serial.println("[NFC] version decode: clone / Fudan FM17522?");
+            Serial.println("[NFC] 版本识别：FM17522?");
             break;
         case 0x90:
-            Serial.println("[NFC] version decode: v0.0");
+            Serial.println("[NFC] 版本识别：v0.0");
             break;
         case 0x91:
-            Serial.println("[NFC] version decode: v1.0");
+            Serial.println("[NFC] 版本识别：v1.0");
             break;
         case 0x92:
-            Serial.println("[NFC] version decode: v2.0");
+            Serial.println("[NFC] 版本识别：v2.0");
             break;
         case 0x00:
-            Serial.println("[NFC] version decode: no response");
+            Serial.println("[NFC] 无响应");
             break;
         case 0xFF:
-            Serial.println("[NFC] version decode: bus floating or communication failed");
+            Serial.println("[NFC] 通信失败");
             break;
         default:
-            Serial.println("[NFC] version decode: unknown");
+            Serial.println("[NFC] 未知版本");
             break;
     }
 
-    Serial.println("[NFC] ready");
+    Serial.println("[NFC] 就绪");
 }
 
 void nfc_poll(void)
@@ -106,11 +136,13 @@ void nfc_poll(void)
 
     bool got_card = false;
     String uid_str;
+    String card_type;
 
     board_spi_ui_lock();
 
     if (g_mfrc522.PICC_IsNewCardPresent() && g_mfrc522.PICC_ReadCardSerial()) {
         uid_str = format_uid_hex(g_mfrc522.uid);
+        card_type = format_card_type(g_mfrc522.uid.sak, g_mfrc522.uid.size);
         got_card = true;
 
         g_mfrc522.PICC_HaltA();
@@ -158,9 +190,10 @@ void nfc_poll(void)
     s_last_uid = uid_str;
     s_last_uid_ms = now;
     s_pending_uid = uid_str;
+    s_pending_card_type = card_type;
     s_has_pending_uid = true;
 
-    Serial.printf("[NFC] detected uid=%s\n", uid_str.c_str());
+    Serial.printf("[NFC] 识别到 UID=%s 类型=%s\n", uid_str.c_str(), card_type.c_str());
 }
 
 bool nfc_is_uid_present(const String& uid)
@@ -188,13 +221,21 @@ bool nfc_is_uid_present(const String& uid)
     return present;
 }
 
-bool nfc_take_last_uid(String& out_uid)
+bool nfc_take_last_card_info(String& out_uid, String& out_card_type)
 {
     if (!s_has_pending_uid) return false;
     out_uid = s_pending_uid;
+    out_card_type = s_pending_card_type;
     s_pending_uid = "";
+    s_pending_card_type = "";
     s_has_pending_uid = false;
     return true;
+}
+
+bool nfc_take_last_uid(String& out_uid)
+{
+    String ignored_type;
+    return nfc_take_last_card_info(out_uid, ignored_type);
 }
 
 

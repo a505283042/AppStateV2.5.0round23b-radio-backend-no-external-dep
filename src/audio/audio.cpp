@@ -304,7 +304,7 @@ uint32_t audio_probe_total_ms(const char* path)
 bool audio_init()
 {
   if (!storage_sd_init_mutex()) {
-    LOGE("[AUDIO] SD 互斥锁未初始化，请确保先调用 storage_init()");
+    LOGE("[音频] SD 互斥锁未初始化，请确保先调用 storage_init()");
     return false;
   }
   
@@ -314,8 +314,11 @@ bool audio_init()
 
 void audio_stop()
 {
-  if (g_dec == DEC_MP3) audio_mp3_stop();
-  if (g_dec == DEC_FLAC) audio_flac_stop();
+  // 切换“网络流 -> 本地文件”时，g_dec 可能已经因为 EOF/断流被置为 DEC_NONE，
+  // 但底层 MP3/FLAC 文件句柄或 HTTP source 仍需要确保关闭。
+  // 这里无条件停止两个解码器，避免残留 source 影响下一首本地播放。
+  audio_mp3_stop();
+  audio_flac_stop();
   g_dec = DEC_NONE;
   s_total_ms = 0;
 }
@@ -331,19 +334,18 @@ bool audio_play(const char* path)
   uint32_t t_after_start = t0;
   bool sniff_ran = false;
 
-  Serial.printf("[AUDIO] play: %s\n", path);
+  LOGD("[音频] 播放：%s", path);
 
 #if AUDIO_SYNC_SNIFF_ON_PLAY
   sniff_ran = true;
   s_total_ms = sniff_total_ms(sd, path);
   t_after_sniff = millis();
   if (s_total_ms) {
-    Serial.printf("[AUDIO] total_ms=%u\n", (unsigned)s_total_ms);
-    Serial.println();
+    LOGD("[音频] 总计_ms=%u", (unsigned)s_total_ms);
   }
 #else
   t_after_sniff = millis();
-  LOGD("[AUDIO] sync sniff skipped on play path");
+  LOGD("[音频] 播放路径已跳过同步探测");
 #endif
 
   bool ok = false;
@@ -354,16 +356,16 @@ bool audio_play(const char* path)
     ok = audio_flac_start(sd, path);
     if (ok) g_dec = DEC_FLAC;
   } else {
-    Serial.println("[AUDIO] unsupported format");
+    LOGE("[音频] 不支持的格式：%s", path);
     return false;
   }
 
   t_after_start = millis();
-  LOGD("[AUDIO] play timing sniff=%lums decoder_start=%lums total=%lums",
+  LOGD("[音频] 播放耗时 探测=%lums 解码器_启动=%lums 总计=%lums",
        (unsigned long)(t_after_sniff - t0),
        (unsigned long)(t_after_start - t_after_sniff),
        (unsigned long)(t_after_start - t0));
-  LOGD("[AUDIO] play detail sniff_ran=%d decoder_stage=%lums",
+  LOGD("[音频] 播放细节 探测_ran=%d 解码器_stage=%lums",
        sniff_ran ? 1 : 0,
        (unsigned long)(t_after_start - t_after_sniff));
 
@@ -377,7 +379,7 @@ bool audio_play_stream_mp3(const char* url)
   audio_reset_play_pos();
   s_total_ms = 0;
   if (!url) return false;
-  Serial.printf("[AUDIO] play stream mp3: %s\n", url);
+  LOGD("[音频] 播放 MP3 流: %s", url);
   bool ok = audio_mp3_start_url(url);
   if (ok) g_dec = DEC_MP3;
   return ok;
@@ -425,3 +427,11 @@ uint16_t audio_get_gain_q15(void)
 // 新增函数实现
 uint32_t audio_get_play_ms() { return audio_i2s_get_play_ms(); }
 void audio_reset_play_pos()  { audio_i2s_reset_play_pos(); }
+
+uint32_t audio_prime_pcm_ms(uint32_t target_ms, uint32_t max_chunks)
+{
+  if (g_dec == DEC_FLAC) {
+    return audio_flac_prime_pcm_ms(target_ms, max_chunks);
+  }
+  return 0;
+}

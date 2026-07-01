@@ -9,10 +9,10 @@ bool storage_sd_init_mutex(void)
 
   g_sd_mutex = xSemaphoreCreateRecursiveMutex();
   if (!g_sd_mutex) {
-    LOGE("[SDIO] create recursive mutex failed");
+    LOGE("[SD互斥锁] 创建递归 SD 互斥锁失败");
     return false;
   }
-  LOGI("[SDIO] recursive SD mutex created");
+  LOGD("[SD互斥锁] 递归 SD 互斥锁已创建");
   return true;
 }
 

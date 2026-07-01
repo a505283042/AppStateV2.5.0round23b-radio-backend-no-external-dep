@@ -65,7 +65,7 @@ static bool try_load_v3(const char* v3_index_path)
   s_catalog_v3.generation = ++s_catalog_generation_seq;
   s_v3_ready = true;
 
-  LOGI("[CATALOG_V3] load ok: tracks=%lu albums=%lu artists=%lu pool=%lu artist_groups=%d album_groups=%d",
+  LOGI("[曲库] 加载成功：歌曲=%lu 专辑=%lu 歌手=%lu 字符池=%lu 歌手分组=%d 专辑分组=%d",
        (unsigned long)s_catalog_v3.track_count,
        (unsigned long)s_catalog_v3.album_count,
        (unsigned long)s_catalog_v3.artist_count,
@@ -81,17 +81,17 @@ static bool rebuild_v3_native(const char* music_root,
 {
     std::vector<TrackBuildTempV3> tmp_tracks;
 
-    LOGI("[CATALOG_V3] native rebuild start...");
+    LOGI("[曲库] 开始重建本地索引...");
 
     if (!storage_scan_music_v3(tmp_tracks, music_root)) {
-        LOGE("[CATALOG_V3] native scan failed");
+        LOGE("[曲库] native scan 失败");
         return false;
     }
 
     storage_catalog_v3_clear();
 
     if (!storage_build_catalog_v3_from_temp(tmp_tracks, s_catalog_v3)) {
-        LOGE("[CATALOG_V3] build from temp failed");
+        LOGE("[曲库] 从临时数据构建失败");
         storage_catalog_v3_clear();
         return false;
     }
@@ -102,10 +102,10 @@ static bool rebuild_v3_native(const char* music_root,
     s_v3_ready = true;
 
     if (!storage_index_save_v3(s_catalog_v3, v3_index_path)) {
-        LOGE("[CATALOG_V3] save v3 failed: %s", v3_index_path);
+        LOGE("[曲库] 保存 v3 失败: %s", v3_index_path);
     }
 
-    LOGI("[CATALOG_V3] native rebuild ok: tracks=%lu albums=%lu artists=%lu pool=%lu artist_groups=%d album_groups=%d",
+    LOGI("[曲库] 本地索引重建完成：歌曲=%lu 专辑=%lu 歌手=%lu 字符池=%lu 歌手分组=%d 专辑分组=%d",
          (unsigned long)s_catalog_v3.track_count,
          (unsigned long)s_catalog_v3.album_count,
          (unsigned long)s_catalog_v3.artist_count,
@@ -123,7 +123,7 @@ bool storage_catalog_v3_load_or_rebuild(const char* music_root,
         return true;
     }
 
-    LOGW("[CATALOG_V3] load v3 failed, fallback native rebuild");
+    LOGW("[曲库] 加载 v3 失败, 回退 native 重建");
     return rebuild_v3_native(music_root, v3_index_path);
 }
 
@@ -154,7 +154,7 @@ bool storage_catalog_v3_get_trackinfo(uint32_t track_index,
 void storage_catalog_v3_log_memory_stats(void)
 {
   if (!storage_catalog_v3_ready()) {
-    LOGE("[CATALOG_V3] memory stats unavailable: catalog not ready");
+    LOGE("[曲库] 内存统计不可用: 目录 未就绪");
     return;
   }
 
@@ -176,45 +176,45 @@ void storage_catalog_v3_log_memory_stats(void)
   size_t total_core = track_bytes + album_bytes + artist_bytes + pool_bytes;
   size_t total_with_groups = total_core + groups_artist_idx_bytes + groups_album_idx_bytes;
 
-  LOGI("[CATALOG_V3][MEM] sizeof(TrackRowV3)=%u sizeof(AlbumRowV3)=%u sizeof(ArtistRowV3)=%u",
+  LOGD("[曲库][内存] 大小of(TrackRowV3)=%u 大小of(AlbumRowV3)=%u 大小of(ArtistRowV3)=%u",
        (unsigned)sizeof(TrackRowV3),
        (unsigned)sizeof(AlbumRowV3),
        (unsigned)sizeof(ArtistRowV3));
 
-  LOGI("[CATALOG_V3][MEM] tracks=%lu -> %lu bytes",
+  LOGD("[曲库][内存] 歌曲s=%lu -> %lu 字节",
        (unsigned long)s_catalog_v3.track_count,
        (unsigned long)track_bytes);
 
-  LOGI("[CATALOG_V3][MEM] albums=%lu -> %lu bytes",
+  LOGD("[曲库][内存] 专辑s=%lu -> %lu 字节",
        (unsigned long)s_catalog_v3.album_count,
        (unsigned long)album_bytes);
 
-  LOGI("[CATALOG_V3][MEM] artists=%lu -> %lu bytes",
+  LOGD("[曲库][内存] 歌手s=%lu -> %lu 字节",
        (unsigned long)s_catalog_v3.artist_count,
        (unsigned long)artist_bytes);
 
-  LOGI("[CATALOG_V3][MEM] string_pool=%lu bytes",
+  LOGD("[曲库][内存] string_pool=%lu 字节",
        (unsigned long)pool_bytes);
 
-  LOGI("[CATALOG_V3][MEM] artist_groups=%d idx_bytes=%lu",
+  LOGD("[曲库][内存] 歌手_分组s=%d idx_字节=%lu",
        (int)s_catalog_v3.artist_groups.size(),
        (unsigned long)groups_artist_idx_bytes);
 
-  LOGI("[CATALOG_V3][MEM] album_groups=%d idx_bytes=%lu",
+  LOGD("[曲库][内存] 专辑_分组s=%d idx_字节=%lu",
        (int)s_catalog_v3.album_groups.size(),
        (unsigned long)groups_album_idx_bytes);
 
-  LOGI("[CATALOG_V3][MEM] core_total=%lu bytes (%.2f KB, %.2f MB)",
+  LOGD("[曲库][内存] core_总计=%lu 字节 (%.2f KB, %.2f MB)",
        (unsigned long)total_core,
        total_core / 1024.0f,
        total_core / 1024.0f / 1024.0f);
 
-  LOGI("[CATALOG_V3][MEM] total_with_groups=%lu bytes (%.2f KB, %.2f MB)",
+  LOGD("[曲库][内存] 总计_with_分组s=%lu 字节 (%.2f KB, %.2f MB)",
        (unsigned long)total_with_groups,
        total_with_groups / 1024.0f,
        total_with_groups / 1024.0f / 1024.0f);
 
-  LOGI("[CATALOG_V3][MEM] note: group object/String overhead not fully included");
+  LOGD("[曲库][内存] note: 分组 对象/String 额外开销未完全计入");
 }
 
 bool storage_catalog_v3_rebuild(const char* music_root,

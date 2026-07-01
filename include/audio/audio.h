@@ -1,5 +1,6 @@
 #pragma once
 #include <stdbool.h>
+#include <stdint.h>
 
 bool audio_init();
 void audio_stop();
@@ -17,3 +18,5 @@ uint32_t audio_get_total_ms();   // 0 = unknown
 void     audio_set_total_ms(uint32_t ms);
 uint32_t audio_probe_total_ms(const char* path);
 void     audio_reset_play_pos();
+// 当前解码器支持时，开播前预解码一段 PCM 到软件缓冲；返回已缓存的音频时长。
+uint32_t audio_prime_pcm_ms(uint32_t target_ms, uint32_t max_chunks);

@@ -33,7 +33,7 @@ bool cover_init_buffer(void)
   uint32_t ps_after   = ESP.getFreePsram();
   uint32_t heap_after = ESP.getFreeHeap();
 
-  LOGI("COVER", "init=%u ptr=%p psram_used=%u heap_used=%u free_psram=%u free_heap=%u",
+  LOGD("[封面] init=%u 指针=%p psram_used=%u 堆_used=%u 可用_psram=%u 可用_堆=%u",
        (unsigned)MAX_COVER_BYTES_HARD, p,
        (unsigned)(ps_before - ps_after),
        (unsigned)(heap_before - heap_after),
@@ -50,7 +50,7 @@ static bool ensure_cover_buf(size_t need)
   if (need == 0 || need > MAX_COVER_BYTES_HARD) return false;
 
   if (!s_cover_initialized) {
-    LOGW("COVER", "buffer not initialized, call cover_init_buffer() first");
+    LOGW("[封面] 缓冲区 not initialized, 请先调用 cover_init_buffer()");
     return false;
   }
 
@@ -71,7 +71,7 @@ static bool open_file_locked(SdFat& sd, const char* path, File32& f)
 {
   StorageSdLockGuard lock(1000);
   if (!lock) {
-    LOGW("COVER", "open lock timeout: %s", path ? path : "<null>");
+    LOGW("[封面] 打开等待锁超时：%s", path ? path : "<null>");
     return false;
   }
 
@@ -84,7 +84,7 @@ static bool close_file_locked(File32& f)
   if (!f) return true;
   StorageSdLockGuard lock(1000);
   if (!lock) {
-    LOGW("COVER", "close lock timeout");
+    LOGW("[封面] 关闭 锁 超时");
     return false;
   }
   f.close();
@@ -98,7 +98,7 @@ static bool read_open_file_chunked_to_buffer(File32& f, uint8_t* dst, uint32_t o
   {
     StorageSdLockGuard lock(1000);
     if (!lock) {
-      LOGW("COVER", "seek lock timeout");
+      LOGW("[封面] seek 锁 超时");
       return false;
     }
     if (!f.seekSet(offset)) {
@@ -112,13 +112,13 @@ static bool read_open_file_chunked_to_buffer(File32& f, uint8_t* dst, uint32_t o
 
     StorageSdLockGuard lock(1000);
     if (!lock) {
-      LOGW("COVER", "read lock timeout @%u", (unsigned)copied);
+      LOGW("[封面] 读取 锁 超时 @%u", (unsigned)copied);
       return false;
     }
 
     const int r = f.read(dst + copied, chunk);
     if (r != (int)chunk) {
-      LOGW("COVER", "read failed want=%u got=%d", (unsigned)chunk, r);
+      LOGW("[封面] 读取 失败 期望=%u 实际=%d", (unsigned)chunk, r);
       return false;
     }
     copied += chunk;
@@ -130,7 +130,7 @@ static bool read_open_file_chunked_to_buffer(File32& f, uint8_t* dst, uint32_t o
 
   out_is_png = detect_png_from_buffer(dst, size);
   if (!out_is_png && !detect_jpg_from_buffer(dst, size)) {
-    LOGW("COVER", "unknown image header, fallback to JPEG decode path");
+    LOGW("[封面] 未知图片头，回退到 JPEG 解码路径");
   }
   return true;
 }
@@ -142,7 +142,7 @@ static bool read_open_file_chunked(File32& f, uint32_t offset, size_t size, bool
   {
     StorageSdLockGuard lock(1000);
     if (!lock) {
-      LOGW("COVER", "seek lock timeout");
+      LOGW("[封面] seek 锁 超时");
       return false;
     }
     if (!f.seekSet(offset)) {
@@ -156,13 +156,13 @@ static bool read_open_file_chunked(File32& f, uint32_t offset, size_t size, bool
 
     StorageSdLockGuard lock(1000);
     if (!lock) {
-      LOGW("COVER", "read lock timeout @%u", (unsigned)copied);
+      LOGW("[封面] 读取 锁 超时 @%u", (unsigned)copied);
       return false;
     }
 
     const int r = f.read(s_cover_buf + copied, chunk);
     if (r != (int)chunk) {
-      LOGW("COVER", "read failed want=%u got=%d", (unsigned)chunk, r);
+      LOGW("[封面] 读取 失败 期望=%u 实际=%d", (unsigned)chunk, r);
       return false;
     }
     copied += chunk;
@@ -174,7 +174,7 @@ static bool read_open_file_chunked(File32& f, uint32_t offset, size_t size, bool
 
   out_is_png = detect_png_from_buffer(s_cover_buf, size);
   if (!out_is_png && !detect_jpg_from_buffer(s_cover_buf, size)) {
-    LOGW("COVER", "unknown image header, fallback to JPEG decode path");
+    LOGW("[封面] 未知图片头，回退到 JPEG 解码路径");
   }
   return true;
 }

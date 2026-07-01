@@ -5,6 +5,11 @@
 
 #include "board/board_pins.h"  /* 包含板级引脚定义 */
 #include "board/board_spi.h"   /* 包含板级SPI总线模块 */
+#include <Wire.h>
+
+#include "board/board_pins_pcb1_mcp23017.h"
+#include "hal/mcp23017_u3.h"
+#include "hal/board_hw_control.h"
 
 SPIClass SPI_SD;              /* SD专用SPI类实例 */
 static SemaphoreHandle_t s_ui_spi_mtx = nullptr;
@@ -16,36 +21,82 @@ void board_spi_init(void)
     if (inited) return;          /* 如果已经初始化则直接返回 */
     inited = true;
 
-    Serial.println("[SPI] init buses...");
+    Serial.println("[启动] 初始化SPI总线...");
+
+    // ---------- I2C / MCP23017 ----------
+    pinMode(board::PIN_EXP_INTA, INPUT_PULLUP);
+
+    Wire.begin(board::PIN_I2C_SDA, board::PIN_I2C_SCL);
+    Wire.setClock(400000);
+
+    const bool mcp_ok = mcp23017_u3_begin();
+    mcp23017_u3_debug_dump();
+
+    if (mcp_ok) {
+        board_hw_control_begin();
+
+        // 功放保持静音 + 关断，等真正播放前再打开。
+
+        board_hw_debug_dump();
+
+        mcp23017_u3_set_b(board::MCP_B_RST_TFT, false);
+        mcp23017_u3_set_b(board::MCP_B_RST_NFC, false);
+
+        mcp23017_u3_set_b(board::MCP_B_BLK, false);
+
+        delay(20);
+
+        mcp23017_u3_set_b(board::MCP_B_RST_TFT, true);
+        mcp23017_u3_set_b(board::MCP_B_RST_NFC, true);
+
+        delay(120);
+
+        mcp23017_u3_set_b(board::MCP_B_BLK, true);
+        Serial.println("[总线] 背光使能 (BLK) -> 高电平");
+    
+    } else {
+        Serial.println("[总线] 初始化IIC扩展失败");
+    }
 
     if (!s_ui_spi_mtx) {
         s_ui_spi_mtx = xSemaphoreCreateRecursiveMutex();
     }
 
-    // ---------- UI SPI: 全局 SPI（给 TFT_eSPI + RC522 用） ----------
-    // SS 参数务必用 -1（别传 TFT_CS/RC522_CS）
-    ::SPI.end();
-    ::SPI.begin(PIN_SPI_UI_SCK, PIN_SPI_UI_MISO, PIN_SPI_UI_MOSI, -1);
-
-    // 把两颗片选都拉高，确保空闲态不选中
+    // ---------- Chip Select safe state ----------
     pinMode(PIN_TFT_CS, OUTPUT);
     digitalWrite(PIN_TFT_CS, HIGH);
 
     pinMode(PIN_RC522_CS, OUTPUT);
     digitalWrite(PIN_RC522_CS, HIGH);
 
-    // ---------- SD SPI: 独立 SPI（给 SdFat 用） ----------
+    pinMode(PIN_SD_CS, OUTPUT);
+    digitalWrite(PIN_SD_CS, HIGH);
+
+    // ---------- UI SPI: TFT + RC522 ----------
+    // SS 参数务必用 -1（别传 TFT_CS/RC522_CS）
+    ::SPI.end();
+    ::SPI.begin(PIN_SPI_UI_SCK, PIN_SPI_UI_MISO, PIN_SPI_UI_MOSI, -1);
+
+    // ---------- SD SPI ----------
     SPI_SD.end();
     SPI_SD.begin(PIN_SPI_SD_SCK, PIN_SPI_SD_MISO, PIN_SPI_SD_MOSI, -1);
 
-    Serial.printf("[SPI] UI  SCK=%d MOSI=%d MISO=%d\n",
+    Serial.printf("[总线] 初始化UI和SDSPI总线参数: SCK=%d MOSI=%d MISO=%d\n",
                   PIN_SPI_UI_SCK, PIN_SPI_UI_MOSI, PIN_SPI_UI_MISO);
-    Serial.printf("[SPI] TFT CS=%d DC=%d RST=%d\n",
-                  PIN_TFT_CS, PIN_TFT_DC, PIN_TFT_RST);
-    Serial.printf("[SPI] RC522 CS=%d RST=%d\n",
-                  PIN_RC522_CS, PIN_RC522_RST);
-    Serial.printf("[SPI] SD  SCK=%d MOSI=%d MISO=%d CS=%d\n",
-                  PIN_SPI_SD_SCK, PIN_SPI_SD_MOSI, PIN_SPI_SD_MISO, PIN_SD_CS);
+    Serial.printf("[总线] 屏幕：CS=%d DC=%d RST=MCPB%d BLK=MCPB%d\n",
+                  PIN_TFT_CS,
+                  PIN_TFT_DC,
+                  board::MCP_B_RST_TFT,
+                  board::MCP_B_BLK);
+    Serial.printf("[总线] RC522 芯片选择引脚=%d 复位引脚=MCPB%d 中断请求引脚=%d\n",
+                  PIN_RC522_CS,
+                  board::MCP_B_RST_NFC,
+                  PIN_RC522_IRQ);
+    Serial.printf("[总线] SD卡 时钟引脚=%d 主出从入引脚=%d 主入从出引脚=%d 芯片选择引脚=%d\n",
+                  PIN_SPI_SD_SCK,
+                  PIN_SPI_SD_MOSI,
+                  PIN_SPI_SD_MISO,
+                  PIN_SD_CS);
 }
 
 void board_spi_ui_lock(void)

@@ -3,7 +3,10 @@
 #include "ui/ui_internal.h"
 #include "ui/ui_text_utils.h"
 #include "ui/ui_list_select_view.h"
+#include "ui/ui_quick_menu_view.h"
+#include "menu/quick_menu.h"
 #include "utils/log.h"
+#include "web/web_settings.h"
 #undef LOG_TAG
 #define LOG_TAG "UI"
 
@@ -15,6 +18,7 @@
 #include "player_list_select.h"
 #include "audio/audio.h"
 #include "audio/audio_service.h"
+#include "hal/board_hw_control.h"
 
 lgfx::U8g2font g_font_cjk(u8g2_font_wenquanyi_merged);
 
@@ -51,8 +55,6 @@ volatile int s_ui_track_idx = 0;
 volatile int s_ui_track_total = 0;
 volatile uint32_t s_ui_volume_active_time = UINT32_MAX;
 volatile uint32_t s_ui_mode_switch_time = 0;
-volatile uint32_t s_ui_play_ms = 0;
-volatile uint32_t s_ui_total_ms = 0;
 
 LGFX_Sprite s_coverSpr(&tft);
 LGFX_Sprite s_coverMasked(&tft);
@@ -84,6 +86,9 @@ bool s_rotFramesInited = false;
 LGFX_Sprite* s_src = nullptr;
 
 int s_list_last_drawn_idx = -1;
+bool s_quick_menu_was_active = false;
+bool s_list_select_was_active = false;
+
 float s_angle_deg = 0.0f;
 uint32_t s_rot_last_ms = 0;
 bool s_rotate_wait_audio_start = false;
@@ -150,21 +155,63 @@ void ui_hold_render(bool hold)
     }
   }
 }
+
+static bool ui_player_audio_active_for_cover_spin()
+{
+  // 未开播时 audio_service_is_paused() 通常为 false，不能只用“非暂停”判断。
+  // 只有音频服务明确处于播放状态时，旋转封面/面板视图才允许转动。
+  return audio_service_is_playing() && !audio_service_is_paused();
+}
+
+static bool ui_player_has_track_for_cover_angle()
+{
+  // 已暂停时保留当前角度，只是不继续转；完全未开播时才归零显示。
+  return audio_service_is_playing() || audio_service_is_paused();
+}
+
+static float ui_cover_draw_angle_or_zero()
+{
+  return (web_settings_get().web_cover_spin && ui_player_has_track_for_cover_angle())
+      ? s_angle_deg
+      : 0.0f;
+}
+
 static inline TickType_t ui_period_ticks()
 {
   // hold 期间：不画，但要"醒得勤快一点"，保证解除 hold 后立刻恢复（这里按旋转帧率）
   if (s_ui_hold) return pdMS_TO_TICKS(1000 / UI_FPS_ROTATE);
 
-  // 列表选择模式：使用较高帧率以实现平滑滚动
+
+  // 列表选择模式优先于快捷菜单。
+  // 从快捷菜单进入列表时菜单仍保持 active，帧率判断也要优先按列表处理，
+  // 避免列表刷新被菜单状态降级或延后。
   if (player_list_select_is_active()) return pdMS_TO_TICKS(1000 / 20);
 
-  // PLAYER 界面：按视图区分帧率
-  if (s_screen == UI_SCREEN_PLAYER) {
-    if (s_view == UI_VIEW_ROTATE) return pdMS_TO_TICKS(1000 / UI_FPS_ROTATE);
-    if (s_view == UI_VIEW_COVER_PANEL) return pdMS_TO_TICKS(1000 / UI_FPS_COVER_PANEL);
+  // 快捷菜单：不需要高帧率，但需要比 1fps 更跟手。
+  if (quick_menu_is_active()) return pdMS_TO_TICKS(1000 / 10);
 
-    const bool info_active = audio_service_is_playing() && !audio_service_is_paused();
-    const uint32_t fps = info_active ? UI_FPS_INFO_ACTIVE : UI_FPS_INFO_IDLE;
+  // PLAYER 界面：按视图区分帧率。
+  // 封面旋转关闭后降低刷新压力，但面板视图仍保留歌词/进度刷新。
+  if (s_screen == UI_SCREEN_PLAYER) {
+    const bool cover_spin_enabled = web_settings_get().web_cover_spin;
+    const bool player_active = ui_player_audio_active_for_cover_spin();
+    const bool cover_should_spin = cover_spin_enabled && player_active;
+
+    if (s_view == UI_VIEW_ROTATE) {
+      const uint32_t fps = cover_should_spin
+          ? UI_FPS_ROTATE
+          : UI_FPS_ROTATE_STATIC;
+      return pdMS_TO_TICKS(1000 / fps);
+    }
+
+    if (s_view == UI_VIEW_COVER_PANEL) {
+      const uint32_t fps = cover_should_spin
+          ? UI_FPS_COVER_PANEL
+          : (player_active ? UI_FPS_COVER_PANEL_STATIC_ACTIVE : UI_FPS_COVER_PANEL_STATIC_IDLE);
+      return pdMS_TO_TICKS(1000 / fps);
+    }
+
+    const uint32_t fps = player_active ? UI_FPS_INFO_ACTIVE : UI_FPS_INFO_IDLE;
     return pdMS_TO_TICKS(1000 / fps);
   }
 
@@ -175,6 +222,9 @@ static inline TickType_t ui_period_ticks()
 static void ui_task_entry(void*)
 {
   for (;;) {
+    // 电池状态后台采样（内部 1 分钟采样一次）
+    board_hw_battery_status_tick();
+
     // 动态帧率：rotate 20fps / info 自适应 / other 1fps
     TickType_t period = ui_period_ticks();
     if (period == 0) period = 1;
@@ -190,15 +240,29 @@ static void ui_task_entry(void*)
       continue;
     }
 
-    // 检查是否处于列表选择模式
+    // 菜单计时仍然要跑，但绘制优先级必须是：列表选择 > 快捷菜单 > 播放器。
+    // 播放源菜单打开列表时会保留 quick_menu active，方便 MODE 短按返回菜单；
+    // 如果这里先画菜单，屏幕会停在菜单页，出现“列表能选能播但 UI 不变”。
+    quick_menu_tick();
+
     if (player_list_select_is_active()) {
+      s_list_select_was_active = true;
+
       ui_draw_lock();
+
       int current_idx = player_list_select_get_selected_idx();
       ListSelectState state = player_list_select_get_state();
 
       if (state == ListSelectState::RADIO) {
         const auto& radios = player_list_select_get_radios();
         ui_draw_radio_select(radios, current_idx, "选择电台");
+      } else if (state == ListSelectState::NET_TRACK) {
+        const auto& items = player_list_select_get_net_tracks();
+        ui_draw_net_music_select(items,
+                                player_list_select_get_net_track_page_start(),
+                                current_idx,
+                                player_list_select_get_net_track_total(),
+                                "选择NAS歌曲");
       } else if (state == ListSelectState::TRACKS) {
         const auto& tracks = player_list_select_get_tracks();
         ui_draw_track_select(tracks, current_idx, "选择歌曲");
@@ -213,7 +277,40 @@ static void ui_task_entry(void*)
       continue;
     }
 
-    // 只在 PLAYER 界面、封面就绪时推屏
+    if (s_list_select_was_active) {
+      s_list_select_was_active = false;
+
+      if (quick_menu_is_active()) {
+        // 列表刚退回菜单时，菜单内容本身可能没有 revision 变化，
+        // 但屏幕已经被列表页覆盖，必须强制整屏重画一次。
+        ui_quick_menu_view_reset();
+        s_quick_menu_was_active = false;
+      } else {
+        // 列表直接退出到播放器时，也让播放器下一帧重新清一次背景。
+        s_screen_cleared = false;
+      }
+    }
+
+    if (quick_menu_is_active()) {
+      if (!s_quick_menu_was_active) {
+        ui_quick_menu_view_reset();
+        s_quick_menu_was_active = true;
+      }
+
+      ui_draw_lock();
+      ui_draw_quick_menu();
+      ui_draw_unlock();
+      continue;
+    }
+
+    // 刚退出菜单时，强制播放器页面重新清屏，避免菜单残影。
+    if (s_quick_menu_was_active) {
+      s_quick_menu_was_active = false;
+      ui_quick_menu_view_reset();
+      s_screen_cleared = false;
+    }
+
+    // 没有菜单/列表覆盖时，正常绘制播放器页面。
     if (s_screen == UI_SCREEN_PLAYER && s_coverSprReady && s_framesInited) {
       ui_draw_lock();
 
@@ -240,17 +337,20 @@ static void ui_task_entry(void*)
             s_rotate_release_ms = now_ms;
             s_rotate_release_audio_ms = audio_ms_now;
             s_rotate_probe_frames_left = 6;
-            LOGI("[UI] rotate release audio_ms=%lu cover_age=%lums", (unsigned long)audio_ms_now, (unsigned long)(now_ms - s_cover_apply_ms));
+            LOGD("[界面] 旋转 release audio_ms=%lu 封面_age=%lums", (unsigned long)audio_ms_now, (unsigned long)(now_ms - s_cover_apply_ms));
           } else {
             s_rot_last_ms = now_ms;
+            const float draw_angle_deg = ui_cover_draw_angle_or_zero();
             if (s_view == UI_VIEW_COVER_PANEL) {
-              cover_panel_draw(s_angle_deg);
+              cover_panel_draw(draw_angle_deg);
             } else {
-              s_coverSpr.pushSprite(0, 0);
+              // 旋转视图等待音频/封面预取期间也必须走完整绘制路径，
+              // 不能直接 push 原封面，否则会把 NFC 弹窗覆盖掉，表现为“弹窗-封面-弹窗”闪烁。
+              cover_rotate_draw(draw_angle_deg);
             }
             ui_draw_unlock();
             continue;
-          }
+        }
         }
 
         float dt = (now_ms - s_rot_last_ms) * 0.001f;
@@ -259,23 +359,27 @@ static void ui_task_entry(void*)
         // 防止任何阻塞导致 dt 过大（看起来像“后台一直在转”）
         if (dt > 0.20f) dt = 0.20f;
 
-        // 暂停时不旋转封面
-        if (!audio_service_is_paused()) {
+        // 只有真正开播且未暂停时才旋转封面；未开播时保持 0 度静态显示。
+        const bool cover_should_spin = web_settings_get().web_cover_spin && ui_player_audio_active_for_cover_spin();
+        if (cover_should_spin) {
           s_angle_deg += COVER_DEG_PER_SEC * dt;
           if (s_angle_deg >= 360.0f) s_angle_deg -= 360.0f;
         }
 
+        // 未开播/关闭旋转时使用 0 度静态封面；暂停时保留当前角度但不继续转。
+        const float draw_angle_deg = ui_cover_draw_angle_or_zero();
+
         const uint32_t rotate_frame_begin = millis();
         if (s_view == UI_VIEW_COVER_PANEL) {
-          cover_panel_draw(s_angle_deg);
+          cover_panel_draw(draw_angle_deg);
         } else {
-          cover_rotate_draw(s_angle_deg);
+          cover_rotate_draw(draw_angle_deg);
         }
         const uint32_t rotate_frame_end = millis();
         if (s_rotate_probe_frames_left > 0) {
           const uint32_t audio_ms_now = audio_get_play_ms();
           const int frame_idx = 7 - s_rotate_probe_frames_left;
-          LOGI("[UI] rotate probe frame=%d audio_ms=%lu audio_since_release=%lums since_release=%lums draw=%lums total=%lums", frame_idx, (unsigned long)audio_ms_now, (unsigned long)(audio_ms_now > s_rotate_release_audio_ms ? (audio_ms_now - s_rotate_release_audio_ms) : 0), (unsigned long)(rotate_frame_begin - s_rotate_release_ms), (unsigned long)(rotate_frame_end - rotate_frame_begin), (unsigned long)(rotate_frame_end - rotate_frame_begin));
+          LOGD("[界面] 旋转 探测 帧=%d audio_ms=%lu audio_since_release=%lums since_release=%lums draw=%lums 总计=%lums", frame_idx, (unsigned long)audio_ms_now, (unsigned long)(audio_ms_now > s_rotate_release_audio_ms ? (audio_ms_now - s_rotate_release_audio_ms) : 0), (unsigned long)(rotate_frame_begin - s_rotate_release_ms), (unsigned long)(rotate_frame_end - rotate_frame_begin), (unsigned long)(rotate_frame_end - rotate_frame_begin));
           --s_rotate_probe_frames_left;
         }
       } else {
@@ -285,9 +389,19 @@ static void ui_task_entry(void*)
       }
 
       ui_draw_unlock();
-    } else if (s_screen == UI_SCREEN_PLAYER) {
-      // 兜底：如果进入播放器界面超过5秒还没就绪，显示轻量占位页
-      if (s_player_enter_time > 0 && (now_ms - s_player_enter_time) > 5000 && !s_screen_cleared) {
+      } else if (s_screen == UI_SCREEN_PLAYER) {
+      // 播放器页但封面/帧缓冲还没 ready 时，会停留在启动或占位画面。
+      // NFC 弹窗必须在这种“未开播/无封面”状态下也能显示，所以这里额外处理一次。
+      const bool nfc_bind_popup_visible = ui_nfc_bind_target_popup_is_visible();
+      const bool nfc_scan_popup_visible = ui_nfc_scan_popup_is_visible();
+      const bool nfc_bind_popup_dirty = ui_nfc_bind_target_popup_consume_dirty();
+      const bool nfc_scan_popup_dirty = ui_nfc_scan_popup_consume_dirty();
+      const bool nfc_popup_visible = nfc_bind_popup_visible || nfc_scan_popup_visible;
+      const bool nfc_popup_dirty = nfc_bind_popup_dirty || nfc_scan_popup_dirty;
+      const bool placeholder_due =
+          (s_player_enter_time > 0 && (now_ms - s_player_enter_time) > 5000 && !s_screen_cleared);
+
+      if (placeholder_due || nfc_popup_visible || nfc_popup_dirty) {
         ui_draw_lock();
         tft.fillScreen(TFT_BLACK);
         tft.setFont(&g_font_cjk);
@@ -308,10 +422,15 @@ static void ui_task_entry(void*)
           draw_center_text("加载中...", 142);
           draw_center_text("请稍候", 166);
         }
+
+        // 未开播/无封面时，NFC 弹窗直接画到 TFT 上，而不是等封面精灵路径。
+        ui_draw_nfc_bind_target_popup_on_tft_if_visible();
+        ui_draw_nfc_scan_popup_on_tft_if_visible();
         
         s_screen_cleared = true;
         ui_draw_unlock();
       }
+
       // 非 PLAYER：也刷新 rot 时钟，避免回到旋转 dt 累积
       s_rot_last_ms = now_ms;
     } else {
@@ -344,14 +463,14 @@ static void ui_task_start_once()
 
 void ui_init(void)
 {
-  LOGI("[UI] init (LGFX GC9A01)");
+  LOGI("[界面] 初始化屏幕（LGFX GC9A01）");
 
   ui_draw_lock();
   tft.init();
   tft.setRotation(3); // 旋转 270 度
 
   tft.initDMA();
-  LOGI("[UI] DMA initialized");
+  LOGI("[界面] DMA 初始化完成");
 
   cover_sprite_init_once();
   cover_cache_sprite_init_once();
@@ -376,7 +495,7 @@ void ui_init(void)
 void ui_set_screen(ui_screen_t screen)
 {
   s_screen = screen;
-  LOGI("[UI] switch screen -> %d", (int)screen);
+  LOGD("[界面] 切换屏幕 -> %d", (int)screen);
 }
 
 TaskHandle_t ui_get_task_handle(void)

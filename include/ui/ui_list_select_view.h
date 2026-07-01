@@ -4,6 +4,7 @@
 
 #include "storage/storage_types_v3.h"
 #include "radio/radio_catalog.h"
+#include "net_music/net_music_catalog.h"
 
 /**
  * @brief 列表选择页绘制接口。
@@ -22,5 +23,11 @@ void ui_draw_track_select(const std::vector<TrackIndex16>& tracks,
 void ui_draw_radio_select(const std::vector<RadioItem>& radios,
                           int selected_idx,
                           const char* title);
+
+void ui_draw_net_music_select(const std::vector<NetMusicItem>& items,
+    int page_start_idx,
+    int selected_global_idx,
+    int total,
+    const char* title);
 
 void ui_clear_list_select();

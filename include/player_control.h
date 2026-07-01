@@ -46,6 +46,18 @@ void player_stop_radio();
 /** 从电台播放返回到本地播放。 */
 bool player_return_from_radio_to_local();
 
+/** NAS 播放中：切换顺序 / 随机。 */
+bool player_net_track_toggle_order_random();
+
+/** 网络播放源返回本地播放，支持 NET_RADIO / NET_TRACK。 */
+bool player_return_from_network_to_local();
+
+/** 播放一首 NAS/HTTP 网络歌曲。 */
+bool player_play_net_track_index(int idx);
+
+/** 停止 NAS/HTTP 网络歌曲并清空网络歌曲源状态。 */
+void player_stop_net_track();
+
 /** 播放当前 playlist 的下一首。 */
 void player_next_track();
 /** 播放当前 playlist 的上一首。 */
@@ -62,11 +74,13 @@ void player_toggle_play();
 /** 按步长调整音量，delta 可正可负。 */
 void player_volume_step(int delta);
 /**
- * @brief “NEXT 长按”对应的导航动作。
+ * @brief “NEXT/LIST 长按”对应的导航动作。
  *
- * 当前实际语义不是字面上的“切到下一个 group”：
- * - 在歌手/专辑模式里：进入列表选择界面
- * - 在全部模式里：执行一次较大的前进步长
+ * 统一进入当前播放源/播放模式对应的列表：
+ * - 本地全部播放：全部歌曲列表
+ * - 歌手/专辑播放：对应分组列表
+ * - 网络电台：电台列表
+ * - NAS歌曲：NAS歌曲列表
  */
 void player_next_group();
 /** 只切换当前大类里的小类：顺序 <-> 随机。 */

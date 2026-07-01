@@ -17,15 +17,23 @@
  * - 播放页运行状态
  * - 封面精灵 / 双槽缓存
  * - 列表选择页绘图状态
+ * - 电池状态缓存状态   
  */
 
 static constexpr int COVER_SIZE = 240;                      // 封面大小
 static constexpr float COVER_DEG_PER_SEC = 15.0f;           // 封面旋转角度 FPS
-static constexpr uint32_t UI_FPS_ROTATE = 20;               // 封面旋转 FPS
-static constexpr uint32_t UI_FPS_COVER_PANEL = 12;          // 封面面板滚动 FPS
+static constexpr uint32_t UI_FPS_ROTATE = 15;               // 封面旋转 FPS
+static constexpr uint32_t UI_FPS_COVER_PANEL = 13;          // 封面面板滚动 FPS
 static constexpr uint32_t UI_FPS_INFO_ACTIVE = 12;          // 信息面板滚动 FPS
 static constexpr uint32_t UI_FPS_INFO_IDLE = 5;             // 信息面板空闲滚动 FPS 
 static constexpr uint32_t UI_FPS_OTHER = 1;                 // 其他元素滚动 FPS
+
+// 封面旋转关闭后的降帧策略。
+// 旋转视图关闭旋转后只有静态封面，低帧率即可。
+// 面板视图还有歌词、时间和进度环，播放中保留 5fps，避免进度条跳动明显。
+static constexpr uint32_t UI_FPS_ROTATE_STATIC = 2;
+static constexpr uint32_t UI_FPS_COVER_PANEL_STATIC_ACTIVE = 5;
+static constexpr uint32_t UI_FPS_COVER_PANEL_STATIC_IDLE = 2;
 static constexpr int SCROLL_SPEED = 1;                      // 滚动 FPS
 static constexpr int SCROLL_GAP = 20;                       // 滚动间隔
 static constexpr uint32_t VOLUME_ACTIVE_TIMEOUT_MS = 200;   // 音量激活超时时间
@@ -56,8 +64,6 @@ extern volatile int s_ui_track_idx;
 extern volatile int s_ui_track_total;
 extern volatile uint32_t s_ui_volume_active_time;
 extern volatile uint32_t s_ui_mode_switch_time;
-extern volatile uint32_t s_ui_play_ms;
-extern volatile uint32_t s_ui_total_ms;
 
 /* 当前封面 + 双槽下一首封面缓存。 */
 extern LGFX_Sprite s_coverSpr;
@@ -123,3 +129,18 @@ bool cover_decode_to_sprite_from_track(const TrackInfo& t);
 void cover_rotate_draw(float angle_deg);
 void cover_panel_draw(float angle_deg);
 void cover_info_draw();
+// 面板页 bilinear 源封面缓存失效：s_coverSpr 内容变化后必须调用，避免切歌仍显示旧封面。
+void cover_panel_invalidate_source_cache();
+
+/* NFC 绑定类型弹窗：播放器无封面/未开播占位页也需要能绘制。 */
+bool ui_nfc_bind_target_popup_is_visible();
+bool ui_nfc_bind_target_popup_consume_dirty();
+void ui_draw_nfc_bind_target_popup_on_tft_if_visible();
+
+/* NFC 刷卡结果弹窗：播放器无封面/未开播占位页也需要能绘制。 */
+bool ui_nfc_scan_popup_is_visible();
+bool ui_nfc_scan_popup_consume_dirty();
+void ui_draw_nfc_scan_popup_on_tft_if_visible();
+
+/* 电池状态页脚绘制。 */
+void ui_draw_battery_footer(LGFX_Sprite* dst);

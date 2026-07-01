@@ -8,13 +8,14 @@
 
 #include "ui/ui.h"
 #include "web/web_cover_cache.h"
+#include "web/web_settings.h"
 #include "ui/ui_internal.h"
 #include "audio/audio_service.h"
 #include "audio/audio.h"
 #include "lyrics/lyrics.h"
 #include "utils/log.h"
 
-static constexpr uint32_t kPlayerAssetTaskStackBytes = 5120; // 播放器资源任务栈大小
+static constexpr uint32_t kPlayerAssetTaskStackBytes = 6144; // 播放器资源任务栈大小：封面/歌词处理峰值较高，预留到 6KB
 static constexpr const char* kDefaultCoverPath = "/System/default_cover.jpg";
 
 #ifndef PLAYER_ASSET_TASK_PRIO // 播放器资源任务优先级
@@ -60,6 +61,12 @@ static DeferredCurrentCoverApply s_deferred_current_cover_apply{};
 
 static void player_assets_try_scale_primed_next_cover_after_current(const PlayerDeferredAssetJob& owner_job);
 
+static bool player_assets_web_cover_enabled()
+{
+    const WebRuntimeSettings& cfg = web_settings_get();
+    return cfg.wifi_enabled && cfg.show_cover;
+}
+
 static void player_assets_try_store_web_cover_from_ui_cache(int track_idx,
                                                             CoverSource cover_source,
                                                             const char* audio_path,
@@ -68,7 +75,14 @@ static void player_assets_try_store_web_cover_from_ui_cache(int track_idx,
                                                             uint32_t cover_size)
 {
     if (track_idx < 0) {
-        LOGI("[PLAYER] webcover skip: invalid track=%d", track_idx);
+        LOGD("[播放器] 网页封面 跳过: 无效 歌曲=%d", track_idx);
+        return;
+    }
+
+    // WiFi 关闭或 Web 封面显示关闭时，不需要预生成 172KB 左右的 Web BMP 缓存。
+    // 这样开机恢复只做本机屏幕封面，少占 PSRAM，也少一次 sprite->BMP 转换。
+    if (!player_assets_web_cover_enabled()) {
+        LOGD("[播放器] 网页封面 跳过 已禁用 歌曲=%d", track_idx);
         return;
     }
 
@@ -80,7 +94,7 @@ static void player_assets_try_store_web_cover_from_ui_cache(int track_idx,
                         cover_path,
                         cover_offset,
                         cover_size)) {
-        LOGI("[PLAYER] webcover skip cached track=%d", track_idx);
+        LOGD("[播放器] 网页封面 跳过 缓存d 歌曲=%d", track_idx);
         return;
     }
 
@@ -93,7 +107,7 @@ static void player_assets_try_store_web_cover_from_ui_cache(int track_idx,
         slot = 1;
     }
 
-    LOGI("[PLAYER] webcover from ui cache track=%d slot=%d ready0=%d idx0=%d ready1=%d idx1=%d",
+    LOGD("[播放器] 网页封面 来自界面缓存 歌曲=%d slot=%d 就绪0=%d idx0=%d 就绪1=%d idx1=%d",
          track_idx,
          slot,
          s_coverCacheReady[0] ? 1 : 0,
@@ -109,9 +123,9 @@ static void player_assets_try_store_web_cover_from_ui_cache(int track_idx,
                                                           cover_offset,
                                                           cover_size,
                                                           *s_coverCacheSpr[slot]);
-        LOGI("[PLAYER] webcover store track=%d slot=%d ok=%d", track_idx, slot, ok ? 1 : 0);
+        LOGD("[播放器] 网页封面缓存写入：歌曲=%d 槽位=%d 成功=%d", track_idx, slot, ok ? 1 : 0);
     } else {
-        LOGI("[PLAYER] webcover store skip track=%d slot=%d spr0=%p spr1=%p",
+        LOGD("[播放器] 网页封面 写入跳过 歌曲=%d slot=%d spr0=%p spr1=%p",
              track_idx, slot, s_coverCacheSpr[0], s_coverCacheSpr[1]);
     }
 
@@ -165,7 +179,7 @@ static bool player_assets_apply_default_cover_for_current(const PlayerDeferredAs
 
     const bool default_ok = player_try_prepare_default_cover_cache(job.track_idx);
     if (!default_ok) {
-        LOGW("[PLAYER] current cover default prepare failed track=%d", job.track_idx);
+        LOGW("[播放器] 当前 封面 默认 prepare 失败 歌曲=%d", job.track_idx);
         return false;
     }
 
@@ -175,7 +189,7 @@ static bool player_assets_apply_default_cover_for_current(const PlayerDeferredAs
 
     const bool apply_ok = ui_cover_apply_cached(job.track_idx);
     if (!apply_ok) {
-        LOGW("[PLAYER] current cover default apply failed track=%d", job.track_idx);
+        LOGW("[播放器] 当前 封面 默认 apply 失败 歌曲=%d", job.track_idx);
         return false;
     }
 
@@ -185,7 +199,7 @@ static bool player_assets_apply_default_cover_for_current(const PlayerDeferredAs
 
     ui_request_refresh_now();
 
-    LOGI("[PLAYER] current cover fallback default track=%d", job.track_idx);
+    LOGD("[播放器] 当前 封面 回退 默认 歌曲=%d", job.track_idx);
     return true;
 }
 
@@ -222,7 +236,7 @@ static void player_asset_task_entry(void*)
         if (job.need_cover) {
             if (s_deferred_current_cover_apply.active && 
                 s_deferred_current_cover_apply.track_idx == job.track_idx) {
-                LOGI("[PLAYER] defer current cover apply track=%d", job.track_idx);
+                LOGD("[播放器] defer 当前 封面 apply 歌曲=%d", job.track_idx);
             } else if (ui_cover_apply_cached(job.track_idx)) {
                 current_cover_cache_hit = true;
 
@@ -237,7 +251,7 @@ static void player_asset_task_entry(void*)
                     s_hooks.on_current_cover_ready(job.track_idx);
                 }
                 ui_request_refresh_now();
-                LOGD("[PLAYER] current cover cache hit track=%d", job.track_idx);
+                LOGD("[播放器] 当前 封面 缓存 命中 歌曲=%d", job.track_idx);
             }
         }
 
@@ -292,7 +306,7 @@ static void player_asset_task_entry(void*)
                 s_primed_current_cover.len = 0;
                 s_primed_current_cover.is_png = false;
 
-                LOGI("[PLAYER] primed current cover hit track=%d len=%u", 
+                LOGD("[播放器] 当前封面预读命中 歌曲=%d le数量=%u", 
                     job.track_idx, (unsigned)cover_len);
             } else {
                 (void)audio_service_fetch_cover(job.cover_source,
@@ -327,7 +341,7 @@ static void player_asset_task_entry(void*)
             if (scaled_ok && player_assets_is_job_current(job)) {
                 if (s_deferred_current_cover_apply.active && 
                     s_deferred_current_cover_apply.track_idx == job.track_idx) {
-                    LOGI("[PLAYER] defer current cover apply track=%d", job.track_idx);
+                    LOGD("[播放器] defer 当前 封面 apply 歌曲=%d", job.track_idx);
                 } else {
                     (void)ui_cover_apply_cached(job.track_idx);
                     if (s_hooks.on_current_cover_ready) {
@@ -376,13 +390,13 @@ static void player_asset_task_entry(void*)
 
             if (!s_hooks.get_next_track_for_cover_prefetch) {
                 prefetch_reason = "no_hook";
-                LOGW("[PLAYER] next cover prefetch skipped: no hook track=%d", job.track_idx);
+                LOGW("[播放器] 下一首 封面 prefetch 已跳过: no ho成功 歌曲=%d", job.track_idx);
             } else if (s_hooks.get_next_track_for_cover_prefetch(job.track_idx, next_track_idx, next_track)) {
                 prefetched_track_idx = next_track_idx;
                 if (ui_cover_cache_is_ready(next_track_idx)) {
                     prefetch_reason = "cache_hit";
                     next_prefetch_state = "ready_real";
-                    LOGD("[PLAYER] next cover cache hit track=%d", next_track_idx);
+                    LOGD("[播放器] 下一首 封面 缓存 命中 歌曲=%d", next_track_idx);
                 } else if (next_track.cover_source == COVER_NONE) {
                     t_after_prefetch_fetch = millis();
                     const bool default_ok = player_try_prepare_default_cover_cache(next_track_idx);
@@ -390,7 +404,7 @@ static void player_asset_task_entry(void*)
                     if (default_ok) {
                         prefetch_reason = "default_ready";
                         next_prefetch_state = "ready_default";
-                        LOGD("[PLAYER] next cover fallback default track=%d", next_track_idx);
+                        LOGD("[播放器] 下一首 封面 回退 默认 歌曲=%d", next_track_idx);
                     } else {
                         prefetch_reason = "default_fail";
                         next_prefetch_state = "failed_retryable";
@@ -429,7 +443,7 @@ static void player_asset_task_entry(void*)
                         if (next_ok) {
                             prefetch_reason = "ready";
                             next_prefetch_state = "ready_real";
-                            LOGD("[PLAYER] next cover prefetch ready track=%d", next_track_idx);
+                            LOGD("[播放器] 下一首 封面 prefetch 就绪 歌曲=%d", next_track_idx);
                         } else {
                             prefetch_reason = "scale_fail_retry";
                             next_prefetch_state = "failed_retryable";
@@ -450,7 +464,7 @@ static void player_asset_task_entry(void*)
                     if (default_ok) {
                         prefetch_reason = "default_ready";
                         next_prefetch_state = "ready_default";
-                        LOGD("[PLAYER] next cover fallback default track=%d", next_track_idx);
+                        LOGD("[播放器] 下一首 封面 回退 默认 歌曲=%d", next_track_idx);
                     } else {
                         prefetch_reason = "default_fail";
                         next_prefetch_state = "failed_retryable";
@@ -472,7 +486,7 @@ static void player_asset_task_entry(void*)
         if (player_assets_is_job_current(job) &&
         (view_now == UI_VIEW_ROTATE || view_now == UI_VIEW_COVER_PANEL)) {
             ui_set_rotate_wait_prefetch(false);
-            LOGD("[PLAYER] rotate prefetch complete audio_ms=%lu prefetch=%s state=%s next=%d",
+            LOGD("[播放器] 旋转 prefetch complete audio_ms=%lu prefetch=%s 状态=%s 下一首=%d",
                  (unsigned long)audio_get_play_ms(),
                  prefetch_reason,
                  next_prefetch_state,
@@ -481,7 +495,7 @@ static void player_asset_task_entry(void*)
 
         const uint32_t total_ms = t_after_prefetch_scale - t0;
         if (total_ms >= 20) {
-            LOGD("[PLAYER] deferred assets req=%lu total_fetch=%lums total_ms=%u lyrics_fetch=%lums lyrics_parse=%lums cover_fetch=%lums cover_scale=%lums next_cover_fetch=%lums next_cover_scale=%lums total=%lums cache_hit=%d prefetch=%s prefetch_state=%s next=%d play_ms_before_prefetch=%lu",
+            LOGD("[播放器] 延迟 as设置s req=%lu 总计_fetch=%lums 总计_ms=%u 歌词_fetch=%lums 歌词_parse=%lums 封面_fetch=%lums 封面_缩放=%lums 下一首_封面_fetch=%lums 下一首_封面_缩放=%lums 总计=%lums 缓存_命中=%d prefetch=%s prefetch_状态=%s 下一首=%d play_ms_before_prefetch=%lu",
                  (unsigned long)job.req_id,
                  (unsigned long)(t_after_fetch_total - t0),
                  (unsigned)fetched_total_ms,
@@ -510,7 +524,7 @@ static void player_asset_task_start_once()
         s_asset_q = xQueueCreate(1, sizeof(PlayerDeferredAssetJob));
     }
     if (!s_asset_q) {
-        LOGE("[PLAYER] create deferred asset queue failed");
+        LOGE("[播放器] 创建 延迟 as设置 队列 失败");
         return;
     }
 
@@ -609,19 +623,7 @@ void player_assets_cancel_pending_cover_prefetch()
     s_cover_prefetch_track_idx = -1;
     s_cover_prefetch_track = TrackInfo();
 }
-// 安排待处理的封面预取任务
-void player_assets_arm_pending_cover_prefetch(const TrackInfo& t, int track_idx, uint32_t delay_ms)
-{
-    (void)t;
-    (void)track_idx;
-    (void)delay_ms;
-    player_assets_cancel_pending_cover_prefetch();
-}
-// 尝试运行待处理的封面预取任务
-void player_assets_try_run_pending_cover_prefetch()
-{
-    return;
-}
+
 // 安排播放器资源请求
 void player_assets_schedule(PlayerDeferredAssetJob& job)
 {
@@ -730,7 +732,7 @@ bool player_assets_prime_next_cover(const TrackInfo& t,
     s_primed_next_cover.cover_offset = t.cover_offset;
     s_primed_next_cover.cover_size = t.cover_size;
 
-    LOGI("[PLAYER] next cover primed raw track=%d len=%u source=%u size=%u",
+    LOGD("[播放器] 下一首 封面 primed raw 歌曲=%d le数量=%u 来源=%u 大小=%u",
          track_idx,
          (unsigned)len,
          (unsigned)t.cover_source,
@@ -758,7 +760,7 @@ bool player_assets_promote_next_cover_to_current(int track_idx)
     s_primed_next_cover.len = 0;
     s_primed_next_cover.is_png = false;
 
-    LOGI("[PLAYER] next cover promoted to current track=%d len=%u",
+    LOGD("[播放器] 下一首 封面 已提升为当前 歌曲=%d le数量=%u",
          track_idx,
          (unsigned)s_primed_current_cover.len);
 
@@ -786,7 +788,7 @@ static void player_assets_try_scale_primed_next_cover_after_current(const Player
     const int target_idx = s_primed_next_cover.track_idx;
 
     if (ui_cover_cache_is_ready(target_idx)) {
-        LOGI("[PLAYER] next cover scale skip ready target=%d", target_idx);
+        LOGD("[播放器] 跳过下一首封面缩放：目标已就绪=%d", target_idx);
 
         if (s_primed_next_cover.has_meta) {
             player_assets_try_store_web_cover_from_ui_cache(target_idx,
@@ -804,7 +806,7 @@ static void player_assets_try_scale_primed_next_cover_after_current(const Player
     // 下一首后台缩放 + webcover 都比较吃 CPU/PSRAM，先限制小封面。
     // 96KB 最大封面大小
     if (s_primed_next_cover.len > 96 * 1024) {
-        LOGI("[PLAYER] next cover scale/web skip large target=%d len=%u",
+        LOGD("[播放器] 跳过下一首封面缩放/网页缓存：目标=%d 长度过大=%u",
              target_idx,
              (unsigned)s_primed_next_cover.len);
         return;
@@ -826,7 +828,7 @@ static void player_assets_try_scale_primed_next_cover_after_current(const Player
 
     const uint32_t t0 = millis();
 
-    LOGI("[PLAYER] next cover scale begin target=%d len=%u",
+    LOGD("[播放器] 开始缩放下一首封面：目标=%d 长度=%u",
          target_idx,
          (unsigned)s_primed_next_cover.len);
 
@@ -838,12 +840,12 @@ static void player_assets_try_scale_primed_next_cover_after_current(const Player
 
     const uint32_t scale_cost = millis() - t0;
 
-    LOGI("[PLAYER] next cover scale done target=%d ok=%d cost=%lu",
+    LOGD("[播放器] 下一首封面缩放完成：目标=%d 成功=%d 耗时=%lums",
          target_idx,
          scaled_ok ? 1 : 0,
          (unsigned long)scale_cost);
 
-    if (scaled_ok && s_primed_next_cover.has_meta) {
+    if (scaled_ok && s_primed_next_cover.has_meta && player_assets_web_cover_enabled()) {
         const uint32_t t_web0 = millis();
 
         player_assets_try_store_web_cover_from_ui_cache(target_idx,
@@ -853,7 +855,7 @@ static void player_assets_try_scale_primed_next_cover_after_current(const Player
                                                         s_primed_next_cover.cover_offset,
                                                         s_primed_next_cover.cover_size);
 
-        LOGI("[PLAYER] next webcover prebuilt target=%d cost=%lu",
+        LOGD("[播放器] 下一首网页封面已预构建：目标=%d 耗时=%lums",
              target_idx,
              (unsigned long)(millis() - t_web0));
     }
@@ -894,7 +896,7 @@ void player_assets_try_apply_deferred_current_cover(int current_track_idx)
         if (s_hooks.on_current_cover_ready) {
             s_hooks.on_current_cover_ready(current_track_idx);
         }
-        LOGI("[PLAYER] deferred current cover applied track=%d", current_track_idx);
+        LOGD("[播放器] 延迟 当前 封面 applied 歌曲=%d", current_track_idx);
         player_assets_clear_deferred_current_cover_apply();
     }
 }

@@ -25,7 +25,23 @@ struct WebRuntimeSettings {
   bool show_next_lyric = true;
   bool show_cover = true;
   bool web_cover_spin = true;
+
+  // WiFi 总开关：保存到 NVS。
+  // false 时，下次开机不自动连接 STA，也不启动 AP fallback。
+  bool wifi_enabled = true;
+
+  // 是否在屏幕 / Web 状态里显示 WiFi 信息。
+  // 这只是显示开关，不影响 WiFi 本身。
   bool show_wifi_info = true;
+
+  // HALL_OUT 霍尔输入总开关。
+  // 关闭后 GPIO9 仍保持输入，但不再控制播放 / 暂停。
+  bool hall_control_enabled = true;
+
+  // TC118S 电磁铁动作总开关。
+  // 关闭后播放键不再输出电磁铁短脉冲，驱动层仍保持停止态保护。
+  bool solenoid_enabled = true;
+
 };
 
 // 启动时从 NVS 加载网页运行设置；没有则使用默认值。
@@ -34,8 +50,12 @@ bool web_settings_load();
 bool web_settings_save();
 // 获取当前网页运行设置快照。
 const WebRuntimeSettings& web_settings_get();
-// 更新当前网页运行设置（不自动保存）。
+// 更新当前网页运行设置（不自动保存）；内容有变化时只标记为待保存。
 void web_settings_set(const WebRuntimeSettings& s);
+// 当前网页设置是否有待保存改动。
+bool web_settings_is_dirty();
+// 仅在有待保存改动时写入 NVS；没有改动时直接返回 true。
+bool web_settings_save_if_dirty();
 
 // 机器可读 key / 中文标签 / 由档位映射出的实际参数。
 const char* web_refresh_preset_key(WebRefreshPreset p);

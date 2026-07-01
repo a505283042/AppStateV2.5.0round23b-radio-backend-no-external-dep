@@ -18,6 +18,7 @@
 #include "player_binding.h"
 #include "player_recover.h"
 #include "radio/radio_catalog.h"
+#include "net_music/net_music_catalog.h"
 #include "player_list_select.h"
 #include "player_playlist.h"
 #include "storage/storage_catalog_v3.h"
@@ -25,6 +26,7 @@
 #include "storage/storage_io.h"
 #include "storage/storage_groups_v3.h"
 #include "ui/ui.h"
+#include "menu/quick_menu.h"
 #include "utils/log.h"
 #include "web/web_config.h"
 #include "web/web_page.h"
@@ -49,6 +51,7 @@ static bool s_wifi_enabled = true;
 static WebServer s_server(80);
 static bool s_started = false;
 static bool s_ready = false;
+static TaskHandle_t s_web_start_task = nullptr;
 static bool s_ap_mode = false;
 static String s_hostname_runtime = WEBCTRL_HOSTNAME_DEFAULT;
 static String s_wifi_source = "ap_fallback";
@@ -57,6 +60,27 @@ static volatile bool s_web_volume_locked = true;
 bool web_wifi_is_enabled()
 {
     return s_wifi_enabled;
+}
+
+static bool web_network_audio_source_active()
+{
+    const PlayerSourceState source = player_source_get();
+    return source.type == PlayerSourceType::NET_RADIO ||
+           source.type == PlayerSourceType::NET_TRACK;
+}
+
+static void web_stop_network_audio_before_wifi_down(const char* reason)
+{
+    if (!web_network_audio_source_active()) {
+        return;
+    }
+
+    if (!audio_service_is_playing() && !audio_service_is_paused()) {
+        return;
+    }
+
+    LOGW("[网页] WiFi 关闭前先停止网络音频：%s", reason ? reason : "未知");
+    audio_service_stop(true);
 }
 
 void web_wifi_set_enabled(bool enabled)
@@ -68,8 +92,15 @@ void web_wifi_set_enabled(bool enabled)
 
     s_wifi_enabled = enabled;
 
+    // WiFi 总开关保存到 NVS。
+    // 关闭后，下次开机不再自动连接 WiFi。
+    WebRuntimeSettings ws = web_settings_get();
+    ws.wifi_enabled = enabled;
+    web_settings_set(ws);
+    (void)web_settings_save();
+
     if (!enabled) {
-        LOGW("[WEB] WiFi disabled by user");
+        LOGW("[网页] 用户已关闭 WiFi");
 
         // 停止 Web 服务
         if (s_started) {
@@ -80,19 +111,25 @@ void web_wifi_set_enabled(bool enabled)
         s_ready = false;
         s_ap_mode = false;
 
+        // 关闭 WiFi 前先停掉网络音频。
+        // 否则 AudioTask 可能正在 WiFiClient::read()，此时直接断 WiFi 会触发 lwIP pbuf 断言。
+        web_stop_network_audio_before_wifi_down("user disabled WiFi");
+
         WiFi.softAPdisconnect(true);
         WiFi.disconnect(true, true);
         WiFi.mode(WIFI_OFF);
 
+        quick_menu_request_refresh();
         return;
     }
 
-    LOGI("[WEB] WiFi enabled by user");
+    LOGI("[网页] 用户已启用 WiFi");
 
     WiFi.mode(WIFI_STA);
 
-    // 重新启动 Web/WiFi 流程
-    web_server_start();
+    // 重新启动 Web/WiFi 流程，不阻塞菜单/UI。
+    web_server_start_async();
+    quick_menu_request_refresh();
 #endif
 }
 
@@ -243,6 +280,17 @@ static bool web_parse_bool(const String& v, bool defv=false) {
   if (s=="0"||s=="false"||s=="no"||s=="off") return false;
   return defv;
 }
+
+static bool web_settings_persistent_core_changed(const WebRuntimeSettings& old_cfg,
+                                                 const WebRuntimeSettings& new_cfg)
+{
+  // 这些设置保持原来的“立即保存”语义；
+  // 显示类开关 show_next_lyric / show_cover / web_cover_spin 可延迟到关机前保存。
+  return old_cfg.refresh_preset != new_cfg.refresh_preset
+      || old_cfg.lyric_sync_mode != new_cfg.lyric_sync_mode
+      || old_cfg.wifi_enabled != new_cfg.wifi_enabled
+      || old_cfg.show_wifi_info != new_cfg.show_wifi_info;
+}
 static bool web_parse_mac(const String& text, uint8_t out[6]) {
   unsigned vals[6];
   if (sscanf(text.c_str(), "%x:%x:%x:%x:%x:%x", &vals[0], &vals[1], &vals[2], &vals[3], &vals[4], &vals[5]) != 6) return false;
@@ -336,9 +384,9 @@ static bool web_require_player_state() {
 static bool web_load_wifi_config(std::vector<WebWifiNetwork>& nets, String& hostname) {
   hostname = WEBCTRL_HOSTNAME_DEFAULT;
   StorageSdLockGuard guard(1200);
-  if (!guard) { LOGW("[WEB] wifi config load skip: SD lock failed"); return false; }
+  if (!guard) { LOGW("[网页] 跳过 WiFi 配置读取：获取 SD 锁失败"); return false; }
   File32 f = sd.open(WEBCTRL_WIFI_CONFIG_PATH, O_RDONLY);
-  if (!f) { LOGI("[WEB] wifi config not found: %s", WEBCTRL_WIFI_CONFIG_PATH); return false; }
+  if (!f) { LOGW("[网页] 未找到 WiFi 配置：%s", WEBCTRL_WIFI_CONFIG_PATH); return false; }
 
   WebWifiNetwork cur{}; bool in_network = false; bool any = false;
   while (f.available()) {
@@ -367,43 +415,57 @@ static bool web_load_wifi_config(std::vector<WebWifiNetwork>& nets, String& host
   }
   if (in_network && cur.ssid.length()) { nets.push_back(cur); any = true; }
   f.close();
-  LOGI("[WEB] wifi config loaded: %d network(s), hostname=%s", (int)nets.size(), hostname.c_str());
+  LOGD("[网页] WiFi 配置已读取：网络数量=%d 主机名=%s", (int)nets.size(), hostname.c_str());
   return any;
 }
 
 static bool web_try_connect_one(const WebWifiNetwork& n, const String& hostname) {
   if (n.ssid.isEmpty()) return false;
   WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
   WiFi.setHostname(hostname.c_str());
   WiFi.disconnect(true, true);
-  delay(50);
+  delay(100);
   if (n.channel > 0 || n.has_bssid) {
     WiFi.begin(n.ssid.c_str(), n.password.c_str(), n.channel > 0 ? n.channel : 0, n.has_bssid ? n.bssid : nullptr, true);
   } else {
     WiFi.begin(n.ssid.c_str(), n.password.c_str());
   }
-  LOGI("[WEB] connecting STA ssid=%s%s", n.ssid.c_str(), n.hidden ? " (hidden)" : "");
+  LOGD("[网页] 正在连接 STA：ssid=%s%s", n.ssid.c_str(), n.hidden ? " (隐藏)" : "");
   const uint32_t t0 = millis();
   while ((millis() - t0) < WEBCTRL_STA_CONNECT_TIMEOUT_MS) {
     if (WiFi.status() == WL_CONNECTED) {
       WiFi.setSleep(false);
-      LOGI("[WEB] STA connected ip=%s", WiFi.localIP().toString().c_str());
+      LOGI("[网页] STA 已连接，IP=%s", WiFi.localIP().toString().c_str());
       s_ap_mode = false; s_wifi_source = "config_file"; s_hostname_runtime = hostname;
       return true;
     }
     delay(200);
   }
-  LOGI("[WEB] STA connect timeout for ssid=%s", n.ssid.c_str());
+  LOGW("[网页] STA 连接超时：ssid=%s", n.ssid.c_str());
   return false;
 }
 
 static bool web_try_connect_sta_from_config() {
+  // 如果 STA 已经连上，直接复用当前连接，不要为了启动 Web 服务再次 disconnect/reconnect。
+  // 网络电台 / NAS HTTP 播放时，AudioTask 可能正在 WiFiClient::read()；
+  // 另一个任务强制 WiFi.disconnect() 会破坏底层 socket/pbuf 生命周期。
+  if (WiFi.status() == WL_CONNECTED) {
+    WiFi.setSleep(false);
+    s_ap_mode = false;
+    s_wifi_source = "existing_sta";
+    LOGD("[网页] 复用已有 STA 连接，IP=%s", WiFi.localIP().toString().c_str());
+    quick_menu_request_refresh();
+    return true;
+  }
+
   std::vector<WebWifiNetwork> nets;
   String hostname;
   if (!web_load_wifi_config(nets, hostname) || nets.empty()) return false;
   for (const auto& n : nets) {
     if (web_try_connect_one(n, hostname)) return true;
   }
+  web_stop_network_audio_before_wifi_down("STA retry failed");
   WiFi.disconnect(true, true);
   return false;
 }
@@ -412,16 +474,13 @@ static bool web_start_ap_fallback() {
   WiFi.mode(WIFI_AP);
   WiFi.setHostname(WEBCTRL_HOSTNAME_DEFAULT);
   const bool ok = WiFi.softAP(WEBCTRL_AP_SSID, WEBCTRL_AP_PASS);
-  if (!ok) { LOGE("[WEB] AP start failed"); return false; }
+  if (!ok) { LOGE("[网页] AP 启动失败"); return false; }
   WiFi.setSleep(false);
   s_ap_mode = true; s_wifi_source = "ap_fallback"; s_hostname_runtime = WEBCTRL_HOSTNAME_DEFAULT;
-  LOGI("[WEB] AP ready ssid=%s ip=%s", WEBCTRL_AP_SSID, WiFi.softAPIP().toString().c_str());
+  LOGI("[网页] AP 已就绪：SSID=%s IP=%s", WEBCTRL_AP_SSID, WiFi.softAPIP().toString().c_str());
   return true;
 }
 
-static uint32_t web_clamp_u32_arg(const char* name, uint32_t defv, uint32_t lo, uint32_t hi) {
-  String s = s_server.arg(name); if (!s.length()) return defv; long v = s.toInt(); if (v < (long)lo) v = (long)lo; if (v > (long)hi) v = (long)hi; return (uint32_t)v;
-}
 static bool web_parse_int_arg(const char* name, int& out) {
   String s = s_server.arg(name);
   if (!s.length()) return false;
@@ -441,7 +500,7 @@ static void web_send_radio_list_json() {
   const bool loaded = web_radio_catalog_ensure_loaded();
   const auto& items = radio_catalog_items();
 
-  LOGI("[WEB] radios total=%u (stream-batch)", (unsigned)items.size());
+  LOGD("[网页] 电台s 总计=%u (流-batch)", (unsigned)items.size());
 
   web_send_no_cache_headers();
   s_server.sendHeader("Connection", "close");
@@ -503,18 +562,13 @@ static void web_send_radio_list_json() {
   if (!web_send_chunk("]}")) return;
   web_end_stream_response();
 }
-static String web_track_album_name_string(const MusicCatalogV3& cat, const TrackRowV3& row) {
-  if (row.album_id == INVALID_ID32 || !cat.albums || row.album_id >= cat.album_count) {
-    return String("");
-  }
-  return String(pool_str_v3(cat.pool, cat.albums[row.album_id].name_off));
-}
+
 static void web_send_group_list_json(const std::vector<PlaylistGroup>& groups, bool is_album) {
   const WebPlayerSnapshot snap = web_snapshot_capture();
   const MusicCatalogV3& cat = storage_catalog_v3();
   const int current_group_idx = player_playlist_get_current_group_idx();
 
-  LOGI("[WEB] group list type=%s total=%u (stream-batch)",
+  LOGD("[网页] 分组列表：类型=%s 总数=%u（流式批量输出）",
        is_album ? "album" : "artist",
        (unsigned)groups.size());
 
@@ -627,7 +681,7 @@ static void web_send_group_detail_json(const std::vector<PlaylistGroup>& groups,
   if (offset > total_tracks) offset = total_tracks;
   const int end = (offset + limit > total_tracks) ? total_tracks : (offset + limit);
 
-  LOGI("[WEB] group detail idx=%d is_album=%d q=%s offset=%d limit=%d returned=%d total=%d",
+  LOGD("[网页] 分组详情：索引=%d 是否专辑=%d 查询=%s 偏移=%d 限制=%d 返回数量=%d 总数=%d",
        group_idx,
        is_album ? 1 : 0,
        q.c_str(),
@@ -771,7 +825,9 @@ static void web_handle_settings_get() {
   s_server.send(200, "application/json; charset=utf-8", json);
 }
 static void web_handle_settings_post() {
-  WebRuntimeSettings ws = web_settings_get();
+  const WebRuntimeSettings old_ws = web_settings_get();
+  WebRuntimeSettings ws = old_ws;
+
   String refresh = s_server.arg("refresh_preset");
   if (refresh.length()) {
     String s = refresh; s.toLowerCase();
@@ -790,9 +846,19 @@ static void web_handle_settings_post() {
   ws.show_cover = web_parse_bool(s_server.arg("show_cover"), ws.show_cover);
   ws.web_cover_spin = web_parse_bool(s_server.arg("web_cover_spin"), ws.web_cover_spin);
   ws.show_wifi_info = web_parse_bool(s_server.arg("show_wifi_info"), ws.show_wifi_info);
+
+  const bool need_immediate_save = web_settings_persistent_core_changed(old_ws, ws);
   web_settings_set(ws);
-  if (!web_settings_save()) { web_send_json_err("保存设置失败", 500); return; }
-  web_send_json_ok_simple("settings_saved");
+
+  if (need_immediate_save) {
+    if (!web_settings_save_if_dirty()) { web_send_json_err("保存设置失败", 500); return; }
+    web_send_json_ok_simple("settings_saved");
+    return;
+  }
+
+  // 只修改封面旋转 / 网页封面 / 下一句歌词这类显示开关时，
+  // 立即生效，但不立刻写 NVS；关机前由 app_power 统一保存。
+  web_send_json_ok_simple(web_settings_is_dirty() ? "settings_deferred" : "settings_unchanged");
 }
 static void web_handle_status() {
   WebPlayerSnapshot snap = web_snapshot_capture();
@@ -925,6 +991,43 @@ static void web_handle_status() {
   json += ",\"radio_backend\":\"" + web_json_escape(snap.radio_backend) + "\"";
   json += ",\"radio_bitrate\":" + String(snap.radio_bitrate);
 
+    json += ",\"net_track_active\":";
+  json += (snap.net_track_active ? "true" : "false");
+
+  json += ",\"net_track_idx\":";
+  json += String(snap.net_track_idx);
+
+  json += ",\"net_track_title\":\"";
+  json += web_json_escape(snap.net_track_title);
+  json += "\"";
+
+  json += ",\"net_track_url\":\"";
+  json += web_json_escape(snap.net_track_url);
+  json += "\"";
+
+  json += ",\"net_track_format\":\"";
+  json += web_json_escape(snap.net_track_format);
+  json += "\"";
+
+  json += ",\"net_track_artist\":\"";
+  json += web_json_escape(snap.net_track_artist);
+  json += "\"";
+
+  json += ",\"net_track_album\":\"";
+  json += web_json_escape(snap.net_track_album);
+  json += "\"";
+
+  json += ",\"net_track_duration_ms\":";
+  json += String((unsigned long)snap.net_track_duration_ms);
+
+  json += ",\"net_track_state\":\"";
+  json += web_json_escape(snap.net_track_state);
+  json += "\"";
+
+  json += ",\"net_track_error\":\"";
+  json += web_json_escape(snap.net_track_error);
+  json += "\"";
+
   json += "}";
 
   web_send_no_cache_headers();
@@ -974,7 +1077,7 @@ static void web_handle_radio_logo_current() {
 
   if (is_remote) {
     if (web_if_none_match_hit(etag)) {
-      LOGI("[WEB] radio logo 304 idx=%d remote=1", radio_idx);
+      LOGD("[网页] 电台台标 304：索引=%d 远程=1", radio_idx);
       web_send_not_modified(etag);
       return;
     }
@@ -987,7 +1090,7 @@ static void web_handle_radio_logo_current() {
   }
 
   if (web_if_none_match_hit(etag)) {
-    LOGI("[WEB] radio logo 304 idx=%d remote=0", radio_idx);
+    LOGD("[网页] 电台台标 304：索引=%d 远程=0", radio_idx);
     web_send_not_modified(etag);
     return;
   }
@@ -1023,7 +1126,7 @@ static void web_handle_radio_logo_current() {
   const size_t written = client.write(buf, len);
   client.flush();
   if (written != len) {
-    LOGW("[WEB] radio logo send short write bytes=%u/%u", (unsigned)written, (unsigned)len);
+    LOGW("[网页] 电台 台标 发送写入不足 字节=%u/%u", (unsigned)written, (unsigned)len);
   }
 
   free(buf);
@@ -1051,7 +1154,7 @@ static void web_handle_cover_current() {
   const String cover_rev = web_make_track_cover_rev(v);
   const String etag = String("\"cover-track-") + String(cur) + "-" + cover_rev + "\"";
   if (web_if_none_match_hit(etag)) {
-    LOGI("[WEB] cover 304 track=%d rev=%s", cur, cover_rev.c_str());
+    LOGD("[网页] 封面 304 歌曲=%d 版本=%s", cur, cover_rev.c_str());
     web_send_not_modified(etag);
     return;
   }
@@ -1073,7 +1176,7 @@ static void web_handle_cover_current() {
     return;
   }
 
-  LOGI("[WEB] cover bmp hit track=%d bytes=%u", cur, (unsigned)len);
+  LOGD("[网页] 封面 BMP 命中 歌曲=%d 字节=%u", cur, (unsigned)len);
 
   WiFiClient client = s_server.client();
   client.setTimeout(800);
@@ -1087,7 +1190,7 @@ static void web_handle_cover_current() {
   const size_t written = client.write(buf, len);
   client.flush();
   if (written != len) {
-    LOGW("[WEB] cover send short write track=%d bytes=%u/%u", cur, (unsigned)written, (unsigned)len);
+    LOGW("[网页] 封面 发送写入不足 歌曲=%d 字节=%u/%u", cur, (unsigned)written, (unsigned)len);
   }
 
   free(buf);
@@ -1491,6 +1594,12 @@ static void web_handle_radios_page() {
   web_send_no_cache_headers();
   s_server.send_P(200, "text/html; charset=utf-8", WEBCTRL_RADIOS_HTML);
 }
+
+static void web_handle_netmusic_page() {
+  web_send_no_cache_headers();
+  s_server.send_P(200, "text/html; charset=utf-8", WEBCTRL_NETMUSIC_HTML);
+}
+
 static void web_handle_radios() {
   web_send_radio_list_json();
 }
@@ -1511,6 +1620,295 @@ static void web_handle_radio_stop() {
     web_send_json_ok_simple("已停止电台");
   }
 }
+static void web_handle_netmusic() {
+  if (!net_music_catalog_is_loaded()) {
+    (void)net_music_catalog_load();
+  }
+
+  int offset = 0;
+  int limit = 20;
+  int detail = 0;
+
+  web_parse_int_arg("offset", offset);
+  web_parse_int_arg("limit", limit);
+  web_parse_int_arg("detail", detail);
+
+  if (offset < 0) offset = 0;
+  if (limit <= 0) limit = 20;
+  if (limit > 50) limit = 50;
+
+  const uint32_t total = net_music_catalog_count();
+  const uint32_t start = (uint32_t)offset;
+
+  uint32_t end = start + (uint32_t)limit;
+  if (start >= total) {
+    end = start;
+  } else if (end > total) {
+    end = total;
+  }
+
+  String json;
+  json.reserve(1024 + limit * 220);
+
+  json += "{\"ok\":";
+  json += net_music_catalog_is_loaded() ? "true" : "false";
+
+  json += ",\"total\":";
+  json += String((unsigned long)total);
+
+  json += ",\"offset\":";
+  json += String(offset);
+
+  json += ",\"limit\":";
+  json += String(limit);
+
+  json += ",\"base\":\"";
+  json += web_json_escape(net_music_catalog_base_url());
+  json += "\"";
+
+  json += ",\"error\":\"";
+  json += web_json_escape(net_music_catalog_error());
+  json += "\"";
+
+  json += ",\"items\":[";
+
+  bool first = true;
+
+  for (uint32_t i = start; i < end; ++i) {
+    NetMusicItem item{};
+    if (!net_music_catalog_get(i, &item) || !item.valid) {
+      continue;
+    }
+
+    if (!first) {
+      json += ",";
+    }
+    first = false;
+
+    json += "{\"idx\":";
+    json += String((unsigned long)i);
+
+    json += ",\"title\":\"";
+    json += web_json_escape(item.title);
+    json += "\"";
+
+    json += ",\"artist\":\"";
+    json += web_json_escape(item.artist);
+    json += "\"";
+
+    json += ",\"album\":\"";
+    json += web_json_escape(item.album);
+    json += "\"";
+
+    json += ",\"format\":\"";
+    json += web_json_escape(item.format);
+    json += "\"";
+
+    json += ",\"duration_ms\":";
+    json += String((unsigned long)item.duration_ms);
+
+    if (detail != 0) {
+      json += ",\"path\":\"";
+      json += web_json_escape(item.encoded_path);
+      json += "\"";
+    }
+
+    json += "}";
+  }
+
+  json += "]}";
+
+  web_send_no_cache_headers();
+  s_server.send(200, "application/json; charset=utf-8", json);
+}
+
+static void web_handle_netmusic_search() {
+  if (!net_music_catalog_is_loaded()) {
+    (void)net_music_catalog_load();
+  }
+
+  String q = s_server.hasArg("q") ? s_server.arg("q") : String();
+  q.trim();
+
+  int limit = 50;
+  int detail = 0;
+  web_parse_int_arg("limit", limit);
+  web_parse_int_arg("detail", detail);
+
+  if (limit <= 0) limit = 20;
+  if (limit > 50) limit = 50;
+
+  if (!q.length()) {
+    web_send_no_cache_headers();
+    s_server.send(200,
+                  "application/json; charset=utf-8",
+                  "{\"ok\":false,\"error\":\"empty_query\",\"matched\":0,\"items\":[]}");
+    return;
+  }
+
+  std::vector<NetMusicSearchHit> hits;
+  hits.reserve((size_t)limit);
+
+  const uint32_t matched =
+      net_music_catalog_search(q, (uint16_t)limit, &hits);
+
+  String json;
+  json.reserve(1024 + hits.size() * 240);
+
+  json += "{\"ok\":";
+  json += net_music_catalog_is_loaded() ? "true" : "false";
+
+  json += ",\"query\":\"";
+  json += web_json_escape(q);
+  json += "\"";
+
+  json += ",\"matched\":";
+  json += String((unsigned long)matched);
+
+  json += ",\"returned\":";
+  json += String((unsigned long)hits.size());
+
+  json += ",\"limit\":";
+  json += String(limit);
+
+  json += ",\"error\":\"";
+  json += web_json_escape(net_music_catalog_error());
+  json += "\"";
+
+  json += ",\"items\":[";
+
+  bool first = true;
+  for (const auto& hit : hits) {
+    const NetMusicItem& item = hit.item;
+
+    if (!first) json += ",";
+    first = false;
+
+    json += "{\"idx\":";
+    json += String((unsigned long)hit.idx);
+
+    json += ",\"title\":\"";
+    json += web_json_escape(item.title);
+    json += "\"";
+
+    json += ",\"artist\":\"";
+    json += web_json_escape(item.artist);
+    json += "\"";
+
+    json += ",\"album\":\"";
+    json += web_json_escape(item.album);
+    json += "\"";
+
+    json += ",\"format\":\"";
+    json += web_json_escape(item.format);
+    json += "\"";
+
+    json += ",\"duration_ms\":";
+    json += String((unsigned long)item.duration_ms);
+
+    if (detail != 0) {
+      json += ",\"path\":\"";
+      json += web_json_escape(item.encoded_path);
+      json += "\"";
+    }
+
+    json += "}";
+  }
+
+  json += "]}";
+
+  web_send_no_cache_headers();
+  s_server.send(200, "application/json; charset=utf-8", json);
+}
+
+static void web_handle_netmusic_play() {
+  if (!web_require_player_state()) return;
+
+  int idx = -1;
+  if (!web_parse_int_arg("idx", idx)) {
+    web_send_json_err("缺少 idx 参数");
+    return;
+  }
+
+  if (!net_music_catalog_is_loaded()) {
+    (void)net_music_catalog_load();
+  }
+
+  const int count = (int)net_music_catalog_count();
+  if (idx < 0 || idx >= count) {
+    web_send_json_err("网络歌曲不存在", 404);
+    return;
+  }
+
+  if (!player_play_net_track_index(idx)) {
+    web_send_json_err("网络歌曲播放失败", 500);
+    return;
+  }
+
+  web_send_json_ok_simple("已开始播放 NAS 歌曲");
+}
+
+static void web_handle_netmusic_prev() {
+  if (!web_require_player_state()) return;
+
+  const PlayerSourceState source = player_source_get();
+  if (source.type != PlayerSourceType::NET_TRACK) {
+    web_send_json_err("当前不是 NAS 播放");
+    return;
+  }
+
+  player_prev_track();
+  web_send_json_ok_simple("NAS 上一首");
+}
+
+static void web_handle_netmusic_next() {
+  if (!web_require_player_state()) return;
+
+  const PlayerSourceState source = player_source_get();
+  if (source.type != PlayerSourceType::NET_TRACK) {
+    web_send_json_err("当前不是 NAS 播放");
+    return;
+  }
+
+  player_next_track();
+  web_send_json_ok_simple("NAS 下一首");
+}
+
+static void web_handle_netmusic_toggle() {
+  if (!web_require_player_state()) return;
+
+  const PlayerSourceState source = player_source_get();
+  if (source.type != PlayerSourceType::NET_TRACK) {
+    web_send_json_err("当前不是 NAS 播放");
+    return;
+  }
+
+  player_toggle_play();
+  web_send_json_ok_simple("NAS 播放 / 暂停");
+}
+
+static void web_handle_netmusic_mode() {
+  if (!web_require_player_state()) return;
+
+  if (!player_net_track_toggle_order_random()) {
+    web_send_json_err("NAS 顺序 / 随机切换失败");
+    return;
+  }
+
+  web_send_json_ok_simple("NAS 播放模式已切换");
+}
+
+static void web_handle_netmusic_return_local() {
+  if (!web_require_player_state()) return;
+
+  if (!player_return_from_network_to_local()) {
+    web_send_json_err("返回本地播放失败");
+    return;
+  }
+
+  web_send_json_ok_simple("已返回本地播放");
+}
+
 static void web_handle_playpause() { if (!web_require_player_state()) return; player_toggle_play(); web_send_json_ok_simple(); }
 static void web_handle_next() { if (!web_require_player_state()) return; player_next_track(); web_send_json_ok_simple(); }
 static void web_handle_prev() { if (!web_require_player_state()) return; player_prev_track(); web_send_json_ok_simple(); }
@@ -1612,6 +2010,7 @@ static void web_setup_routes() {
   s_server.on("/albums", HTTP_GET, web_handle_albums_page);
   s_server.on("/nfc", HTTP_GET, web_handle_nfc_page);
   s_server.on("/radios", HTTP_GET, web_handle_radios_page);
+  s_server.on("/netmusic", HTTP_GET, web_handle_netmusic_page);
   s_server.on("/settings", HTTP_GET, web_handle_settings_page);
   s_server.on("/favicon.ico", HTTP_GET, web_handle_favicon);
   s_server.on("/api/status", HTTP_GET, web_handle_status);
@@ -1620,6 +2019,8 @@ static void web_setup_routes() {
   s_server.on("/api/artist/search_song", HTTP_GET, web_handle_artist_song_search);
   s_server.on("/api/album/search_song", HTTP_GET, web_handle_album_song_search);
   s_server.on("/api/radios", HTTP_GET, web_handle_radios);
+  s_server.on("/api/netmusic", HTTP_GET, web_handle_netmusic);
+  s_server.on("/api/netmusic/search", HTTP_GET, web_handle_netmusic_search);
   s_server.on("/api/artist/detail", HTTP_GET, web_handle_artist_detail);
   s_server.on("/api/album/detail", HTTP_GET, web_handle_album_detail);
   s_server.on("/api/settings", HTTP_GET, web_handle_settings_get);
@@ -1637,6 +2038,13 @@ static void web_setup_routes() {
   s_server.on("/api/track/bind_nfc", HTTP_POST, web_handle_track_bind_nfc);
   s_server.on("/api/radio/play", HTTP_POST, web_handle_radio_play);
   s_server.on("/api/radio/stop", HTTP_POST, web_handle_radio_stop);
+  s_server.on("/api/netmusic/play", HTTP_GET, web_handle_netmusic_play);
+  s_server.on("/api/netmusic/play", HTTP_POST, web_handle_netmusic_play);
+  s_server.on("/api/netmusic/prev", HTTP_POST, web_handle_netmusic_prev);
+  s_server.on("/api/netmusic/next", HTTP_POST, web_handle_netmusic_next);
+  s_server.on("/api/netmusic/toggle", HTTP_POST, web_handle_netmusic_toggle);
+  s_server.on("/api/netmusic/mode", HTTP_POST, web_handle_netmusic_mode);
+  s_server.on("/api/netmusic/return-local", HTTP_POST, web_handle_netmusic_return_local);
   s_server.on("/api/playpause", HTTP_POST, web_handle_playpause);
   s_server.on("/api/next", HTTP_POST, web_handle_next);
   s_server.on("/api/prev", HTTP_POST, web_handle_prev);
@@ -1651,11 +2059,80 @@ static void web_setup_routes() {
   s_server.onNotFound([](){ web_send_json_err("not_found", 404); });
 }
 
+bool web_server_switch_wifi_from_config()
+{
+#if WEBCTRL_ENABLED
+  if (!s_wifi_enabled) {
+    LOGI("[网页] WiFi 当前关闭，切换 WiFi 将先启用 WiFi");
+    web_wifi_set_enabled(true);
+    quick_menu_request_refresh();
+    return true;
+  }
+
+  std::vector<WebWifiNetwork> nets;
+  String hostname;
+  if (!web_load_wifi_config(nets, hostname) || nets.empty()) {
+    LOGW("[网页] 切换 WiFi 失败：没有可用配置");
+    quick_menu_request_refresh();
+    return false;
+  }
+
+  const String current_ssid = WiFi.status() == WL_CONNECTED ? WiFi.SSID() : String("");
+  int current_index = -1;
+  for (int i = 0; i < (int)nets.size(); ++i) {
+    if (current_ssid.length() && nets[i].ssid == current_ssid) {
+      current_index = i;
+      break;
+    }
+  }
+
+  LOGI("[网页] 切换 WiFi：当前=%s 配置数量=%d",
+       current_ssid.length() ? current_ssid.c_str() : "-",
+       (int)nets.size());
+
+  // 切换 WiFi 前先停掉网络音频，避免 AudioTask 正在 WiFiClient::read() 时断网。
+  web_stop_network_audio_before_wifi_down("switch WiFi");
+
+  const int total = (int)nets.size();
+  const int start = current_index >= 0 ? ((current_index + 1) % total) : 0;
+
+  for (int step = 0; step < total; ++step) {
+    const int idx = (start + step) % total;
+
+    // 多个配置时，优先跳过当前 SSID；只有一个配置时允许重连当前 SSID。
+    if (total > 1 && current_ssid.length() && nets[idx].ssid == current_ssid) {
+      continue;
+    }
+
+    LOGI("[网页] 尝试切换到 WiFi：%s", nets[idx].ssid.c_str());
+    if (web_try_connect_one(nets[idx], hostname)) {
+      s_ap_mode = false;
+      s_wifi_source = "config_switch";
+      s_hostname_runtime = hostname;
+
+      if (!s_started) {
+        web_server_start_async();
+      }
+
+      quick_menu_request_refresh();
+      return true;
+    }
+  }
+
+  LOGW("[网页] 切换 WiFi 失败，恢复 AP 兜底模式");
+  web_start_ap_fallback();
+  quick_menu_request_refresh();
+  return false;
+#else
+  return false;
+#endif
+}
+
 bool web_server_retry_sta_from_config()
 {
 #if WEBCTRL_ENABLED
   if (!s_wifi_enabled) {
-    LOGW("[WEB] retry STA skipped: WiFi disabled");
+    LOGW("[网页] 跳过 STA 重试：WiFi 已关闭");
     return false;
   }
 
@@ -1670,23 +2147,25 @@ bool web_server_retry_sta_from_config()
 
   // 如果已经是 STA 且连接正常，不重复切换。
   if (!s_ap_mode && WiFi.status() == WL_CONNECTED) {
-    LOGI("[WEB] STA already connected ip=%s", WiFi.localIP().toString().c_str());
+    LOGD("[网页] STA 已连接，IP=%s", WiFi.localIP().toString().c_str());
+    quick_menu_request_refresh();
     return true;
   }
 
-  LOGI("[WEB] retry STA from config");
+  LOGD("[网页] 根据配置重试 STA 连接");
 
   const bool ok = web_try_connect_sta_from_config();
 
   if (ok) {
     // s_server 已经 begin 过，WiFi 从 AP 切 STA 后一般不需要重新注册路由。
-    LOGI("[WEB] switched to STA ip=%s", WiFi.localIP().toString().c_str());
+    LOGI("[网页] 已切换到 STA，IP=%s", WiFi.localIP().toString().c_str());
+    quick_menu_request_refresh();
     return true;
   }
 
   // 注意：web_try_connect_sta_from_config 失败后会 WiFi.disconnect，
   // 如果不重新拉起 AP，网页控制入口会丢失。
-  LOGW("[WEB] retry STA failed, restore AP fallback");
+  LOGW("[网页] STA 重试失败，恢复 AP 兜底模式");
   web_start_ap_fallback();
   return false;
 #else
@@ -1694,36 +2173,117 @@ bool web_server_retry_sta_from_config()
 #endif
 }
 
+static void web_start_task_entry(void* arg)
+{
+    (void)arg;
+
+    // 先让播放器、I2S、功放时序稳定下来。
+    // 避免 WiFi association/DHCP 正好撞上开机起播。
+    vTaskDelay(pdMS_TO_TICKS(3000));
+
+    web_server_start();
+
+    s_web_start_task = nullptr;
+    vTaskDelete(nullptr);
+}
+
 void web_server_start() {
+  #if WEBCTRL_ENABLED
+    // 开机启动 Web/WiFi 前，先读取 NVS 设置。
+    // 如果用户上次在菜单中关闭了 WiFi，这里直接跳过，不扫网、不启动 AP。
+    web_settings_load();
+    s_wifi_enabled = web_settings_get().wifi_enabled;
+
+    if (!s_wifi_enabled) {
+      LOGW("[网页] 跳过启动：NVS 设置中 WiFi 已关闭");
+      WiFi.softAPdisconnect(true);
+      WiFi.disconnect(true, true);
+      WiFi.mode(WIFI_OFF);
+      s_started = false;
+      s_ready = false;
+      s_ap_mode = false;
+      return;
+    }
+
+    if (s_started) return;
+
+    s_started = true;
+    WiFi.persistent(false);
+    WiFi.setAutoReconnect(false);
+    web_settings_load();
+    const bool net_ok = web_try_connect_sta_from_config() || web_start_ap_fallback();
+    if (!net_ok) { LOGE("[网页] 网络启动失败，Web 已禁用"); s_ready = false; return; }
+
+    static const char* kHeaderKeys[] = { "If-None-Match" };
+    s_server.collectHeaders(kHeaderKeys, 1);
+
+    web_setup_routes();
+    s_server.begin();
+    s_ready = true;
+    LOGI("[网页] 服务已启动：http://%s/", web_ip_string().c_str());
+  #else
+    s_started = true; s_ready = false;
+  #endif
+}
+
+void web_server_start_async()
+{
 #if WEBCTRL_ENABLED
-  if (!s_wifi_enabled) {
-    LOGW("[WEB] start skipped: WiFi disabled");
-    return;
-  }
+    // 开机启动 Web/WiFi 前，先读取 NVS 设置。
+    // 如果用户上次在菜单中关闭了 WiFi，这里直接跳过，不扫网、不启动 AP。
+    web_settings_load();
+    s_wifi_enabled = web_settings_get().wifi_enabled;
 
-  if (s_started) return;
-  s_started = true;
-  WiFi.persistent(false); WiFi.setAutoReconnect(true);
-  web_settings_load();
-  const bool net_ok = web_try_connect_sta_from_config() || web_start_ap_fallback();
-  if (!net_ok) { LOGE("[WEB] network start failed, web disabled"); s_ready = false; return; }
+    if (!s_wifi_enabled) {
+        LOGD("[网页] NVS 设置中 WiFi 已关闭，Web 服务不启动");
+        WiFi.softAPdisconnect(true);
+        WiFi.disconnect(true, true);
+        WiFi.mode(WIFI_OFF);
+        s_started = false;
+        s_ready = false;
+        s_ap_mode = false;
+        return;
+    }
 
-  static const char* kHeaderKeys[] = { "If-None-Match" };
-  s_server.collectHeaders(kHeaderKeys, 1);
+    if (s_started || s_web_start_task != nullptr) {
+        return;
+    }
 
-  web_setup_routes();
-  s_server.begin();
-  s_ready = true;
-  LOGI("[WEB] server started: http://%s/", web_ip_string().c_str());
+    const BaseType_t ok = xTaskCreatePinnedToCore(
+        web_start_task_entry,
+        "WebStart",
+        6144,
+        nullptr,
+        1,
+        &s_web_start_task,
+        1
+    );
+
+    if (ok != pdPASS) {
+        s_web_start_task = nullptr;
+        LOGE("[网页] 创建异步启动任务失败");
+    } else {
+        LOGD("[网页] 异步启动任务已创建");
+    }
 #else
-  s_started = true; s_ready = false;
+    web_server_start();
 #endif
 }
-void web_server_poll() {
+
+void web_server_poll()
+{
 #if WEBCTRL_ENABLED
-  if (!s_ready) return;
-  s_server.handleClient();
+    if (!s_ready) return;
+    s_server.handleClient();
 #endif
 }
-bool web_server_started() { return s_started; }
-bool web_server_ready() { return s_ready; }
+
+bool web_server_started()
+{
+    return s_started;
+}
+
+bool web_server_ready()
+{
+    return s_ready;
+}

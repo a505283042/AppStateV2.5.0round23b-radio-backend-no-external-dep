@@ -89,10 +89,26 @@ void ui_toggle_view();
 enum ui_player_view_t ui_get_view();
 void ui_set_view(ui_player_view_t view);
 void ui_set_now_playing(const char* title, const char* artist);
+// 全屏旋转视图切歌提示：显示歌名和歌手，短时间自动消失。
+void ui_show_track_change_popup(const char* title, const char* artist);
 void ui_set_album(const String& album);
 void ui_set_volume(uint8_t vol);
 void ui_volume_key_pressed();
+
+// 显示音量步进小提示，例如：音量图标 x5
+void ui_show_volume_step_hint(uint8_t step);
+// 显示 / 隐藏 NFC 绑定类型小弹窗，selected: 0=单曲, 1=歌手, 2=专辑
+void ui_show_nfc_bind_target_popup(uint8_t selected);
+void ui_hide_nfc_bind_target_popup();
+// 刷 NFC 卡时显示识别结果弹窗。bound=false 时 bind_type 可传 "未绑定"。
+void ui_show_nfc_scan_popup(const String& uid,
+                            const String& card_type,
+                            const String& bind_type,
+                            const String& bind_name,
+                            bool bound);
+
 void ui_set_play_mode(play_mode_t mode);
+
 void ui_mode_switch_highlight();
 void ui_set_track_pos(int idx, int total);
 // 通知封面面板导航反馈（上/下）

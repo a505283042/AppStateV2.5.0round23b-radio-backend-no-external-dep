@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <WiFi.h>
+#include <esp_heap_caps.h>
 #include "ui/ui_internal.h"
 #include "ui/ui_text_utils.h"
 #include "ui/ui_progress.h"
@@ -12,15 +13,668 @@
 #include "lyrics/lyrics.h"
 #include "player_assets.h"
 #include "player_state.h"
+#include "hal/board_hw_control.h"
 #include "utils/log.h"
 #include "web/web_settings.h"
 
 #undef LOG_TAG
 #define LOG_TAG "UI"
 
+#ifndef UI_RENDER_PROFILING
+#define UI_RENDER_PROFILING 0
+#endif
+
+#if UI_RENDER_PROFILING
+struct UiRenderProfStat {
+  uint32_t sum_us = 0;
+  uint32_t max_us = 0;
+  uint32_t count = 0;
+  uint32_t last_log_ms = 0;
+};
+
+static void ui_render_prof_sample(UiRenderProfStat& st, const char* label, uint32_t dt_us)
+{
+  st.sum_us += dt_us;
+  if (dt_us > st.max_us) st.max_us = dt_us;
+  st.count++;
+
+  const uint32_t now_ms = millis();
+  if (st.count > 0 && now_ms - st.last_log_ms >= 1000) {
+    Serial.printf("[UI-PROF] %-26s avg=%lu us max=%lu us frames=%lu\n",
+                  label,
+                  (unsigned long)(st.sum_us / st.count),
+                  (unsigned long)st.max_us,
+                  (unsigned long)st.count);
+    st.sum_us = 0;
+    st.max_us = 0;
+    st.count = 0;
+    st.last_log_ms = now_ms;
+  }
+}
+
+#define UI_PROF_T0() micros()
+#define UI_PROF_SAMPLE(stat, label, t0) ui_render_prof_sample((stat), (label), micros() - (t0))
+
+static UiRenderProfStat s_prof_cover_rotate_total;
+static UiRenderProfStat s_prof_cover_rotate_push;
+static UiRenderProfStat s_prof_fullscreen_bilinear;
+static UiRenderProfStat s_prof_panel_total;
+static UiRenderProfStat s_prof_panel_cover;
+static UiRenderProfStat s_prof_panel_record;
+static UiRenderProfStat s_prof_panel_skin;
+static UiRenderProfStat s_prof_panel_info;
+static UiRenderProfStat s_prof_panel_progress;
+static UiRenderProfStat s_prof_panel_push;
+#else
+#define UI_PROF_T0() 0
+#define UI_PROF_SAMPLE(stat, label, t0) do {} while (0)
+#endif
+
+void cover_panel_invalidate_source_cache();
+
+// 全屏旋转页抗锯齿开关。
+// 1: 使用安全 bilinear 旋转采样，锯齿更轻，但每帧计算量高于 pushRotateZoom。
+// 0: 回退 LovyanGFX pushRotateZoom 原路径。
+#ifndef UI_FULLSCREEN_COVER_BILINEAR
+#define UI_FULLSCREEN_COVER_BILINEAR 1
+#endif
+
+static bool draw_fullscreen_rotated_cover_bilinear(LGFX_Sprite* dst, LGFX_Sprite* src, float angle_deg);
+
 static void cover_set_source(LGFX_Sprite* src)
 {
   s_src = src;
+  cover_panel_invalidate_source_cache();
+}
+
+// =============================================================================
+// 音量步进小提示 Overlay
+// =============================================================================
+
+static constexpr uint32_t VOLUME_STEP_HINT_DURATION_MS = 1200;
+
+static volatile uint8_t s_volume_step_hint = 1;
+static volatile uint32_t s_volume_step_hint_until_ms = 0;
+
+void ui_show_volume_step_hint(uint8_t step)
+{
+  if (step == 0) {
+    step = 1;
+  }
+
+  s_volume_step_hint = step;
+  s_volume_step_hint_until_ms = millis() + VOLUME_STEP_HINT_DURATION_MS;
+
+  ui_request_refresh();
+}
+
+static bool volume_step_hint_active(uint32_t now)
+{
+  if (s_volume_step_hint_until_ms == 0) {
+    return false;
+  }
+
+  return static_cast<int32_t>(s_volume_step_hint_until_ms - now) > 0;
+}
+
+static void draw_volume_step_hint_overlay(LGFX_Sprite* dst)
+{
+  if (!dst) {
+    return;
+  }
+
+  const uint32_t now = millis();
+  if (!volume_step_hint_active(now)) {
+    return;
+  }
+
+  const uint8_t step = s_volume_step_hint;
+  const uint8_t volume = s_ui_volume;
+
+  // 圆屏上中间小弹窗，显示当前音量值和本次旋钮步进。
+  // 弹窗宽度收窄，避免在圆屏安全区边缘显得太长。
+  static constexpr int BOX_W = 100;
+  static constexpr int BOX_H = 32;
+  static constexpr int BOX_X = (240 - BOX_W) / 2;
+  static constexpr int BOX_Y = (240 - BOX_H) / 2;
+  static constexpr int BOX_R = 9;
+
+  const uint16_t border_color = step > 1 ? TFT_YELLOW : TFT_DARKGREY;
+  const uint16_t icon_color = step > 1 ? TFT_YELLOW : TFT_LIGHTGREY;
+  const uint16_t text_color = TFT_WHITE;
+  const uint16_t step_color = step > 1 ? TFT_YELLOW : TFT_LIGHTGREY;
+
+  dst->fillRoundRect(BOX_X, BOX_Y, BOX_W, BOX_H, BOX_R, TFT_BLACK);
+  dst->drawRoundRect(BOX_X, BOX_Y, BOX_W, BOX_H, BOX_R, border_color);
+
+  // 复用项目已有音量图标。
+  draw_volume_icon(dst, BOX_X + 9, BOX_Y + 10, icon_color);
+
+  char volume_label[8];
+  snprintf(volume_label, sizeof(volume_label), "%u%%", static_cast<unsigned>(volume));
+
+  char step_label[8];
+  snprintf(step_label, sizeof(step_label), "x%u", static_cast<unsigned>(step));
+
+  dst->setFont(&g_font_cjk);
+  dst->setTextSize(1);
+  dst->setTextWrap(false);
+
+  dst->setTextDatum(middle_left);
+  dst->setTextColor(text_color, TFT_BLACK);
+  dst->drawString(volume_label, BOX_X + 30, BOX_Y + BOX_H / 2);
+
+  dst->setTextDatum(middle_right);
+  dst->setTextColor(step_color, TFT_BLACK);
+  dst->drawString(step_label, BOX_X + BOX_W - 9, BOX_Y + BOX_H / 2);
+
+  dst->setTextDatum(top_left);
+}
+
+// =============================================================================
+// 全屏旋转视图切歌提示 Overlay
+// =============================================================================
+
+static constexpr uint32_t TRACK_CHANGE_POPUP_DURATION_MS = 2600;
+
+static volatile uint32_t s_track_change_popup_until_ms = 0;
+static String s_track_change_popup_title;
+static String s_track_change_popup_artist;
+
+template <typename CanvasT>
+static String track_popup_fit_text_px(CanvasT* dst, String text, int max_w)
+{
+  text.trim();
+  if (!dst || max_w <= 0 || text.length() == 0) {
+    return text;
+  }
+
+  if (dst->textWidth(text) <= max_w) {
+    return text;
+  }
+
+  const String ellipsis = "...";
+  String out = text;
+
+  // 按像素宽度裁剪，并回退到 UTF-8 字符边界，避免中文歌名被截坏。
+  while (out.length() > 0 && dst->textWidth(out + ellipsis) > max_w) {
+    int len = out.length();
+    do {
+      --len;
+    } while (len > 0 && ((static_cast<uint8_t>(out[len]) & 0xC0) == 0x80));
+
+    out = out.substring(0, len);
+  }
+
+  if (out.length() == 0) {
+    return ellipsis;
+  }
+
+  return out + ellipsis;
+}
+
+static bool track_change_popup_active(uint32_t now)
+{
+  return s_track_change_popup_until_ms != 0 &&
+         static_cast<int32_t>(s_track_change_popup_until_ms - now) > 0;
+}
+
+void ui_show_track_change_popup(const char* title, const char* artist)
+{
+  s_track_change_popup_title = title ? String(title) : String("");
+  s_track_change_popup_artist = artist ? String(artist) : String("");
+  s_track_change_popup_title.trim();
+  s_track_change_popup_artist.trim();
+
+  if (s_track_change_popup_title.isEmpty()) {
+    s_track_change_popup_title = "未知歌曲";
+  }
+  if (s_track_change_popup_artist.isEmpty()) {
+    s_track_change_popup_artist = "未知歌手";
+  }
+
+  s_track_change_popup_until_ms = millis() + TRACK_CHANGE_POPUP_DURATION_MS;
+  ui_request_refresh();
+}
+
+static void draw_track_change_popup_overlay(LGFX_Sprite* dst)
+{
+  if (!dst || !track_change_popup_active(millis())) {
+    return;
+  }
+
+  // 只用于全屏旋转封面页。圆屏底部横向安全宽度会变窄，
+  // 所以弹窗不能按 240 方屏铺太宽，否则左右下角会出圆屏。
+  static constexpr int BOX_W = 184;
+  static constexpr int BOX_H = 38;
+  static constexpr int BOX_X = (240 - BOX_W) / 2;
+  static constexpr int BOX_Y = 154;
+  static constexpr int BOX_R = 10;
+  static constexpr int PAD_X = 10;
+  static constexpr int TEXT_MAX_W = BOX_W - PAD_X * 2;
+
+  dst->fillRoundRect(BOX_X, BOX_Y, BOX_W, BOX_H, BOX_R, TFT_BLACK);
+  dst->drawRoundRect(BOX_X, BOX_Y, BOX_W, BOX_H, BOX_R, TFT_DARKGREY);
+
+  dst->setFont(&g_font_cjk);
+  dst->setTextSize(1);
+  dst->setTextWrap(false);
+
+  const String title = track_popup_fit_text_px(dst, s_track_change_popup_title, TEXT_MAX_W);
+  const String artist = track_popup_fit_text_px(dst, s_track_change_popup_artist, TEXT_MAX_W);
+
+  dst->setTextDatum(middle_center);
+  dst->setTextColor(TFT_WHITE, TFT_BLACK);
+  dst->drawString(title, BOX_X + BOX_W / 2, BOX_Y + 12);
+
+  dst->setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+  dst->drawString(artist, BOX_X + BOX_W / 2, BOX_Y + 27);
+
+  dst->setTextDatum(top_left);
+}
+
+// =============================================================================
+// NFC 绑定类型选择 Overlay
+// =============================================================================
+
+static volatile bool s_nfc_bind_target_popup_visible = false;
+static volatile uint8_t s_nfc_bind_target_popup_selected = 0;
+static volatile bool s_nfc_bind_target_popup_dirty = false;
+
+bool ui_nfc_bind_target_popup_is_visible()
+{
+  return s_nfc_bind_target_popup_visible;
+}
+
+bool ui_nfc_bind_target_popup_consume_dirty()
+{
+  const bool dirty = s_nfc_bind_target_popup_dirty;
+  s_nfc_bind_target_popup_dirty = false;
+  return dirty;
+}
+
+template <typename CanvasT>
+static void draw_nfc_bind_target_popup_canvas(CanvasT* dst, uint8_t selected)
+{
+  if (!dst) {
+    return;
+  }
+
+  if (selected > 2) {
+    selected = 0;
+  }
+
+  // 保持和音量步进提示一致的“居中黑色圆角弹窗”风格，尺寸稍大以容纳三项选择。
+  static constexpr int BOX_W = 168;
+  static constexpr int BOX_H = 88;
+  static constexpr int BOX_X = (240 - BOX_W) / 2;
+  static constexpr int BOX_Y = (240 - BOX_H) / 2;
+  static constexpr int BOX_R = 14;
+
+  dst->fillRoundRect(BOX_X, BOX_Y, BOX_W, BOX_H, BOX_R, TFT_BLACK);
+  dst->drawRoundRect(BOX_X, BOX_Y, BOX_W, BOX_H, BOX_R, TFT_YELLOW);
+
+  dst->setFont(&g_font_cjk);
+  dst->setTextSize(1);
+  dst->setTextWrap(false);
+
+  dst->setTextColor(TFT_WHITE, TFT_BLACK);
+  dst->setTextDatum(middle_center);
+  dst->drawString("NFC绑定", BOX_X + BOX_W / 2, BOX_Y + 17);
+
+  static const char* labels[3] = { "单曲", "歌手", "专辑" };
+  static constexpr int ITEM_W = 44;
+  static constexpr int ITEM_H = 24;
+  static constexpr int ITEM_GAP = 7;
+  static constexpr int ITEMS_W = ITEM_W * 3 + ITEM_GAP * 2;
+  static constexpr int ITEM_X0 = BOX_X + (BOX_W - ITEMS_W) / 2;
+  static constexpr int ITEM_Y = BOX_Y + 34;
+
+  for (uint8_t i = 0; i < 3; ++i) {
+    const int x = ITEM_X0 + i * (ITEM_W + ITEM_GAP);
+    const bool active = (i == selected);
+    const uint16_t border = active ? TFT_YELLOW : TFT_DARKGREY;
+    const uint16_t fg = active ? TFT_YELLOW : TFT_LIGHTGREY;
+
+    if (active) {
+      dst->fillRoundRect(x, ITEM_Y, ITEM_W, ITEM_H, 8, TFT_DARKGREY);
+    }
+
+    dst->drawRoundRect(x, ITEM_Y, ITEM_W, ITEM_H, 8, border);
+    dst->setTextColor(fg, active ? TFT_DARKGREY : TFT_BLACK);
+    dst->drawString(labels[i], x + ITEM_W / 2, ITEM_Y + ITEM_H / 2);
+  }
+
+  dst->setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+  dst->drawString("旋钮选择  PLAY确认", BOX_X + BOX_W / 2, BOX_Y + 72);
+  dst->setTextDatum(top_left);
+}
+
+void ui_show_nfc_bind_target_popup(uint8_t selected)
+{
+  if (selected > 2) {
+    selected = 0;
+  }
+
+  s_nfc_bind_target_popup_selected = selected;
+  s_nfc_bind_target_popup_visible = true;
+  s_nfc_bind_target_popup_dirty = true;
+  ui_request_refresh();
+}
+
+void ui_hide_nfc_bind_target_popup()
+{
+  s_nfc_bind_target_popup_visible = false;
+  s_nfc_bind_target_popup_dirty = true;
+  ui_request_refresh();
+}
+
+void ui_draw_nfc_bind_target_popup_on_tft_if_visible()
+{
+  if (!s_nfc_bind_target_popup_visible) {
+    return;
+  }
+
+  draw_nfc_bind_target_popup_canvas(&tft, s_nfc_bind_target_popup_selected);
+}
+
+static void draw_nfc_bind_target_popup_overlay(LGFX_Sprite* dst)
+{
+  if (!dst || !s_nfc_bind_target_popup_visible) {
+    return;
+  }
+
+  draw_nfc_bind_target_popup_canvas(dst, s_nfc_bind_target_popup_selected);
+}
+
+// =============================================================================
+// NFC 刷卡结果 Overlay
+// =============================================================================
+
+static constexpr uint32_t NFC_SCAN_POPUP_DURATION_MS = 4200; // 弹窗时间3.2s
+
+static volatile bool s_nfc_scan_popup_visible = false;
+static volatile bool s_nfc_scan_popup_dirty = false;
+static volatile uint32_t s_nfc_scan_popup_until_ms = 0;
+static bool s_nfc_scan_popup_bound = false;
+static String s_nfc_scan_popup_uid;
+static String s_nfc_scan_popup_card_type;
+static String s_nfc_scan_popup_bind_type;
+static String s_nfc_scan_popup_bind_name;
+
+static String nfc_popup_fit_text(String text, size_t max_chars)
+{
+  text.trim();
+  if (text.length() <= max_chars) {
+    return text;
+  }
+
+  if (max_chars <= 3) {
+    return text.substring(0, max_chars);
+  }
+
+  String out = text.substring(0, max_chars - 3);
+  out += "...";
+  return out;
+}
+
+template <typename CanvasT>
+static String nfc_popup_fit_text_px(CanvasT* dst, String text, int max_w)
+{
+  text.trim();
+  if (!dst || max_w <= 0 || text.length() == 0) {
+    return text;
+  }
+
+  if (dst->textWidth(text) <= max_w) {
+    return text;
+  }
+
+  const String ellipsis = "...";
+  String out = text;
+
+  // 按像素宽度裁剪，并回退到 UTF-8 字符边界，避免中文歌名被截坏。
+  while (out.length() > 0 && dst->textWidth(out + ellipsis) > max_w) {
+    int len = out.length();
+    do {
+      --len;
+    } while (len > 0 && ((static_cast<uint8_t>(out[len]) & 0xC0) == 0x80));
+
+    out = out.substring(0, len);
+  }
+
+  if (out.length() == 0) {
+    return ellipsis;
+  }
+
+  return out + ellipsis;
+}
+
+static bool nfc_scan_popup_active(uint32_t now)
+{
+  if (!s_nfc_scan_popup_visible) {
+    return false;
+  }
+
+  if (static_cast<int32_t>(s_nfc_scan_popup_until_ms - now) > 0) {
+    return true;
+  }
+
+  s_nfc_scan_popup_visible = false;
+  s_nfc_scan_popup_dirty = true;
+  return false;
+}
+
+bool ui_nfc_scan_popup_is_visible()
+{
+  return nfc_scan_popup_active(millis());
+}
+
+bool ui_nfc_scan_popup_consume_dirty()
+{
+  const bool dirty = s_nfc_scan_popup_dirty;
+  s_nfc_scan_popup_dirty = false;
+  return dirty;
+}
+
+void ui_show_nfc_scan_popup(const String& uid,
+                            const String& card_type,
+                            const String& bind_type,
+                            const String& bind_name,
+                            bool bound)
+{
+  s_nfc_scan_popup_uid = uid;
+  s_nfc_scan_popup_uid.trim();
+  s_nfc_scan_popup_card_type = card_type;
+  s_nfc_scan_popup_card_type.trim();
+  s_nfc_scan_popup_bind_type = bind_type;
+  s_nfc_scan_popup_bind_type.trim();
+  s_nfc_scan_popup_bind_name = bind_name;
+  s_nfc_scan_popup_bind_name.trim();
+  s_nfc_scan_popup_bound = bound;
+
+  if (s_nfc_scan_popup_card_type.isEmpty()) {
+    s_nfc_scan_popup_card_type = "未知卡";
+  }
+  if (s_nfc_scan_popup_bind_type.isEmpty()) {
+    s_nfc_scan_popup_bind_type = bound ? String("已绑定") : String("未绑定");
+  }
+  if (!bound && s_nfc_scan_popup_bind_name.isEmpty()) {
+    s_nfc_scan_popup_bind_name = "长按上一曲可绑定";
+  }
+
+  s_nfc_scan_popup_visible = true;
+  s_nfc_scan_popup_dirty = true;
+  s_nfc_scan_popup_until_ms = millis() + NFC_SCAN_POPUP_DURATION_MS;
+  ui_request_refresh();
+}
+
+template <typename CanvasT>
+static void draw_nfc_scan_popup_canvas(CanvasT* dst)
+{
+  if (!dst || !nfc_scan_popup_active(millis())) {
+    return;
+  }
+
+  // 居中黑色圆角弹窗，和音量/NFC绑定弹窗保持一致风格。
+  // 标题和绑定状态合并到一行后，高度可以从 118px 收到 100px。
+  static constexpr int BOX_W = 220;
+  static constexpr int BOX_H = 100;
+  static constexpr int BOX_X = (240 - BOX_W) / 2;
+  static constexpr int BOX_Y = (240 - BOX_H) / 2;
+  static constexpr int BOX_R = 14;
+
+  const uint16_t status_color = s_nfc_scan_popup_bound ? TFT_GREEN : TFT_ORANGE;
+
+  dst->fillRoundRect(BOX_X, BOX_Y, BOX_W, BOX_H, BOX_R, TFT_BLACK);
+  dst->drawRoundRect(BOX_X, BOX_Y, BOX_W, BOX_H, BOX_R, status_color);
+
+  dst->setFont(&g_font_cjk);
+  dst->setTextSize(1);
+  dst->setTextWrap(false);
+
+  dst->setTextDatum(middle_center);
+  dst->setTextColor(status_color, TFT_BLACK);
+  dst->drawString(s_nfc_scan_popup_bound ? "NFC卡  已绑定" : "NFC卡  未绑定",
+                  BOX_X + BOX_W / 2,
+                  BOX_Y + 15);
+
+  dst->setTextDatum(middle_left);
+  dst->setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+
+  const int left = BOX_X + 12;
+  const int value_left = left + 38;
+
+  // 标题位置不动；下面几行每段间距各收 1px，让底部歌名离下边框更舒服。
+  static constexpr int Y_UID   = 35;
+  static constexpr int Y_CARD  = 52;
+  static constexpr int Y_TYPE  = 69;
+  static constexpr int Y_NAME  = 87;
+
+  dst->drawString("UID:", left, BOX_Y + Y_UID);
+  dst->drawString(nfc_popup_fit_text(s_nfc_scan_popup_uid, 30), value_left, BOX_Y + Y_UID);
+
+  dst->drawString("卡:", left, BOX_Y + Y_CARD);
+  dst->drawString(nfc_popup_fit_text(s_nfc_scan_popup_card_type, 22), value_left, BOX_Y + Y_CARD);
+
+  dst->drawString("类型:", left, BOX_Y + Y_TYPE);
+  dst->setTextColor(status_color, TFT_BLACK);
+  dst->drawString(nfc_popup_fit_text(s_nfc_scan_popup_bind_type, 20), value_left, BOX_Y + Y_TYPE);
+
+  // 绑定名称/歌名限制在弹窗框内：按像素宽度裁剪，超出才加省略号。
+  // 注意这里不用固定“字符数”截断，避免中文歌名明明放得下却被提前省略。
+  static constexpr int NAME_PAD_X = 12;
+  const int name_max_w = BOX_W - NAME_PAD_X * 2;
+  const String name_text = nfc_popup_fit_text_px(dst, s_nfc_scan_popup_bind_name, name_max_w);
+
+  dst->setTextDatum(middle_center);
+  dst->setTextColor(TFT_WHITE, TFT_BLACK);
+  dst->drawString(name_text, BOX_X + BOX_W / 2, BOX_Y + Y_NAME);
+
+  dst->setTextDatum(top_left);
+}
+
+void ui_draw_nfc_scan_popup_on_tft_if_visible()
+{
+  draw_nfc_scan_popup_canvas(&tft);
+}
+
+static void draw_nfc_scan_popup_overlay(LGFX_Sprite* dst)
+{
+  draw_nfc_scan_popup_canvas(dst);
+}
+
+// =============================================================================
+// 电池状态页脚绘制
+// =============================================================================
+
+static void draw_tiny_battery_icon(LGFX_Sprite* dst,
+                                   int x,
+                                   int y,
+                                   uint8_t percent,
+                                   bool external_power_good,
+                                   bool charging,
+                                   uint16_t color)
+{
+    static constexpr int BODY_W = 16;
+    static constexpr int BODY_H = 8;
+    static constexpr int HEAD_W = 2;
+    static constexpr int HEAD_H = 4;
+
+    // 电池外框
+    dst->drawRect(x, y, BODY_W, BODY_H, color);
+    dst->fillRect(x + BODY_W, y + 2, HEAD_W, HEAD_H, color);
+
+    // 电量填充
+    const int inner_w = BODY_W - 4;
+    const int fill_w = static_cast<int>((inner_w * percent) / 100);
+
+    if (fill_w > 0) {
+        dst->fillRect(x + 2, y + 2, fill_w, BODY_H - 4, color);
+    }
+
+    if (external_power_good) {
+        // 有输入电源就显示闪电：
+        // 正在充电用黄色，已接电但未充电/满电用当前状态色。
+        const uint16_t lightning_color = charging ? TFT_YELLOW : color;
+
+        const int bx = x + BODY_W + HEAD_W + 1;
+        const int by = y - 1;
+
+        dst->drawLine(bx + 3, by,     bx,     by + 5, lightning_color);
+        dst->drawLine(bx,     by + 5, bx + 4, by + 5, lightning_color);
+        dst->drawLine(bx + 4, by + 5, bx + 1, by + 10, lightning_color);
+    }
+}
+
+void ui_draw_battery_footer(LGFX_Sprite* dst)
+{
+    if (!dst) {
+        return;
+    }
+
+    const BatteryUiStatus bat = board_hw_get_battery_status_cached();
+    if (!bat.valid) {
+        return;
+    }
+
+    // 圆屏底部可视区域很窄，所以放在底部中间。
+    static constexpr int Y = 220;
+    // 电池图标约 18px，闪电约 5px，中间 1px 间隔。
+    // ICON_W 包含：电池 + 闪电 + 1px 余量。
+    static constexpr int ICON_W = 24;
+    static constexpr int TEXT_W = 28;
+    static constexpr int GAP = 1;
+    static constexpr int TOTAL_W = ICON_W + GAP + TEXT_W;
+    static constexpr int X = (240 - TOTAL_W) / 2;
+
+    uint16_t color = TFT_LIGHTGREY;
+
+    if (bat.external_power_good) {
+        // 插 USB / 外部供电时更醒目。
+        color = bat.charging ? TFT_CYAN : TFT_LIGHTGREY;
+    } else if (bat.percent <= 15) {
+        color = TFT_ORANGE;
+    }
+
+    char text[8];
+    snprintf(text, sizeof(text), "%u%%", static_cast<unsigned>(bat.percent));
+
+    draw_tiny_battery_icon(dst,
+                       X,
+                       Y,
+                       bat.percent,
+                       bat.external_power_good,
+                       bat.charging,
+                       color);
+
+    dst->setFont(&g_font_cjk);
+    dst->setTextSize(1);
+    dst->setTextWrap(false);
+    dst->setTextColor(color);
+    dst->setTextDatum(middle_left);
+    dst->drawString(text, X + ICON_W + GAP, Y + 4);
+    dst->setTextDatum(top_left);
 }
 
 // 将旋转的封面渲染到后帧并推送到 LCD（稳定路径）
@@ -29,6 +683,8 @@ static void cover_set_source(LGFX_Sprite* src)
 //      使用双缓冲技术避免闪烁，交换前后帧索引
 void cover_rotate_draw(float angle_deg)
 {
+  const uint32_t prof_total_t0 = UI_PROF_T0();
+
   // 检查旋转帧是否已初始化以及源精灵是否有效
   if (!s_rotFramesInited || !s_src) return;
 
@@ -36,11 +692,37 @@ void cover_rotate_draw(float angle_deg)
   auto* dst = s_rotFrame[s_rotBack];
   // 清空后帧
   dst->fillScreen(TFT_BLACK);
-  // 将源精灵旋转指定角度并绘制到后帧（不缩放）
-  s_src->pushRotateZoom(dst, COVER_SIZE / 2, COVER_SIZE / 2, angle_deg, 1.0f, 1.0f);
+
+  // 封面旋转关闭时会传入 0 度。
+  // 0 度不需要走 pushRotateZoom，直接推原图，降低 UI 压力。
+  if (angle_deg == 0.0f) {
+    s_src->pushSprite(dst, 0, 0);
+  } else {
+  #if UI_FULLSCREEN_COVER_BILINEAR
+    // 安全 bilinear 路径：不直接写 Sprite getBuffer()，避免颜色格式/字节序导致花屏。
+    // 如果缓存分配失败，会自动回退到原来的 pushRotateZoom。
+    if (!draw_fullscreen_rotated_cover_bilinear(dst, s_src, angle_deg)) {
+      s_src->pushRotateZoom(dst, COVER_SIZE / 2, COVER_SIZE / 2, angle_deg, 1.0f, 1.0f);
+    }
+  #else
+    // 原稳定路径：性能好，但旋转边缘锯齿较明显。
+    s_src->pushRotateZoom(dst, COVER_SIZE / 2, COVER_SIZE / 2, angle_deg, 1.0f, 1.0f);
+  #endif
+  }
+
+  // 全屏旋转页切歌时显示歌名/歌手；音量和 NFC 弹窗在其上层。
+  draw_track_change_popup_overlay(dst);
+
+  // 绘制音量步进小提示
+  draw_volume_step_hint_overlay(dst);
+  draw_nfc_bind_target_popup_overlay(dst);
+  draw_nfc_scan_popup_overlay(dst);
 
   // 将后帧推送到屏幕 (0, 0) 位置
+  const uint32_t prof_push_t0 = UI_PROF_T0();
   dst->pushSprite(0, 0);
+  UI_PROF_SAMPLE(s_prof_cover_rotate_push, "cover_rotate.push", prof_push_t0);
+  UI_PROF_SAMPLE(s_prof_cover_rotate_total, "cover_rotate.total", prof_total_t0);
 
   // 交换前后帧索引（双缓冲）
   uint8_t tmp = s_rotFront;
@@ -256,18 +938,253 @@ static constexpr uint8_t COVER_PANEL_RECORD_ALPHA = 155;
 static constexpr int COVER_PANEL_RECORD_INNER_R = 25;// 最内圈半径，不参与半透明混合
 
 
+static constexpr int COVER_PANEL_RECORD_SPAN_INVALID_X0 = 1;
+static constexpr int COVER_PANEL_RECORD_SPAN_INVALID_X1 = 0;
+
+struct CoverPanelRecordSpan {
+  int16_t x0;
+  int16_t x1;
+  int16_t inner_x0;
+  int16_t inner_x1;
+};
+
+static CoverPanelRecordSpan s_cover_panel_record_spans[240];
+static bool s_cover_panel_record_spans_ready = false;
+
+static void cover_panel_init_record_spans()
+{
+  if (s_cover_panel_record_spans_ready) {
+    return;
+  }
+
+  for (int y = 0; y < 240; ++y) {
+    s_cover_panel_record_spans[y] = {
+        COVER_PANEL_RECORD_SPAN_INVALID_X0,
+        COVER_PANEL_RECORD_SPAN_INVALID_X1,
+        COVER_PANEL_RECORD_SPAN_INVALID_X0,
+        COVER_PANEL_RECORD_SPAN_INVALID_X1,
+    };
+  }
+
+  const int cx = COVER_PANEL_RECORD_CX;
+  const int cy = COVER_PANEL_RECORD_CY;
+  const int r = COVER_PANEL_RECORD_R;
+  const int inner_r = COVER_PANEL_RECORD_INNER_R;
+
+  for (int y = cy - r; y <= cy + r; ++y) {
+    if ((unsigned)y >= 240) {
+      continue;
+    }
+
+    const int dy = y - cy;
+    const int outer_xx = r * r - dy * dy;
+    if (outer_xx < 0) {
+      continue;
+    }
+
+    const int outer_half = (int)sqrtf((float)outer_xx);
+    int x0 = cx - outer_half;
+    int x1 = cx + outer_half;
+    if (x0 < 0) x0 = 0;
+    if (x1 > 239) x1 = 239;
+
+    int inner_x0 = COVER_PANEL_RECORD_SPAN_INVALID_X0;
+    int inner_x1 = COVER_PANEL_RECORD_SPAN_INVALID_X1;
+    const int inner_xx = inner_r * inner_r - dy * dy;
+    if (inner_xx >= 0) {
+      const int inner_half = (int)sqrtf((float)inner_xx);
+      inner_x0 = cx - inner_half;
+      inner_x1 = cx + inner_half;
+      if (inner_x0 < 0) inner_x0 = 0;
+      if (inner_x1 > 239) inner_x1 = 239;
+    }
+
+    s_cover_panel_record_spans[y] = {
+        (int16_t)x0,
+        (int16_t)x1,
+        (int16_t)inner_x0,
+        (int16_t)inner_x1,
+    };
+  }
+
+  s_cover_panel_record_spans_ready = true;
+}
+
+// 面板页 bilinear 旋转的源封面缓存。
+// 安全版每个像素会 src->readPixel() 4 次，画质好但帧耗时高。
+// 这里在切歌/换封面后只用 readPixel() 把 240x240 源封面缓存一次，
+// 后续每帧旋转只访问普通 RGB565 数组，仍然用 drawPixel() 安全写回，避免上一版 getBuffer 写入花屏。
+static uint16_t* s_cover_panel_src_cache = nullptr;
+static LGFX_Sprite* s_cover_panel_src_cache_owner = nullptr;
+static bool s_cover_panel_src_cache_valid = false;
+
+void cover_panel_invalidate_source_cache()
+{
+  s_cover_panel_src_cache_valid = false;
+  s_cover_panel_src_cache_owner = nullptr;
+}
+
+static bool cover_panel_ensure_source_cache(LGFX_Sprite* src)
+{
+  if (!src) return false;
+
+  if (s_cover_panel_src_cache_valid && s_cover_panel_src_cache_owner == src && s_cover_panel_src_cache) {
+    return true;
+  }
+
+  if (!s_cover_panel_src_cache) {
+    const size_t bytes = (size_t)COVER_SIZE * (size_t)COVER_SIZE * sizeof(uint16_t);
+    s_cover_panel_src_cache = (uint16_t*)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_cover_panel_src_cache) {
+      s_cover_panel_src_cache = (uint16_t*)heap_caps_malloc(bytes, MALLOC_CAP_8BIT);
+    }
+    if (!s_cover_panel_src_cache) {
+      LOGW("[界面] COVER_PANEL 源封面缓存分配失败，回退 readPixel 采样");
+      return false;
+    }
+  }
+
+  for (int y = 0; y < COVER_SIZE; ++y) {
+    uint16_t* row = s_cover_panel_src_cache + y * COVER_SIZE;
+    for (int x = 0; x < COVER_SIZE; ++x) {
+      row[x] = (uint16_t)src->readPixel(x, y);
+    }
+  }
+
+  s_cover_panel_src_cache_owner = src;
+  s_cover_panel_src_cache_valid = true;
+  return true;
+}
+
+static inline uint16_t cover_panel_cached_pixel(const uint16_t* cache, LGFX_Sprite* src, int x, int y)
+{
+  if (cache) {
+    return cache[y * COVER_SIZE + x];
+  }
+  return (uint16_t)src->readPixel(x, y);
+}
+
+// RGB565 四点双线性混合。fx/fy 使用 10-bit 小数，范围 0..1023。
+// 这里故意不直接操作 Sprite getBuffer()：上一版花屏大概率来自 Sprite 内部字节序/格式假设。
+static uint16_t cover_bilinear_mix_rgb565(uint16_t c00,
+                                          uint16_t c10,
+                                          uint16_t c01,
+                                          uint16_t c11,
+                                          int fx,
+                                          int fy)
+{
+  const int inv_fx = 1024 - fx;
+  const int inv_fy = 1024 - fy;
+
+  const int w00 = inv_fx * inv_fy;
+  const int w10 = fx     * inv_fy;
+  const int w01 = inv_fx * fy;
+  const int w11 = fx     * fy;
+
+  const int round = 1 << 19;
+
+  const int r = (((int)((c00 >> 11) & 0x1F) * w00 +
+                  (int)((c10 >> 11) & 0x1F) * w10 +
+                  (int)((c01 >> 11) & 0x1F) * w01 +
+                  (int)((c11 >> 11) & 0x1F) * w11 + round) >> 20);
+
+  const int g = (((int)((c00 >> 5) & 0x3F) * w00 +
+                  (int)((c10 >> 5) & 0x3F) * w10 +
+                  (int)((c01 >> 5) & 0x3F) * w01 +
+                  (int)((c11 >> 5) & 0x3F) * w11 + round) >> 20);
+
+  const int b = (((int)(c00 & 0x1F) * w00 +
+                  (int)(c10 & 0x1F) * w10 +
+                  (int)(c01 & 0x1F) * w01 +
+                  (int)(c11 & 0x1F) * w11 + round) >> 20);
+
+  return (uint16_t)((r << 11) | (g << 5) | b);
+}
+
+static bool draw_fullscreen_rotated_cover_bilinear(LGFX_Sprite* dst, LGFX_Sprite* src, float angle_deg)
+{
+  const uint32_t prof_t0 = UI_PROF_T0();
+
+  if (!dst || !src) return false;
+
+  if (!cover_panel_ensure_source_cache(src) || !s_cover_panel_src_cache) {
+    return false;
+  }
+
+  const uint16_t* src_cache = s_cover_panel_src_cache;
+
+  const float rad = angle_deg * 0.01745329252f;
+  const int c = (int)(cosf(rad) * 1024.0f);
+  const int s = (int)(sinf(rad) * 1024.0f);
+
+  static constexpr int FP = 10;
+  static constexpr int ONE = 1 << FP;
+  static constexpr int CENTER_FP = (COVER_SIZE / 2) << FP;
+  const int max_fp = (COVER_SIZE - 2) << FP;
+
+  // dst 已经在 cover_rotate_draw() 里 fillScreen(TFT_BLACK)。
+  // 这里只绘制圆屏可见范围，减少约 20% 像素计算量，屏幕四角保持黑色。
+  for (int y = 0; y < COVER_SIZE; ++y) {
+    int x0 = 0;
+    int w = 0;
+    circle_span(y, 0, x0, w);
+    if (w <= 0) continue;
+
+    const int dy = y - COVER_SIZE / 2;
+    const int x_end = x0 + w;
+    const int dx0 = x0 - COVER_SIZE / 2;
+
+    int sx_fp_row = CENTER_FP + dx0 * c + dy * s;
+    int sy_fp_row = CENTER_FP - dx0 * s + dy * c;
+
+    for (int x = x0; x < x_end; ++x) {
+      int sx_fp = sx_fp_row;
+      int sy_fp = sy_fp_row;
+      sx_fp_row += c;
+      sy_fp_row -= s;
+
+      if (sx_fp < 0) sx_fp = 0;
+      if (sy_fp < 0) sy_fp = 0;
+      if (sx_fp > max_fp) sx_fp = max_fp;
+      if (sy_fp > max_fp) sy_fp = max_fp;
+
+      const int sx0 = sx_fp >> FP;
+      const int sy0 = sy_fp >> FP;
+      const int fx = sx_fp & (ONE - 1);
+      const int fy = sy_fp & (ONE - 1);
+
+      const int row0 = sy0 * COVER_SIZE;
+      const int row1 = row0 + COVER_SIZE;
+      const uint16_t c00 = src_cache[row0 + sx0];
+      const uint16_t c10 = src_cache[row0 + sx0 + 1];
+      const uint16_t c01 = src_cache[row1 + sx0];
+      const uint16_t c11 = src_cache[row1 + sx0 + 1];
+
+      const uint16_t color = cover_bilinear_mix_rgb565(c00, c10, c01, c11, fx, fy);
+      dst->drawPixel(x, y, color);
+    }
+  }
+
+  UI_PROF_SAMPLE(s_prof_fullscreen_bilinear, "fullscreen.bilinear", prof_t0);
+  return true;
+}
+
 static void draw_upper_rotated_cover_sampled(LGFX_Sprite* dst, LGFX_Sprite* src, float angle_deg)
 {
   if (!dst || !src) return;
 
   dst->fillScreen(TFT_BLACK);
 
-  uint16_t* sbuf = reinterpret_cast<uint16_t*>(src->getBuffer());
-  uint16_t* dbuf = reinterpret_cast<uint16_t*>(dst->getBuffer());
+  const bool cache_ok = cover_panel_ensure_source_cache(src);
+  const uint16_t* src_cache = cache_ok ? s_cover_panel_src_cache : nullptr;
 
   const float rad = angle_deg * 0.01745329252f;
   const int c = (int)(cosf(rad) * 1024.0f);
   const int s = (int)(sinf(rad) * 1024.0f);
+
+  static constexpr int FP = 10;
+  static constexpr int ONE = 1 << FP;
+  static constexpr int CENTER_FP = (COVER_SIZE / 2) << FP;
 
   for (int y = 0; y < COVER_PANEL_Y; ++y) {
     int x0 = 0;
@@ -275,29 +1192,50 @@ static void draw_upper_rotated_cover_sampled(LGFX_Sprite* dst, LGFX_Sprite* src,
     circle_span(y, 0, x0, w);
     if (w <= 0) continue;
 
-    const int yoff = y * COVER_SIZE;
     const int dy = y - COVER_SIZE / 2;
+    const int x_end = x0 + w;
+    const int dx0 = x0 - COVER_SIZE / 2;
 
-    for (int x = x0; x < x0 + w; ++x) {
-      const int dx = x - COVER_SIZE / 2;
+    // 行内递增优化：同一行里 x 每增加 1，源坐标只需要固定增量。
+    // 避免每个像素重复做 dx*c / dx*s 乘法，画质不变、风险低。
+    int sx_fp_row = CENTER_FP + dx0 * c + dy * s;
+    int sy_fp_row = CENTER_FP - dx0 * s + dy * c;
+    const int max_fp = (COVER_SIZE - 2) << FP;
 
-      // 反向映射：屏幕点 -> 原封面点
-      const int sx = COVER_SIZE / 2 + ((dx * c + dy * s) >> 10);
-      const int sy = COVER_SIZE / 2 + ((-dx * s + dy * c) >> 10);
+    for (int x = x0; x < x_end; ++x) {
+      int sx_fp = sx_fp_row;
+      int sy_fp = sy_fp_row;
+      sx_fp_row += c;
+      sy_fp_row -= s;
 
-      int src_x = sx;
-      int src_y = sy;
+      // 为了安全读取 x+1/y+1，最大钳到 COVER_SIZE-2。
+      if (sx_fp < 0) sx_fp = 0;
+      if (sy_fp < 0) sy_fp = 0;
+      if (sx_fp > max_fp) sx_fp = max_fp;
+      if (sy_fp > max_fp) sy_fp = max_fp;
 
-      if (src_x < 0) src_x = 0;
-      if (src_x >= COVER_SIZE) src_x = COVER_SIZE - 1;
-      if (src_y < 0) src_y = 0;
-      if (src_y >= COVER_SIZE) src_y = COVER_SIZE - 1;
+      const int sx0 = sx_fp >> FP;
+      const int sy0 = sy_fp >> FP;
+      const int fx = sx_fp & (ONE - 1);
+      const int fy = sy_fp & (ONE - 1);
 
-      const uint16_t color = sbuf ? sbuf[src_y * COVER_SIZE + src_x] : src->readPixel(src_x, src_y);
-      if (dbuf) dbuf[yoff + x] = color;
-      else      dst->drawPixel(x, y, color);
+      const uint16_t c00 = cover_panel_cached_pixel(src_cache, src, sx0,     sy0);
+      const uint16_t c10 = cover_panel_cached_pixel(src_cache, src, sx0 + 1, sy0);
+      const uint16_t c01 = cover_panel_cached_pixel(src_cache, src, sx0,     sy0 + 1);
+      const uint16_t c11 = cover_panel_cached_pixel(src_cache, src, sx0 + 1, sy0 + 1);
+
+      const uint16_t color = cover_bilinear_mix_rgb565(c00, c10, c01, c11, fx, fy);
+      dst->drawPixel(x, y, color);
     }
   }
+}
+
+static inline int div255_round_fast(int v)
+{
+  // 近似 round(v / 255)，避免每个颜色通道做整数除法。
+  // v 的范围很小（RGB565 通道 * alpha），该写法用于 8-bit alpha blend 足够稳定。
+  v += 128;
+  return (v + (v >> 8)) >> 8;
 }
 
 static uint16_t blend_rgb565(uint16_t bg, uint16_t fg, uint8_t alpha)
@@ -312,45 +1250,34 @@ static uint16_t blend_rgb565(uint16_t bg, uint16_t fg, uint8_t alpha)
   const int fgc = (fg >> 5) & 0x3F;
   const int fb = fg & 0x1F;
 
-  const int r = (br * inv + fr * alpha) / 255;
-  const int g = (bgc * inv + fgc * alpha) / 255;
-  const int b = (bb * inv + fb * alpha) / 255;
+  const int r = div255_round_fast(br * inv + fr * alpha);
+  const int g = div255_round_fast(bgc * inv + fgc * alpha);
+  const int b = div255_round_fast(bb * inv + fb * alpha);
 
   return (uint16_t)((r << 11) | (g << 5) | b);
 }
 
-static void fill_blend_circle_rgb565(LGFX_Sprite* dst,
-                                     int cx,
-                                     int cy,
-                                     int r,
-                                     int skip_inner_r,
-                                     uint16_t color,
-                                     uint8_t alpha)
+static void fill_cover_panel_record_blend(LGFX_Sprite* dst, uint16_t color, uint8_t alpha)
 {
-  if (!dst || r <= 0 || alpha == 0) return;
+  if (!dst || alpha == 0) return;
 
-  const int skip_inner_r2 = skip_inner_r * skip_inner_r;
+  cover_panel_init_record_spans();
 
-  for (int y = cy - r; y <= cy + r; ++y) {
-    if ((unsigned)y >= 240) continue;
+  int y0 = COVER_PANEL_RECORD_CY - COVER_PANEL_RECORD_R;
+  int y1 = COVER_PANEL_RECORD_CY + COVER_PANEL_RECORD_R;
+  if (y0 < 0) y0 = 0;
+  if (y1 > 239) y1 = 239;
 
-    const int dy = y - cy;
-    const int xx = r * r - dy * dy;
-    if (xx < 0) continue;
+  for (int y = y0; y <= y1; ++y) {
+    const CoverPanelRecordSpan& span = s_cover_panel_record_spans[y];
+    if (span.x0 > span.x1) {
+      continue;
+    }
 
-    const int half = (int)sqrtf((float)xx);
-
-    int x0 = cx - half;
-    int x1 = cx + half;
-
-    if (x0 < 0) x0 = 0;
-    if (x1 > 239) x1 = 239;
-
-    for (int x = x0; x <= x1; ++x) {
-      const int dx = x - cx;
-
-      // 关键：最内圈不参与半透明混合
-      if (skip_inner_r > 0 && (dx * dx + dy * dy) <= skip_inner_r2) {
+    for (int x = span.x0; x <= span.x1; ++x) {
+      // 最内圈后面会被实心圆覆盖，这里直接跳过，避免无效 readPixel/blend/drawPixel。
+      if (span.inner_x0 <= span.inner_x1 && x >= span.inner_x0 && x <= span.inner_x1) {
+        x = span.inner_x1;
         continue;
       }
 
@@ -369,14 +1296,9 @@ static void draw_cover_panel_record_overlay(LGFX_Sprite* dst)
   const int cy = COVER_PANEL_RECORD_CY;
   const int r  = COVER_PANEL_RECORD_R;
 
-  // 大唱片圆：半透明，但跳过最内圈
-  fill_blend_circle_rgb565(dst,
-                           cx,
-                           cy,
-                           r,
-                           COVER_PANEL_RECORD_INNER_R,
-                           TFT_BLACK,
-                           COVER_PANEL_RECORD_ALPHA);
+  // 大唱片圆：半透明，但跳过最内圈。
+  // span 已预计算，避免每帧 sqrtf 和 inner dx*dx 判断。
+  fill_cover_panel_record_blend(dst, TFT_BLACK, COVER_PANEL_RECORD_ALPHA);
 
   // 内部弱环纹，保留一条
   dst->drawCircle(cx, cy, r - 7, 0x8430);
@@ -442,35 +1364,6 @@ static void draw_cover_panel_prev_next(LGFX_Sprite* dst,
   }
 }
 
-static bool cover_panel_inner_span(int y, int& x0, int& w)
-{
-  static constexpr int CX = 120;
-  static constexpr int CY = 120;
-  const int R = COVER_PANEL_INNER_R;
-
-  const int dy = y - CY;
-  if (dy < -R || dy > R) {
-    x0 = 0;
-    w = 0;
-    return false;
-  }
-
-  const int half = (int)sqrtf((float)(R * R - dy * dy));
-  x0 = CX - half;
-  w  = half * 2 + 1;
-
-  if (x0 < 0) {
-    w += x0;
-    x0 = 0;
-  }
-
-  if (x0 + w > 240) {
-    w = 240 - x0;
-  }
-
-  return w > 0;
-}
-
 // 接近洋红也透明
 static bool is_cover_panel_skin_transparent(uint16_t c)
 {
@@ -490,38 +1383,55 @@ static bool is_cover_panel_skin_transparent(uint16_t c)
   return false;
 }
 
-static bool cover_panel_skin_transparent_at_screen(int sx, int sy)
-{
-  const int lx = sx;
-  const int ly = sy - COVER_PANEL_SKIN_Y;
+// 面板皮肤缓存。
+// 原实现每帧都从 PROGMEM 读 240x140 像素、判断透明、再逐像素 drawPixel，
+// 在封面面板页里会和 bilinear 旋转抢时间。这里把静态皮肤预渲染成 Sprite，
+// 每帧只做一次带透明色的 pushSprite。
+static LGFX_Sprite* s_cover_panel_skin_spr = nullptr;
+static bool s_cover_panel_skin_spr_ready = false;
+static bool s_cover_panel_skin_spr_failed = false;
 
-  if (lx < 0 || lx >= COVER_PANEL_SKIN_W ||
-      ly < 0 || ly >= COVER_PANEL_SKIN_H) {
+static bool cover_panel_ensure_skin_sprite()
+{
+  if (s_cover_panel_skin_spr_ready && s_cover_panel_skin_spr) {
     return true;
   }
-
-  const uint16_t c =
-      pgm_read_word(&g_cover_panel_skin_240x140[ly * COVER_PANEL_SKIN_W + lx]);
-
-  return is_cover_panel_skin_transparent(c);
-}
-
-static void draw_pixel_if_skin_transparent(LGFX_Sprite* dst,
-                                           int x,
-                                           int y,
-                                           uint16_t color)
-{
-  if (!dst) return;
-  if ((unsigned)x >= 240 || (unsigned)y >= 240) return;
-
-  if (!cover_panel_skin_transparent_at_screen(x, y)) {
-    return;
+  if (s_cover_panel_skin_spr_failed) {
+    return false;
   }
 
-  dst->drawPixel(x, y, color);
+  if (!s_cover_panel_skin_spr) {
+    s_cover_panel_skin_spr = new LGFX_Sprite(&tft);
+    if (!s_cover_panel_skin_spr) {
+      s_cover_panel_skin_spr_failed = true;
+      return false;
+    }
+  }
+
+  s_cover_panel_skin_spr->setColorDepth(16);
+  s_cover_panel_skin_spr->setPsram(psramFound());
+  if (!s_cover_panel_skin_spr->createSprite(COVER_PANEL_SKIN_W, COVER_PANEL_SKIN_H)) {
+    LOGW("[界面] COVER_PANEL 皮肤缓存 Sprite 创建失败，回退逐像素绘制");
+    s_cover_panel_skin_spr_failed = true;
+    return false;
+  }
+
+  s_cover_panel_skin_spr->fillScreen(COVER_PANEL_SKIN_KEY);
+  for (int y = 0; y < COVER_PANEL_SKIN_H; ++y) {
+    for (int x = 0; x < COVER_PANEL_SKIN_W; ++x) {
+      const uint16_t c = pgm_read_word(&g_cover_panel_skin_240x140[y * COVER_PANEL_SKIN_W + x]);
+      if (is_cover_panel_skin_transparent(c)) {
+        continue;
+      }
+      s_cover_panel_skin_spr->drawPixel(x, y, c);
+    }
+  }
+
+  s_cover_panel_skin_spr_ready = true;
+  return true;
 }
 
-static void draw_cover_panel_skin(LGFX_Sprite* dst)
+static void draw_cover_panel_skin_fallback(LGFX_Sprite* dst)
 {
   if (!dst) return;
 
@@ -541,38 +1451,16 @@ static void draw_cover_panel_skin(LGFX_Sprite* dst)
   }
 }
 
-static void draw_cover_panel_shell(LGFX_Sprite* dst)
+static void draw_cover_panel_skin(LGFX_Sprite* dst)
 {
   if (!dst) return;
 
-  const uint16_t panel    = 0x1082;
-  const uint16_t hub_line = 0x2104;
-
-  // 下半圆面板：从 COVER_PANEL_Y 往下，只填充圆屏内部区域。
-  for (int y = COVER_PANEL_Y; y < 240; ++y) {
-    int x0 = 0;
-    int w = 0;
-
-    if (!cover_panel_inner_span(y, x0, w)) {
-      continue;
-    }
-
-    dst->fillRect(x0, y, w, 1, panel);
+  if (cover_panel_ensure_skin_sprite()) {
+    s_cover_panel_skin_spr->pushSprite(dst, 0, COVER_PANEL_SKIN_Y, COVER_PANEL_SKIN_KEY);
+    return;
   }
 
-  // 上方小凸起，盖住封面。
-  dst->fillCircle(120, COVER_PANEL_BUMP_CY, COVER_PANEL_BUMP_R, panel);
-
-  // 补一下凸起和下方面板的连接处，避免中间有缝。
-  dst->fillRect(120 - COVER_PANEL_BUMP_R,
-                COVER_PANEL_Y,
-                COVER_PANEL_BUMP_R * 2,
-                COVER_PANEL_BUMP_R,
-                panel);
-
-  // 中间唱片孔 / 转轴。
-  dst->fillCircle(120, COVER_PANEL_BUMP_CY, COVER_PANEL_HUB_R, TFT_BLACK);
-  dst->drawCircle(120, COVER_PANEL_BUMP_CY, COVER_PANEL_HUB_R, hub_line);
+  draw_cover_panel_skin_fallback(dst);
 }
 
 // COVER_PANEL title scroll state
@@ -959,19 +1847,60 @@ static void draw_cover_panel_info(LGFX_Sprite* dst)
                                   c_lyrics_next,
                                   COVER_PANEL_TEXT_SAFE_PAD);
     }
-  } else {
-      draw_cover_panel_center_text(dst,
-                                  "暂无歌词",
-                                  COVER_PANEL_LYRIC_CUR_Y,
-                                  c_lyrics_next,
-                                  COVER_PANEL_TEXT_SAFE_PAD);
   }
 }
 
-static uint16_t lerp_rgb565(uint16_t c0, uint16_t c1, float t)
+struct CoverPanelTrigPoint {
+  int16_t cos1024;
+  int16_t sin1024;
+};
+
+static CoverPanelTrigPoint s_cover_panel_trig_lut[360];
+static bool s_cover_panel_trig_lut_ready = false;
+
+static int cover_panel_norm_deg(int deg)
 {
-  if (t < 0.0f) t = 0.0f;
-  if (t > 1.0f) t = 1.0f;
+  deg %= 360;
+  if (deg < 0) deg += 360;
+  return deg;
+}
+
+static void cover_panel_init_trig_lut()
+{
+  if (s_cover_panel_trig_lut_ready) {
+    return;
+  }
+
+  for (int deg = 0; deg < 360; ++deg) {
+    const float rad = ((float)deg - 90.0f) * 0.01745329252f;
+    s_cover_panel_trig_lut[deg].cos1024 = (int16_t)lroundf(cosf(rad) * 1024.0f);
+    s_cover_panel_trig_lut[deg].sin1024 = (int16_t)lroundf(sinf(rad) * 1024.0f);
+  }
+
+  s_cover_panel_trig_lut_ready = true;
+}
+
+static inline int cover_panel_arc_x(int cx, int radius, int deg)
+{
+  cover_panel_init_trig_lut();
+  const CoverPanelTrigPoint& p = s_cover_panel_trig_lut[cover_panel_norm_deg(deg)];
+  const int v = (int)p.cos1024 * radius;
+  return cx + ((v >= 0) ? ((v + 512) >> 10) : -(((-v) + 512) >> 10));
+}
+
+static inline int cover_panel_arc_y(int cy, int radius, int deg)
+{
+  cover_panel_init_trig_lut();
+  const CoverPanelTrigPoint& p = s_cover_panel_trig_lut[cover_panel_norm_deg(deg)];
+  const int v = (int)p.sin1024 * radius;
+  return cy + ((v >= 0) ? ((v + 512) >> 10) : -(((-v) + 512) >> 10));
+}
+
+static uint16_t lerp_rgb565_int(uint16_t c0, uint16_t c1, int num, int den)
+{
+  if (den <= 0) return c0;
+  if (num < 0) num = 0;
+  if (num > den) num = den;
 
   const int r0 = (c0 >> 11) & 0x1F;
   const int g0 = (c0 >> 5)  & 0x3F;
@@ -981,9 +1910,9 @@ static uint16_t lerp_rgb565(uint16_t c0, uint16_t c1, float t)
   const int g1 = (c1 >> 5)  & 0x3F;
   const int b1 = c1 & 0x1F;
 
-  const int r = r0 + (int)((r1 - r0) * t);
-  const int g = g0 + (int)((g1 - g0) * t);
-  const int b = b0 + (int)((b1 - b0) * t);
+  const int r = r0 + ((r1 - r0) * num + den / 2) / den;
+  const int g = g0 + ((g1 - g0) * num + den / 2) / den;
+  const int b = b0 + ((b1 - b0) * num + den / 2) / den;
 
   return (uint16_t)((r << 11) | (g << 5) | b);
 }
@@ -1073,17 +2002,13 @@ static void draw_cover_panel_arc_gradient(LGFX_Sprite* dst,
       const int x = cx + (int)(cosf(rad) * rr);
       const int y = cy + (int)(sinf(rad) * rr);
 
-      // 这里按“左 -> 右”算渐变比例：
+      // 这里按"左 -> 右"算渐变比例：
       // deg = full_left_deg  时 t=0，蓝色
       // deg = full_right_deg 时 t=1，粉色
-      float t = 0.0f;
-      if (full_left_deg > full_right_deg) {
-        t = (float)(full_left_deg - deg) / (float)full_range;
-      } else {
-        t = (float)(deg - full_left_deg) / (float)full_range;
-      }
-
-      const uint16_t color = lerp_rgb565(left_color, right_color, t);
+      const int num = (full_left_deg > full_right_deg)
+          ? (full_left_deg - deg)
+          : (deg - full_left_deg);
+      const uint16_t color = lerp_rgb565_int(left_color, right_color, num, full_range);
 
       if (has_prev) {
         dst->drawLine(prev_x, prev_y, x, y, color);
@@ -1186,26 +2111,49 @@ static void draw_cover_panel_progress_ring(LGFX_Sprite* dst)
 
 void cover_panel_draw(float angle_deg)
 {
+  const uint32_t prof_total_t0 = UI_PROF_T0();
+
   if (!s_rotFramesInited || !s_src) return;
 
   auto* dst = s_rotFrame[s_rotBack];
 
   // 1. 只画上半圆旋转封面
+  uint32_t prof_step_t0 = UI_PROF_T0();
   draw_upper_rotated_cover_sampled(dst, s_src, angle_deg);
+  UI_PROF_SAMPLE(s_prof_panel_cover, "panel.cover", prof_step_t0);
 
   // 2. 半透明唱片圆：封面前、面板后
-  draw_cover_panel_record_overlay(dst);   
-  
+  prof_step_t0 = UI_PROF_T0();
+  draw_cover_panel_record_overlay(dst);
+  UI_PROF_SAMPLE(s_prof_panel_record, "panel.record", prof_step_t0);
+
   // 3. 下半固定面板覆盖
+  prof_step_t0 = UI_PROF_T0();
   draw_cover_panel_skin(dst);
+  UI_PROF_SAMPLE(s_prof_panel_skin, "panel.skin", prof_step_t0);
 
   // 4. 面板文字和按钮
+  prof_step_t0 = UI_PROF_T0();
   draw_cover_panel_info(dst);
+  UI_PROF_SAMPLE(s_prof_panel_info, "panel.info", prof_step_t0);
 
   // 5. 最后画外圈进度弧，避免被面板覆盖
+  prof_step_t0 = UI_PROF_T0();
   draw_cover_panel_progress_ring(dst);
+  UI_PROF_SAMPLE(s_prof_panel_progress, "panel.progress", prof_step_t0);
 
+  // 6. 电池状态页脚
+  ui_draw_battery_footer(dst);
+
+  // 7. 绘制音量步进小提示
+  draw_volume_step_hint_overlay(dst);
+  draw_nfc_bind_target_popup_overlay(dst);
+  draw_nfc_scan_popup_overlay(dst);
+
+  prof_step_t0 = UI_PROF_T0();
   dst->pushSprite(0, 0);
+  UI_PROF_SAMPLE(s_prof_panel_push, "panel.push", prof_step_t0);
+  UI_PROF_SAMPLE(s_prof_panel_total, "panel.total", prof_total_t0);
 
   uint8_t tmp = s_rotFront;
   s_rotFront = s_rotBack;
@@ -1271,7 +2219,7 @@ void cover_info_draw()
 
   // 5) 歌词显示（屏幕上半部分）- 在遮罩之后绘制，确保可见
   bool hasLyrics = g_lyricsDisplay.hasLyrics();
-  LOGD("[UI] hasLyrics: %d", hasLyrics);
+  LOGD("[界面] hasLyrics: %d", hasLyrics);
   if (hasLyrics) {
     // 使用滚动歌词显示（3行：上一句、当前、下一句）
     LyricsDisplay::ScrollLyrics scroll = g_lyricsDisplay.getScrollLyrics();
@@ -1364,9 +2312,7 @@ void cover_info_draw()
   uint32_t t_status = millis();
 
   // 5) 标题/歌手（支持滚动显示长文本）
-  extern void draw_note_icon_img(LGFX_Sprite* dst, int x, int y, uint16_t color);
-  extern void draw_artist_icon_img(LGFX_Sprite* dst, int x, int y, uint16_t color);
-  
+    
   // 更新滚动偏移（像素滚动，30ms间隔）
   uint32_t now = millis();
   if (now - s_scroll_last_ms > 30) {
@@ -1378,7 +2324,6 @@ void cover_info_draw()
     if (title_scroll) {
       s_title_scroll_x += SCROLL_SPEED;
       // 滚动范围：文本宽度 + 间距
-      extern lgfx::U8g2font g_font_cjk;
       dst->setFont(&g_font_cjk);
       int title_w = dst->textWidth(s_np_title.c_str());
       if (s_title_scroll_x > title_w + SCROLL_GAP) {
@@ -1393,7 +2338,6 @@ void cover_info_draw()
                                                         14, c_artist, safe_pad, draw_artist_icon_img);
     if (artist_scroll) {
       s_artist_scroll_x += SCROLL_SPEED;
-      extern lgfx::U8g2font g_font_cjk;
       dst->setFont(&g_font_cjk);
       int artist_w = dst->textWidth(s_np_artist.c_str());
       if (s_artist_scroll_x > artist_w + SCROLL_GAP) {
@@ -1411,8 +2355,15 @@ void cover_info_draw()
   }
 
   uint32_t t_text = millis();
+  // 6) 电池状态页脚
+  ui_draw_battery_footer(dst);
 
-  // 6) 推屏
+  // 7) 音量步进小提示 Overlay
+  draw_volume_step_hint_overlay(dst);
+  draw_nfc_bind_target_popup_overlay(dst);
+  draw_nfc_scan_popup_overlay(dst);
+
+  // 8) 推屏
   dst->pushSprite(0, 0);
 
   uint32_t t_push = millis();
@@ -1437,16 +2388,27 @@ bool ui_draw_cover_for_track(const TrackInfo& t, bool force_redraw)
   s_angle_deg = 0.0f;
   s_rot_last_ms = 0;   // 让 UiTask 下次自己初始化 dt
 
-  // 切歌：先清空总时长，等待播放层重新喂入
-  s_ui_play_ms  = 0;
-  s_ui_total_ms = 0;
-
-  // 立即推送第一帧
+  // 立即推送第一帧。
+  // 如果此时有 NFC 弹窗，必须走当前播放器视图的完整绘制路径，
+  // 让弹窗作为 overlay 一起画进去，避免直接推封面把弹窗短暂盖掉。
   if (!s_screen_cleared) {
     tft.fillScreen(TFT_BLACK);
     s_screen_cleared = true;
   }
-  s_coverSpr.pushSprite(0, 0);
+
+  const bool nfc_overlay_visible =
+      s_nfc_bind_target_popup_visible || nfc_scan_popup_active(millis());
+  if (nfc_overlay_visible) {
+    if (s_view == UI_VIEW_COVER_PANEL) {
+      cover_panel_draw(0.0f);
+    } else if (s_view == UI_VIEW_INFO) {
+      cover_info_draw();
+    } else {
+      cover_rotate_draw(0.0f);
+    }
+  } else {
+    s_coverSpr.pushSprite(0, 0);
+  }
 
   s_angle_deg = 0.0f;
   s_rot_last_ms = millis();
@@ -1455,33 +2417,6 @@ bool ui_draw_cover_for_track(const TrackInfo& t, bool force_redraw)
 
   return true;
 }
-
-// =============================================================================
-// 可选的覆盖层 API（目前保持为轻量级存根）
-// =============================================================================
-void ui_player_draw_overlay(const TrackInfo&, uint32_t, uint32_t,
-                            const char*, const char*, const char*)
-{
-  // 最小化构建：无覆盖层
-}
-
-void ui_player_update_progress(uint32_t play_ms, uint32_t total_ms)
-{
-  s_ui_play_ms  = play_ms;
-  s_ui_total_ms = total_ms;   // 0 表示未知
-
-  g_lyricsDisplay.updateTime(play_ms);
-
-  player_assets_try_apply_deferred_current_cover(player_state_current_index());
-
-  ui_request_refresh();
-}
-
-void ui_player_update_lyrics(const char*, const char*)
-{
-  // 最小化构建：无覆盖层
-}
-
 
 enum ui_player_view_t ui_get_view() { return s_view; }
 
@@ -1504,7 +2439,7 @@ void ui_set_view(ui_player_view_t new_view)
 // 在旋转视图(ROTATE)和信息视图(INFO)之间切换
 void ui_toggle_view()
 {
-  LOGI("[UI] toggle_view: current=%d", (int)s_view);
+  LOGD("[界面] toggle_视图: 当前=%d", (int)s_view);
 
   ui_player_view_t next = UI_VIEW_INFO;
 
@@ -1527,7 +2462,7 @@ void ui_toggle_view()
   }
 
   ui_set_view(next);
-  LOGI("[UI] toggle_view: new=%d", (int)s_view);
+  LOGD("[界面] toggle_视图: new=%d", (int)s_view);
 }
 
 void ui_set_now_playing(const char* title, const char* artist)

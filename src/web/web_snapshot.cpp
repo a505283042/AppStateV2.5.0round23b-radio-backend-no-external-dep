@@ -10,6 +10,7 @@
 #include "player_source.h"
 #include "audio/audio_radio_backend.h"
 #include "radio/radio_catalog.h"
+#include "net_music/net_music_catalog.h"
 #include "storage/storage_catalog_v3.h"
 #include "ui/ui.h"
 #include "storage/storage_view_v3.h"
@@ -220,6 +221,17 @@ WebPlayerSnapshot web_snapshot_capture() {
   snap.radio_backend = source.radio_backend;
   snap.radio_bitrate = source.radio_bitrate;
 
+  snap.net_track_active = source.net_track_active;
+  snap.net_track_idx = source.net_track_idx;
+  snap.net_track_title = source.net_track_title;
+  snap.net_track_url = source.net_track_url;
+  snap.net_track_format = source.net_track_format;
+  snap.net_track_artist = source.net_track_artist;
+  snap.net_track_album = source.net_track_album;
+  snap.net_track_duration_ms = source.net_track_duration_ms;
+  snap.net_track_state = source.net_track_state;
+  snap.net_track_error = source.net_track_error;
+
   if (source.type == PlayerSourceType::NET_RADIO) {
     const RadioBackendStatus rb = audio_radio_backend_get_status();
     if (rb.station.length()) snap.radio_name = rb.station;
@@ -266,6 +278,42 @@ WebPlayerSnapshot web_snapshot_capture() {
     }
     snap.display_pos = -1;
     snap.display_total = (int)radio_catalog_count();
+  }
+
+  if (source.type == PlayerSourceType::NET_TRACK) {
+    snap.track_idx = -1;
+
+    snap.title = source.net_track_title.length()
+                   ? source.net_track_title
+                   : String("NAS歌曲");
+
+    snap.artist = source.net_track_artist.length()
+                    ? source.net_track_artist
+                    : String("NAS");
+
+    snap.album = source.net_track_album.length()
+                   ? source.net_track_album
+                   : String("网络音乐");
+
+    snap.total_ms = source.net_track_duration_ms;
+
+    snap.has_lyrics = false;
+    snap.lyrics_loading = false;
+    snap.current_lyric = "";
+    snap.next_lyric = "";
+    snap.following_lyric = "";
+    snap.current_lyric_start_ms = 0;
+    snap.next_lyric_start_ms = 0;
+    snap.following_lyric_start_ms = 0;
+
+    snap.cover_loading = false;
+    snap.has_cover = false;
+    snap.cover_url = "";
+    snap.cover_rev = "";
+    snap.cover_ready_for_web = false;
+
+    snap.display_pos = source.net_track_idx;
+    snap.display_total = (int)net_music_catalog_count();
   }
 
   return snap;

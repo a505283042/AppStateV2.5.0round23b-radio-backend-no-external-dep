@@ -1,0 +1,9 @@
+# ESP32-S3 16MB flash partition table with OTA + coredump
+# Keep app0/app1 compatible with Arduino default_16MB.csv style, reserve 512KB at flash end for coredump.
+# Name,     Type, SubType, Offset,   Size,     Flags
+nvs,        data, nvs,     0x9000,   0x5000,
+otadata,    data, ota,     0xe000,   0x2000,
+app0,       app,  ota_0,   0x10000,  0x640000,
+app1,       app,  ota_1,   0x650000, 0x640000,
+spiffs,     data, spiffs,  0xc90000, 0x2f0000,
+coredump,   data, coredump,0xf80000, 0x80000,

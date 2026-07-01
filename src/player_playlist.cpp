@@ -78,7 +78,7 @@ static bool ensure_compact_index_buf(CompactIndex*& buf,
                                 want_size * sizeof(CompactIndex),
                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!p) {
-        LOGE("[PLAYER] alloc %s failed: count=%u bytes=%u",
+        LOGE("[播放器] 分配 %s 失败: 数量=%u 字节=%u",
              tag,
              (unsigned)want_size,
              (unsigned)(want_size * sizeof(CompactIndex)));
@@ -186,13 +186,13 @@ void rebuild_group_cache_if_needed()
     }
 
     s_group_cache_generation = cat.generation;
-    LOGD("[PLAYER] group cache rebuilt: tracks=%lu artists=%d albums=%d gen=%lu",
+    LOGD("[播放器] 分组 缓存 已重建: 歌曲s=%lu 歌手s=%d 专辑s=%d gen=%lu",
          (unsigned long)cat.track_count,
          (int)artist_groups.size(),
          (int)album_groups.size(),
          (unsigned long)s_group_cache_generation);
     
-    LOGI("[PLAYER][CACHE] group_cache tracks=%u bytes=%u (psram)",
+    LOGD("[播放器][缓存] 分组缓存：歌曲=%u 字节=%u（PSRAM）",
          (unsigned)n,
          (unsigned)(n * 4 * sizeof(CompactIndex)));
 }
@@ -219,7 +219,7 @@ void rebuild_playlist_pos_cache()
     s_playlist_pos_mode = g_play_mode;
     s_playlist_pos_group_idx = s_current_group_idx;
     
-    LOGI("[PLAYER][CACHE] playlist_pos tracks=%u bytes=%u (psram)",
+    LOGD("[播放器][缓存] 播放列表位置：歌曲=%u 字节=%u（PSRAM）",
          (unsigned)n,
          (unsigned)(n * sizeof(CompactIndex)));
 }
@@ -363,7 +363,7 @@ void player_playlist_seed_rng_once()
     if (seed == 0) seed = 0xA5A55A5Au;
     g_rng.seed(seed);
     s_rng_seeded = true;
-    LOGD("[PLAYER] rng seeded: 0x%08lx", (unsigned long)seed);
+    LOGD("[播放器] rng seeded: 0x%08lx", (unsigned long)seed);
 }
 
 void player_playlist_reset_state()
@@ -435,7 +435,7 @@ bool player_playlist_align_group_context_for_track(int track_idx, bool verbose)
         const int actual_group = (int)s_artist_group_index_by_track[(size_t)track_idx];
         if (actual_group >= 0 && actual_group != s_current_group_idx) {
             if (verbose) {
-                LOGD("[PLAYER] align artist group: track=%d old=%d new=%d",
+                LOGD("[播放器] align 歌手 分组: 歌曲=%d old=%d new=%d",
                      track_idx, s_current_group_idx, actual_group);
             }
             s_current_group_idx = actual_group;
@@ -449,7 +449,7 @@ bool player_playlist_align_group_context_for_track(int track_idx, bool verbose)
         const int actual_group = (int)s_album_group_index_by_track[(size_t)track_idx];
         if (actual_group >= 0 && actual_group != s_current_group_idx) {
             if (verbose) {
-                LOGD("[PLAYER] align album group: track=%d old=%d new=%d",
+                LOGD("[播放器] align 专辑 分组: 歌曲=%d old=%d new=%d",
                      track_idx, s_current_group_idx, actual_group);
             }
             s_current_group_idx = actual_group;

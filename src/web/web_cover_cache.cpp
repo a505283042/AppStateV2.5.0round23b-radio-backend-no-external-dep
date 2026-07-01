@@ -257,7 +257,7 @@ bool web_cover_cache_store_from_sprite(int track_idx,
     if (old_slot >= 0) {
       s_slots[old_slot].last_touch_ms = millis();
       xSemaphoreGive(mu0);
-      LOGI("[WEBCOVER] skip ready track=%d", track_idx);
+      LOGD("[网页封面] 跳过 就绪 歌曲=%d", track_idx);
       return true;
     }
     xSemaphoreGive(mu0);
@@ -294,7 +294,7 @@ bool web_cover_cache_store_from_sprite(int track_idx,
 
   xSemaphoreGive(mu);
 
-  LOGI("[WEBCOVER] ready track=%d bytes=%u", track_idx, (unsigned)bmp_len);
+  LOGD("[网页封面] 就绪 歌曲=%d 字节=%u", track_idx, (unsigned)bmp_len);
   return true;
 }
 

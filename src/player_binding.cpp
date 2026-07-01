@@ -24,7 +24,7 @@ static bool nfc_binding_should_suppress_duplicate(int track_idx)
     
     uint32_t now = millis();
     if (track_idx == s_nfc_last_track_idx && (uint32_t)(now - s_nfc_last_track_ms) < 1000) {
-        LOGW("[NFC] duplicate track trigger suppressed idx=%d dt=%ums", 
+        LOGW("[NFC] 已抑制重复歌曲触发：索引=%d 间隔=%ums", 
              track_idx, (unsigned)(now - s_nfc_last_track_ms));
         return true;
     }
@@ -81,7 +81,7 @@ static void nfc_binding_apply_mode(NfcBindType type)
     g_play_mode = nfc_binding_mode_for_type(type);
     const bool is_random = nfc_binding_keep_random_flag();
 
-    LOGI("[NFC] apply mode type=%d -> mode=%d random=%d",
+    LOGD("[NFC] 应用播放模式：类型=%d -> 模式=%d 随机=%d",
          (int)type,
          (int)g_play_mode,
          is_random ? 1 : 0);
@@ -105,7 +105,7 @@ bool player_binding_try_handle_nfc_uid(const String& uid)
         case NFC_BIND_TRACK: {
             int idx = player_recover_find_track_idx_by_path(entry.key);
             if (idx >= 0) {
-                LOGI("[NFC] uid matched, play track idx=%d path=%s", idx, entry.key.c_str());
+                LOGI("[NFC] UID 已匹配，播放歌曲 索引=%d 路径=%s", idx, entry.key.c_str());
 
                 if (nfc_binding_should_suppress_duplicate(idx)) {
                     return true;
@@ -117,7 +117,7 @@ bool player_binding_try_handle_nfc_uid(const String& uid)
                 player_state_mark_next_play_from_nfc();
                 (void)binding_play_track_dispatch(idx, true, true);
             } else {
-                LOGI("[NFC] track binding not found: %s", entry.key.c_str());
+                LOGD("[NFC] 未找到单曲绑定：%s", entry.key.c_str());
             }
             break;
         }
@@ -131,7 +131,7 @@ bool player_binding_try_handle_nfc_uid(const String& uid)
             break;
 
         default:
-            LOGI("[NFC] unknown binding type");
+            LOGW("[NFC] 未知绑定类型");
             break;
     }
 
@@ -143,17 +143,17 @@ bool player_play_artist_binding(const String& artist)
     String key = artist;
     key.trim();
     if (key.isEmpty()) {
-        LOGI("[PLAYER] artist binding failed: empty artist");
+        LOGW("[播放器] 歌手 binding 失败: 为空 歌手");
         return false;
     }
 
-    LOGI("[PLAYER] artist binding request: %s", key.c_str());
+    LOGD("[播放器] 歌手 binding request: %s", key.c_str());
 
     const MusicCatalogV3& cat = storage_catalog_v3();
     const auto& groups = binding_artist_groups();
     for (int i = 0; i < (int)groups.size(); i++) {
         if (playlist_group_name_string(cat, groups[i]) == key) {
-            LOGI("[PLAYER] artist binding matched: group=%d name=%s first_idx=%d",
+            LOGD("[播放器] 歌手 binding matched: 分组=%d name=%s first_索引=%d",
                  i, playlist_group_name_cstr(cat, groups[i]),
                  groups[i].track_indices.empty() ? -1 : (int)groups[i].track_indices[0]);
             nfc_binding_apply_mode(NFC_BIND_ARTIST);
@@ -168,14 +168,14 @@ bool player_play_artist_binding(const String& artist)
                 
                 player_state_mark_next_play_from_nfc();
                 (void)binding_play_track_dispatch(playlist[0], true, true);
-                LOGI("[PLAYER] artist binding success: %s, group=%d, tracks=%d",
+                LOGI("[播放器] 歌手 binding success: %s, 分组=%d, 歌曲s=%d",
                      key.c_str(), i, (int)playlist.size());
                 return true;
             }
         }
     }
 
-    LOGI("[PLAYER] artist binding not found: %s", key.c_str());
+    LOGD("[播放器] 歌手 binding 未找到: %s", key.c_str());
     return false;
 }
 // 尝试播放专辑
@@ -184,18 +184,18 @@ bool player_play_album_binding(const String& album)
     String key = album;
     key.trim();
     if (key.isEmpty()) {
-        LOGI("[PLAYER] album binding failed: empty album");
+        LOGW("[播放器] 专辑 binding 失败: 为空 专辑");
         return false;
     }
 
-    LOGI("[PLAYER] album binding request: %s", key.c_str());
+    LOGD("[播放器] 专辑 binding request: %s", key.c_str());
 
     const MusicCatalogV3& cat = storage_catalog_v3();
     const auto& groups = binding_album_groups();
     for (int i = 0; i < (int)groups.size(); i++) {
         String group_key = playlist_group_display_string(cat, groups[i]);
         if (group_key == key) {
-            LOGI("[PLAYER] album binding matched: group=%d name=%s first_idx=%d",
+            LOGD("[播放器] 专辑 binding matched: 分组=%d name=%s first_索引=%d",
                  i, group_key.c_str(),
                  groups[i].track_indices.empty() ? -1 : (int)groups[i].track_indices[0]);
             nfc_binding_apply_mode(NFC_BIND_ALBUM);
@@ -210,13 +210,13 @@ bool player_play_album_binding(const String& album)
                 
                 player_state_mark_next_play_from_nfc();
                 (void)binding_play_track_dispatch(playlist[0], true, true);
-                LOGI("[PLAYER] album binding success: %s, group=%d, tracks=%d",
+                LOGI("[播放器] 专辑 binding success: %s, 分组=%d, 歌曲s=%d",
                      key.c_str(), i, (int)playlist.size());
                 return true;
             }
         }
     }
 
-    LOGI("[PLAYER] album binding not found: %s", key.c_str());
+    LOGD("[播放器] 专辑 binding 未找到: %s", key.c_str());
     return false;
 }

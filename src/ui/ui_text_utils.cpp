@@ -5,9 +5,6 @@
 // 封面尺寸常量（需要与 ui.cpp 保持一致）
 static constexpr int COVER_SIZE = 240;
 
-// 滚动文本参数
-static constexpr int SCROLL_GAP_CHARS = 2;  // 副本间距（字符数）
-
 // 外部声明 TFT 对象
 extern LGFX tft;
 
@@ -21,20 +18,6 @@ static int utf8_char_len(uint8_t c)
   return 1;
 }
 
-// 获取指定位置的UTF-8字符宽度（像素）
-static int get_char_width(LGFX_Sprite* dst, const String& text, int byte_pos)
-{
-  if (byte_pos >= (int)text.length()) return 0;
-  
-  int char_len = utf8_char_len((uint8_t)text[byte_pos]);
-  // 使用临时缓冲区，避免创建 String 对象
-  char temp_buf[5] = {0}; // UTF-8字符最多4字节
-  const char* p = text.c_str() + byte_pos;
-  memcpy(temp_buf, p, char_len);
-  temp_buf[char_len] = '\0';
-  return dst->textWidth(temp_buf);
-}
-
 // 计算从开头到指定字符位置的累计宽度
 static int get_text_width_to_pos(lgfx::v1::LGFX_Device* dst, const String& text, int char_index)
 {
@@ -43,17 +26,16 @@ static int get_text_width_to_pos(lgfx::v1::LGFX_Device* dst, const String& text,
   int current_char = 0;
   const char* p = text.c_str();
   char temp_buf[5] = {0}; // UTF-8字符最多4字节
-  
+
   while (byte_pos < (int)text.length() && current_char < char_index) {
     int char_len = utf8_char_len((uint8_t)p[byte_pos]);
-    // 使用临时缓冲区，避免创建 String 对象
     memcpy(temp_buf, p + byte_pos, char_len);
     temp_buf[char_len] = '\0';
     width += dst->textWidth(temp_buf);
     byte_pos += char_len;
     current_char++;
   }
-  
+
   return width;
 }
 

@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <string.h>
 #include <stdlib.h>
+#include <new>
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -11,8 +12,12 @@
 #include "audio/audio_service.h"
 #include "audio/audio.h"
 #include "audio/audio_file.h"
+#include "audio/audio_mp3.h"
 #include "audio/audio_i2s.h"
+#include "audio/audio_output_route.h"
 #include "storage/storage_io.h"
+#include "hal/board_hw_control.h"
+#include "audio/audio_output_route.h"
 #include "utils/log.h"
 
 extern SdFat sd;
@@ -28,7 +33,7 @@ extern SdFat sd;
 static constexpr uint32_t kAudioTaskStackBytes = 10240; // 音频任务栈大小
 
 #ifndef AUDIO_CMD_PATH_MAX
-#define AUDIO_CMD_PATH_MAX 256
+#define AUDIO_CMD_PATH_MAX 512
 #endif
 
 #ifndef AUDIO_AUX_READ_CHUNK
@@ -80,6 +85,11 @@ static float s_last_fade_gain = 1.0f; // 上一次的增益
 #define PAUSE_FADE_STEP   0.05f   // 暂停时淡出，保持柔和
 #define PLAY_FADE_STEP    0.12f   // 开播/切歌时淡入，加快恢复正常音量
 #define PLAY_START_GAIN   0.35f   // 新歌起播初始增益，别从 0 开始
+// FLAC 某些歌曲解码会短时间超过实时长度。
+// 注意：不能在功放静音时直接预填 I2S DMA，否则 I2S 硬件会把开头音频播放掉；
+// 这里改为“软件预解码 PCM 到 RAM”，真正开声后再写入 I2S。
+#define PLAY_PREFILL_TARGET_MS 160
+#define PLAY_PREFILL_MAX_LOOPS 8
 #define STOP_FADE_MAX_ITERS 8
 #define STOP_FADE_STEP    0.20f
 
@@ -127,7 +137,7 @@ static bool audio_task_soft_stop_impl(bool fast_fade)
   // 给零填充一个很短的生效窗口，进一步减少切歌 click/pop
   vTaskDelay(1);
 
-  LOGD("[AUDIO] soft stop had_audio=%d fade_iters=%u exec=%lums",
+  LOGD("[音频] 软停止：有音频=%d 淡出次数=%u 耗时=%lums",
        had_audio ? 1 : 0,
        (unsigned)fade_iters,
        (unsigned long)(millis() - t0));
@@ -140,7 +150,7 @@ static bool audio_task_fetch_total_ms_impl(const char* path, uint32_t* out_total
   const uint32_t t0 = millis();
   const uint32_t total_ms = audio_probe_total_ms(path);
   *out_total_ms = total_ms;
-  LOGD("[AUDIO] total probe detail exec=%lums total_ms=%u",
+  LOGD("[音频] 总时长探测细节：耗时=%lums 总时长=%u",
        (unsigned long)(millis() - t0),
        (unsigned)total_ms);
   return total_ms > 0;
@@ -159,7 +169,7 @@ static bool audio_task_fetch_lyrics_impl(const char* path, char** out_text, size
 
   AudioFile file;
   if (!file.open(sd, path)) {
-    LOGW("[AUDIO] lyrics open failed: %s", path ? path : "<null>");
+    LOGW("[音频] 歌词 打开失败：%s", path ? path : "<null>");
     return false;
   }
   t_after_open = millis();
@@ -168,7 +178,7 @@ static bool audio_task_fetch_lyrics_impl(const char* path, char** out_text, size
   t_after_size = millis();
 
   if (file_size == 0 || file_size > 65536) {
-    LOGW("[AUDIO] lyrics invalid size=%u path=%s", (unsigned)file_size, path);
+    LOGW("[音频] 歌词 无效 大小=%u 路径=%s", (unsigned)file_size, path);
     file.close();
     return false;
   }
@@ -208,16 +218,16 @@ static bool audio_task_fetch_lyrics_impl(const char* path, char** out_text, size
   *out_text = buf;
   *out_len = file_size;
 
-  LOGI("[LYRICS][AUDIO] fetch ok path=%s size=%u ptr=%p",
+  LOGD("[歌词][音频] 读取成功 路径=%s 大小=%u 指针=%p",
        path, (unsigned)file_size, buf);
-  LOGI("[LYRICS][AUDIO] alloc=%s size=%u ptr=%p",
+  LOGD("[歌词][音频] 分配=%s 大小=%u 指针=%p",
        heap_caps_malloc_extmem_enable ? "psram_or_heap" : "heap",
        (unsigned)file_size, buf);
 
   const auto& st = file.last_open_stats();
   const uint32_t total_ms = t_after_close - t0;
   if (total_ms >= 20) {
-    LOGD("[AUDIO] lyrics fetch detail lock_wait=%lums dir_prepare=%lums dir_cache=%u cache_reason=%s open=%lums size=%lums read=%lums close=%lums total=%lums bytes=%u",
+    LOGD("[音频] 歌词 读取细节 等待锁=%lums 目录准备=%lums 目录缓存=%u 缓存原因=%s 打开=%lums 大小=%lums 读取=%lums 关闭=%lums 总计=%lums 字节=%u",
          (unsigned long)st.lock_wait_ms,
          (unsigned long)st.dir_prepare_ms,
          (unsigned)st.used_dir_cache,
@@ -263,7 +273,7 @@ static bool audio_task_fetch_cover_impl(const AudioCmd& cmd) {
 
   AudioFile file;
   if (!file.open(sd, path.c_str())) {
-    LOGW("[AUDIO] cover open failed: %s", path.c_str());
+    LOGW("[音频] 封面 打开失败：%s", path.c_str());
     return false;
   }
   t_after_open = millis();
@@ -316,7 +326,7 @@ static bool audio_task_fetch_cover_impl(const AudioCmd& cmd) {
 
   bool is_png = detect_png_from_buffer(buf, size);
   if (!is_png && !detect_jpg_from_buffer(buf, size)) {
-    LOGW("[AUDIO] cover unknown header, fallback JPEG path");
+    LOGW("[音频] 封面 未知 头, 回退 JPEG 路径");
   }
 
   *cmd.out_buf = buf;
@@ -326,7 +336,7 @@ static bool audio_task_fetch_cover_impl(const AudioCmd& cmd) {
   const auto& st = file.last_open_stats();
   const uint32_t total_ms = t_after_close - t0;
   if (total_ms >= 20) {
-    LOGD("[AUDIO] cover fetch detail lock_wait=%lums dir_prepare=%lums dir_cache=%u cache_reason=%s open=%lums size=%lums seek=%lums read=%lums close=%lums total=%lums bytes=%u src=%u",
+    LOGD("[音频] 封面 读取细节 等待锁=%lums 目录准备=%lums 目录缓存=%u 缓存原因=%s 打开=%lums 大小=%lums 定位=%lums 读取=%lums 关闭=%lums 总计=%lums 字节=%u 来源=%u",
          (unsigned long)st.lock_wait_ms,
          (unsigned long)st.dir_prepare_ms,
          (unsigned)st.used_dir_cache,
@@ -343,11 +353,33 @@ static bool audio_task_fetch_cover_impl(const AudioCmd& cmd) {
   return true;
 }
 
-static void audio_task_entry(void*)
+static void audio_task_prepare_amp_after_i2s_ready()
 {
+  // I2S 已初始化后，再让功放退出关断。
+  // 关键点：退出关断时仍保持静音，避免 SHDN 跳变打到喇叭。
+  (void)audio_output_route_set_amp_mute(true);
+  audio_i2s_zero_dma_buffer();
+
+  vTaskDelay(pdMS_TO_TICKS(20));
+
+  (void)audio_output_route_set_amp_shutdown(false);
+
+  // 给 PAM8406 / 输出电容 / 模拟链路一点稳定时间。
+  vTaskDelay(pdMS_TO_TICKS(150));
+
+  // 注意：这里不要取消静音。
+  // 真正开始播放且首批 PCM 推进后，再取消静音。
+  (void)audio_output_route_set_amp_mute(true);
+
+  LOGD("[音频] 功放已准备：解除关断并保持静音");
+}
+
+static void audio_task_entry(void*){
   // I2S/decoder 初始化放在音频任务内部，确保由同一线程管理
   if (!audio_init()) {
-    Serial.println("[AUDIO] init failed (AudioTask)");
+    LOGE("[音频] init 失败 (AudioTask)");
+  } else {
+    audio_task_prepare_amp_after_i2s_ready();
   }
 
   s_ready = true;
@@ -360,11 +392,21 @@ static void audio_task_entry(void*)
 
       if (cmd.type == CMD_STOP) {
         const uint32_t t_cmd = millis();
+
         audio_task_soft_stop_impl(true);
+
+        // 停止后只静音，不关断功放。
+        // 关断功放留到整机关机时再做，避免下一次播放 SHDN 跳变产生 pop。
+        (void)audio_output_route_set_amp_mute(true);
+
         const uint32_t t_done = millis();
-        LOGD("[AUDIO] service cmd stop exec=%lums", (unsigned long)(t_done - t_cmd));
+        LOGD("[音频] 服务命令“停止”耗时=%lums", (unsigned long)(t_done - t_cmd));
       } else if (cmd.type == CMD_PLAY || cmd.type == CMD_PLAY_STREAM_MP3) {
         const uint32_t t_cmd = millis();
+
+        // 播放前先保持功放静音，避免切歌/开机瞬态打到喇叭。
+        (void)audio_output_route_set_amp_mute(true);
+
         if (audio_is_playing() || s_playing_cache || s_fade_gain > 0.0f) {
           audio_task_soft_stop_impl(true);
         } else {
@@ -375,20 +417,37 @@ static void audio_task_entry(void*)
           audio_i2s_zero_dma_buffer();
         }
 
+        (void)audio_output_route_set_amp_mute(true);
+
         bool ok = (cmd.type == CMD_PLAY_STREAM_MP3) ? audio_play_stream_mp3(cmd.path) : audio_play(cmd.path);
         const uint32_t t_done = millis();
         ack = ok ? 1 : 0;
 
         if (ok) {
-          // 切歌起播不要从 0 开始，避免一开始声音明显偏小
+          // 先用很小增益推进几帧 PCM，但功放仍静音。
+          // 这样可以避开解码器刚打开、I2S 首包数据不稳定的瞬间。
+          s_fade_gain = 0.05f;
+          s_last_fade_gain = 0.05f;
+
+          const uint32_t prefill_t0 = millis();
+          const uint32_t primed_ms = audio_prime_pcm_ms(PLAY_PREFILL_TARGET_MS, PLAY_PREFILL_MAX_LOOPS);
+          LOGD("[音频] 启动 software prefill primed_ms=%lu cost=%lums play_ms=%lu",
+               (unsigned long)primed_ms,
+               (unsigned long)(millis() - prefill_t0),
+               (unsigned long)audio_i2s_get_play_ms());
+
+          // 再恢复正常起播增益并取消静音。
           s_fade_gain = PLAY_START_GAIN;
           s_last_fade_gain = PLAY_START_GAIN;
+
+          (void)audio_output_route_set_amp_mute(false);
         } else {
+          (void)audio_output_route_set_amp_mute(true);
           s_fade_gain = 0.0f;
           s_last_fade_gain = 0.0f;
         }
 
-        LOGD("[AUDIO] service cmd %s exec=%lums ok=%d",
+        LOGD("[音频] 服务命令 %s 耗时=%lums 成功=%d",
             (cmd.type == CMD_PLAY_STREAM_MP3) ? "play_stream_mp3" : "play",
             (unsigned long)(t_done - t_cmd), ok ? 1 : 0);
 
@@ -399,7 +458,7 @@ static void audio_task_entry(void*)
         bool ok = audio_task_fetch_total_ms_impl(cmd.path, cmd.out_total_ms);
         const uint32_t t_done = millis();
         ack = ok ? 1 : 0;
-        LOGD("[AUDIO] service cmd fetch_total exec=%lums ok=%d total_ms=%u",
+        LOGD("[音频] 服务命令“读取总时长”：耗时=%lums 成功=%d 总时长=%u",
              (unsigned long)(t_done - t_cmd), ok ? 1 : 0,
              (unsigned)((cmd.out_total_ms) ? *cmd.out_total_ms : 0));
       } else if (cmd.type == CMD_FETCH_LYRICS) {
@@ -407,7 +466,7 @@ static void audio_task_entry(void*)
         bool ok = audio_task_fetch_lyrics_impl(cmd.path, cmd.out_text, cmd.out_text_len);
         const uint32_t t_done = millis();
         ack = ok ? 1 : 0;
-        LOGD("[AUDIO] service cmd fetch_lyrics exec=%lums ok=%d bytes=%u",
+        LOGD("[音频] 服务命令“读取歌词”：耗时=%lums 成功=%d 字节=%u",
              (unsigned long)(t_done - t_cmd), ok ? 1 : 0,
              (unsigned)((ok && cmd.out_text_len) ? *cmd.out_text_len : 0));
       } else if (cmd.type == CMD_FETCH_COVER) {
@@ -415,7 +474,7 @@ static void audio_task_entry(void*)
         bool ok = audio_task_fetch_cover_impl(cmd);
         const uint32_t t_done = millis();
         ack = ok ? 1 : 0;
-        LOGD("[AUDIO] service cmd fetch_cover exec=%lums ok=%d bytes=%u png=%d src=%u",
+        LOGD("[音频] 服务命令“读取封面”：耗时=%lums 成功=%d 字节=%u PNG=%d 来源=%u",
              (unsigned long)(t_done - t_cmd), ok ? 1 : 0,
              (unsigned)((ok && cmd.out_buf_len) ? *cmd.out_buf_len : 0),
              (int)((ok && cmd.out_is_png) ? *cmd.out_is_png : 0),
@@ -472,7 +531,15 @@ static void audio_task_entry(void*)
     } else if (!s_playing_cache || s_paused) {
       vTaskDelay(10);
     } else {
-      vTaskDelay(1);
+      // 网络 MP3 的 WiFiClient::available()/read 可能被 AudioTask 高频轮询，
+      // 如果这里只 taskYIELD，低优先级 IDLE0 仍然可能长期得不到运行，触发 task_wdt。
+      // 仅对网络 MP3 每轮让出 1 tick；本地 FLAC/MP3 仍保持原来的轻量 yield，
+      // 避免本地高码率解码被额外延时拖慢。
+      if (audio_mp3_is_active() && audio_mp3_is_stream_source()) {
+        vTaskDelay(1);
+      } else {
+        taskYIELD();
+      }
     }
   }
 }
@@ -482,7 +549,7 @@ void audio_service_start(void)
   if (s_task) return;
 
   s_q = xQueueCreate(AUDIO_CMD_QUEUE_LEN, sizeof(AudioCmd));
-  LOGI("[AUDIO] cmd queue len=%u cmd_size=%u bytes",
+  LOGD("[音频] 命令队列已创建：长度=%u 命令大小=%u 字节",
        (unsigned)AUDIO_CMD_QUEUE_LEN,
        (unsigned)sizeof(AudioCmd));
   xTaskCreatePinnedToCore(audio_task_entry,
@@ -512,7 +579,7 @@ static bool send_cmd(AudioCmd& cmd, bool wait)
 
   // 使用 100ms 超时，避免 UI 线程卡死
   if (xQueueSend(s_q, &cmd, pdMS_TO_TICKS(100)) != pdTRUE) {
-    Serial.println("[AUDIO] 发送命令超时，音频核心忙");
+    LOGW("[音频] 发送命令超时，音频核心忙");
     return false;
   }
   if (!wait) return true;
@@ -522,35 +589,57 @@ static bool send_cmd(AudioCmd& cmd, bool wait)
   return ack == 1;
 }
 
+static AudioCmd* audio_cmd_new()
+{
+  AudioCmd* cmd = new (std::nothrow) AudioCmd();
+  if (!cmd) {
+    LOGE("[音频] 分配命令对象失败：size=%u", (unsigned)sizeof(AudioCmd));
+  }
+  return cmd;
+}
+
+static bool send_cmd_heap(AudioCmd* cmd, bool wait)
+{
+  if (!cmd) return false;
+  const bool ok = send_cmd(*cmd, wait);
+  delete cmd;
+  return ok;
+}
+
 bool audio_service_play(const char* path, bool wait)
 {
   if (!path) return false;
 
-  AudioCmd cmd{};
-  cmd.type = CMD_PLAY;
-  strncpy(cmd.path, path, sizeof(cmd.path) - 1);
-  cmd.path[sizeof(cmd.path) - 1] = '\0';
+  AudioCmd* cmd = audio_cmd_new();
+  if (!cmd) return false;
+  cmd->type = CMD_PLAY;
+  strncpy(cmd->path, path, sizeof(cmd->path) - 1);
+  cmd->path[sizeof(cmd->path) - 1] = '\0';
 
-  return send_cmd(cmd, wait);
+  return send_cmd_heap(cmd, wait);
 }
 
 
 bool audio_service_play_stream_mp3(const char* url, bool wait)
 {
   if (!url) return false;
-  AudioCmd cmd{};
-  cmd.type = CMD_PLAY_STREAM_MP3;
-  strncpy(cmd.path, url, sizeof(cmd.path) - 1);
-  cmd.path[sizeof(cmd.path) - 1] = '\0';
-  return send_cmd(cmd, wait);
+
+  // AudioCmd 超过 1KB；不要放在 loopTask 栈上，避免长 URL 自动切歌时压爆栈。
+  AudioCmd* cmd = audio_cmd_new();
+  if (!cmd) return false;
+  cmd->type = CMD_PLAY_STREAM_MP3;
+  strncpy(cmd->path, url, sizeof(cmd->path) - 1);
+  cmd->path[sizeof(cmd->path) - 1] = '\0';
+  return send_cmd_heap(cmd, wait);
 }
 
 bool audio_service_stop(bool wait)
 {
-  AudioCmd cmd{};
-  cmd.type = CMD_STOP;
-  cmd.path[0] = 0;
-  return send_cmd(cmd, wait);
+  AudioCmd* cmd = audio_cmd_new();
+  if (!cmd) return false;
+  cmd->type = CMD_STOP;
+  cmd->path[0] = 0;
+  return send_cmd_heap(cmd, wait);
 }
 
 bool audio_service_is_playing(void)
@@ -561,13 +650,13 @@ bool audio_service_is_playing(void)
 bool audio_service_fetch_total_ms(const char* path, uint32_t* out_total_ms, bool wait)
 {
   if (!path || !out_total_ms) return false;
-  AudioCmd cmd{};
-  cmd.type = CMD_FETCH_TOTAL_MS;
-  strncpy(cmd.path, path, sizeof(cmd.path) - 1);
-  cmd.path[sizeof(cmd.path) - 1] = '\0';
-  cmd.notify_to = wait ? xTaskGetCurrentTaskHandle() : nullptr;
-  cmd.out_total_ms = out_total_ms;
-  return send_cmd(cmd, wait);
+  AudioCmd* cmd = audio_cmd_new();
+  if (!cmd) return false;
+  cmd->type = CMD_FETCH_TOTAL_MS;
+  strncpy(cmd->path, path, sizeof(cmd->path) - 1);
+  cmd->path[sizeof(cmd->path) - 1] = '\0';
+  cmd->out_total_ms = out_total_ms;
+  return send_cmd_heap(cmd, wait);
 }
 
 bool audio_service_fetch_lyrics(const char* path, char** out_text, size_t* out_len, bool wait)
@@ -576,13 +665,14 @@ bool audio_service_fetch_lyrics(const char* path, char** out_text, size_t* out_l
   *out_text = nullptr;
   *out_len = 0;
 
-  AudioCmd cmd{};
-  cmd.type = CMD_FETCH_LYRICS;
-  strncpy(cmd.path, path, sizeof(cmd.path) - 1);
-  cmd.path[sizeof(cmd.path) - 1] = '\0';
-  cmd.out_text = out_text;
-  cmd.out_text_len = out_len;
-  return send_cmd(cmd, wait);
+  AudioCmd* cmd = audio_cmd_new();
+  if (!cmd) return false;
+  cmd->type = CMD_FETCH_LYRICS;
+  strncpy(cmd->path, path, sizeof(cmd->path) - 1);
+  cmd->path[sizeof(cmd->path) - 1] = '\0';
+  cmd->out_text = out_text;
+  cmd->out_text_len = out_len;
+  return send_cmd_heap(cmd, wait);
 }
 
 bool audio_service_fetch_cover(CoverSource cover_source,
@@ -600,23 +690,24 @@ bool audio_service_fetch_cover(CoverSource cover_source,
   *out_len = 0;
   *out_is_png = false;
 
-  AudioCmd cmd{};
-  cmd.type = CMD_FETCH_COVER;
-  cmd.cover_source = cover_source;
-  cmd.cover_offset = cover_offset;
-  cmd.cover_size = cover_size;
+  AudioCmd* cmd = audio_cmd_new();
+  if (!cmd) return false;
+  cmd->type = CMD_FETCH_COVER;
+  cmd->cover_source = cover_source;
+  cmd->cover_offset = cover_offset;
+  cmd->cover_size = cover_size;
   if (audio_path) {
-    strncpy(cmd.path, audio_path, sizeof(cmd.path) - 1);
-    cmd.path[sizeof(cmd.path) - 1] = '\0';
+    strncpy(cmd->path, audio_path, sizeof(cmd->path) - 1);
+    cmd->path[sizeof(cmd->path) - 1] = '\0';
   }
   if (cover_path) {
-    strncpy(cmd.cover_path, cover_path, sizeof(cmd.cover_path) - 1);
-    cmd.cover_path[sizeof(cmd.cover_path) - 1] = '\0';
+    strncpy(cmd->cover_path, cover_path, sizeof(cmd->cover_path) - 1);
+    cmd->cover_path[sizeof(cmd->cover_path) - 1] = '\0';
   }
-  cmd.out_buf = out_buf;
-  cmd.out_buf_len = out_len;
-  cmd.out_is_png = out_is_png;
-  return send_cmd(cmd, wait);
+  cmd->out_buf = out_buf;
+  cmd->out_buf_len = out_len;
+  cmd->out_is_png = out_is_png;
+  return send_cmd_heap(cmd, wait);
 }
 
 // 供外部调用的暂停控制接口
@@ -625,6 +716,8 @@ void audio_service_pause() {
     // 注意：不再立即调用 zero_dma_buffer，因为我们要留时间做淡出
 }
 void audio_service_resume() {
+    // 恢复播放时只取消静音，不动 SHDN。
+    (void)audio_output_route_set_amp_mute(false);
     s_paused = false;
 }
 bool audio_service_is_paused() { return s_paused; }
