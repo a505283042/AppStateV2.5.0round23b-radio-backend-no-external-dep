@@ -1,4 +1,9 @@
 #include "lyrics/lyrics.h"
+
+#ifndef LYRICS_SCROLL_POINTER_DEBUG_LOG
+#define LYRICS_SCROLL_POINTER_DEBUG_LOG 0
+#endif
+
 #include "utils/log.h"
 #include <algorithm>
 #include <stdlib.h>
@@ -495,10 +500,12 @@ LyricsDisplay::ScrollLyrics LyricsDisplay::getScrollLyrics() const {
     result.current = m_parser.getLineTextCStr(m_currentIndex);
     result.next = m_parser.getLineTextCStr(m_currentIndex + 1);
 
-    LOGD("[歌词][界面] 滚动指针：上一行=%p 当前=%p 下一行=%p", 
-         (const void*)result.prev, 
-         (const void*)result.current, 
-         (const void*)result.next);
+    #if LYRICS_SCROLL_POINTER_DEBUG_LOG
+        LOGD("[歌词][界面] 滚动指针：上一行=%p 当前=%p 下一行=%p",
+            (const void*)result.prev,
+            (const void*)result.current,
+            (const void*)result.next);
+    #endif
 
     const uint32_t currStart = m_parser.getLineTimeMs(m_currentIndex);
     const uint32_t nextStart = getNextLyricTime();

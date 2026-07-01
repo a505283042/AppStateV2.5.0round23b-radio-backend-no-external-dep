@@ -1,5 +1,10 @@
 #include <Arduino.h>
 #include <WiFi.h>
+
+#ifndef UI_LYRICS_STATE_DEBUG_LOG
+#define UI_LYRICS_STATE_DEBUG_LOG 0
+#endif
+
 #include <esp_heap_caps.h>
 #include "ui/ui_internal.h"
 #include "ui/ui_text_utils.h"
@@ -2219,7 +2224,17 @@ void cover_info_draw()
 
   // 5) 歌词显示（屏幕上半部分）- 在遮罩之后绘制，确保可见
   bool hasLyrics = g_lyricsDisplay.hasLyrics();
-  LOGD("[界面] hasLyrics: %d", hasLyrics);
+  #if UI_LYRICS_STATE_DEBUG_LOG
+  {
+    static bool s_last_has_lyrics = false;
+    static bool s_last_has_lyrics_valid = false;
+    if (!s_last_has_lyrics_valid || s_last_has_lyrics != hasLyrics) {
+      LOGD("[界面] hasLyrics: %d", hasLyrics);
+      s_last_has_lyrics = hasLyrics;
+      s_last_has_lyrics_valid = true;
+    }
+  }
+#endif
   if (hasLyrics) {
     // 使用滚动歌词显示（3行：上一句、当前、下一句）
     LyricsDisplay::ScrollLyrics scroll = g_lyricsDisplay.getScrollLyrics();

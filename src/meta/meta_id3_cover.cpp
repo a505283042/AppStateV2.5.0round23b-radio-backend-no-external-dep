@@ -96,9 +96,9 @@ bool id3_find_apic_from_reader(Id3ByteReader& r, Mp3CoverLoc& out)
     }
   }
 
-  // 安全上限：NAS 内嵌封面常比本地扫描阶段更靠后，放宽到 512KB。
+  // 安全上限：NAS 内嵌封面常比本地扫描阶段更靠后，放宽到 1MB。
   // 图片本体下载仍在调用方限制 400KB，避免炸内存。
-  static constexpr uint32_t kId3ScanLimit = 512 * 1024u;
+  static constexpr uint32_t kId3ScanLimit = 1024 * 1024u;
   if (end > 10 + kId3ScanLimit) end = 10 + kId3ScanLimit;
 
   while (pos + 10 <= end) {

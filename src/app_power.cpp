@@ -50,21 +50,31 @@ void app_power_save_and_shutdown()
     // 确保能看到关机提示。
     (void)board_hw_set_backlight(true);
     ui_power_show_shutdown_stage("正在保存设置", "请稍候...");
-    delay(150);
+    delay(1000);
 
     // 先暂停音频、静音功放，降低关机爆音风险。
     audio_service_pause();
     (void)board_hw_set_amp_mute(true);
 
     const bool snapshot_ok = player_snapshot_save_to_nvs();
+    ui_power_show_shutdown_stage("保存播放状态", "正在写入 NVS...");
+    delay(600);
+
     const bool list_ok = player_list_select_flush_persistent_state();
+    ui_power_show_shutdown_stage("保存列表位置", "正在写入 NVS...");
+    delay(600);
+
     const bool web_ok = web_settings_save_if_dirty();
+    ui_power_show_shutdown_stage("保存网页设置", "正在写入 NVS...");
+    delay(600);
 
     // NFC 绑定在刷卡确认时只写内存并标记 dirty。
     // 真正写 TF 前必须停止 AudioTask 读卡，避免播放中写 /System/nfc_map.txt 抢 SD 锁。
     audio_service_stop(true);
 
     const bool nfc_ok = nfc_binding_flush_if_dirty("/System/nfc_map.txt");
+    ui_power_show_shutdown_stage("保存 NFC 绑定", "正在写入 TF 卡...");
+    delay(600);
 
     LOGI("[电源] 保存 result snapshot=%d list=%d 网页=%d nfc=%d",
          snapshot_ok ? 1 : 0,
@@ -78,13 +88,13 @@ void app_power_save_and_shutdown()
         ui_power_show_shutdown_stage("部分保存失败", "仍将关机...");
     }
 
-    delay(500);
+    delay(1500);
 
     // 可选：关闭高功耗外设。
     (void)board_hw_set_bt_power(false);
     (void)board_hw_set_amp_shutdown(true);
 
-    delay(80);
+    delay(200);
 
     board_hw_power_off();
 

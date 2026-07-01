@@ -822,6 +822,7 @@ static bool control_play_net_track_index_impl(int idx, bool reset_shuffle)
 
         // 播放先启动，NAS MP3 内嵌封面通过 HTTP Range 后台解析和应用，
         // 避免起播被 ID3/APIC 网络读取拖慢。
+        LOGI("[网络封面] 准备启动 NAS 内嵌封面任务 idx=%d url=%s", idx, url.c_str());
         net_music_embedded_cover_start(idx, url);
 
         LOGI("[网络歌曲] 播放网络歌曲 索引=%d 标题=%s 时长=%lums offset=%lu URL=%s",
