@@ -10,6 +10,7 @@
 #include "player_assets.h"
 #include "radio/radio_catalog.h"
 #include "net_music/net_music_catalog.h"
+#include "net_music/net_music_embedded_cover.h"
 #include "player_state.h"
 #include "player_source.h"
 #include "lyrics/lyrics.h"
@@ -107,6 +108,7 @@ void control_update_track_pos_for_mode(int current_idx)
 
 void control_prepare_for_radio_source()
 {
+    net_music_embedded_cover_cancel();
     player_assets_cancel_pending_cover_prefetch();
     player_assets_invalidate_requests();
     g_lyricsDisplay.clear();
@@ -813,6 +815,10 @@ static bool control_play_net_track_index_impl(int idx, bool reset_shuffle)
 
         control_reset_net_track_eof_watch(idx);
 
+        // 播放先启动，NAS MP3 内嵌封面通过 HTTP Range 后台解析和应用，
+        // 避免起播被 ID3/APIC 网络读取拖慢。
+        net_music_embedded_cover_start(idx, url);
+
         LOGI("[网络歌曲] 播放网络歌曲 索引=%d 标题=%s 时长=%lums URL=%s",
             idx,
             item.title.c_str(),
@@ -837,6 +843,7 @@ bool player_play_net_track_index(int idx)
 
 void player_stop_net_track()
 {
+    net_music_embedded_cover_cancel();
     audio_service_stop(true);
     player_source_clear_net_track();
 }
