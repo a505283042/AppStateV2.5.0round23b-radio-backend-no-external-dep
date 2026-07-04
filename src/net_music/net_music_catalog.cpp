@@ -4,7 +4,6 @@
 #include <SdFat.h>
 #include <WiFi.h>
 #include <esp_heap_caps.h>
-#include <vector>
 
 #include "storage/storage_io.h"
 #include "utils/log.h"
@@ -13,14 +12,16 @@ extern SdFat sd;
 
 namespace {
 
-std::vector<uint32_t> s_offsets;
+uint32_t* s_offsets = nullptr;
+uint32_t s_offsets_count = 0;
+uint32_t s_offsets_cap = 0;
 bool s_loaded = false;
 bool s_base_loaded = false;
 String s_error;
 String s_base_url;
 
 // NAS 歌曲列表只放内存，不写入 TF。
-// s_offsets 记录每一行在 s_list_buf 里的起始位置。
+// s_offsets 记录每一行在 s_list_buf 里的起始位置，强制放到 PSRAM，降低 WiFi 开启后的内部 RAM 压力。
 char* s_list_buf = nullptr;
 uint32_t s_list_len = 0;
 uint32_t s_list_cap = 0;
@@ -45,6 +46,53 @@ static void strip_utf8_bom(String& s) {
       (uint8_t)s[2] == 0xBF) {
     s.remove(0, 3);
   }
+}
+
+
+
+static void free_remote_offsets() {
+  if (s_offsets) {
+    heap_caps_free(s_offsets);
+  }
+
+  s_offsets = nullptr;
+  s_offsets_count = 0;
+  s_offsets_cap = 0;
+}
+
+static bool reserve_remote_offsets_capacity(uint32_t required_count) {
+  if (required_count <= s_offsets_cap) {
+    return true;
+  }
+
+  uint32_t new_cap = s_offsets_cap ? s_offsets_cap : 256;
+  while (new_cap < required_count) {
+    new_cap *= 2;
+  }
+
+  const size_t bytes = (size_t)new_cap * sizeof(uint32_t);
+  void* p = heap_caps_realloc(s_offsets, bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!p) {
+    s_error = "net_music_offsets_psram_alloc_failed";
+    LOGE("[网络音乐] 偏移表 PSRAM 分配失败 need=%lu cap=%lu bytes=%u",
+         (unsigned long)required_count,
+         (unsigned long)new_cap,
+         (unsigned)bytes);
+    return false;
+  }
+
+  s_offsets = static_cast<uint32_t*>(p);
+  s_offsets_cap = new_cap;
+  return true;
+}
+
+static bool append_remote_offset(uint32_t offset) {
+  if (!reserve_remote_offsets_capacity(s_offsets_count + 1)) {
+    return false;
+  }
+
+  s_offsets[s_offsets_count++] = offset;
+  return true;
 }
 
 static void free_remote_list_buffer() {
@@ -389,7 +437,7 @@ static bool copy_line_from_memory(uint32_t line_start, String& out) {
 }
 
 static bool read_item_from_memory(uint32_t idx, NetMusicItem* out) {
-  if (!out || idx >= s_offsets.size()) {
+  if (!out || idx >= s_offsets_count) {
     s_error = "net_music_index_out_of_range";
     return false;
   }
@@ -415,7 +463,7 @@ bool net_music_catalog_load_base() {
 }
 
 bool net_music_catalog_load() {
-  s_offsets.clear();
+  free_remote_offsets();
   s_loaded = false;
   s_error = "";
   free_remote_list_buffer();
@@ -446,7 +494,12 @@ bool net_music_catalog_load() {
     if (copy_line_from_memory(line_start, line)) {
       NetMusicItem probe{};
       if (parse_line(line, &probe)) {
-        s_offsets.push_back(line_start);
+        if (!append_remote_offset(line_start)) {
+          s_loaded = false;
+          free_remote_offsets();
+          free_remote_list_buffer();
+          return false;
+        }
         ++valid_count;
       }
     }
@@ -460,6 +513,7 @@ bool net_music_catalog_load() {
     s_loaded = false;
     s_error = "net_music_no_valid_items";
     LOGW("[网络音乐] 远程列表没有有效 MP3 条目");
+    free_remote_offsets();
     free_remote_list_buffer();
     return false;
   }
@@ -467,9 +521,12 @@ bool net_music_catalog_load() {
   s_loaded = true;
   s_error = "";
 
-  LOGI("[网络音乐] 目录 加载ed 歌曲s=%lu 偏移s=%u base=%s 来源=memory",
+  LOGI("[网络音乐] 目录 加载ed 歌曲s=%lu 偏移s=%u offset_bytes=%lu offset_psram=%d list_psram=%d base=%s 来源=memory",
        (unsigned long)valid_count,
-       (unsigned)s_offsets.size(),
+       (unsigned)s_offsets_count,
+       (unsigned long)((size_t)s_offsets_cap * sizeof(uint32_t)),
+       s_offsets ? (esp_ptr_external_ram(s_offsets) ? 1 : 0) : 0,
+       s_list_buf ? (esp_ptr_external_ram(s_list_buf) ? 1 : 0) : 0,
        s_base_url.c_str());
 
   return true;
@@ -480,7 +537,7 @@ bool net_music_catalog_is_loaded() {
 }
 
 uint32_t net_music_catalog_count() {
-  return (uint32_t)s_offsets.size();
+  return s_offsets_count;
 }
 
 bool net_music_catalog_get(uint32_t idx, NetMusicItem* out) {
@@ -524,7 +581,7 @@ uint32_t net_music_catalog_search(const String& query,
 
   uint32_t matched_total = 0;
 
-  for (uint32_t i = 0; i < s_offsets.size(); ++i) {
+  for (uint32_t i = 0; i < s_offsets_count; ++i) {
     String line;
     if (!copy_line_from_memory(s_offsets[i], line)) {
       continue;
@@ -591,7 +648,7 @@ const char* net_music_catalog_base_path() {
 }
 
 void net_music_catalog_clear() {
-  s_offsets.clear();
+  free_remote_offsets();
   s_loaded = false;
   s_base_loaded = false;
   s_error = "";
