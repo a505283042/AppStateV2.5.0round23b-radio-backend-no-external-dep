@@ -293,9 +293,13 @@ static bool scan_one_audio_file_core_v3(const String& full_path,
     String base_no_ext = basename_no_ext_v3(fn);
     String parent_dir = parent_dir_of_v3(full_path);
 
-    String lrc_abs = parent_dir + "/" + base_no_ext + ".lrc";
-    if (file_exists_v3(lrc_abs)) {
-        out_track.lrc_rel = to_music_relative_path_v3(lrc_abs);
+    const char* const lrc_exts[] = {".lrc", ".LRC", ".Lrc"};
+    for (const char* lrc_ext : lrc_exts) {
+        String lrc_abs = parent_dir + "/" + base_no_ext + lrc_ext;
+        if (file_exists_v3(lrc_abs)) {
+            out_track.lrc_rel = to_music_relative_path_v3(lrc_abs);
+            break;
+        }
     }
 
     out_track.cover_source = COVER_NONE;
