@@ -1,5 +1,4 @@
 #include "player_control.h"
-#include <vector>
 #include <esp_system.h>
 #include <esp_heap_caps.h>
 
@@ -205,7 +204,8 @@ static bool control_prepare_net_track_item(int idx, NetMusicItem& item, String& 
 }
 
 struct NetTrackShuffleState {
-    std::vector<uint16_t> order;
+    uint16_t* order = nullptr;
+    uint32_t order_cap = 0;
     uint32_t pos = 0;
     uint32_t count = 0;
     bool ready = false;
@@ -258,16 +258,51 @@ static int control_next_net_track_index_sequential(int current_idx, int step)
 
 static void control_clear_net_track_shuffle()
 {
-    s_net_track_shuffle.order.clear();
     s_net_track_shuffle.pos = 0;
     s_net_track_shuffle.count = 0;
     s_net_track_shuffle.ready = false;
 }
 
+static bool control_reserve_net_track_shuffle_order(uint32_t required_count)
+{
+    if (required_count <= s_net_track_shuffle.order_cap) {
+        return true;
+    }
+
+    if (required_count > UINT16_MAX) {
+        LOGW("[网络歌曲] shuffle 已禁用: 数量 过大=%lu",
+             (unsigned long)required_count);
+        return false;
+    }
+
+    uint32_t new_cap = s_net_track_shuffle.order_cap ? s_net_track_shuffle.order_cap : 256;
+    while (new_cap < required_count) {
+        new_cap *= 2;
+    }
+    if (new_cap > UINT16_MAX) {
+        new_cap = UINT16_MAX;
+    }
+
+    const size_t bytes = (size_t)new_cap * sizeof(uint16_t);
+    void* p = heap_caps_realloc(s_net_track_shuffle.order,
+                                bytes,
+                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!p) {
+        LOGE("[网络歌曲] shuffle 顺序表 PSRAM 分配失败: 数量=%lu 字节=%lu",
+             (unsigned long)new_cap,
+             (unsigned long)bytes);
+        return false;
+    }
+
+    s_net_track_shuffle.order = static_cast<uint16_t*>(p);
+    s_net_track_shuffle.order_cap = new_cap;
+    return true;
+}
+
 static int control_net_track_shuffle_index_at(uint32_t pos)
 {
-    if (!s_net_track_shuffle.ready) return -1;
-    if (pos >= s_net_track_shuffle.order.size()) return -1;
+    if (!s_net_track_shuffle.ready || !s_net_track_shuffle.order) return -1;
+    if (pos >= s_net_track_shuffle.count) return -1;
     return (int)s_net_track_shuffle.order[pos];
 }
 
@@ -287,9 +322,13 @@ static void control_reset_net_track_shuffle(int start_idx)
         return;
     }
 
-    s_net_track_shuffle.order.reserve(count);
+    if (!control_reserve_net_track_shuffle_order(count)) {
+        control_clear_net_track_shuffle();
+        return;
+    }
+
     for (uint32_t i = 0; i < count; ++i) {
-        s_net_track_shuffle.order.push_back((uint16_t)i);
+        s_net_track_shuffle.order[i] = (uint16_t)i;
     }
 
     // Fisher-Yates shuffle.
@@ -317,8 +356,8 @@ static void control_reset_net_track_shuffle(int start_idx)
     s_net_track_shuffle.ready = true;
 
     log_ptr_region_control("net_shuffle.order",
-                           s_net_track_shuffle.order.empty() ? nullptr : s_net_track_shuffle.order.data(),
-                           s_net_track_shuffle.order.capacity() * sizeof(uint16_t));
+                           s_net_track_shuffle.order,
+                           (size_t)s_net_track_shuffle.order_cap * sizeof(uint16_t));
 
     LOGD("[网络歌曲] shuffle re设置 method=fisher 启动=%d 数量=%lu",
          start_idx,
@@ -332,7 +371,7 @@ static bool control_sync_net_track_shuffle_to_current(int current_idx)
 
     if (!s_net_track_shuffle.ready ||
         s_net_track_shuffle.count != count ||
-        s_net_track_shuffle.order.size() != count) {
+        !s_net_track_shuffle.order) {
         control_reset_net_track_shuffle(current_idx);
         return s_net_track_shuffle.ready;
     }
@@ -343,7 +382,7 @@ static bool control_sync_net_track_shuffle_to_current(int current_idx)
     }
 
     // 如果当前播放 index 和随机 pos 不一致，先尝试在当前洗牌表里定位。
-    for (uint32_t i = 0; i < s_net_track_shuffle.order.size(); ++i) {
+    for (uint32_t i = 0; i < s_net_track_shuffle.count; ++i) {
         if (s_net_track_shuffle.order[i] == (uint16_t)current_idx) {
             s_net_track_shuffle.pos = i;
             LOGD("[网络歌曲] shuffle 同步 当前=%d pos=%lu",
@@ -1124,7 +1163,7 @@ void control_apply_mode_context(play_mode_t new_mode, int current_idx, bool verb
         player_playlist_update_for_current_track(current_idx, verbose);
     } else {
         player_playlist_force_rebuild();
-        player_playlist_get_current();
+        player_playlist_ensure_current();
     }
 
     control_update_track_pos_for_mode(current_idx);

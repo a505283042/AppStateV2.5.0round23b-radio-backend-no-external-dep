@@ -676,7 +676,7 @@ void player_state_run(void)
 
         // 没有快照时才按默认播放模式构建启动播放列表。
         player_playlist_force_rebuild();
-        player_playlist_get_current();
+        player_playlist_ensure_current();
 
         int start_idx = player_clamp_idx_for_dispatch(V3_TEST_START_INDEX);
         if (start_idx < 0) {

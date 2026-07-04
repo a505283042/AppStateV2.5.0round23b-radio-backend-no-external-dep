@@ -781,10 +781,11 @@ static bool web_play_group_impl(bool is_album, int group_idx) {
   player_playlist_set_current_group_idx(group_idx);
   player_playlist_force_rebuild();
 
-  const auto& playlist = player_playlist_get_current();
-  if (playlist.empty()) return false;
+  player_playlist_ensure_current();
+  const int first_track = player_playlist_current_track_at(0);
+  if (first_track < 0) return false;
 
-  return player_play_idx_v3((uint32_t)playlist[0], true, true);
+  return player_play_idx_v3((uint32_t)first_track, true, true);
 }
 static void web_handle_artists_page() {
   web_send_no_cache_headers();

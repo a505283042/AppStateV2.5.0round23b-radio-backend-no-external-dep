@@ -19,17 +19,13 @@
 static void prepare_music_catalogs()
 {
     if (storage_catalog_v3_load_or_rebuild("/Music",
-                                           "/System/music_index_v3.bin")) {
+                                        "/System/music_index_v3.bin")) {
         LOGD("[启动] V3歌曲库 加载成功: 音乐=%lu 专辑=%lu 歌手=%lu",
-             (unsigned long)storage_catalog_v3_track_count(),
-             (unsigned long)storage_catalog_v3_album_count(),
-             (unsigned long)storage_catalog_v3_artist_count());
+            (unsigned long)storage_catalog_v3_track_count(),
+            (unsigned long)storage_catalog_v3_album_count(),
+            (unsigned long)storage_catalog_v3_artist_count());
 
-        // 曲库内存明细有 8~9 行，日常开机只需要上面的汇总。
-        // 需要排查内存时，把 platformio.ini 里的 LOG_LEVEL 调到 3 再显示。
-        #if LOG_LEVEL >= 3
-        storage_catalog_v3_log_memory_stats();
-        #endif
+        // 曲库内存归因已在 storage_catalog_v3_load_or_rebuild() 成功后强制打印。
     } else {
         LOGE("[启动] V3歌曲库 加载失败");
     }

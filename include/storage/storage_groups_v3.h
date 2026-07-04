@@ -6,4 +6,4 @@
 std::vector<String> storage_split_artists_v3(const String& artists_str);
 
 /* 基于 V3 catalog 构建运行时分组 */
-void storage_build_groups_v3(MusicCatalogV3& cat);
+bool storage_build_groups_v3(MusicCatalogV3& cat);

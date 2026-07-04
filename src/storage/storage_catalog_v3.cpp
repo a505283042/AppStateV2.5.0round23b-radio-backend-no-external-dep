@@ -62,18 +62,26 @@ static bool try_load_v3(const char* v3_index_path)
     return false;
   }
 
-  storage_build_groups_v3(s_catalog_v3);
+  if (!storage_build_groups_v3(s_catalog_v3)) {
+    LOGE("[曲库] 分组构建失败");
+    storage_catalog_v3_clear();
+    return false;
+  }
 
   s_catalog_v3.generation = ++s_catalog_generation_seq;
   s_v3_ready = true;
 
   LOGI("[曲库] 加载成功：歌曲=%lu 专辑=%lu 歌手=%lu 字符池=%lu 歌手分组=%d 专辑分组=%d",
-       (unsigned long)s_catalog_v3.track_count,
-       (unsigned long)s_catalog_v3.album_count,
-       (unsigned long)s_catalog_v3.artist_count,
-       (unsigned long)s_catalog_v3.pool.size,
-       (int)s_catalog_v3.artist_groups.size(),
-       (int)s_catalog_v3.album_groups.size());
+      (unsigned long)s_catalog_v3.track_count,
+      (unsigned long)s_catalog_v3.album_count,
+      (unsigned long)s_catalog_v3.artist_count,
+      (unsigned long)s_catalog_v3.pool.size,
+      (int)s_catalog_v3.artist_groups.size(),
+      (int)s_catalog_v3.album_groups.size());
+
+  // 强制打印曲库内存归因，不再依赖 boot_state 的 LOG_LEVEL 条件。
+  // 这样开机加载、插卡重载、手动重建后都能确认 group vector 是否落到内部 RAM。
+  storage_catalog_v3_log_memory_stats();
 
   return true;
 }
@@ -98,7 +106,11 @@ static bool rebuild_v3_native(const char* music_root,
         return false;
     }
 
-    storage_build_groups_v3(s_catalog_v3);
+    if (!storage_build_groups_v3(s_catalog_v3)) {
+        LOGE("[曲库] 分组构建失败");
+        storage_catalog_v3_clear();
+        return false;
+    }
 
     s_catalog_v3.generation = ++s_catalog_generation_seq;
     s_v3_ready = true;
@@ -114,6 +126,9 @@ static bool rebuild_v3_native(const char* music_root,
          (unsigned long)s_catalog_v3.pool.size,
          (int)s_catalog_v3.artist_groups.size(),
          (int)s_catalog_v3.album_groups.size());
+
+    // native 重建后也强制打印，确认临时构建和分组生成后的最终驻留位置。
+    storage_catalog_v3_log_memory_stats();
 
     return true;
 }
@@ -166,15 +181,13 @@ static void log_ptr_region_v3(const char* label, const void* ptr, size_t bytes)
 static void log_group_vector_regions_v3(const char* label, const std::vector<PlaylistGroup>& groups)
 {
   size_t idx_bytes = 0;
-  size_t cap_bytes = 0;
   uint32_t internal_count = 0;
   uint32_t psram_count = 0;
   uint32_t unknown_count = 0;
 
   for (const auto& g : groups) {
     idx_bytes += g.track_indices.size() * sizeof(TrackIndex16);
-    cap_bytes += g.track_indices.capacity() * sizeof(TrackIndex16);
-    const void* p = g.track_indices.empty() ? nullptr : g.track_indices.data();
+    const void* p = g.track_indices.empty() ? nullptr : g.track_indices.data;
     if (!p) {
       continue;
     }
@@ -187,7 +200,7 @@ static void log_group_vector_regions_v3(const char* label, const std::vector<Pla
     }
   }
 
-  LOGI("[内存归因] %s groups=%u vector_array_ptr=%p vector_array_bytes=%lu internal=%d psram=%d idx_bytes=%lu cap_bytes=%lu idx_vectors_internal=%lu idx_vectors_psram=%lu idx_vectors_unknown=%lu",
+  LOGI("[内存归因] %s groups=%u vector_array_ptr=%p vector_array_bytes=%lu internal=%d psram=%d idx_bytes=%lu idx_vectors_internal=%lu idx_vectors_psram=%lu idx_vectors_unknown=%lu",
        label,
        (unsigned)groups.size(),
        groups.empty() ? nullptr : groups.data(),
@@ -195,7 +208,6 @@ static void log_group_vector_regions_v3(const char* label, const std::vector<Pla
        (!groups.empty() && esp_ptr_internal(groups.data())) ? 1 : 0,
        (!groups.empty() && esp_ptr_external_ram(groups.data())) ? 1 : 0,
        (unsigned long)idx_bytes,
-       (unsigned long)cap_bytes,
        (unsigned long)internal_count,
        (unsigned long)psram_count,
        (unsigned long)unknown_count);
@@ -230,6 +242,12 @@ void storage_catalog_v3_log_memory_stats(void)
   log_ptr_region_v3("catalog.tracks", s_catalog_v3.tracks, track_bytes);
   log_ptr_region_v3("catalog.albums", s_catalog_v3.albums, album_bytes);
   log_ptr_region_v3("catalog.artists", s_catalog_v3.artists, artist_bytes);
+  log_ptr_region_v3("catalog.artist_group_track_pool",
+                    s_catalog_v3.artist_group_track_pool,
+                    (size_t)s_catalog_v3.artist_group_track_pool_count * sizeof(TrackIndex16));
+  log_ptr_region_v3("catalog.album_group_track_pool",
+                    s_catalog_v3.album_group_track_pool,
+                    (size_t)s_catalog_v3.album_group_track_pool_count * sizeof(TrackIndex16));
   log_group_vector_regions_v3("catalog.artist_groups", s_catalog_v3.artist_groups);
   log_group_vector_regions_v3("catalog.album_groups", s_catalog_v3.album_groups);
 

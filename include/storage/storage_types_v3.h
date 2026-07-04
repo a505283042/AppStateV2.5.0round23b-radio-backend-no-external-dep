@@ -2,6 +2,7 @@
 #include <Arduino.h>
 #include <stdint.h>
 #include <vector>
+#include <esp_heap_caps.h>
 
 /* ===== 基础类型定义 ===== */
 
@@ -35,10 +36,47 @@ struct TrackInfo {
 /* 播放列表分组 */
 using TrackIndex16 = uint16_t;
 
+struct PlaylistGroupTrackList {
+  TrackIndex16* data = nullptr;
+  uint16_t count = 0;
+
+  bool empty() const {
+    return data == nullptr || count == 0;
+  }
+
+  size_t size() const {
+    return count;
+  }
+
+  TrackIndex16& operator[](size_t idx) {
+    return data[idx];
+  }
+
+  const TrackIndex16& operator[](size_t idx) const {
+    return data[idx];
+  }
+
+  TrackIndex16* begin() {
+    return data;
+  }
+
+  TrackIndex16* end() {
+    return data ? data + count : data;
+  }
+
+  const TrackIndex16* begin() const {
+    return data;
+  }
+
+  const TrackIndex16* end() const {
+    return data ? data + count : data;
+  }
+};
+
 struct PlaylistGroup {
   uint32_t name_off = 0;                  /* 歌手名或专辑名偏移 */
   uint32_t primary_artist_off = 0;        /* 仅专辑分组使用 */
-  std::vector<TrackIndex16> track_indices;
+  PlaylistGroupTrackList track_indices;   /* 指向连续 PSRAM group index pool 的轻量视图 */
 };
 
 
@@ -170,9 +208,27 @@ struct MusicCatalogV3 {
   std::vector<PlaylistGroup> artist_groups;
   std::vector<PlaylistGroup> album_groups;
 
+  TrackIndex16* artist_group_track_pool = nullptr;
+  uint32_t artist_group_track_pool_count = 0;
+
+  TrackIndex16* album_group_track_pool = nullptr;
+  uint32_t album_group_track_pool_count = 0;
+
   uint32_t generation = 0;
 
   void clear_runtime_only() {
+    if (artist_group_track_pool) {
+      heap_caps_free(artist_group_track_pool);
+      artist_group_track_pool = nullptr;
+    }
+    artist_group_track_pool_count = 0;
+
+    if (album_group_track_pool) {
+      heap_caps_free(album_group_track_pool);
+      album_group_track_pool = nullptr;
+    }
+    album_group_track_pool_count = 0;
+
     artist_groups.clear();
     album_groups.clear();
     generation = 0;

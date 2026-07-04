@@ -55,8 +55,14 @@ bool player_playlist_align_group_context_for_track(int track_idx, bool verbose);
 
 /** 根据当前歌曲刷新 playlist 状态；发现上下文不一致时会尝试自愈。 */
 void player_playlist_update_for_current_track(int current_track_idx, bool verbose);
-/** 读取当前真实生效的 playlist（只读）。 */
-const std::vector<uint16_t>& player_playlist_get_current();
+/** 确保当前真实生效的 playlist 已构建。 */
+void player_playlist_ensure_current();
+/** 当前 playlist 数量。 */
+size_t player_playlist_current_size();
+/** 当前 playlist 是否为空。 */
+bool player_playlist_current_empty();
+/** 读取当前 playlist 指定位置的歌曲索引；越界返回 -1。 */
+int player_playlist_current_track_at(size_t pos);
 /**
  * @brief 在当前 playlist 中解析前进/后退步长。
  * @param step 正数向后，负数向前。

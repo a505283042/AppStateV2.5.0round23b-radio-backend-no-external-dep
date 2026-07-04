@@ -160,16 +160,17 @@ bool player_play_artist_binding(const String& artist)
             player_playlist_set_current_group_idx(i);
             player_playlist_force_rebuild();
 
-            const auto& playlist = player_playlist_get_current();
-            if (!playlist.empty()) {
-                if (nfc_binding_should_suppress_duplicate(playlist[0])) {
+            player_playlist_ensure_current();
+            const int first_track = player_playlist_current_track_at(0);
+            if (first_track >= 0) {
+                if (nfc_binding_should_suppress_duplicate(first_track)) {
                     return true;
                 }
                 
                 player_state_mark_next_play_from_nfc();
-                (void)binding_play_track_dispatch(playlist[0], true, true);
+                (void)binding_play_track_dispatch(first_track, true, true);
                 LOGI("[播放器] 歌手 binding success: %s, 分组=%d, 歌曲s=%d",
-                     key.c_str(), i, (int)playlist.size());
+                     key.c_str(), i, (int)player_playlist_current_size());
                 return true;
             }
         }
@@ -202,16 +203,17 @@ bool player_play_album_binding(const String& album)
             player_playlist_set_current_group_idx(i);
             player_playlist_force_rebuild();
 
-            const auto& playlist = player_playlist_get_current();
-            if (!playlist.empty()) {
-                if (nfc_binding_should_suppress_duplicate(playlist[0])) {
+            player_playlist_ensure_current();
+            const int first_track = player_playlist_current_track_at(0);
+            if (first_track >= 0) {
+                if (nfc_binding_should_suppress_duplicate(first_track)) {
                     return true;
                 }
                 
                 player_state_mark_next_play_from_nfc();
-                (void)binding_play_track_dispatch(playlist[0], true, true);
+                (void)binding_play_track_dispatch(first_track, true, true);
                 LOGI("[播放器] 专辑 binding success: %s, 分组=%d, 歌曲s=%d",
-                     key.c_str(), i, (int)playlist.size());
+                     key.c_str(), i, (int)player_playlist_current_size());
                 return true;
             }
         }

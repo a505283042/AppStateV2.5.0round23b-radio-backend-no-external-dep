@@ -161,7 +161,7 @@ static void snapshot_apply_light_state(const PlayerPersistSnapshot& snap)
     g_play_mode = mode;
     player_playlist_set_current_group_idx(snapshot_sanitize_group_idx(mode, snap.current_group_idx));
     player_playlist_force_rebuild();
-    player_playlist_get_current();
+    player_playlist_ensure_current();
 }
 
 } // namespace
