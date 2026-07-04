@@ -600,7 +600,26 @@ static bool send_cmd(AudioCmd& cmd, bool wait)
   if (!wait) return true;
 
   uint32_t ack = 0;
-  if (xTaskNotifyWait(0, 0xFFFFFFFF, &ack, pdMS_TO_TICKS(2000)) != pdTRUE) return false;
+  uint32_t ack_timeout_ms = 2000;
+  switch (cmd.type) {
+    case CMD_STOP:
+      ack_timeout_ms = 3000;
+      break;
+    case CMD_PLAY:
+      ack_timeout_ms = 5000;
+      break;
+    case CMD_PLAY_STREAM_MP3:
+      ack_timeout_ms = 12000;
+      break;
+    case CMD_FETCH_LYRICS:
+      ack_timeout_ms = 3000;
+      break;
+    case CMD_FETCH_COVER:
+    case CMD_FETCH_TOTAL_MS:
+      ack_timeout_ms = 5000;
+      break;
+  }
+  if (xTaskNotifyWait(0, 0xFFFFFFFF, &ack, pdMS_TO_TICKS(ack_timeout_ms)) != pdTRUE) return false;
   return ack == 1;
 }
 

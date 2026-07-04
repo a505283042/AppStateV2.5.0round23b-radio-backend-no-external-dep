@@ -796,8 +796,11 @@ static bool control_play_net_track_index_impl(int idx, bool reset_shuffle)
     ui_set_volume(audio_get_volume());
     
 
-    // 第一版先使用默认封面，避免引入网络封面和歌词复杂度。
-    (void)control_apply_cover_file("/System/default_cover.jpg");
+    // NAS 播放起播时先显示网络封面加载图，避免继续显示上一首封面。
+    // 如果 /System/net_cover_loading.jpg 不存在，则回退默认封面。
+    if (!control_apply_cover_file("/System/net_cover_loading.jpg")) {
+        (void)control_apply_cover_file("/System/default_cover.jpg");
+    }
     ui_request_refresh_now();
 
     uint32_t stream_start_offset = 0;
@@ -1012,6 +1015,9 @@ void player_toggle_play()
         audio_service_pause();
         s_user_paused = true;
         s_pause_time_ms = millis();
+        if (source.type == PlayerSourceType::NET_TRACK) {
+            player_source_set_net_track_status(true, String("paused"), String());
+        }
         const uint32_t paused_at_ms = audio_get_play_ms();
         LOGI("[播放器] 暂停于 %u ms", paused_at_ms);
         return;

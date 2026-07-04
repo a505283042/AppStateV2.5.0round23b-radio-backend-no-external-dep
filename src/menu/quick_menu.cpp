@@ -4,6 +4,8 @@
 
 #include "menu/quick_menu_pages.h"
 #include "menu/quick_menu_page_nfc.h"
+#include "audio/audio_service.h"
+#include "player_source.h"
 #include "utils/log.h"
 
 namespace {
@@ -11,6 +13,7 @@ namespace {
 static constexpr uint32_t MENU_AUTO_EXIT_MS = 30000;
 static constexpr uint32_t MENU_CONFIRM_GUARD_MS = 250;
 static constexpr uint32_t MENU_DYNAMIC_REFRESH_MS = 1000;
+static constexpr uint32_t MENU_NET_TRACK_DYNAMIC_REFRESH_MS = 5000;
 
 static bool s_active = false;
 static QuickMenuPage s_page = QuickMenuPage::Root;
@@ -100,6 +103,16 @@ static bool quick_menu_page_is_dynamic(QuickMenuPage page)
         default:
             return false;
     }
+}
+
+static uint32_t quick_menu_dynamic_refresh_interval_ms()
+{
+    const PlayerSourceState source = player_source_get();
+    if (source.type == PlayerSourceType::NET_TRACK && audio_service_is_playing()) {
+        return MENU_NET_TRACK_DYNAMIC_REFRESH_MS;
+    }
+
+    return MENU_DYNAMIC_REFRESH_MS;
 }
 
 const QuickMenuPageDef& current_page_def()
@@ -379,8 +392,9 @@ void quick_menu_tick()
     }
 
     if (quick_menu_page_is_dynamic(s_page)) {
+        const uint32_t refresh_interval_ms = quick_menu_dynamic_refresh_interval_ms();
         if (s_last_dynamic_refresh_ms == 0 ||
-            now - s_last_dynamic_refresh_ms >= MENU_DYNAMIC_REFRESH_MS) {
+            now - s_last_dynamic_refresh_ms >= refresh_interval_ms) {
             s_last_dynamic_refresh_ms = now;
 
             // 只标记内容变化，不刷新用户操作时间。

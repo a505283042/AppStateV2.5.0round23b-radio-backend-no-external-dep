@@ -18,6 +18,7 @@
 #include "player_list_select.h"
 #include "audio/audio.h"
 #include "audio/audio_service.h"
+#include "audio/audio_mp3.h"
 #include "hal/board_hw_control.h"
 
 lgfx::U8g2font g_font_cjk(u8g2_font_wenquanyi_merged);
@@ -100,6 +101,9 @@ int s_rotate_probe_frames_left = 0;
 uint32_t s_scan_last_ms = 0;
 int s_scan_phase = 0;
 volatile bool s_ui_hold = false;
+static constexpr uint32_t kUiDiagQuickMenuDrawMs = 60;
+static constexpr uint32_t kUiDiagQuickMenuLogIntervalMs = 5000;
+static uint32_t s_ui_diag_last_quick_menu_log_ms = 0;
 
 void ui_lock()
 {
@@ -240,11 +244,10 @@ static void ui_task_entry(void*)
       continue;
     }
 
-    // 菜单计时仍然要跑，但绘制优先级必须是：列表选择 > 快捷菜单 > 播放器。
+    // 菜单计时由 loopTask/keys_update() 推进；UI 任务只负责绘制。
     // 播放源菜单打开列表时会保留 quick_menu active，方便 MODE 短按返回菜单；
     // 如果这里先画菜单，屏幕会停在菜单页，出现“列表能选能播但 UI 不变”。
-    quick_menu_tick();
-
+    
     if (player_list_select_is_active()) {
       s_list_select_was_active = true;
       // 菜单/列表覆盖播放器时，暂停封面旋转时钟，避免退出后 dt 累积导致角度跳变。
@@ -303,9 +306,19 @@ static void ui_task_entry(void*)
       // 避免 NAS 播放时持续抢占 SPI/CPU。按键会主动唤醒 UI，因此空闲低频不会影响跟手性。
       s_rot_last_ms = now_ms;
       if (ui_quick_menu_view_needs_draw()) {
+        const uint32_t draw_t0 = millis();
         ui_draw_lock();
         ui_draw_quick_menu();
         ui_draw_unlock();
+        const uint32_t draw_ms = millis() - draw_t0;
+        if (audio_mp3_is_active() && audio_mp3_is_stream_source() && draw_ms >= kUiDiagQuickMenuDrawMs) {
+          const uint32_t log_now = millis();
+          if (s_ui_diag_last_quick_menu_log_ms == 0 ||
+              log_now - s_ui_diag_last_quick_menu_log_ms >= kUiDiagQuickMenuLogIntervalMs) {
+            s_ui_diag_last_quick_menu_log_ms = log_now;
+            LOGI("[界面诊断] 快捷菜单绘制耗时=%lums", (unsigned long)draw_ms);
+          }
+        }
       }
       continue;
     }

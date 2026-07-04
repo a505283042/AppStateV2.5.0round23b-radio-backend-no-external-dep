@@ -10,6 +10,10 @@
 
 static const i2s_port_t I2S_PORT = I2S_NUM_0;
 static bool g_inited = false;
+static constexpr uint32_t kI2sDiagSlowWriteMs = 40;
+static constexpr uint32_t kI2sDiagLogIntervalMs = 2000;
+static uint32_t s_i2s_diag_last_log_ms = 0;
+static uint32_t s_i2s_diag_slow_events = 0;
 
 // ===== 播放位置统计（按“已写入 I2S 的帧数”计算）=====
 static portMUX_TYPE s_pos_mux = portMUX_INITIALIZER_UNLOCKED;
@@ -134,11 +138,26 @@ size_t audio_i2s_write_frames(const int16_t* stereo_samples, size_t frames)
         size_t chunk_written = 0;
 
         // ✅ 使用 100ms 超时，避免 I2S 硬件异常时死锁
+        const uint32_t write_t0 = millis();
         esp_err_t err = i2s_write(I2S_PORT,
                                   (const char*)out,
                                   chunk_bytes,
                                   &chunk_written,
                                   pdMS_TO_TICKS(100));
+        const uint32_t write_ms = millis() - write_t0;
+
+        if ((write_ms >= kI2sDiagSlowWriteMs || chunk_written < chunk_bytes) &&
+            (s_i2s_diag_last_log_ms == 0 || millis() - s_i2s_diag_last_log_ms >= kI2sDiagLogIntervalMs)) {
+            ++s_i2s_diag_slow_events;
+            s_i2s_diag_last_log_ms = millis();
+            LOGI("[I2S诊断] 写入耗时=%lums events=%lu 请求=%u 实写=%u frames=%u gain=%u",
+                 (unsigned long)write_ms,
+                 (unsigned long)s_i2s_diag_slow_events,
+                 (unsigned)chunk_bytes,
+                 (unsigned)chunk_written,
+                 (unsigned)frames,
+                 (unsigned)g);
+        }
 
         if (err != ESP_OK) {
             LOGE("[I2S] 写入失败: %d", err);

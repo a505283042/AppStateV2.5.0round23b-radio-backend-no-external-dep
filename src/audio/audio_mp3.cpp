@@ -36,11 +36,16 @@ static String s_mp3_debug_name;
 static constexpr size_t kMp3FileInputBufferBytes = 8 * 1024;
 // 网络 MP3 流比本地文件更怕 UI/菜单短时间抢 CPU。
 // 这里给网络流单独使用更大的输入缓冲，并优先放到 PSRAM。
-static constexpr size_t kMp3StreamInputBufferBytes = 32 * 1024;
-static constexpr size_t kMp3StreamStartupPrefillBytes = 16 * 1024;
-static constexpr size_t kMp3StreamRefillLowBytes = 12 * 1024;
-static constexpr size_t kMp3StreamRefillTargetBytes = 28 * 1024;
-static constexpr uint32_t kMp3StreamStartupPrefillTimeoutMs = 1500;
+static constexpr size_t kMp3StreamInputBufferBytes = 96 * 1024;
+static constexpr size_t kMp3StreamStartupPrefillBytes = 48 * 1024;
+static constexpr size_t kMp3StreamRefillLowBytes = 48 * 1024;
+static constexpr size_t kMp3StreamRefillWaitLowBytes = 32 * 1024;
+static constexpr size_t kMp3StreamRefillTargetBytes = 88 * 1024;
+static constexpr size_t kMp3StreamMinDecodeBytes = 2048;
+static constexpr uint32_t kMp3StreamStartupPrefillTimeoutMs = 3000;
+static constexpr uint32_t kMp3StreamRefillWaitTimeoutMs = 25;
+static constexpr uint32_t kMp3DiagLogIntervalMs = 2000;
+static constexpr uint32_t kMp3DiagLoopGapMs = 60;
 
 static uint8_t s_file_inbuf[kMp3FileInputBufferBytes];
 static uint8_t* g_inbuf = s_file_inbuf;
@@ -56,6 +61,38 @@ static size_t s_pending_frames = 0;
 static int s_channels = 2; // 当前声道数
 static int s_last_sr = 0; // 上次设置的采样率（文件级 static，便于重置）
 static const char* s_debug_name = nullptr;
+
+static uint32_t s_diag_last_loop_ms = 0;
+static uint32_t s_diag_last_loop_gap_log_ms = 0;
+static uint32_t s_diag_last_wait_log_ms = 0;
+static uint32_t s_diag_last_low_log_ms = 0;
+static uint32_t s_diag_last_resync_log_ms = 0;
+static uint32_t s_diag_loop_gap_events = 0;
+static uint32_t s_diag_wait_events = 0;
+static uint32_t s_diag_low_events = 0;
+static uint32_t s_diag_resync_events = 0;
+
+static bool diag_log_due(uint32_t& last_ms, uint32_t now_ms)
+{
+  if (last_ms == 0 || now_ms - last_ms >= kMp3DiagLogIntervalMs) {
+    last_ms = now_ms;
+    return true;
+  }
+  return false;
+}
+
+static void reset_stream_diag_state()
+{
+  s_diag_last_loop_ms = 0;
+  s_diag_last_loop_gap_log_ms = 0;
+  s_diag_last_wait_log_ms = 0;
+  s_diag_last_low_log_ms = 0;
+  s_diag_last_resync_log_ms = 0;
+  s_diag_loop_gap_events = 0;
+  s_diag_wait_events = 0;
+  s_diag_low_events = 0;
+  s_diag_resync_events = 0;
+}
 
 static void release_stream_input_buffer()
 {
@@ -107,6 +144,7 @@ static void reset_decoder_state()
   s_pending_off = 0;
   s_pending_frames = 0;
   g_source_eof = false;
+  reset_stream_diag_state();
 }
 
 static void clear_source()
@@ -138,7 +176,20 @@ static bool fill_input_buffer(size_t min_fill_target, uint32_t wait_timeout_ms =
     }
 
     if (n == AUDIO_MP3_SOURCE_WOULD_BLOCK) {
-      if (wait_timeout_ms > 0 && (millis() - start_ms) < wait_timeout_ms) {
+      const uint32_t now_ms = millis();
+      if (g_source_is_stream) {
+        ++s_diag_wait_events;
+        if ((size_t)g_inbuf_filled < kMp3StreamRefillWaitLowBytes &&
+            diag_log_due(s_diag_last_wait_log_ms, now_ms)) {
+          LOGI("[MP3诊断] 网络暂时无数据 events=%lu fill=%d target=%u cap=%u 等待=%lums",
+               (unsigned long)s_diag_wait_events,
+               g_inbuf_filled,
+               (unsigned)min_fill_target,
+               (unsigned)g_inbuf_capacity,
+               (unsigned long)(now_ms - start_ms));
+        }
+      }
+      if (wait_timeout_ms > 0 && (now_ms - start_ms) < wait_timeout_ms) {
         waited = true;
         vTaskDelay(pdMS_TO_TICKS(5));
         continue;
@@ -311,6 +362,25 @@ bool audio_mp3_loop()
 {
   if (!g_playing) return false;
 
+  if (g_source_is_stream) {
+    const uint32_t now_ms = millis();
+    if (s_diag_last_loop_ms != 0) {
+      const uint32_t gap_ms = now_ms - s_diag_last_loop_ms;
+      if (gap_ms >= kMp3DiagLoopGapMs) {
+        ++s_diag_loop_gap_events;
+        if (diag_log_due(s_diag_last_loop_gap_log_ms, now_ms)) {
+          LOGI("[MP3诊断] 解码循环间隔过长 gap=%lums events=%lu fill=%d pending=%u eof=%d",
+               (unsigned long)gap_ms,
+               (unsigned long)s_diag_loop_gap_events,
+               g_inbuf_filled,
+               (unsigned)s_pending_frames,
+               g_source_eof ? 1 : 0);
+        }
+      }
+    }
+    s_diag_last_loop_ms = now_ms;
+  }
+
   // --- A) 先把 pending 的 PCM 写完 ---
   if (s_pending_frames > 0) {
     size_t w = audio_i2s_write_frames(g_pcm + s_pending_off * 2, s_pending_frames);
@@ -324,9 +394,26 @@ bool audio_mp3_loop()
   const size_t refill_low = g_source_is_stream ? kMp3StreamRefillLowBytes : 2048;
   const size_t refill_target = g_source_is_stream ? kMp3StreamRefillTargetBytes : 2048;
   if ((size_t)g_inbuf_filled < refill_low) {
-    if (!fill_input_buffer(refill_target)) {
+    const bool stream_wait_needed = g_source_is_stream &&
+                                    (size_t)g_inbuf_filled < kMp3StreamRefillWaitLowBytes;
+    const uint32_t refill_wait_ms = stream_wait_needed ? kMp3StreamRefillWaitTimeoutMs : 0;
+    if (!fill_input_buffer(refill_target, refill_wait_ms)) {
       audio_mp3_stop();
       return false;
+    }
+    if (g_source_is_stream && !g_source_eof && (size_t)g_inbuf_filled < refill_low) {
+      ++s_diag_low_events;
+      const uint32_t now_ms = millis();
+      if ((size_t)g_inbuf_filled < kMp3StreamRefillWaitLowBytes &&
+          diag_log_due(s_diag_last_low_log_ms, now_ms)) {
+        LOGI("[MP3诊断] 网络缓冲低水位 events=%lu fill=%d low=%u hard=%u target=%u cap=%u",
+             (unsigned long)s_diag_low_events,
+             g_inbuf_filled,
+             (unsigned)refill_low,
+             (unsigned)kMp3StreamRefillWaitLowBytes,
+             (unsigned)refill_target,
+             (unsigned)g_inbuf_capacity);
+      }
     }
     if (g_inbuf_filled == 0) {
       if (g_source_eof) {
@@ -339,6 +426,10 @@ bool audio_mp3_loop()
   }
 
   // --- C) 解一帧 ---
+  if (g_source_is_stream && !g_source_eof && g_inbuf_filled < (int)kMp3StreamMinDecodeBytes) {
+    return true;
+  }
+
   mp3dec_frame_info_t info;
   int samples = mp3dec_decode_frame(&g_dec, g_inbuf, g_inbuf_filled, g_pcm, &info);
 
@@ -355,6 +446,16 @@ bool audio_mp3_loop()
       if (sync_pos > 0) {
         memmove(g_inbuf, g_inbuf + sync_pos, g_inbuf_filled - sync_pos);
         g_inbuf_filled -= sync_pos;
+        if (g_source_is_stream) {
+          ++s_diag_resync_events;
+          const uint32_t now_ms = millis();
+          if (diag_log_due(s_diag_last_resync_log_ms, now_ms)) {
+            LOGI("[MP3诊断] 流重新同步 pos=%d events=%lu fill=%d",
+                 sync_pos,
+                 (unsigned long)s_diag_resync_events,
+                 g_inbuf_filled);
+          }
+        }
         LOGD("[MP3] 已重新同步到位置 %d", sync_pos);
       } else {
         int keep = 1;

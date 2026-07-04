@@ -7,6 +7,7 @@
 #include "menu/quick_menu.h"
 #include "nfc/nfc_binding.h"
 #include "player_snapshot.h"
+#include "player_source.h"
 #include "player_list_select.h"
 #include "ui/ui_power_prompt.h"
 #include "web/web_settings.h"
@@ -56,7 +57,10 @@ void app_power_save_and_shutdown()
     audio_service_pause();
     (void)board_hw_set_amp_mute(true);
 
-    const bool snapshot_ok = player_snapshot_save_to_nvs();
+    const PlayerSourceState source = player_source_get();
+    const bool snapshot_ok = (source.type == PlayerSourceType::LOCAL_TRACK)
+                                 ? player_snapshot_save_to_nvs()
+                                 : true;
     ui_power_show_shutdown_stage("保存播放状态", "正在写入 NVS...");
     delay(600);
 
