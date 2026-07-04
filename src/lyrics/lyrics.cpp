@@ -14,6 +14,8 @@ extern SdFat sd;
 
 LyricsDisplay g_lyricsDisplay;
 
+static constexpr size_t kInternalFallbackMaxBytes = 32 * 1024;
+
 static inline bool lyric_is_space(char c) {
     return c == ' ' || c == '\t' || c == '\r' || c == '\n';
 }
@@ -31,9 +33,13 @@ static bool lyric_parse_uint(const char* s, size_t len, int* out_value) {
 }
 
 static char* lyrics_alloc_text_buffer(size_t len) {
-    char* buf = (char*)ps_malloc(len + 1);
-    if (!buf) {
-        buf = (char*)malloc(len + 1);
+    const size_t bytes = len + 1;
+    char* buf = (char*)ps_malloc(bytes);
+    if (!buf && bytes <= kInternalFallbackMaxBytes) {
+        buf = (char*)malloc(bytes);
+    }
+    if (!buf && bytes > kInternalFallbackMaxBytes) {
+        LOGW("[歌词] 缓冲 PSRAM 分配失败，禁止回落内部RAM 大小=%u", (unsigned)bytes);
     }
     return buf;
 }

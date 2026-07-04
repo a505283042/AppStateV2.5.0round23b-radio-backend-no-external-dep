@@ -22,6 +22,7 @@ static constexpr uint32_t kHttpCoverChunkBytes = 8 * 1024u;
 static constexpr uint32_t kMaxRemoteCoverBytes = 512 * 1024u;
 static constexpr uint32_t kMaxRemoteLyricsBytes = 64 * 1024u;
 static constexpr uint32_t kRemoteLyricsChunkBytes = 512u;
+static constexpr size_t kInternalFallbackMaxBytes = 32 * 1024;
 static constexpr uint32_t kLyricsJobDelayMs = 250;
 static constexpr uint32_t kCoverJobDelayMs = 600;
 static constexpr uint32_t kHttpTimeoutMs = 5000;
@@ -234,9 +235,14 @@ static String build_same_dir_sidecar_url(const String& media_url, const char* ne
 
 static char* alloc_remote_lyrics_buffer(size_t cap)
 {
-  char* buf = static_cast<char*>(ps_malloc(cap + 1));
-  if (!buf) {
-    buf = static_cast<char*>(malloc(cap + 1));
+  const size_t bytes = cap + 1;
+  char* buf = static_cast<char*>(ps_malloc(bytes));
+  if (!buf && bytes <= kInternalFallbackMaxBytes) {
+    buf = static_cast<char*>(malloc(bytes));
+  }
+  if (!buf && bytes > kInternalFallbackMaxBytes) {
+    LOGW("[网络歌词] 缓冲 PSRAM 分配失败，禁止回落内部RAM size=%lu",
+         (unsigned long)bytes);
   }
   return buf;
 }
@@ -553,7 +559,7 @@ private:
     if (!m_buf) {
       m_buf = static_cast<uint8_t*>(heap_caps_malloc(kHttpRangeWindowBytes,
                                                      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-      if (!m_buf) {
+      if (!m_buf && kHttpRangeWindowBytes <= kInternalFallbackMaxBytes) {
         m_buf = static_cast<uint8_t*>(heap_caps_malloc(kHttpRangeWindowBytes, MALLOC_CAP_8BIT));
       }
       if (!m_buf) {
@@ -613,11 +619,15 @@ static bool fetch_remote_cover_image(const String& url,
 
   uint8_t* buf = static_cast<uint8_t*>(heap_caps_malloc(loc.size,
                                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-  if (!buf) {
+  if (!buf && loc.size <= kInternalFallbackMaxBytes) {
     buf = static_cast<uint8_t*>(heap_caps_malloc(loc.size, MALLOC_CAP_8BIT));
   }
   if (!buf) {
-    LOGW("[网络封面] 图片缓冲分配失败 size=%lu", (unsigned long)loc.size);
+    if (loc.size > kInternalFallbackMaxBytes) {
+      LOGW("[网络封面] 图片缓冲 PSRAM 分配失败，禁止回落内部RAM size=%lu", (unsigned long)loc.size);
+    } else {
+      LOGW("[网络封面] 图片缓冲分配失败 size=%lu", (unsigned long)loc.size);
+    }
     return false;
   }
 

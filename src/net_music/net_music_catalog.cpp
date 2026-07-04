@@ -124,12 +124,11 @@ static bool reserve_remote_list_capacity(uint32_t required_len) {
 
   if (p) {
     LOGI("[网络音乐] 列表内存使用 PSRAM cap=%lu", (unsigned long)new_cap);
-  } else {
-    LOGW("[网络音乐] PSRAM 分配失败，尝试内部 RAM cap=%lu", (unsigned long)new_cap);
-    p = heap_caps_realloc(s_list_buf, new_cap, MALLOC_CAP_8BIT);
   }
 
   if (!p) {
+    LOGW("[网络音乐] 列表 PSRAM 分配失败，禁止回落内部RAM cap=%lu",
+         (unsigned long)new_cap);
     s_error = "net_music_memory_alloc_failed";
     LOGE("[网络音乐] 列表内存分配失败 need=%lu cap=%lu",
          (unsigned long)required_len,
@@ -155,9 +154,6 @@ static void shrink_remote_list_capacity_to_len(uint32_t len) {
   void* p = heap_caps_realloc(s_list_buf,
                               required_cap,
                               MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (!p) {
-    p = heap_caps_realloc(s_list_buf, required_cap, MALLOC_CAP_8BIT);
-  }
 
   if (p) {
     s_list_buf = static_cast<char*>(p);

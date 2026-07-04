@@ -15,6 +15,7 @@ static bool detect_jpg_from_buffer(const uint8_t* b, size_t len) {
 // 400KB 上限：够大多数封面，避免炸内存
 static constexpr size_t MAX_COVER_BYTES_HARD = 400 * 1024;
 static constexpr size_t COVER_READ_CHUNK = 8 * 1024;  // 分块读取，避免长时间霸占 SD 锁
+static constexpr size_t INTERNAL_FALLBACK_MAX_BYTES = 32 * 1024;
 static uint8_t* s_cover_buf = nullptr;
 static bool s_cover_initialized = false;
 
@@ -27,8 +28,11 @@ bool cover_init_buffer(void)
   uint32_t heap_before = ESP.getFreeHeap();
 
   uint8_t* p = (uint8_t*)ps_malloc(MAX_COVER_BYTES_HARD);
-  if (!p) p = (uint8_t*)malloc(MAX_COVER_BYTES_HARD);
-  if (!p) return false;
+  if (!p) {
+    LOGW("[封面] 主缓冲 PSRAM 分配失败，禁止回落内部RAM size=%u",
+         (unsigned)MAX_COVER_BYTES_HARD);
+    return false;
+  }
 
   uint32_t ps_after   = ESP.getFreePsram();
   uint32_t heap_after = ESP.getFreeHeap();
@@ -266,8 +270,13 @@ bool cover_load_alloc(SdFat& sd, const TrackInfo& t, uint8_t*& out_buf, size_t& 
   }
 
   uint8_t* buf = (uint8_t*)ps_malloc(size);
-  if (!buf) buf = (uint8_t*)malloc(size);
+  if (!buf && size <= INTERNAL_FALLBACK_MAX_BYTES) {
+    buf = (uint8_t*)malloc(size);
+  }
   if (!buf) {
+    if (size > INTERNAL_FALLBACK_MAX_BYTES) {
+      LOGW("[封面] 分配缓冲 PSRAM 失败，禁止回落内部RAM size=%u", (unsigned)size);
+    }
     close_file_locked(f);
     return false;
   }

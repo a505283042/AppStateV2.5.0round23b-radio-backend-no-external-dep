@@ -1041,10 +1041,8 @@ static bool cover_panel_ensure_source_cache(LGFX_Sprite* src)
     const size_t bytes = (size_t)COVER_SIZE * (size_t)COVER_SIZE * sizeof(uint16_t);
     s_cover_panel_src_cache = (uint16_t*)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!s_cover_panel_src_cache) {
-      s_cover_panel_src_cache = (uint16_t*)heap_caps_malloc(bytes, MALLOC_CAP_8BIT);
-    }
-    if (!s_cover_panel_src_cache) {
-      LOGW("[界面] COVER_PANEL 源封面缓存分配失败，回退 readPixel 采样");
+      LOGW("[界面] COVER_PANEL 源封面缓存 PSRAM 分配失败，禁止回落内部RAM，回退 readPixel 采样 size=%lu",
+           (unsigned long)bytes);
       return false;
     }
     LOGI("[内存归因] ui.cover_panel_src_cache ptr=%p bytes=%lu internal=%d psram=%d",

@@ -8,6 +8,8 @@
 #include "esp_heap_caps.h"
 #include "utils/log.h"
 
+static constexpr size_t kInternalFallbackMaxBytes = 32 * 1024;
+
 /* =========================
  * 内部 builder 临时结构
  * ========================= */
@@ -150,6 +152,12 @@ static void* alloc_prefer_psram(size_t n)
 
   void* p = heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (p) return p;
+
+  if (n > kInternalFallbackMaxBytes) {
+    LOGW("[曲库构建] 大缓冲 PSRAM 分配失败，禁止回落内部RAM size=%lu",
+         (unsigned long)n);
+    return nullptr;
+  }
 
   return heap_caps_malloc(n, MALLOC_CAP_8BIT);
 }

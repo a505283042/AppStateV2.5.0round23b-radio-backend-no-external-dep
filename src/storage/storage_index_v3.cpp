@@ -68,6 +68,8 @@ static bool read_section(File32& f, IndexSectionV3& s)
 
 /* ===== 内存管理 ===== */
 
+static constexpr size_t kInternalFallbackMaxBytes = 32 * 1024;
+
 static void* psram_alloc_bytes(size_t n)
 {
   if (n == 0) return nullptr;
@@ -84,6 +86,13 @@ static void* alloc_prefer_psram(size_t n)
 {
   void* p = psram_alloc_bytes(n);
   if (p) return p;
+
+  if (n > kInternalFallbackMaxBytes) {
+    LOGW("[曲库索引] 大缓冲 PSRAM 分配失败，禁止回落内部RAM size=%lu",
+         (unsigned long)n);
+    return nullptr;
+  }
+
   return heap_alloc_bytes(n);
 }
 

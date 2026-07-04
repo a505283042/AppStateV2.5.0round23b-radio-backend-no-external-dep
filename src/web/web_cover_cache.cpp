@@ -14,6 +14,8 @@
 
 namespace {
 
+static constexpr size_t kInternalFallbackMaxBytes = 32 * 1024;
+
 struct WebCoverBmpSlot {
   bool valid = false;
   int track_idx = -1;
@@ -131,8 +133,16 @@ static bool build_bmp24_from_sprite(LGFX_Sprite& spr, uint8_t** out_buf, size_t*
   const size_t file_size = 54 + pixel_bytes;
 
   uint8_t* buf = (uint8_t*)ps_malloc(file_size);
-  if (!buf) buf = (uint8_t*)malloc(file_size);
-  if (!buf) return false;
+  if (!buf && file_size <= kInternalFallbackMaxBytes) {
+    buf = (uint8_t*)malloc(file_size);
+  }
+  if (!buf) {
+    if (file_size > kInternalFallbackMaxBytes) {
+      LOGW("[网页封面] BMP 构建缓冲 PSRAM 分配失败，禁止回落内部RAM size=%lu",
+           (unsigned long)file_size);
+    }
+    return false;
+  }
 
   LOGI("[内存归因] web_cover.bmp_build ptr=%p bytes=%lu internal=%d psram=%d",
        buf,
@@ -228,8 +238,14 @@ bool web_cover_cache_copy_bmp(int track_idx,
   }
 
   uint8_t* copy = (uint8_t*)ps_malloc(s_slots[slot].bmp_len);
-  if (!copy) copy = (uint8_t*)malloc(s_slots[slot].bmp_len);
+  if (!copy && s_slots[slot].bmp_len <= kInternalFallbackMaxBytes) {
+    copy = (uint8_t*)malloc(s_slots[slot].bmp_len);
+  }
   if (!copy) {
+    if (s_slots[slot].bmp_len > kInternalFallbackMaxBytes) {
+      LOGW("[网页封面] BMP copy PSRAM 分配失败，禁止回落内部RAM size=%lu",
+           (unsigned long)s_slots[slot].bmp_len);
+    }
     xSemaphoreGive(mu);
     return false;
   }

@@ -103,6 +103,24 @@ static inline bool detect_jpg_from_buffer(const uint8_t* b, size_t len) {
   return (len >= 2 && b[0] == 0xFF && b[1] == 0xD8);
 }
 
+static constexpr size_t kInternalFallbackMaxBytes = 32 * 1024;
+
+static void* alloc_aux_buffer(size_t size, const char* tag) {
+  if (size == 0) return nullptr;
+
+  void* p = ps_malloc(size);
+  if (p) return p;
+
+  if (size > kInternalFallbackMaxBytes) {
+    LOGW("[音频] %s PSRAM 分配失败，禁止回落内部RAM size=%u",
+         tag ? tag : "buffer",
+         (unsigned)size);
+    return nullptr;
+  }
+
+  return malloc(size);
+}
+
 static void audio_task_service_playback_slice() {
   if (s_fade_gain > 0.0f) {
     audio_loop();
@@ -184,10 +202,7 @@ static bool audio_task_fetch_lyrics_impl(const char* path, char** out_text, size
     return false;
   }
 
-  char* buf = (char*)ps_malloc(file_size + 1);
-  if (!buf) {
-    buf = (char*)malloc(file_size + 1);
-  }
+  char* buf = static_cast<char*>(alloc_aux_buffer((size_t)file_size + 1, "歌词缓冲"));
   if (!buf) {
     file.close();
     return false;
@@ -289,8 +304,7 @@ static bool audio_task_fetch_cover_impl(const AudioCmd& cmd) {
     return false;
   }
 
-  uint8_t* buf = (uint8_t*)ps_malloc(size);
-  if (!buf) buf = (uint8_t*)malloc(size);
+  uint8_t* buf = static_cast<uint8_t*>(alloc_aux_buffer(size, "封面缓冲"));
   if (!buf) {
     file.close();
     return false;
