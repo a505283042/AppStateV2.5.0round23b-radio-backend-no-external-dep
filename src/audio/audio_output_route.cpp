@@ -83,7 +83,7 @@ bool audio_output_route_enforce()
         ok = board_hw_set_amp_mute(true) && ok;
         ok = board_hw_set_amp_shutdown(true) && ok;
         ok = board_hw_set_bt_power(true) && ok;
-        LOGD("[音频输出] 路线=BluetoothTx amp muted/shutdown, bt on");
+        LOGD("[音频输出] 路线=耳机+蓝牙，功放静音并关断，蓝牙开启");
         return ok;
     }
 
@@ -92,7 +92,7 @@ bool audio_output_route_enforce()
         ok = board_hw_set_bt_power(false) && ok;
         ok = board_hw_set_amp_mute(true) && ok;
         ok = board_hw_set_amp_shutdown(true) && ok;
-        LOGD("[音频输出] 路线=HeadphoneOnly amp muted/shutdown, bt off");
+        LOGD("[音频输出] 路线=仅耳机，功放静音并关断，蓝牙关闭");
         return ok;
     }
 
@@ -100,7 +100,7 @@ bool audio_output_route_enforce()
     ok = board_hw_set_bt_power(false) && ok;
     ok = board_hw_set_amp_shutdown(false) && ok;
     ok = board_hw_set_amp_mute(false) && ok;
-    LOGD("[音频输出] 路线=Speaker bt off, amp 启用d");
+    LOGD("[音频输出] 路线=耳机+功放，蓝牙关闭，功放启用");
     return ok;
 }
 
@@ -108,7 +108,7 @@ bool audio_output_route_set_amp_mute(bool enabled)
 {
     if (!enabled && !route_allows_amp()) {
         // 非功放模式下，任何取消静音请求都被改成保持静音。
-        LOGW("[音频输出] amp unmute 被阻止: 路线=%s", audio_output_route_label());
+        LOGD("[音频输出] 功放取消静音被阻止：路线=%s", audio_output_route_label());
         return board_hw_set_amp_mute(true);
     }
 
@@ -119,7 +119,7 @@ bool audio_output_route_set_amp_shutdown(bool enabled)
 {
     if (!enabled && !route_allows_amp()) {
         // 非功放模式下，任何释放关断请求都被改成继续关断。
-        LOGW("[音频输出] amp shutdown release 被阻止: 路线=%s", audio_output_route_label());
+        LOGD("[音频输出] 功放解除关断被阻止：路线=%s", audio_output_route_label());
         bool ok = board_hw_set_amp_mute(true);
         ok = board_hw_set_amp_shutdown(true) && ok;
         return ok;

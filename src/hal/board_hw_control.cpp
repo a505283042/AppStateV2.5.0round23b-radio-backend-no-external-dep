@@ -224,7 +224,7 @@ bool board_hw_control_begin()
     board_hw_set_amp_shutdown(true);
     board_hw_solenoid_begin();
 
-    LOGI("[HWCTRL] begin ok BAT_ADC=%d BT_PWR=MCPB%d MUTE=MCPA%d SHDN=MCPA%d",
+    LOGI("[硬件控制] 初始化成功 BAT_ADC=%d 蓝牙电源=MCPB%d 功放静音=MCPA%d 功放关断=MCPA%d",
          PIN_BAT_ADC,
          board::MCP_B_BT_PWR_EN,
          board::MCP_A_MUTE_EN,
@@ -415,7 +415,7 @@ bool board_hw_set_bt_power(bool enabled)
     }
 
     s_bt_power_enabled = enabled;
-    LOGI("[HWCTRL] BT power %s level=%d", enabled ? "ON" : "OFF", level ? 1 : 0);
+    LOGI("[硬件控制] 蓝牙电源 %s 电平=%d", enabled ? "开启" : "关闭", level ? 1 : 0);
     return true;
 }
 
@@ -434,7 +434,7 @@ bool board_hw_set_bt_wakeup(bool enabled)
     }
 
     s_bt_wakeup_enabled = enabled;
-    LOGI("[HWCTRL] BT wakeup %s level=%d", enabled ? "ON" : "OFF", level ? 1 : 0);
+    LOGI("[硬件控制] 蓝牙唤醒 %s 电平=%d", enabled ? "开启" : "关闭", level ? 1 : 0);
     return true;
 }
 
@@ -453,7 +453,7 @@ bool board_hw_set_bt_switch(bool pressed)
     }
 
     s_bt_switch_level = level;
-    LOGI("[HWCTRL] BT switch pressed=%d level=%d", pressed ? 1 : 0, level ? 1 : 0);
+    LOGI("[硬件控制] 蓝牙按键 按下=%d 电平=%d", pressed ? 1 : 0, level ? 1 : 0);
     return true;
 }
 
@@ -473,7 +473,7 @@ bool board_hw_set_backlight(bool enabled)
     }
 
     s_backlight_enabled = enabled;
-    LOGI("[HWCTRL] backlight %s", enabled ? "ON" : "OFF");
+    LOGI("[硬件控制] 背光 %s", enabled ? "开启" : "关闭");
     return true;
 }
 
@@ -567,7 +567,7 @@ bool board_hw_set_amp_mute(bool enabled)
     }
 
     s_amp_mute_enabled = enabled;
-    LOGD("[HWCTRL] AMP mute %s level=%d", enabled ? "ON" : "OFF", level ? 1 : 0);
+    LOGD("[硬件控制] 功放静音 %s 电平=%d", enabled ? "开启" : "关闭", level ? 1 : 0);
     return true;
 }
 
@@ -586,7 +586,7 @@ bool board_hw_set_amp_shutdown(bool enabled)
     }
 
     s_amp_shutdown_enabled = enabled;
-    LOGI("[HWCTRL] AMP shutdown %s level=%d", enabled ? "ON" : "OFF", level ? 1 : 0);
+    LOGI("[硬件控制] 功放关断 %s 电平=%d", enabled ? "开启" : "关闭", level ? 1 : 0);
     return true;
 }
 
@@ -604,7 +604,7 @@ void board_hw_debug_dump()
     (void)mcp23017_u3_read_b_bit(board::MCP_B_PG, &pg_level);
     (void)mcp23017_u3_read_b_bit(board::MCP_B_CHG_STAT, &chg_level);
 
-    LOGD("[HWCTRL] dump bat_raw=%u adc=%lumV bat=%lumV bt=%d mute=%d shdn=%d PG=%d CHG=%d",
+    LOGD("[硬件控制] 状态 bat_raw=%u adc=%lumV 电池=%lumV 蓝牙=%d 静音=%d 关断=%d PG=%d CHG=%d",
          bat.raw,
          (unsigned long)bat.mv_adc,
          (unsigned long)bat.mv_battery,
@@ -617,7 +617,7 @@ void board_hw_debug_dump()
 
 void board_hw_power_off()
 {
-    LOGI("[HWCTRL] power off: release POWER_CTRL GPIO%d", PIN_POWER_CTRL);
+    LOGI("[硬件控制] 关机：释放 POWER_CTRL GPIO%d", PIN_POWER_CTRL);
 
     pinMode(PIN_POWER_CTRL, OUTPUT);
     digitalWrite(PIN_POWER_CTRL, LOW);

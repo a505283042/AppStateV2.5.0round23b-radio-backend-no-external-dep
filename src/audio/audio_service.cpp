@@ -368,25 +368,44 @@ static bool audio_task_fetch_cover_impl(const AudioCmd& cmd) {
   return true;
 }
 
+static void audio_task_keep_amp_safe_muted()
+{
+  (void)audio_output_route_set_amp_mute(true);
+}
+
+static void audio_task_unmute_amp_if_route_allows()
+{
+  // 出声前重新读取当前路线。切歌/HTTP/预填充期间用户可能已切换输出。
+  if (audio_output_route_is_speaker()) {
+    (void)audio_output_route_set_amp_mute(false);
+  } else {
+    (void)audio_output_route_set_amp_mute(true);
+  }
+}
+
 static void audio_task_prepare_amp_after_i2s_ready()
 {
-  // I2S 已初始化后，再让功放退出关断。
-  // 关键点：退出关断时仍保持静音，避免 SHDN 跳变打到喇叭。
-  (void)audio_output_route_set_amp_mute(true);
+  // I2S 已初始化后，先把功放放到安全状态。
+  // 非功放路线下不释放 SHDN，避免“仅耳机/蓝牙”模式被音频任务重新打开功放。
+  audio_task_keep_amp_safe_muted();
   audio_i2s_zero_dma_buffer();
 
   vTaskDelay(pdMS_TO_TICKS(20));
 
-  (void)audio_output_route_set_amp_shutdown(false);
+  if (audio_output_route_is_speaker()) {
+    (void)audio_output_route_set_amp_shutdown(false);
 
-  // 给 PAM8406 / 输出电容 / 模拟链路一点稳定时间。
-  vTaskDelay(pdMS_TO_TICKS(150));
+    // 给 PAM8406 / 输出电容 / 模拟链路一点稳定时间。
+    vTaskDelay(pdMS_TO_TICKS(150));
 
-  // 注意：这里不要取消静音。
-  // 真正开始播放且首批 PCM 推进后，再取消静音。
-  (void)audio_output_route_set_amp_mute(true);
-
-  LOGD("[音频] 功放已准备：解除关断并保持静音");
+    // 注意：这里不要取消静音。
+    // 真正开始播放且首批 PCM 推进后，再取消静音。
+    audio_task_keep_amp_safe_muted();
+    LOGD("[音频] 功放已准备：解除关断并保持静音");
+  } else {
+    (void)audio_output_route_set_amp_shutdown(true);
+    LOGD("[音频] 功放保持关闭：路线=%s", audio_output_route_label());
+  }
 }
 
 static void audio_task_entry(void*){
@@ -412,7 +431,7 @@ static void audio_task_entry(void*){
 
         // 停止后只静音，不关断功放。
         // 关断功放留到整机关机时再做，避免下一次播放 SHDN 跳变产生 pop。
-        (void)audio_output_route_set_amp_mute(true);
+        audio_task_keep_amp_safe_muted();
 
         const uint32_t t_done = millis();
         LOGD("[音频] 服务命令“停止”耗时=%lums", (unsigned long)(t_done - t_cmd));
@@ -420,7 +439,7 @@ static void audio_task_entry(void*){
         const uint32_t t_cmd = millis();
 
         // 播放前先保持功放静音，避免切歌/开机瞬态打到喇叭。
-        (void)audio_output_route_set_amp_mute(true);
+        audio_task_keep_amp_safe_muted();
 
         if (audio_is_playing() || s_playing_cache || s_fade_gain > 0.0f) {
           audio_task_soft_stop_impl(true);
@@ -432,7 +451,7 @@ static void audio_task_entry(void*){
           audio_i2s_zero_dma_buffer();
         }
 
-        (void)audio_output_route_set_amp_mute(true);
+        audio_task_keep_amp_safe_muted();
 
         bool ok = false;
         if (cmd.type == CMD_PLAY_STREAM_MP3) {
@@ -469,9 +488,9 @@ static void audio_task_entry(void*){
           s_fade_gain = PLAY_START_GAIN;
           s_last_fade_gain = PLAY_START_GAIN;
 
-          (void)audio_output_route_set_amp_mute(false);
+          audio_task_unmute_amp_if_route_allows();
         } else {
-          (void)audio_output_route_set_amp_mute(true);
+          audio_task_keep_amp_safe_muted();
           s_fade_gain = 0.0f;
           s_last_fade_gain = 0.0f;
         }
@@ -781,8 +800,8 @@ void audio_service_pause() {
     // 注意：不再立即调用 zero_dma_buffer，因为我们要留时间做淡出
 }
 void audio_service_resume() {
-    // 恢复播放时只取消静音，不动 SHDN。
-    (void)audio_output_route_set_amp_mute(false);
+    // 恢复播放时只在功放路线取消静音；仅耳机/蓝牙路线继续保持功放静音。
+    audio_task_unmute_amp_if_route_allows();
     s_paused = false;
 }
 bool audio_service_is_paused() { return s_paused; }
