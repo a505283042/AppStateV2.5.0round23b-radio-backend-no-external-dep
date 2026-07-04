@@ -30,6 +30,7 @@ constexpr const char* kNetMusicListName = "net_music.txt";
 constexpr const char* kNetMusicMemoryPath = "memory:http/net_music.txt";
 constexpr const char* kNetMusicBasePath = "/System/net_music_base.txt";
 constexpr uint32_t kMaxNetMusicLineLen = 768;
+constexpr uint32_t kNetMusicMaxItems = UINT16_MAX;
 constexpr uint32_t kHttpChunkSize = 256;
 constexpr uint32_t kHttpIdleTimeoutMs = 8000;
 
@@ -139,6 +140,30 @@ static bool reserve_remote_list_capacity(uint32_t required_len) {
   s_list_buf = static_cast<char*>(p);
   s_list_cap = new_cap;
   return true;
+}
+
+static void shrink_remote_list_capacity_to_len(uint32_t len) {
+  if (!s_list_buf) {
+    return;
+  }
+
+  const uint32_t required_cap = len + 1;
+  if (required_cap >= s_list_cap) {
+    return;
+  }
+
+  void* p = heap_caps_realloc(s_list_buf,
+                              required_cap,
+                              MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!p) {
+    p = heap_caps_realloc(s_list_buf, required_cap, MALLOC_CAP_8BIT);
+  }
+
+  if (p) {
+    s_list_buf = static_cast<char*>(p);
+    s_list_cap = required_cap;
+    s_list_buf[s_list_len] = '\0';
+  }
 }
 
 static bool append_remote_list_bytes(const uint8_t* data, uint32_t len) {
@@ -481,6 +506,8 @@ bool net_music_catalog_load() {
   }
 
   uint32_t valid_count = 0;
+  uint32_t skipped_count = 0;
+  uint32_t truncate_len = s_list_len;
   uint32_t pos = 0;
 
   while (pos < s_list_len) {
@@ -490,22 +517,43 @@ bool net_music_catalog_load() {
       ++pos;
     }
 
+    bool kept_line = false;
     String line;
     if (copy_line_from_memory(line_start, line)) {
       NetMusicItem probe{};
       if (parse_line(line, &probe)) {
-        if (!append_remote_offset(line_start)) {
-          s_loaded = false;
-          free_remote_offsets();
-          free_remote_list_buffer();
-          return false;
+        if (valid_count < kNetMusicMaxItems) {
+          if (!append_remote_offset(line_start)) {
+            s_loaded = false;
+            free_remote_offsets();
+            free_remote_list_buffer();
+            return false;
+          }
+          ++valid_count;
+          kept_line = true;
+        } else {
+          ++skipped_count;
         }
-        ++valid_count;
       }
     }
 
     if (pos < s_list_len && s_list_buf[pos] == '\n') {
       ++pos;
+    }
+
+    if (kept_line) {
+      truncate_len = pos;
+    }
+  }
+
+  if (skipped_count > 0) {
+    LOGW("[网络音乐] 有效条目超过上限: 保留=%lu 跳过=%lu",
+         (unsigned long)valid_count,
+         (unsigned long)skipped_count);
+    if (truncate_len < s_list_len) {
+      s_list_len = truncate_len;
+      s_list_buf[s_list_len] = '\0';
+      shrink_remote_list_capacity_to_len(s_list_len);
     }
   }
 

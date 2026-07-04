@@ -1,6 +1,7 @@
 #include "player_control.h"
 #include <vector>
 #include <esp_system.h>
+#include <esp_heap_caps.h>
 
 #include "audio/audio.h"
 #include "audio/audio_service.h"
@@ -23,6 +24,16 @@
 namespace {
 
 PlayerControlHooks s_hooks{};
+
+static void log_ptr_region_control(const char* label, const void* ptr, size_t bytes)
+{
+    LOGI("[内存归因] %s ptr=%p bytes=%lu internal=%d psram=%d",
+         label,
+         ptr,
+         (unsigned long)bytes,
+         ptr ? (esp_ptr_internal(ptr) ? 1 : 0) : 0,
+         ptr ? (esp_ptr_external_ram(ptr) ? 1 : 0) : 0);
+}
 
 bool s_user_paused = false;
 bool s_manual_stop_latched = false;
@@ -304,6 +315,10 @@ static void control_reset_net_track_shuffle(int start_idx)
     s_net_track_shuffle.pos = 0;
     s_net_track_shuffle.count = count;
     s_net_track_shuffle.ready = true;
+
+    log_ptr_region_control("net_shuffle.order",
+                           s_net_track_shuffle.order.empty() ? nullptr : s_net_track_shuffle.order.data(),
+                           s_net_track_shuffle.order.capacity() * sizeof(uint16_t));
 
     LOGD("[网络歌曲] shuffle re设置 method=fisher 启动=%d 数量=%lu",
          start_idx,

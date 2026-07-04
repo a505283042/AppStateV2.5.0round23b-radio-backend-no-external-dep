@@ -22,6 +22,16 @@ int s_original_group_pos = -1;
 play_mode_t s_last_play_mode = PLAY_MODE_ALL_SEQ;
 int s_last_group_idx = -1;
 
+static void log_ptr_region_playlist(const char* label, const void* ptr, size_t bytes)
+{
+    LOGI("[内存归因] %s ptr=%p bytes=%lu internal=%d psram=%d",
+         label,
+         ptr,
+         (unsigned long)bytes,
+         ptr ? (esp_ptr_internal(ptr) ? 1 : 0) : 0,
+         ptr ? (esp_ptr_external_ram(ptr) ? 1 : 0) : 0);
+}
+
 std::mt19937 g_rng(0x13572468u);
 bool s_rng_seeded = false;
 
@@ -195,6 +205,11 @@ void rebuild_group_cache_if_needed()
     LOGD("[播放器][缓存] 分组缓存：歌曲=%u 字节=%u（PSRAM）",
          (unsigned)n,
          (unsigned)(n * 4 * sizeof(CompactIndex)));
+
+    log_ptr_region_playlist("playlist.artist_group_index", s_artist_group_index_by_track, n * sizeof(CompactIndex));
+    log_ptr_region_playlist("playlist.artist_group_pos", s_artist_group_pos_by_track, n * sizeof(CompactIndex));
+    log_ptr_region_playlist("playlist.album_group_index", s_album_group_index_by_track, n * sizeof(CompactIndex));
+    log_ptr_region_playlist("playlist.album_group_pos", s_album_group_pos_by_track, n * sizeof(CompactIndex));
 }
 
 void rebuild_playlist_pos_cache()
@@ -222,6 +237,8 @@ void rebuild_playlist_pos_cache()
     LOGD("[播放器][缓存] 播放列表位置：歌曲=%u 字节=%u（PSRAM）",
          (unsigned)n,
          (unsigned)(n * sizeof(CompactIndex)));
+
+    log_ptr_region_playlist("playlist.pos_by_track", s_playlist_pos_by_track, n * sizeof(CompactIndex));
 }
 
 void shuffle_playlist_keep_current_front(std::vector<uint16_t>& playlist, int current_track)
@@ -337,6 +354,10 @@ void update_playlist_cache_for_track(int current_track_idx)
             !s_current_playlist.empty() && s_current_playlist_pos < 0) {
             s_current_playlist_pos = 0;
         }
+
+        log_ptr_region_playlist("playlist.current",
+                                s_current_playlist.empty() ? nullptr : s_current_playlist.data(),
+                                s_current_playlist.capacity() * sizeof(uint16_t));
 
         s_last_play_mode = g_play_mode;
         s_last_group_idx = s_current_group_idx;

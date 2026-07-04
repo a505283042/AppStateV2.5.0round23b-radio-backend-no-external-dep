@@ -7,6 +7,8 @@
 #include "storage/storage_scan_v3.h"
 #include "utils/log.h"
 
+#include <esp_heap_caps.h>
+
 static MusicCatalogV3 s_catalog_v3;
 static bool s_v3_ready = false;
 static uint32_t s_catalog_generation_seq = 0;
@@ -151,6 +153,54 @@ bool storage_catalog_v3_get_trackinfo(uint32_t track_index,
   return storage_fill_trackinfo_from_v3(s_catalog_v3, track_index, out, music_root);
 }
 
+static void log_ptr_region_v3(const char* label, const void* ptr, size_t bytes)
+{
+  LOGI("[内存归因] %s ptr=%p bytes=%lu internal=%d psram=%d",
+       label,
+       ptr,
+       (unsigned long)bytes,
+       ptr ? (esp_ptr_internal(ptr) ? 1 : 0) : 0,
+       ptr ? (esp_ptr_external_ram(ptr) ? 1 : 0) : 0);
+}
+
+static void log_group_vector_regions_v3(const char* label, const std::vector<PlaylistGroup>& groups)
+{
+  size_t idx_bytes = 0;
+  size_t cap_bytes = 0;
+  uint32_t internal_count = 0;
+  uint32_t psram_count = 0;
+  uint32_t unknown_count = 0;
+
+  for (const auto& g : groups) {
+    idx_bytes += g.track_indices.size() * sizeof(TrackIndex16);
+    cap_bytes += g.track_indices.capacity() * sizeof(TrackIndex16);
+    const void* p = g.track_indices.empty() ? nullptr : g.track_indices.data();
+    if (!p) {
+      continue;
+    }
+    if (esp_ptr_internal(p)) {
+      ++internal_count;
+    } else if (esp_ptr_external_ram(p)) {
+      ++psram_count;
+    } else {
+      ++unknown_count;
+    }
+  }
+
+  LOGI("[内存归因] %s groups=%u vector_array_ptr=%p vector_array_bytes=%lu internal=%d psram=%d idx_bytes=%lu cap_bytes=%lu idx_vectors_internal=%lu idx_vectors_psram=%lu idx_vectors_unknown=%lu",
+       label,
+       (unsigned)groups.size(),
+       groups.empty() ? nullptr : groups.data(),
+       (unsigned long)(groups.capacity() * sizeof(PlaylistGroup)),
+       (!groups.empty() && esp_ptr_internal(groups.data())) ? 1 : 0,
+       (!groups.empty() && esp_ptr_external_ram(groups.data())) ? 1 : 0,
+       (unsigned long)idx_bytes,
+       (unsigned long)cap_bytes,
+       (unsigned long)internal_count,
+       (unsigned long)psram_count,
+       (unsigned long)unknown_count);
+}
+
 void storage_catalog_v3_log_memory_stats(void)
 {
   if (!storage_catalog_v3_ready()) {
@@ -175,6 +225,13 @@ void storage_catalog_v3_log_memory_stats(void)
 
   size_t total_core = track_bytes + album_bytes + artist_bytes + pool_bytes;
   size_t total_with_groups = total_core + groups_artist_idx_bytes + groups_album_idx_bytes;
+
+  log_ptr_region_v3("catalog.pool", s_catalog_v3.pool.data, pool_bytes);
+  log_ptr_region_v3("catalog.tracks", s_catalog_v3.tracks, track_bytes);
+  log_ptr_region_v3("catalog.albums", s_catalog_v3.albums, album_bytes);
+  log_ptr_region_v3("catalog.artists", s_catalog_v3.artists, artist_bytes);
+  log_group_vector_regions_v3("catalog.artist_groups", s_catalog_v3.artist_groups);
+  log_group_vector_regions_v3("catalog.album_groups", s_catalog_v3.album_groups);
 
   LOGD("[曲库][内存] 大小of(TrackRowV3)=%u 大小of(AlbumRowV3)=%u 大小of(ArtistRowV3)=%u",
        (unsigned)sizeof(TrackRowV3),
