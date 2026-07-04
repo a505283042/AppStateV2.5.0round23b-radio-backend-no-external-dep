@@ -4,6 +4,7 @@
 #include "audio/audio_file.h"
 #include "board/board_pins.h"
 #include "utils/log.h"
+#include <esp_heap_caps.h>
 
 #define DR_FLAC_IMPLEMENTATION
 #include "../../lib/dr_libs/dr_flac.h"
@@ -20,16 +21,47 @@ static int s_last_sr = 0; // 上次设置的采样率（文件级 static，便�
 
 // FLAC 每次解码 1024 frames，44.1k 下约 23ms。
 static constexpr uint32_t FLAC_BUFFER_FRAMES = 1024;
-static int16_t s_decode_pcm[FLAC_BUFFER_FRAMES * 2 + 64]; // stereo buffer + 安全边距
+static constexpr uint32_t FLAC_PCM_SAMPLES_PER_CHUNK = FLAC_BUFFER_FRAMES * 2 + 64;
+static int16_t s_decode_pcm[FLAC_PCM_SAMPLES_PER_CHUNK]; // stereo buffer + 安全边距
 
 // 开播前软件 PCM 缓冲：只预解码，不写 I2S。
 // 之前直接预填 I2S DMA 时，I2S 硬件会在功放静音期间把开头音频播放掉，
 // 所以无法形成“开声后的缓冲余量”。这里改为先把 PCM 放在 RAM，开声后再快速写入 I2S。
 static constexpr uint8_t FLAC_PRIME_CHUNKS = 8;
-static int16_t s_prime_pcm[FLAC_PRIME_CHUNKS][FLAC_BUFFER_FRAMES * 2 + 64];
+static int16_t* s_prime_pcm = nullptr;
 static uint16_t s_prime_frames[FLAC_PRIME_CHUNKS] = {0};
 static uint8_t s_prime_head = 0;
 static uint8_t s_prime_count = 0;
+
+static size_t prime_buffer_bytes()
+{
+  return (size_t)FLAC_PRIME_CHUNKS * FLAC_PCM_SAMPLES_PER_CHUNK * sizeof(int16_t);
+}
+
+static int16_t* prime_chunk_ptr(uint8_t idx)
+{
+  if (!s_prime_pcm || idx >= FLAC_PRIME_CHUNKS) return nullptr;
+  return s_prime_pcm + ((size_t)idx * FLAC_PCM_SAMPLES_PER_CHUNK);
+}
+
+static bool ensure_prime_buffer()
+{
+  if (s_prime_pcm) return true;
+
+  const size_t bytes = prime_buffer_bytes();
+  void* p = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!p) {
+    LOGW("[FLAC] 启动软件预填充 PSRAM 分配失败，跳过预填充 size=%lu",
+         (unsigned long)bytes);
+    return false;
+  }
+
+  s_prime_pcm = static_cast<int16_t*>(p);
+  LOGD("[FLAC] 启动软件预填充缓冲 已分配=%lu 字节 PSRAM=%d",
+       (unsigned long)bytes,
+       esp_ptr_external_ram(s_prime_pcm) ? 1 : 0);
+  return true;
+}
 
 static void clear_prime_buffer()
 {
@@ -176,6 +208,11 @@ uint32_t audio_flac_prime_pcm_ms(uint32_t target_ms, uint32_t max_chunks)
     s_last_sr = g_sr;
   }
 
+  if (!ensure_prime_buffer()) {
+    clear_prime_buffer();
+    return 0;
+  }
+
   clear_prime_buffer();
 
   const uint32_t t0 = millis();
@@ -188,8 +225,14 @@ uint32_t audio_flac_prime_pcm_ms(uint32_t target_ms, uint32_t max_chunks)
     if (now_ms >= target_ms) break;
 
     const uint32_t idx = (s_prime_head + s_prime_count) % FLAC_PRIME_CHUNKS;
+    int16_t* chunk_pcm = prime_chunk_ptr((uint8_t)idx);
+    if (!chunk_pcm) {
+      LOGW("[FLAC] 启动软件预填充缓冲无效 idx=%u", (unsigned)idx);
+      break;
+    }
+
     const uint32_t td0 = millis();
-    const uint32_t frames = decode_one_chunk_to(s_prime_pcm[idx]);
+    const uint32_t frames = decode_one_chunk_to(chunk_pcm);
     const uint32_t decode_ms = millis() - td0;
     if (decode_ms > max_decode_ms) max_decode_ms = decode_ms;
 
@@ -244,7 +287,14 @@ bool audio_flac_loop()
     s_prime_head = (s_prime_head + 1) % FLAC_PRIME_CHUNKS;
     --s_prime_count;
 
-    s_pending_pcm = s_prime_pcm[idx];
+    s_pending_pcm = prime_chunk_ptr(idx);
+    if (!s_pending_pcm) {
+      s_pending_off = 0;
+      s_pending_frames = 0;
+      s_prime_frames[idx] = 0;
+      clear_prime_buffer();
+      return true;
+    }
     s_pending_off = 0;
     s_pending_frames = s_prime_frames[idx];
     s_prime_frames[idx] = 0;
