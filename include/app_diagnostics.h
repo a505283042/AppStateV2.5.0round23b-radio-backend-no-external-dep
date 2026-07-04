@@ -1,0 +1,13 @@
+#pragma once
+
+#ifndef APP_DIAG_RAM_ATTRIBUTION
+#define APP_DIAG_RAM_ATTRIBUTION 1
+#endif
+
+#ifndef APP_DIAG_AUDIO_RUNTIME
+#define APP_DIAG_AUDIO_RUNTIME 1
+#endif
+
+#ifndef APP_DIAG_UI_RUNTIME
+#define APP_DIAG_UI_RUNTIME 1
+#endif

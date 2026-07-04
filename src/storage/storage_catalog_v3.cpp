@@ -6,6 +6,7 @@
 #include "storage/storage_groups_v3.h"
 #include "storage/storage_scan_v3.h"
 #include "utils/log.h"
+#include "app_diagnostics.h"
 
 #include <esp_heap_caps.h>
 
@@ -168,6 +169,7 @@ bool storage_catalog_v3_get_trackinfo(uint32_t track_index,
   return storage_fill_trackinfo_from_v3(s_catalog_v3, track_index, out, music_root);
 }
 
+#if APP_DIAG_RAM_ATTRIBUTION
 static void log_ptr_region_v3(const char* label, const void* ptr, size_t bytes)
 {
   LOGI("[内存归因] %s ptr=%p bytes=%lu internal=%d psram=%d",
@@ -291,6 +293,12 @@ void storage_catalog_v3_log_memory_stats(void)
 
   LOGD("[曲库][内存] note: 分组 对象/String 额外开销未完全计入");
 }
+
+#else
+void storage_catalog_v3_log_memory_stats(void)
+{
+}
+#endif
 
 bool storage_catalog_v3_rebuild(const char* music_root,
                                 const char* v3_index_path)

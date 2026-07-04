@@ -14,6 +14,7 @@
 #include "audio/audio_mp3_source_file.h"
 #include "audio/audio_mp3_source_audiotools.h"
 #include "utils/log.h"
+#include "app_diagnostics.h"
 
 #define MINIMP3_IMPLEMENTATION
 #include "../../lib/minimp3/minimp3.h"
@@ -178,6 +179,7 @@ static bool fill_input_buffer(size_t min_fill_target, uint32_t wait_timeout_ms =
     if (n == AUDIO_MP3_SOURCE_WOULD_BLOCK) {
       const uint32_t now_ms = millis();
       if (g_source_is_stream) {
+#if APP_DIAG_AUDIO_RUNTIME
         ++s_diag_wait_events;
         if ((size_t)g_inbuf_filled < kMp3StreamRefillWaitLowBytes &&
             diag_log_due(s_diag_last_wait_log_ms, now_ms)) {
@@ -188,6 +190,7 @@ static bool fill_input_buffer(size_t min_fill_target, uint32_t wait_timeout_ms =
                (unsigned)g_inbuf_capacity,
                (unsigned long)(now_ms - start_ms));
         }
+#endif
       }
       if (wait_timeout_ms > 0 && (now_ms - start_ms) < wait_timeout_ms) {
         waited = true;
@@ -364,6 +367,7 @@ bool audio_mp3_loop()
 
   if (g_source_is_stream) {
     const uint32_t now_ms = millis();
+#if APP_DIAG_AUDIO_RUNTIME
     if (s_diag_last_loop_ms != 0) {
       const uint32_t gap_ms = now_ms - s_diag_last_loop_ms;
       if (gap_ms >= kMp3DiagLoopGapMs) {
@@ -378,6 +382,7 @@ bool audio_mp3_loop()
         }
       }
     }
+#endif
     s_diag_last_loop_ms = now_ms;
   }
 
@@ -401,6 +406,7 @@ bool audio_mp3_loop()
       audio_mp3_stop();
       return false;
     }
+    #if APP_DIAG_AUDIO_RUNTIME
     if (g_source_is_stream && !g_source_eof && (size_t)g_inbuf_filled < refill_low) {
       ++s_diag_low_events;
       const uint32_t now_ms = millis();
@@ -415,6 +421,7 @@ bool audio_mp3_loop()
              (unsigned)g_inbuf_capacity);
       }
     }
+#endif
     if (g_inbuf_filled == 0) {
       if (g_source_eof) {
         audio_mp3_stop();
@@ -446,6 +453,7 @@ bool audio_mp3_loop()
       if (sync_pos > 0) {
         memmove(g_inbuf, g_inbuf + sync_pos, g_inbuf_filled - sync_pos);
         g_inbuf_filled -= sync_pos;
+#if APP_DIAG_AUDIO_RUNTIME
         if (g_source_is_stream) {
           ++s_diag_resync_events;
           const uint32_t now_ms = millis();
@@ -456,6 +464,7 @@ bool audio_mp3_loop()
                  g_inbuf_filled);
           }
         }
+#endif
         LOGD("[MP3] 已重新同步到位置 %d", sync_pos);
       } else {
         int keep = 1;

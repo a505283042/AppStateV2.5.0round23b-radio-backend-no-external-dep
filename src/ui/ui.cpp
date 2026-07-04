@@ -6,6 +6,7 @@
 #include "ui/ui_quick_menu_view.h"
 #include "menu/quick_menu.h"
 #include "utils/log.h"
+#include "app_diagnostics.h"
 #include "web/web_settings.h"
 #undef LOG_TAG
 #define LOG_TAG "UI"
@@ -311,6 +312,7 @@ static void ui_task_entry(void*)
         ui_draw_quick_menu();
         ui_draw_unlock();
         const uint32_t draw_ms = millis() - draw_t0;
+#if APP_DIAG_UI_RUNTIME
         if (audio_mp3_is_active() && audio_mp3_is_stream_source() && draw_ms >= kUiDiagQuickMenuDrawMs) {
           const uint32_t log_now = millis();
           if (s_ui_diag_last_quick_menu_log_ms == 0 ||
@@ -319,6 +321,7 @@ static void ui_task_entry(void*)
             LOGI("[界面诊断] 快捷菜单绘制耗时=%lums", (unsigned long)draw_ms);
           }
         }
+#endif
       }
       continue;
     }

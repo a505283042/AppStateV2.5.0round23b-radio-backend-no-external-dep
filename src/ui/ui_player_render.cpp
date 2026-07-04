@@ -20,6 +20,7 @@
 #include "player_state.h"
 #include "hal/board_hw_control.h"
 #include "utils/log.h"
+#include "app_diagnostics.h"
 #include "web/web_settings.h"
 
 #undef LOG_TAG
@@ -1045,11 +1046,13 @@ static bool cover_panel_ensure_source_cache(LGFX_Sprite* src)
            (unsigned long)bytes);
       return false;
     }
+#if APP_DIAG_RAM_ATTRIBUTION
     LOGI("[内存归因] ui.cover_panel_src_cache ptr=%p bytes=%lu internal=%d psram=%d",
          s_cover_panel_src_cache,
          (unsigned long)bytes,
          esp_ptr_internal(s_cover_panel_src_cache) ? 1 : 0,
          esp_ptr_external_ram(s_cover_panel_src_cache) ? 1 : 0);
+#endif
   }
 
   for (int y = 0; y < COVER_SIZE; ++y) {

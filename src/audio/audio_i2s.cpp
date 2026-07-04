@@ -3,6 +3,7 @@
 #include "driver/i2s.h"
 #include <freertos/FreeRTOS.h>
 #include "utils/log.h"
+#include "app_diagnostics.h"
 #include "audio/audio_service.h"
 #include <string.h>
 #include "audio/audio.h"
@@ -146,6 +147,7 @@ size_t audio_i2s_write_frames(const int16_t* stereo_samples, size_t frames)
                                   pdMS_TO_TICKS(100));
         const uint32_t write_ms = millis() - write_t0;
 
+        #if APP_DIAG_AUDIO_RUNTIME
         if ((write_ms >= kI2sDiagSlowWriteMs || chunk_written < chunk_bytes) &&
             (s_i2s_diag_last_log_ms == 0 || millis() - s_i2s_diag_last_log_ms >= kI2sDiagLogIntervalMs)) {
             ++s_i2s_diag_slow_events;
@@ -158,6 +160,9 @@ size_t audio_i2s_write_frames(const int16_t* stereo_samples, size_t frames)
                  (unsigned)frames,
                  (unsigned)g);
         }
+#else
+        (void)write_ms;
+#endif
 
         if (err != ESP_OK) {
             LOGE("[I2S] 写入失败: %d", err);

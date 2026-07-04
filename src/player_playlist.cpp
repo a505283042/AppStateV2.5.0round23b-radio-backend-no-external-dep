@@ -10,6 +10,7 @@
 #include "storage/storage_catalog_v3.h"
 #include "storage/storage_groups_v3.h"
 #include "utils/log.h"
+#include "app_diagnostics.h"
 
 namespace {
 
@@ -26,12 +27,18 @@ int s_last_group_idx = -1;
 
 static void log_ptr_region_playlist(const char* label, const void* ptr, size_t bytes)
 {
+#if APP_DIAG_RAM_ATTRIBUTION
     LOGI("[内存归因] %s ptr=%p bytes=%lu internal=%d psram=%d",
          label,
          ptr,
          (unsigned long)bytes,
          ptr ? (esp_ptr_internal(ptr) ? 1 : 0) : 0,
          ptr ? (esp_ptr_external_ram(ptr) ? 1 : 0) : 0);
+#else
+    (void)label;
+    (void)ptr;
+    (void)bytes;
+#endif
 }
 
 

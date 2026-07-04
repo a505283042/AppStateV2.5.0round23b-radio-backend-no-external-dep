@@ -8,6 +8,7 @@
 #include <stdlib.h>
 
 #include "utils/log.h"
+#include "app_diagnostics.h"
 
 #undef LOG_TAG
 #define LOG_TAG "WEBCOVER"
@@ -144,11 +145,13 @@ static bool build_bmp24_from_sprite(LGFX_Sprite& spr, uint8_t** out_buf, size_t*
     return false;
   }
 
+  #if APP_DIAG_RAM_ATTRIBUTION
   LOGI("[内存归因] web_cover.bmp_build ptr=%p bytes=%lu internal=%d psram=%d",
        buf,
        (unsigned long)file_size,
        esp_ptr_internal(buf) ? 1 : 0,
        esp_ptr_external_ram(buf) ? 1 : 0);
+#endif
 
   memset(buf, 0, file_size);
 
@@ -250,11 +253,13 @@ bool web_cover_cache_copy_bmp(int track_idx,
     return false;
   }
 
+  #if APP_DIAG_RAM_ATTRIBUTION
   LOGI("[内存归因] web_cover.bmp_copy ptr=%p bytes=%lu internal=%d psram=%d",
        copy,
        (unsigned long)s_slots[slot].bmp_len,
        esp_ptr_internal(copy) ? 1 : 0,
        esp_ptr_external_ram(copy) ? 1 : 0);
+#endif
 
   memcpy(copy, s_slots[slot].bmp, s_slots[slot].bmp_len);
   *out_buf = copy;
