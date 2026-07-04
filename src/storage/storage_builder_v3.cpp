@@ -186,6 +186,13 @@ bool storage_build_catalog_v3_from_temp(const std::vector<TrackBuildTempV3>& tra
 
   std::vector<TrackBuildTempV3> sorted_tracks = tracks;
   std::stable_sort(sorted_tracks.begin(), sorted_tracks.end(), track_build_temp_less_v3);
+  if (sorted_tracks.size() > UINT16_MAX) {
+    LOGW("[曲库构建] 歌曲数量超过 TrackIndex16 上限: 总数=%lu 保留=%u 跳过=%lu",
+         (unsigned long)sorted_tracks.size(),
+         (unsigned)UINT16_MAX,
+         (unsigned long)(sorted_tracks.size() - UINT16_MAX));
+    sorted_tracks.resize(UINT16_MAX);
+  }
 
   StringPoolBuilder pool_builder;
 
@@ -199,7 +206,7 @@ bool storage_build_catalog_v3_from_temp(const std::vector<TrackBuildTempV3>& tra
 
   /* track rows */
   std::vector<TrackRowV3> track_rows;
-  track_rows.reserve(tracks.size());
+  track_rows.reserve(sorted_tracks.size());
 
   for (const auto& t : sorted_tracks) {
     TrackRowV3 row{};
