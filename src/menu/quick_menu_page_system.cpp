@@ -9,7 +9,9 @@
 
 #include "audio/audio_service.h"
 #include "hal/board_hw_control.h"
+#include "hal/bq27441.h"
 #include "hal/mcp23017_u3.h"
+#include "hal/pcf85063.h"
 #include "ui/ui.h"
 
 namespace {
@@ -39,6 +41,88 @@ const char* value_mcp23017_status()
 const char* value_i2c_status()
 {
     return mcp23017_u3_is_ready() ? "OK" : "ERR";
+}
+
+const char* value_bq27441_status()
+{
+    return bq27441_is_ready() ? "OK" : "ERR";
+}
+
+const char* value_pcf85063_status()
+{
+    return pcf85063_is_ready() ? pcf85063_status_label() : "ERR";
+}
+
+static constexpr uint32_t RTC_MENU_CACHE_MS = 1000;
+static Pcf85063Status s_rtc_cache{};
+static bool s_rtc_cache_ok = false;
+static uint32_t s_rtc_cache_ms = 0;
+
+static void update_rtc_menu_cache()
+{
+    const uint32_t now = millis();
+    if (s_rtc_cache_ms != 0 && now - s_rtc_cache_ms < RTC_MENU_CACHE_MS) {
+        return;
+    }
+    s_rtc_cache_ok = pcf85063_read_status(&s_rtc_cache);
+    s_rtc_cache_ms = now;
+}
+
+static const Pcf85063Status& rtc_menu_status()
+{
+    update_rtc_menu_cache();
+    return s_rtc_cache;
+}
+
+const char* value_rtc_time()
+{
+    const Pcf85063Status& st = rtc_menu_status();
+    if (!s_rtc_cache_ok || !st.time_valid) {
+        if (st.oscillator_stopped) return "未设置";
+        return "未知";
+    }
+    return pcf85063_datetime_to_text(st.time);
+}
+
+const char* value_rtc_alarm()
+{
+    const Pcf85063Status& st = rtc_menu_status();
+    if (!s_rtc_cache_ok) return "未知";
+    if (st.alarm_pending) return "已触发";
+    if (st.alarm_enabled) return "已启用";
+    return "关闭";
+}
+
+const char* value_rtc_int_level()
+{
+    const Pcf85063Status& st = rtc_menu_status();
+    if (!s_rtc_cache_ok || !st.rtc_int_level_known) return "未接";
+    return st.rtc_int_level ? "高" : "低";
+}
+
+const char* value_rtc_boot_alarm()
+{
+    return pcf85063_boot_alarm_was_pending() ? "是" : "否";
+}
+
+const char* value_rtc_control2()
+{
+    static char buf[16];
+    const Pcf85063Status& st = rtc_menu_status();
+    if (!s_rtc_cache_ok) return "未知";
+    snprintf(buf, sizeof(buf), "0x%02X", static_cast<unsigned>(st.control2));
+    return buf;
+}
+
+const char* value_rtc_flags_text()
+{
+    const Pcf85063Status& st = rtc_menu_status();
+    if (!s_rtc_cache_ok) return "未知";
+    if (st.oscillator_stopped) return "晶振停止";
+    if (st.alarm_pending) return "闹钟触发";
+    if (st.timer_pending) return "定时器触发";
+    if (st.time_valid) return "正常";
+    return "待校时";
 }
 
 const char* value_heap_free()
@@ -155,22 +239,9 @@ const char* value_stack_rescan()
     return stack_free_label(xTaskGetHandle("rescan_v3"));
 }
 
-uint8_t battery_percent_from_mv(uint32_t mv)
-{
-    // 单节锂电粗略估算。不是库仑计，只用于菜单显示。
-    if (mv >= 4200) return 100;
-    if (mv >= 4000) return 80 + static_cast<uint8_t>((mv - 4000) * 20 / 200);
-    if (mv >= 3800) return 55 + static_cast<uint8_t>((mv - 3800) * 25 / 200);
-    if (mv >= 3700) return 40 + static_cast<uint8_t>((mv - 3700) * 15 / 100);
-    if (mv >= 3600) return 25 + static_cast<uint8_t>((mv - 3600) * 15 / 100);
-    if (mv >= 3500) return 12 + static_cast<uint8_t>((mv - 3500) * 13 / 100);
-    if (mv >= 3300) return static_cast<uint8_t>((mv - 3300) * 12 / 200);
-    return 0;
-}
-
 static constexpr uint32_t BATTERY_MENU_CACHE_MS = 800;
 
-static BatterySample s_battery_cache{};
+static BatteryUiStatus s_battery_cache{};
 static ChargerStatus s_charger_cache{};
 static uint32_t s_battery_cache_ms = 0;
 
@@ -183,12 +254,13 @@ static void update_battery_menu_cache()
         return;
     }
 
-    s_battery_cache = board_hw_read_battery();
+    board_hw_battery_status_tick();
+    s_battery_cache = board_hw_get_battery_status_cached();
     s_charger_cache = board_hw_read_charger_status();
     s_battery_cache_ms = now;
 }
 
-static const BatterySample& battery_menu_sample()
+static const BatteryUiStatus& battery_menu_sample()
 {
     update_battery_menu_cache();
     return s_battery_cache;
@@ -204,8 +276,8 @@ const char* value_battery_voltage()
 {
     static char buf[24];
 
-    const BatterySample& bat = battery_menu_sample();
-    if (bat.mv_battery == 0) {
+    const BatteryUiStatus& bat = battery_menu_sample();
+    if (!bat.valid || bat.mv_battery == 0) {
         return "未知";
     }
 
@@ -220,64 +292,126 @@ const char* value_battery_percent()
 {
     static char buf[16];
 
-    const BatterySample& bat = battery_menu_sample();
-    if (bat.mv_battery == 0) {
+    const BatteryUiStatus& bat = battery_menu_sample();
+    if (!bat.valid) {
         return "未知";
     }
 
-    snprintf(buf, sizeof(buf), "%u%%",
-             static_cast<unsigned>(battery_percent_from_mv(bat.mv_battery)));
-
+    snprintf(buf, sizeof(buf), "%u%%", static_cast<unsigned>(bat.percent));
     return buf;
 }
 
-const char* value_battery_adc_mv()
+const char* value_battery_current()
+{
+    static char buf[20];
+
+    const BatteryUiStatus& bat = battery_menu_sample();
+    if (!bat.valid) {
+        return "未知";
+    }
+
+    snprintf(buf, sizeof(buf), "%dmA", static_cast<int>(bat.average_current_ma));
+    return buf;
+}
+
+const char* value_battery_capacity()
 {
     static char buf[24];
 
-    const BatterySample& bat = battery_menu_sample();
-    if (bat.mv_adc == 0) {
+    const BatteryUiStatus& bat = battery_menu_sample();
+    if (!bat.valid) {
         return "未知";
     }
 
-    snprintf(buf, sizeof(buf), "%lu.%02luV",
-             static_cast<unsigned long>(bat.mv_adc / 1000),
-             static_cast<unsigned long>((bat.mv_adc % 1000) / 10));
-
+    if (bat.full_charge_capacity_mah > 0) {
+        snprintf(buf, sizeof(buf), "%u/%umAh",
+                 static_cast<unsigned>(bat.remaining_capacity_mah),
+                 static_cast<unsigned>(bat.full_charge_capacity_mah));
+    } else if (bat.design_capacity_mah > 0) {
+        snprintf(buf, sizeof(buf), "%u/%umAh",
+                 static_cast<unsigned>(bat.remaining_capacity_mah),
+                 static_cast<unsigned>(bat.design_capacity_mah));
+    } else {
+        snprintf(buf, sizeof(buf), "%umAh",
+                 static_cast<unsigned>(bat.remaining_capacity_mah));
+    }
     return buf;
 }
 
-const char* value_battery_raw()
+const char* value_bq_flags_text()
+{
+    const BatteryUiStatus& bat = battery_menu_sample();
+    if (!bat.valid) {
+        return "未知";
+    }
+    return bq27441_flags_to_text(bat.flags);
+}
+
+const char* value_bq_design_capacity()
+{
+    static char buf[16];
+    const BatteryUiStatus& bat = battery_menu_sample();
+    const uint16_t cap = bat.design_capacity_mah ? bat.design_capacity_mah : bq27441_design_capacity_mah();
+    if (cap == 0) {
+        return "未知";
+    }
+    snprintf(buf, sizeof(buf), "%umAh", static_cast<unsigned>(cap));
+    return buf;
+}
+
+const char* value_battery_soh()
 {
     static char buf[16];
 
-    const BatterySample& bat = battery_menu_sample();
-    snprintf(buf, sizeof(buf), "%u", static_cast<unsigned>(bat.raw));
+    const BatteryUiStatus& bat = battery_menu_sample();
+    if (!bat.valid || bat.state_of_health_percent == 0) {
+        return "未知";
+    }
 
+    snprintf(buf, sizeof(buf), "%u%%", static_cast<unsigned>(bat.state_of_health_percent));
+    return buf;
+}
+
+const char* value_bq_gpout_level()
+{
+    const BatteryUiStatus& bat = battery_menu_sample();
+    return bat.gpout_level ? "高" : "低";
+}
+
+const char* value_bq_flags()
+{
+    static char buf[16];
+
+    const BatteryUiStatus& bat = battery_menu_sample();
+    if (!bat.valid) {
+        return "未知";
+    }
+
+    snprintf(buf, sizeof(buf), "0x%04X", static_cast<unsigned>(bat.flags));
     return buf;
 }
 
 const char* value_battery_state()
 {
-    const BatterySample& bat = battery_menu_sample();
+    const BatteryUiStatus& bat = battery_menu_sample();
 
-    if (bat.mv_battery == 0) {
+    if (!bat.valid) {
         return "未知";
     }
 
-    if (bat.mv_battery >= 4100) {
+    if (bat.percent >= 95) {
         return "满电";
     }
 
-    if (bat.mv_battery >= 3700) {
+    if (bat.percent >= 40) {
         return "正常";
     }
 
-    if (bat.mv_battery >= 3500) {
+    if (bat.percent >= 20) {
         return "偏低";
     }
 
-    if (bat.mv_battery >= 3300) {
+    if (bat.percent >= 10) {
         return "低电量";
     }
 
@@ -344,6 +478,8 @@ const QuickMenuItem SYSTEM_ITEMS[] = {
     {"运行内存", QuickMenuItemType::SubPage, QuickMenuPage::MemoryInfo, "", value_open, nullptr, true, false},
     {"任务余量", QuickMenuItemType::SubPage, QuickMenuPage::StackInfo, "", value_open, nullptr, true, false},
     {"扩展芯片", QuickMenuItemType::Status, QuickMenuPage::SystemInfo, "", value_mcp23017_status, nullptr, true, false},
+    {"电量计", QuickMenuItemType::Status, QuickMenuPage::SystemInfo, "", value_bq27441_status, nullptr, true, false},
+    {"RTC时钟", QuickMenuItemType::SubPage, QuickMenuPage::RtcInfo, "", value_pcf85063_status, nullptr, true, false},
     {"I2C通信", QuickMenuItemType::Status, QuickMenuPage::SystemInfo, "", value_i2c_status, nullptr, true, false},
     {"恢复出厂", QuickMenuItemType::SubPage, QuickMenuPage::FactoryResetConfirm, "确认", nullptr, nullptr, true, false},
     {"返回", QuickMenuItemType::Back, QuickMenuPage::Root, "", nullptr, nullptr, true, false},
@@ -372,11 +508,28 @@ const QuickMenuItem STACK_ITEMS[] = {
 const QuickMenuItem BATTERY_ITEMS[] = {
     {"电池电压", QuickMenuItemType::Status, QuickMenuPage::BatteryInfo, "", value_battery_voltage, nullptr, true, false},
     {"剩余电量", QuickMenuItemType::Status, QuickMenuPage::BatteryInfo, "", value_battery_percent, nullptr, true, false},
+    {"电池状态", QuickMenuItemType::Status, QuickMenuPage::BatteryInfo, "", value_battery_state, nullptr, true, false},
+    {"平均电流", QuickMenuItemType::Status, QuickMenuPage::BatteryInfo, "", value_battery_current, nullptr, true, false},
+    {"剩余容量", QuickMenuItemType::Status, QuickMenuPage::BatteryInfo, "", value_battery_capacity, nullptr, true, false},
+    {"设计容量", QuickMenuItemType::Status, QuickMenuPage::BatteryInfo, "", value_bq_design_capacity, nullptr, true, false},
+    {"健康度", QuickMenuItemType::Status, QuickMenuPage::BatteryInfo, "", value_battery_soh, nullptr, true, false},
     {"输入电源", QuickMenuItemType::Status, QuickMenuPage::BatteryInfo, "", value_external_power, nullptr, true, false},
     {"充电状态", QuickMenuItemType::Status, QuickMenuPage::BatteryInfo, "", value_charge_state, nullptr, true, false},
     {"充电检测", QuickMenuItemType::Status, QuickMenuPage::BatteryInfo, "", value_chg_level, nullptr, true, false},
-    {"采样电压", QuickMenuItemType::Status, QuickMenuPage::BatteryInfo, "", value_battery_adc_mv, nullptr, true, false},
-    {"采样数值", QuickMenuItemType::Status, QuickMenuPage::BatteryInfo, "", value_battery_raw, nullptr, true, false},
+    {"GPOUT电平", QuickMenuItemType::Status, QuickMenuPage::BatteryInfo, "", value_bq_gpout_level, nullptr, true, false},
+    {"BQ标志", QuickMenuItemType::Status, QuickMenuPage::BatteryInfo, "", value_bq_flags, nullptr, true, false},
+    {"标志说明", QuickMenuItemType::Status, QuickMenuPage::BatteryInfo, "", value_bq_flags_text, nullptr, true, false},
+    {"返回", QuickMenuItemType::Back, QuickMenuPage::SystemInfo, "", nullptr, nullptr, true, false},
+};
+
+const QuickMenuItem RTC_ITEMS[] = {
+    {"RTC时间", QuickMenuItemType::Status, QuickMenuPage::RtcInfo, "", value_rtc_time, nullptr, true, false},
+    {"RTC状态", QuickMenuItemType::Status, QuickMenuPage::RtcInfo, "", value_pcf85063_status, nullptr, true, false},
+    {"闹钟状态", QuickMenuItemType::Status, QuickMenuPage::RtcInfo, "", value_rtc_alarm, nullptr, true, false},
+    {"开机闹钟", QuickMenuItemType::Status, QuickMenuPage::RtcInfo, "", value_rtc_boot_alarm, nullptr, true, false},
+    {"RTC_INT", QuickMenuItemType::Status, QuickMenuPage::RtcInfo, "", value_rtc_int_level, nullptr, true, false},
+    {"控制寄存器", QuickMenuItemType::Status, QuickMenuPage::RtcInfo, "", value_rtc_control2, nullptr, true, false},
+    {"状态说明", QuickMenuItemType::Status, QuickMenuPage::RtcInfo, "", value_rtc_flags_text, nullptr, true, false},
     {"返回", QuickMenuItemType::Back, QuickMenuPage::SystemInfo, "", nullptr, nullptr, true, false},
 };
 
@@ -434,6 +587,19 @@ const QuickMenuPageDef& quick_menu_get_battery_page()
         QuickMenuPage::SystemInfo,
         BATTERY_ITEMS,
         MENU_COUNT(BATTERY_ITEMS),
+    };
+
+    return page;
+}
+
+const QuickMenuPageDef& quick_menu_get_rtc_page()
+{
+    static const QuickMenuPageDef page = {
+        "RTC时钟",
+        QuickMenuPage::RtcInfo,
+        QuickMenuPage::SystemInfo,
+        RTC_ITEMS,
+        MENU_COUNT(RTC_ITEMS),
     };
 
     return page;

@@ -2,6 +2,7 @@
 
 #include <Wire.h>
 
+#include "hal/i2c_bus_lock.h"
 #include "board/board_pins_pcb1_mcp23017.h"
 #include "utils/log.h"
 
@@ -59,10 +60,13 @@ uint8_t s_olat_a = 0x00;
 uint8_t s_olat_b = 0x00;
 
 bool write_reg(uint8_t reg, uint8_t value) {
+  if (!i2c_bus_is_ready()) return false;
+  i2c_bus_lock();
   Wire.beginTransmission(board::MCP23017_U3_ADDR);
   Wire.write(reg);
   Wire.write(value);
   const uint8_t err = Wire.endTransmission();
+  i2c_bus_unlock();
 
   if (err != 0) {
     LOGW("[MCP23017] 写寄存器失败 寄存器=0x%02X 值=0x%02X 错误=%u",
@@ -77,22 +81,27 @@ bool write_reg(uint8_t reg, uint8_t value) {
 
 bool read_reg(uint8_t reg, uint8_t* out) {
   if (!out) return false;
+  if (!i2c_bus_is_ready()) return false;
 
+  i2c_bus_lock();
   Wire.beginTransmission(board::MCP23017_U3_ADDR);
   Wire.write(reg);
   uint8_t err = Wire.endTransmission(false);
   if (err != 0) {
+    i2c_bus_unlock();
     LOGW("[MCP23017] 选择读取寄存器失败 寄存器=0x%02X 错误=%u", reg, err);
     return false;
   }
 
   const uint8_t n = Wire.requestFrom((int)board::MCP23017_U3_ADDR, 1);
   if (n != 1 || !Wire.available()) {
+    i2c_bus_unlock();
     LOGW("[MCP23017] 读取寄存器失败 寄存器=0x%02X 数量=%u", reg, n);
     return false;
   }
 
   *out = Wire.read();
+  i2c_bus_unlock();
   return true;
 }
 

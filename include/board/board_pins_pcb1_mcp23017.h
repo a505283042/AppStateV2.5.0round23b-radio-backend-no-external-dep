@@ -21,7 +21,9 @@ static constexpr int PIN_WS2812 = 3;
 // Power
 static constexpr int PIN_POWER_CTRL = 47;
 static constexpr int PIN_POWER_PLAY = 48;
-static constexpr int PIN_BAT_ADC = 1;
+static constexpr int PIN_BQ27441_GPOUT = 1;
+static constexpr int PIN_RTC_INT = -1;
+static constexpr int PIN_BAT_ADC = PIN_BQ27441_GPOUT;
 
 // NFC
 static constexpr int PIN_NFC_IRQ = 4;

@@ -72,6 +72,9 @@ const QuickMenuPageDef& quick_menu_get_page_def(QuickMenuPage page)
         case QuickMenuPage::BatteryInfo:
             return quick_menu_get_battery_page();
 
+        case QuickMenuPage::RtcInfo:
+            return quick_menu_get_rtc_page();
+
         case QuickMenuPage::FactoryResetConfirm:
             return quick_menu_get_factory_reset_confirm_page();
 

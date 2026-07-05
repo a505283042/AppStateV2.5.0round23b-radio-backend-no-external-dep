@@ -39,4 +39,6 @@
 #define PIN_WS2812       board::PIN_WS2812
 #define PIN_POWER_CTRL   board::PIN_POWER_CTRL
 #define PIN_BAT_ADC      board::PIN_BAT_ADC
+#define PIN_BQ27441_GPOUT board::PIN_BQ27441_GPOUT
+#define PIN_RTC_INT     board::PIN_RTC_INT
 #define PIN_HALL_OUT     board::PIN_HALL_OUT

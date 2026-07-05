@@ -10,6 +10,8 @@
 #include "board/board_pins_pcb1_mcp23017.h"
 #include "hal/mcp23017_u3.h"
 #include "hal/board_hw_control.h"
+#include "hal/i2c_bus_lock.h"
+#include "hal/pcf85063.h"
 
 SPIClass SPI_SD;              /* SD专用SPI类实例 */
 static SemaphoreHandle_t s_ui_spi_mtx = nullptr;
@@ -23,14 +25,25 @@ void board_spi_init(void)
 
     Serial.println("[启动] 初始化SPI总线...");
 
-    // ---------- I2C / MCP23017 ----------
+    // ---------- I2C / MCP23017 / BQ27441 ----------
+    // ready=false 期间所有 I2C 设备驱动必须跳过 Wire 访问，避免启动早期误调用。
+    i2c_bus_set_ready(false);
+
     pinMode(board::PIN_EXP_INTA, INPUT_PULLUP);
 
     Wire.begin(board::PIN_I2C_SDA, board::PIN_I2C_SCL);
-    Wire.setClock(400000);
+    // BQ27441 + MCP23017 + PCF85063 共用一条 I2C，总线优先稳定。
+    // 400k 下 BQ27441 偶发 requestFrom 失败，降到 100k。
+    Wire.setClock(100000);
+    i2c_bus_set_ready(true);
 
     const bool mcp_ok = mcp23017_u3_begin();
     mcp23017_u3_debug_dump();
+
+    // PCF85063 RTC 与 MCP23017/BQ27441 共用 I2C。
+    // 若 RTC 闹钟拉起整机，ESP32 已在更早阶段拉住 POWER_CTRL，
+    // 这里可以安全清除 AF，避免关机后 RTC_INT 一直保持触发导致循环开机。
+    (void)pcf85063_begin(true);
 
     if (mcp_ok) {
         board_hw_control_begin();

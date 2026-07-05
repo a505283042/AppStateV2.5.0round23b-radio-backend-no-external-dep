@@ -27,6 +27,7 @@ enum class QuickMenuPage : uint8_t {
     MemoryInfo,
     StackInfo,
     BatteryInfo,
+    RtcInfo,
     FactoryResetConfirm,
 };
 

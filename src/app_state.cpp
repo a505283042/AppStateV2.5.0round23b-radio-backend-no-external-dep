@@ -40,6 +40,7 @@ volatile play_mode_t g_play_mode = PLAY_MODE_ALL_SEQ;  // 播放模式
 
 static TaskHandle_t s_rescan_task = nullptr; // 扫描任务句柄
 static bool s_tf_mount_restore_pending = false;
+static bool s_low_battery_shutdown_started = false;
 
 static void app_handle_tf_removed();
 static void app_handle_tf_mounted();
@@ -222,6 +223,21 @@ void app_state_update(void)
 
     // 睡眠关机定时器到点后走统一安全关机流程。
     app_power_sleep_timer_tick();
+
+    if (!s_low_battery_shutdown_started) {
+        const BatteryShutdownReason reason = board_hw_battery_shutdown_reason();
+        if (reason != BatteryShutdownReason::None) {
+            s_low_battery_shutdown_started = true;
+            LOGW("[应用] 触发低电量关机: %s", board_hw_battery_shutdown_reason_label(reason));
+            ui_show_player_placeholder("低电量关机", board_hw_battery_shutdown_reason_label(reason));
+            player_control_mark_manual_stop();
+            audio_service_stop(true);
+            player_snapshot_save_to_nvs();
+            delay(1000);
+            board_hw_power_off();
+            return;
+        }
+    }
 
     const PlayerSourceState source = player_source_get();
 

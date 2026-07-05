@@ -5,109 +5,59 @@
 
 #include "board/board_pins.h"
 #include "board/board_pins_pcb1_mcp23017.h"
+#include "hal/bq27441.h"
 #include "hal/mcp23017_u3.h"
 #include "utils/log.h"
 
 namespace {
 
-// 高阻分压输入，采样次数稍微多一点，降低 ESP32 ADC 抖动。
-static constexpr uint8_t BATTERY_ADC_SAMPLE_COUNT = 16;
-static constexpr uint16_t BATTERY_ADC_SETTLE_US = 300;
-
-// EMA 平滑比例：
-// 新值占 1/4，旧值占 3/4。
-// 电池电压变化慢，这样显示更稳。
-static constexpr uint32_t BATTERY_EMA_NEW_NUM = 1;
-static constexpr uint32_t BATTERY_EMA_DEN = 4;
-
-// ADC 读数校准：
-// 万用表量 BAT_ADC 是 1.48V，但菜单显示采样电压是 1.58V，程序偏高。
-// 所以用 1480 / 1580 把采样电压校准回万用表实测值。
-static constexpr uint32_t BATTERY_ADC_CAL_NUM = 1532;
-static constexpr uint32_t BATTERY_ADC_CAL_DEN = 1580;
-
-// 电池分压倍率校准：
-// 万用表量 BAT+ 是 3.81V，BAT_ADC 是 1.48V。
-// 所以电池电压 = 采样电压 × 3810 / 1480，约等于 ×2.57。
-static constexpr uint32_t BATTERY_DIVIDER_CAL_NUM = 3810;
-static constexpr uint32_t BATTERY_DIVIDER_CAL_DEN = 1480;
-
-// 电池平滑滤波状态
-static bool s_battery_filter_ready = false;
-static uint32_t s_battery_filtered_raw = 0;
-static uint32_t s_battery_filtered_mv_adc = 0;
-static uint32_t s_battery_filtered_mv_battery = 0;
+// BQ27441DRZR-G1A 电量计：
+// - I2C 地址 0x55，和 MCP23017 共用 Wire 总线。
+// - 原 BAT_ADC / GPIO1 现在接 BQ27441 GPOUT，只做数字输入/告警检测，不再做 ADC 采样。
+// - 电池电压、SOC、容量、电流全部从 BQ27441 标准命令读取。
 
 // 电池 UI 缓存采样策略：
 // 1. 上电后先立即采样；
-// 2. 前几次每 3 秒采样一次，让 EMA 更快稳定；
+// 2. 前几次每 3 秒采样一次；
 // 3. 稳定后每 1 分钟采样一次。
-// 4. PG/CHG 是数字状态，单独每 1 秒刷新一次，插 USB 后闪电能尽快显示。
+// 4. PG/CHG 是充电芯片数字状态，单独每 1 秒刷新一次，插 USB 后闪电能尽快显示。
 static constexpr uint32_t BATTERY_UI_BOOT_SAMPLE_INTERVAL_MS = 3000;
 static constexpr uint32_t BATTERY_UI_STABLE_SAMPLE_INTERVAL_MS = 60UL * 1000UL;
 static constexpr uint32_t CHARGER_UI_SAMPLE_INTERVAL_MS = 1000;
 static constexpr uint8_t BATTERY_UI_BOOT_SAMPLE_COUNT = 5;
 
+static constexpr uint8_t BATTERY_SHUTDOWN_SOC_PERCENT = 5;
+static constexpr uint8_t BATTERY_GPOUT_CONFIRM_SOC_PERCENT = 10;
+static constexpr uint32_t BATTERY_SHUTDOWN_VOLTAGE_MV = 3400;
+static constexpr uint32_t BATTERY_GPOUT_CONFIRM_VOLTAGE_MV = 3600;
+static constexpr uint8_t BATTERY_SHUTDOWN_CONFIRM_COUNT = 2;
+static constexpr uint32_t BATTERY_SHUTDOWN_CHECK_INTERVAL_MS = 5000;
+
 static BatteryUiStatus s_battery_ui_status{};
+static uint32_t s_battery_shutdown_last_check_ms = 0;
+static uint8_t s_battery_shutdown_confirm_count = 0;
+static BatteryShutdownReason s_battery_shutdown_last_reason = BatteryShutdownReason::None;
 static uint32_t s_battery_ui_last_sample_ms = 0;
 static uint32_t s_charger_ui_last_sample_ms = 0;
 static uint8_t s_battery_ui_sample_count = 0;
 
-static uint8_t battery_percent_from_mv(uint32_t mv)
+static void configure_bq27441_gpout_input()
 {
-    // 单节锂电粗略估算，不是库仑计。
-    if (mv >= 4200) return 100;
-    if (mv >= 4000) return 80 + static_cast<uint8_t>((mv - 4000) * 20 / 200);
-    if (mv >= 3800) return 55 + static_cast<uint8_t>((mv - 3800) * 25 / 200);
-    if (mv >= 3700) return 40 + static_cast<uint8_t>((mv - 3700) * 15 / 100);
-    if (mv >= 3600) return 25 + static_cast<uint8_t>((mv - 3600) * 15 / 100);
-    if (mv >= 3500) return 12 + static_cast<uint8_t>((mv - 3500) * 13 / 100);
-    if (mv >= 3300) return static_cast<uint8_t>((mv - 3300) * 12 / 200);
-    return 0;
-}
-
-static void configure_battery_adc_input()
-{
-    // BAT_ADC 是高阻分压输入，必须保持高阻输入状态。
-    // 关闭内部上下拉，避免 GPIO1 把分压点拉偏。
-    pinMode(PIN_BAT_ADC, INPUT);
+    // BQ27441 GPOUT 通常为开漏/中断输出。
+    // 原 GPIO1 不再接分压点，因此必须禁止 ADC 采样，只作为数字输入。
+    pinMode(PIN_BQ27441_GPOUT, INPUT_PULLUP);
 
 #if defined(ARDUINO_ARCH_ESP32)
-    gpio_num_t gpio = static_cast<gpio_num_t>(PIN_BAT_ADC);
+    gpio_num_t gpio = static_cast<gpio_num_t>(PIN_BQ27441_GPOUT);
     gpio_set_direction(gpio, GPIO_MODE_INPUT);
-    gpio_pullup_dis(gpio);
+    gpio_pullup_en(gpio);
     gpio_pulldown_dis(gpio);
-
-    // BAT_ADC 理论满电约 1.4V，使用 11dB 衰减更安全。
-    analogSetPinAttenuation(PIN_BAT_ADC, ADC_11db);
 #endif
 }
 
-static uint32_t apply_ema_filter(uint32_t old_value, uint32_t new_value)
+static bool read_bq27441_gpout_level()
 {
-    return ((old_value * (BATTERY_EMA_DEN - BATTERY_EMA_NEW_NUM)) +
-            (new_value * BATTERY_EMA_NEW_NUM)) /
-           BATTERY_EMA_DEN;
-}
-
-static BatterySample apply_battery_filter(const BatterySample& sample)
-{
-    if (!s_battery_filter_ready) {
-        s_battery_filtered_raw = sample.raw;
-        s_battery_filtered_mv_adc = sample.mv_adc;
-        s_battery_filtered_mv_battery = sample.mv_battery;
-        s_battery_filter_ready = true;
-    } else {
-        s_battery_filtered_raw = apply_ema_filter(s_battery_filtered_raw, sample.raw);
-        s_battery_filtered_mv_adc = apply_ema_filter(s_battery_filtered_mv_adc, sample.mv_adc);
-        s_battery_filtered_mv_battery = apply_ema_filter(s_battery_filtered_mv_battery, sample.mv_battery);
-    }
-
-    BatterySample out = sample;
-    out.raw = static_cast<uint16_t>(s_battery_filtered_raw);
-    out.mv_adc = s_battery_filtered_mv_adc;
-    out.mv_battery = s_battery_filtered_mv_battery;
-    return out;
+    return digitalRead(PIN_BQ27441_GPOUT) == HIGH;
 }
 
 // 当前先假设高电平为“开启/使能”。
@@ -210,7 +160,8 @@ bool start_solenoid_pulse(SolenoidDirection direction, uint32_t pulse_ms)
 
 bool board_hw_control_begin()
 {
-    configure_battery_adc_input();
+    configure_bq27441_gpout_input();
+    (void)bq27441_begin();
 
     s_ready = true;
 
@@ -224,8 +175,9 @@ bool board_hw_control_begin()
     board_hw_set_amp_shutdown(true);
     board_hw_solenoid_begin();
 
-    LOGI("[硬件控制] 初始化成功 BAT_ADC=%d 蓝牙电源=MCPB%d 功放静音=MCPA%d 功放关断=MCPA%d",
-         PIN_BAT_ADC,
+    LOGI("[硬件控制] 初始化成功 BQ27441=%d GPOUT=GPIO%d 蓝牙电源=MCPB%d 功放静音=MCPA%d 功放关断=MCPA%d",
+         bq27441_is_ready() ? 1 : 0,
+         PIN_BQ27441_GPOUT,
          board::MCP_B_BT_PWR_EN,
          board::MCP_A_MUTE_EN,
          board::MCP_A_SHDN_EN);
@@ -237,68 +189,27 @@ BatterySample board_hw_read_battery()
 {
     BatterySample s{};
 
-    configure_battery_adc_input();
+    configure_bq27441_gpout_input();
+    s.gpout_level = read_bq27441_gpout_level();
 
-    // 高阻分压 + ADC 采样电容，第一次读数容易偏。
-    // 先丢弃两次，再进入正式采样。
-    (void)analogRead(PIN_BAT_ADC);
-    delayMicroseconds(BATTERY_ADC_SETTLE_US);
-    (void)analogRead(PIN_BAT_ADC);
-    delayMicroseconds(BATTERY_ADC_SETTLE_US);
-
-    uint32_t raw_sum = 0;
-    uint32_t mv_sum = 0;
-
-    uint32_t raw_min = 0xFFFFFFFFu;
-    uint32_t raw_max = 0;
-    uint32_t mv_min = 0xFFFFFFFFu;
-    uint32_t mv_max = 0;
-
-    for (uint8_t i = 0; i < BATTERY_ADC_SAMPLE_COUNT; ++i) {
-        const uint32_t raw = static_cast<uint32_t>(analogRead(PIN_BAT_ADC));
-
-#if defined(ARDUINO_ARCH_ESP32)
-        const uint32_t mv = static_cast<uint32_t>(analogReadMilliVolts(PIN_BAT_ADC));
-#else
-        const uint32_t mv = 0;
-#endif
-
-        raw_sum += raw;
-        mv_sum += mv;
-
-        if (raw < raw_min) raw_min = raw;
-        if (raw > raw_max) raw_max = raw;
-        if (mv < mv_min) mv_min = mv;
-        if (mv > mv_max) mv_max = mv;
-
-        delayMicroseconds(BATTERY_ADC_SETTLE_US);
+    Bq27441Sample bq{};
+    if (!bq27441_read(&bq)) {
+        return s;
     }
 
-    // 去掉一个最大值和一个最小值，减少偶发尖峰。
-    static constexpr uint8_t EFFECTIVE_SAMPLE_COUNT = BATTERY_ADC_SAMPLE_COUNT - 2;
-
-    const uint32_t raw_avg = (raw_sum - raw_min - raw_max) / EFFECTIVE_SAMPLE_COUNT;
-    const uint32_t mv_adc_raw = (mv_sum - mv_min - mv_max) / EFFECTIVE_SAMPLE_COUNT;
-
-    s.raw = static_cast<uint16_t>(raw_avg);
-
-#if defined(ARDUINO_ARCH_ESP32)
-    // ESP32 ADC 软件读数校准到万用表实测 BAT_ADC。
-    s.mv_adc = static_cast<uint32_t>(
-        (static_cast<uint64_t>(mv_adc_raw) * BATTERY_ADC_CAL_NUM) /
-        BATTERY_ADC_CAL_DEN
-    );
-#else
+    s.valid = bq.valid;
+    s.mv_battery = bq.voltage_mv;
     s.mv_adc = 0;
-#endif
+    s.soc_percent = bq.soc_percent;
+    s.average_current_ma = bq.average_current_ma;
+    s.remaining_capacity_mah = bq.remaining_capacity_mah;
+    s.full_charge_capacity_mah = bq.full_charge_capacity_mah;
+    s.design_capacity_mah = bq.design_capacity_mah;
+    s.flags = bq.flags;
+    s.raw = bq.flags;
+    s.state_of_health_percent = bq.state_of_health_percent;
 
-    uint32_t mv_battery = static_cast<uint32_t>(
-        (static_cast<uint64_t>(s.mv_adc) * BATTERY_DIVIDER_CAL_NUM) /
-        BATTERY_DIVIDER_CAL_DEN
-    );
-
-    s.mv_battery = mv_battery;
-    return apply_battery_filter(s);
+    return s;
 }
 
 ChargerStatus board_hw_read_charger_status()
@@ -338,7 +249,7 @@ static void board_hw_update_charger_status_cache()
         return;
     }
 
-    // PG/CHG 是数字状态，更新它不需要重新采样 ADC。
+    // PG/CHG 是数字状态，更新它不需要重新访问 BQ27441。
     // 这样插 USB 后，闪电图标最多 1 秒内出现。
     s_battery_ui_status.external_power_good = chg.external_power_good;
     s_battery_ui_status.charging = chg.charging;
@@ -351,11 +262,22 @@ static void board_hw_update_battery_status_cache()
     const ChargerStatus chg = board_hw_read_charger_status();
 
     BatteryUiStatus out = s_battery_ui_status;
-    out.valid = bat.mv_battery > 0;
-    out.mv_battery = bat.mv_battery;
-    out.mv_adc = bat.mv_adc;
-    out.raw = bat.raw;
-    out.percent = battery_percent_from_mv(bat.mv_battery);
+
+    if (bat.valid) {
+        out.valid = true;
+        out.mv_battery = bat.mv_battery;
+        out.mv_adc = 0;
+        out.raw = bat.raw;
+        out.percent = bat.soc_percent;
+        out.average_current_ma = bat.average_current_ma;
+        out.remaining_capacity_mah = bat.remaining_capacity_mah;
+        out.full_charge_capacity_mah = bat.full_charge_capacity_mah;
+        out.design_capacity_mah = bat.design_capacity_mah;
+        out.flags = bat.flags;
+        out.state_of_health_percent = bat.state_of_health_percent;
+    }
+
+    out.gpout_level = bat.gpout_level;
 
     if (chg.valid) {
         out.external_power_good = chg.external_power_good;
@@ -403,6 +325,95 @@ void board_hw_battery_status_tick()
 BatteryUiStatus board_hw_get_battery_status_cached()
 {
     return s_battery_ui_status;
+}
+
+const char* board_hw_battery_shutdown_reason_label(BatteryShutdownReason reason)
+{
+    switch (reason) {
+        case BatteryShutdownReason::SocFinal: return "SOCF极低电量";
+        case BatteryShutdownReason::SocCritical: return "电量低于5%";
+        case BatteryShutdownReason::VoltageCritical: return "电压低于3.40V";
+        case BatteryShutdownReason::GpoutLow: return "GPOUT低电量告警";
+        case BatteryShutdownReason::None:
+        default: return "无";
+    }
+}
+
+BatteryShutdownReason board_hw_battery_shutdown_reason()
+{
+    const uint32_t now = millis();
+    if (s_battery_shutdown_last_check_ms != 0 &&
+        now - s_battery_shutdown_last_check_ms < BATTERY_SHUTDOWN_CHECK_INTERVAL_MS) {
+        return BatteryShutdownReason::None;
+    }
+    s_battery_shutdown_last_check_ms = now;
+
+    configure_bq27441_gpout_input();
+    s_battery_ui_status.gpout_level = read_bq27441_gpout_level();
+
+    if (!s_battery_ui_status.gpout_level) {
+        board_hw_update_battery_status_cache();
+    } else {
+        board_hw_battery_status_tick();
+    }
+
+    const BatteryUiStatus bat = s_battery_ui_status;
+
+    BatteryShutdownReason reason = BatteryShutdownReason::None;
+
+    if (bat.valid && !bat.external_power_good && !bat.charging) {
+        const bool socf = (bat.flags & BQ27441_FLAG_SOCF) != 0;
+        const bool soc1 = (bat.flags & BQ27441_FLAG_SOC1) != 0;
+        const bool gpout_asserted = !bat.gpout_level;
+
+        if (socf) {
+            reason = BatteryShutdownReason::SocFinal;
+        } else if (bat.percent <= BATTERY_SHUTDOWN_SOC_PERCENT) {
+            reason = BatteryShutdownReason::SocCritical;
+        } else if (bat.mv_battery > 0 && bat.mv_battery <= BATTERY_SHUTDOWN_VOLTAGE_MV) {
+            reason = BatteryShutdownReason::VoltageCritical;
+        } else if (gpout_asserted &&
+                   (soc1 ||
+                    bat.percent <= BATTERY_GPOUT_CONFIRM_SOC_PERCENT ||
+                    (bat.mv_battery > 0 && bat.mv_battery <= BATTERY_GPOUT_CONFIRM_VOLTAGE_MV))) {
+            reason = BatteryShutdownReason::GpoutLow;
+        }
+    }
+
+    if (reason == BatteryShutdownReason::None) {
+        s_battery_shutdown_confirm_count = 0;
+        s_battery_shutdown_last_reason = BatteryShutdownReason::None;
+        return BatteryShutdownReason::None;
+    }
+
+    if (reason != s_battery_shutdown_last_reason) {
+        s_battery_shutdown_confirm_count = 0;
+        s_battery_shutdown_last_reason = reason;
+    }
+
+    if (s_battery_shutdown_confirm_count < 255) {
+        ++s_battery_shutdown_confirm_count;
+    }
+
+    if (s_battery_shutdown_confirm_count >= BATTERY_SHUTDOWN_CONFIRM_COUNT) {
+        LOGW("[电池] 低电量关机确认：原因=%s SOC=%u%% 电压=%lumV flags=0x%04X GPOUT=%d",
+             board_hw_battery_shutdown_reason_label(reason),
+             (unsigned)bat.percent,
+             (unsigned long)bat.mv_battery,
+             (unsigned)bat.flags,
+             bat.gpout_level ? 1 : 0);
+        return reason;
+    }
+
+    LOGW("[电池] 低电量关机候选：原因=%s 确认=%u/%u SOC=%u%% 电压=%lumV flags=0x%04X GPOUT=%d",
+         board_hw_battery_shutdown_reason_label(reason),
+         (unsigned)s_battery_shutdown_confirm_count,
+         (unsigned)BATTERY_SHUTDOWN_CONFIRM_COUNT,
+         (unsigned)bat.percent,
+         (unsigned long)bat.mv_battery,
+         (unsigned)bat.flags,
+         bat.gpout_level ? 1 : 0);
+    return BatteryShutdownReason::None;
 }
 
 bool board_hw_set_bt_power(bool enabled)
@@ -604,10 +615,15 @@ void board_hw_debug_dump()
     (void)mcp23017_u3_read_b_bit(board::MCP_B_PG, &pg_level);
     (void)mcp23017_u3_read_b_bit(board::MCP_B_CHG_STAT, &chg_level);
 
-    LOGD("[硬件控制] 状态 bat_raw=%u adc=%lumV 电池=%lumV 蓝牙=%d 静音=%d 关断=%d PG=%d CHG=%d",
-         bat.raw,
-         (unsigned long)bat.mv_adc,
+    LOGD("[硬件控制] 状态 bq_valid=%d 电池=%lumV soc=%u%% current=%dmA cap=%u/%umAh flags=0x%04X gpout=%d 蓝牙=%d 静音=%d 关断=%d PG=%d CHG=%d",
+         bat.valid ? 1 : 0,
          (unsigned long)bat.mv_battery,
+         static_cast<unsigned>(bat.soc_percent),
+         static_cast<int>(bat.average_current_ma),
+         static_cast<unsigned>(bat.remaining_capacity_mah),
+         static_cast<unsigned>(bat.full_charge_capacity_mah),
+         static_cast<unsigned>(bat.flags),
+         bat.gpout_level ? 1 : 0,
          s_bt_power_enabled ? 1 : 0,
          s_amp_mute_enabled ? 1 : 0,
          s_amp_shutdown_enabled ? 1 : 0,
