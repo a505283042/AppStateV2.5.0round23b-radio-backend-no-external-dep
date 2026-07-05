@@ -23,6 +23,10 @@ static bool s_sleep_shutdown_started = false;
 static uint16_t s_sleep_preset_minutes = 0;
 static uint32_t s_sleep_deadline_ms = 0;
 
+static bool s_pending_shutdown_active = false;
+static uint32_t s_pending_shutdown_deadline_ms = 0;
+static const char* s_pending_shutdown_reason = nullptr;
+
 static uint8_t sleep_preset_index(uint16_t minutes)
 {
     for (uint8_t i = 0; i < SLEEP_PRESET_COUNT; ++i) {
@@ -108,6 +112,20 @@ void app_power_save_and_shutdown()
     }
 }
 
+void app_power_request_save_and_shutdown(const char* reason, uint32_t delay_ms)
+{
+    if (s_sleep_shutdown_started) {
+        return;
+    }
+
+    s_pending_shutdown_active = true;
+    s_pending_shutdown_deadline_ms = millis() + delay_ms;
+    s_pending_shutdown_reason = reason;
+    LOGI("[电源] 已预约保存关机：原因=%s 延迟=%lums",
+         reason ? reason : "未指定",
+         (unsigned long)delay_ms);
+}
+
 void app_power_sleep_timer_set_minutes(uint16_t minutes)
 {
     if (minutes == 0) {
@@ -171,7 +189,22 @@ uint16_t app_power_sleep_timer_cycle_next()
 
 void app_power_sleep_timer_tick()
 {
-    if (!s_sleep_timer_active || s_sleep_shutdown_started) {
+    if (s_sleep_shutdown_started) {
+        return;
+    }
+
+    if (s_pending_shutdown_active) {
+        if ((int32_t)(millis() - s_pending_shutdown_deadline_ms) >= 0) {
+            const char* reason = s_pending_shutdown_reason;
+            s_pending_shutdown_active = false;
+            s_pending_shutdown_reason = nullptr;
+            LOGI("[电源] 预约保存关机触发：%s", reason ? reason : "未指定");
+            app_power_save_and_shutdown();
+            return;
+        }
+    }
+
+    if (!s_sleep_timer_active) {
         return;
     }
 

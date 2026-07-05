@@ -10,6 +10,15 @@
 void app_power_save_and_shutdown();
 
 /**
+ * @brief 延迟请求保存并关机。
+ *
+ * 用于 Web API 先返回响应，再在主循环中进入统一安全关机流程。
+ * @param reason 日志原因，可为 nullptr。
+ * @param delay_ms 延迟毫秒数；给 WebServer 留出发送响应的时间。
+ */
+void app_power_request_save_and_shutdown(const char* reason, uint32_t delay_ms);
+
+/**
  * @brief 设置睡眠关机定时。
  *
  * @param minutes 分钟数；传 0 表示取消睡眠关机。

@@ -19,12 +19,14 @@ constexpr uint8_t REG_DAYS = 0x07;
 constexpr uint8_t REG_WEEKDAYS = 0x08;
 constexpr uint8_t REG_MONTHS = 0x09;
 constexpr uint8_t REG_YEARS = 0x0A;
+constexpr uint8_t REG_SECOND_ALARM = 0x0B;
 
 constexpr uint8_t CTRL2_AIE = 0x80;
 constexpr uint8_t CTRL2_AF = 0x40;
 constexpr uint8_t CTRL2_TF = 0x08;
 
 constexpr uint8_t SECONDS_OS = 0x80;
+constexpr uint8_t ALARM_DISABLE = 0x80;
 
 bool s_ready = false;
 uint8_t s_last_i2c_error = 0;
@@ -58,6 +60,20 @@ bool valid_datetime_fields(const Pcf85063DateTime& t)
            t.hour <= 23 &&
            t.minute <= 59 &&
            t.second <= 59;
+}
+
+static uint32_t seconds_of_day(const Pcf85063DateTime& t)
+{
+    return (uint32_t)t.hour * 3600UL + (uint32_t)t.minute * 60UL + (uint32_t)t.second;
+}
+
+static void time_from_seconds_of_day(uint32_t sod, uint8_t& hour, uint8_t& minute, uint8_t& second)
+{
+    sod %= 24UL * 3600UL;
+    hour = (uint8_t)(sod / 3600UL);
+    sod %= 3600UL;
+    minute = (uint8_t)(sod / 60UL);
+    second = (uint8_t)(sod % 60UL);
 }
 
 bool read_bytes_locked(uint8_t reg, uint8_t* out, size_t len)
@@ -189,11 +205,21 @@ bool pcf85063_begin(bool clear_alarm_flag_on_boot)
     const bool time_ok = pcf85063_read_time(&now);
 
     if (clear_alarm_flag_on_boot && s_boot_alarm_pending) {
-        if (pcf85063_clear_alarm_flag()) {
-            LOGI("[PCF85063] 检测到RTC闹钟触发，已清除AF");
+        // RTC_INT + AO3401A 定时开机属于一次性触发：开机后必须同时关闭 AIE 和清 AF。
+        // 只清 AF 会留下 Control_2=0x80，菜单显示“已启用”，并可能在下一天同一时间再次触发。
+        if (pcf85063_disable_alarm()) {
+            LOGI("[PCF85063] 检测到RTC闹钟开机，已关闭一次性闹钟");
+        } else if (pcf85063_clear_alarm_flag()) {
+            LOGW("[PCF85063] 检测到RTC闹钟开机，关闭闹钟失败，仅清除AF err=%u", s_last_i2c_error);
         } else {
-            LOGW("[PCF85063] 检测到RTC闹钟触发，但清除AF失败 err=%u", s_last_i2c_error);
+            LOGW("[PCF85063] 检测到RTC闹钟开机，但清除AF失败 err=%u", s_last_i2c_error);
         }
+    }
+
+    uint8_t current_ctrl2 = 0;
+    if (read_control2(&current_ctrl2)) {
+        ctrl2 = current_ctrl2;
+        s_last_control2 = ctrl2;
     }
 
     s_ready = true;
@@ -271,7 +297,11 @@ bool pcf85063_set_time(const Pcf85063DateTime& t)
     i2c_bus_unlock();
 
     if (ok) {
-        LOGI("[PCF85063] 时间已设置：%s", pcf85063_datetime_to_text(t));
+        s_last_time = t;
+        s_last_time.valid = true;
+        s_last_time.oscillator_stopped = false;
+        s_ready = true;
+        LOGI("[PCF85063] 时间已设置：%s", pcf85063_datetime_to_text(s_last_time));
     }
     return ok;
 }
@@ -342,6 +372,93 @@ bool pcf85063_clear_interrupt_flags()
     ctrl2 &= static_cast<uint8_t>(~(CTRL2_AF | CTRL2_TF));
     const bool ok = write_control2(ctrl2);
     if (ok) s_last_control2 = ctrl2;
+    return ok;
+}
+
+bool pcf85063_set_alarm_after_seconds(uint32_t seconds)
+{
+    if (seconds == 0 || seconds > 24UL * 3600UL || !i2c_ready_for_rtc()) return false;
+
+    Pcf85063DateTime now{};
+    if (!pcf85063_read_time(&now) || !now.valid) {
+        LOGW("[PCF85063] 设置闹钟失败：RTC时间无效");
+        return false;
+    }
+
+    uint8_t target_hour = 0;
+    uint8_t target_minute = 0;
+    uint8_t target_second = 0;
+    time_from_seconds_of_day(seconds_of_day(now) + seconds, target_hour, target_minute, target_second);
+
+    const uint8_t alarm_regs[5] = {
+        bin_to_bcd(target_second),
+        bin_to_bcd(target_minute),
+        bin_to_bcd(target_hour),
+        ALARM_DISABLE,
+        ALARM_DISABLE,
+    };
+
+    uint8_t ctrl2 = 0;
+    if (!read_control2(&ctrl2)) return false;
+    ctrl2 &= static_cast<uint8_t>(~CTRL2_AF);
+
+    i2c_bus_lock();
+    const bool alarm_ok = write_bytes_locked(REG_SECOND_ALARM, alarm_regs, sizeof(alarm_regs));
+    i2c_bus_unlock();
+    if (!alarm_ok) {
+        LOGW("[PCF85063] 设置闹钟失败：写闹钟寄存器失败 err=%u", s_last_i2c_error);
+        return false;
+    }
+
+    ctrl2 |= CTRL2_AIE;
+    if (!write_control2(ctrl2)) {
+        LOGW("[PCF85063] 设置闹钟失败：启用AIE失败 err=%u", s_last_i2c_error);
+        return false;
+    }
+
+    s_last_control2 = ctrl2;
+    LOGI("[PCF85063] 已设置测试闹钟：%02u:%02u:%02u 后约%lu秒触发",
+         (unsigned)target_hour,
+         (unsigned)target_minute,
+         (unsigned)target_second,
+         (unsigned long)seconds);
+    return true;
+}
+
+bool pcf85063_set_test_alarm_after_one_minute()
+{
+    return pcf85063_set_alarm_after_seconds(60);
+}
+
+bool pcf85063_disable_alarm()
+{
+    if (!i2c_ready_for_rtc()) return false;
+
+    const uint8_t alarm_regs[5] = {
+        ALARM_DISABLE,
+        ALARM_DISABLE,
+        ALARM_DISABLE,
+        ALARM_DISABLE,
+        ALARM_DISABLE,
+    };
+
+    uint8_t ctrl2 = 0;
+    if (!read_control2(&ctrl2)) return false;
+    ctrl2 &= static_cast<uint8_t>(~(CTRL2_AIE | CTRL2_AF));
+
+    i2c_bus_lock();
+    const bool alarm_ok = write_bytes_locked(REG_SECOND_ALARM, alarm_regs, sizeof(alarm_regs));
+    i2c_bus_unlock();
+    if (!alarm_ok) {
+        LOGW("[PCF85063] 清除闹钟失败：写闹钟寄存器失败 err=%u", s_last_i2c_error);
+        return false;
+    }
+
+    const bool ok = write_control2(ctrl2);
+    if (ok) {
+        s_last_control2 = ctrl2;
+        LOGI("[PCF85063] RTC闹钟已关闭");
+    }
     return ok;
 }
 

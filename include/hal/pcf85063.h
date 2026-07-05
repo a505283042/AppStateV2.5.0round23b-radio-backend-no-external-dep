@@ -40,6 +40,9 @@ bool pcf85063_alarm_pending();
 bool pcf85063_clear_alarm_flag();
 bool pcf85063_clear_timer_flag();
 bool pcf85063_clear_interrupt_flags();
+bool pcf85063_set_alarm_after_seconds(uint32_t seconds);
+bool pcf85063_set_test_alarm_after_one_minute();
+bool pcf85063_disable_alarm();
 
 bool pcf85063_boot_alarm_was_pending();
 const char* pcf85063_status_label();

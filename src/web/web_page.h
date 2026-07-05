@@ -818,6 +818,7 @@ static const char WEBCTRL_SETTINGS_HTML[] PROGMEM = R"HTML(
     input[type=checkbox]{transform:scale(1.2)}
     button,a{border:none;border-radius:12px;padding:12px 14px;background:#2f6feb;color:#fff;font-size:15px;font-weight:600;text-decoration:none;display:inline-flex;align-items:center;justify-content:center}
     a.secondary,button.secondary{background:#444}
+    button.danger{background:#b42318}
     .actions{display:flex;gap:10px;flex-wrap:wrap}
     .muted{color:#aaa;font-size:14px}
   </style>
@@ -830,6 +831,23 @@ static const char WEBCTRL_SETTINGS_HTML[] PROGMEM = R"HTML(
       </div>
       <h2>网页设置</h2>
       <div class="muted">设置会保存到设备内部配置区（更稳定）</div>
+    </div>
+
+    <div class="card">
+      <h2>RTC时钟</h2>
+      <div class="muted" id="rtcStatusText">读取中...</div>
+      <div class="row"><label>RTC时间</label><div id="rtcTimeText">-</div></div>
+      <div class="row"><label>RTC状态</label><div id="rtcStateText">-</div></div>
+      <div class="row"><label>闹钟状态</label><div id="rtcAlarmText">-</div></div>
+      <div class="row"><label>控制寄存器</label><div id="rtcCtrlText">-</div></div>
+      <div class="actions">
+        <button onclick="syncRtcFromBrowser()">用浏览器时间校准RTC</button>
+        <button class="secondary" onclick="setRtcTestAlarm1m()">1分钟后测试闹钟</button>
+        <button class="danger" onclick="setRtcPowerTest1m()">1分钟后开机测试（会关机）</button>
+        <button class="secondary" onclick="clearRtcAlarm()">清除RTC闹钟</button>
+        <button class="secondary" onclick="loadRtcStatus()">刷新RTC状态</button>
+      </div>
+      <div class="muted">写入的是当前浏览器本地时间；普通测试闹钟只验证RTC AF/AIE；开机测试会保存状态并关机，约1分钟后由RTC_INT硬件唤醒。</div>
     </div>
 
     <div class="card">
@@ -897,6 +915,101 @@ async function saveSettings(){
     alert(j && j.ok ? '保存成功' : ((j && j.message) ? j.message : '保存失败'));
   }catch(e){ alert('保存失败'); }
 }
+async function loadRtcStatus(){
+  try{
+    const r = await fetch('/api/rtc/status', {cache:'no-store'});
+    const j = await r.json();
+    if(!j.ok){
+      document.getElementById('rtcStatusText').textContent = (j && j.message) ? j.message : 'RTC读取失败';
+      return;
+    }
+    document.getElementById('rtcStatusText').textContent = j.ready ? 'RTC已连接' : 'RTC未就绪';
+    document.getElementById('rtcTimeText').textContent = j.time_valid ? (j.datetime || '-') : '未设置';
+    let state = j.status_label || '-';
+    if(j.oscillator_stopped) state += ' / 晶振停止';
+    document.getElementById('rtcStateText').textContent = state;
+    document.getElementById('rtcAlarmText').textContent = `${j.alarm_label || '-'} / 开机闹钟:${j.boot_alarm ? '是' : '否'} / INT:${j.rtc_int_known ? (j.rtc_int_level ? '高' : '低') : '未接'}`;
+    document.getElementById('rtcCtrlText').textContent = j.control2_hex || '-';
+  }catch(e){
+    document.getElementById('rtcStatusText').textContent = 'RTC状态读取失败';
+  }
+}
+
+async function syncRtcFromBrowser(){
+  const d = new Date();
+  const params = new URLSearchParams();
+  params.set('year', String(d.getFullYear()));
+  params.set('month', String(d.getMonth() + 1));
+  params.set('day', String(d.getDate()));
+  params.set('weekday', String(d.getDay()));
+  params.set('hour', String(d.getHours()));
+  params.set('minute', String(d.getMinutes()));
+  params.set('second', String(d.getSeconds()));
+  try{
+    const r = await fetchWithTimeout('/api/rtc/time', {
+      method:'POST',
+      headers:{'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8'},
+      body:params.toString()
+    }, 3500);
+    const j = await r.json();
+    if(j && j.ok){
+      alert('RTC时间已校准');
+      await loadRtcStatus();
+    }else{
+      alert((j && j.message) ? j.message : 'RTC校准失败');
+    }
+  }catch(e){
+    alert('RTC校准失败');
+  }
+}
+
+async function setRtcTestAlarm1m(){
+  try{
+    const r = await fetchWithTimeout('/api/rtc/alarm/test1m', {method:'POST'}, 3500);
+    const j = await r.json();
+    if(j && j.ok){
+      alert('RTC测试闹钟已设置，约1分钟后触发');
+      await loadRtcStatus();
+    }else{
+      alert((j && j.message) ? j.message : 'RTC测试闹钟设置失败');
+    }
+  }catch(e){
+    alert('RTC测试闹钟设置失败');
+  }
+}
+
+async function clearRtcAlarm(){
+  try{
+    const r = await fetchWithTimeout('/api/rtc/alarm/clear', {method:'POST'}, 3500);
+    const j = await r.json();
+    if(j && j.ok){
+      alert('RTC闹钟已清除');
+      await loadRtcStatus();
+    }else{
+      alert((j && j.message) ? j.message : 'RTC闹钟清除失败');
+    }
+  }catch(e){
+    alert('RTC闹钟清除失败');
+  }
+}
+
+async function setRtcPowerTest1m(){
+  if(!confirm('将设置约1分钟后的RTC闹钟，然后设备会保存状态并关机。确认开始开机测试？')) return;
+  try{
+    const r = await fetchWithTimeout('/api/rtc/alarm/power_test1m', {method:'POST'}, 3500);
+    const j = await r.json();
+    if(j && j.ok){
+      alert('RTC开机测试已设置，设备即将保存并关机，约1分钟后等待RTC_INT唤醒');
+      await loadRtcStatus();
+    }else{
+      alert((j && j.message) ? j.message : 'RTC开机测试设置失败');
+    }
+  }catch(e){
+    alert('RTC开机测试设置失败');
+  }
+}
+
+loadRtcStatus();
 loadSettings();
 </script>
 </body>

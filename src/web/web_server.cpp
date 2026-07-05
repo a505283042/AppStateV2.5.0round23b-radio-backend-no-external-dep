@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "app_state.h"
+#include "app_power.h"
 #include "app_flags.h"
 #include "audio/audio_service.h"
 #include "audio/audio.h"
@@ -34,6 +35,7 @@
 #include "web/web_snapshot.h"
 #include "web/web_settings.h"
 #include "web/web_cover_cache.h"
+#include "hal/pcf85063.h"
 
 extern SdFat sd;
 
@@ -862,6 +864,187 @@ static void web_handle_settings_post() {
   // 立即生效，但不立刻写 NVS；关机前由 app_power 统一保存。
   web_send_json_ok_simple(web_settings_is_dirty() ? "settings_deferred" : "settings_unchanged");
 }
+
+static void web_append_rtc_json_fields(String& json, const Pcf85063Status& st) {
+  json += "\"ok\":true";
+  json += ",\"ready\":";
+  json += (st.ready ? "true" : "false");
+  json += ",\"time_valid\":";
+  json += (st.time_valid ? "true" : "false");
+  json += ",\"oscillator_stopped\":";
+  json += (st.oscillator_stopped ? "true" : "false");
+  json += ",\"alarm_pending\":";
+  json += (st.alarm_pending ? "true" : "false");
+  json += ",\"alarm_enabled\":";
+  json += (st.alarm_enabled ? "true" : "false");
+  json += ",\"timer_pending\":";
+  json += (st.timer_pending ? "true" : "false");
+  json += ",\"boot_alarm\":";
+  json += (pcf85063_boot_alarm_was_pending() ? "true" : "false");
+  json += ",\"rtc_int_known\":";
+  json += (st.rtc_int_level_known ? "true" : "false");
+  json += ",\"rtc_int_level\":";
+  json += (st.rtc_int_level ? "true" : "false");
+  json += ",\"control2\":";
+  json += String(st.control2);
+
+  char hexbuf[8];
+  snprintf(hexbuf, sizeof(hexbuf), "0x%02X", st.control2);
+  json += ",\"control2_hex\":\"";
+  json += hexbuf;
+  json += "\"";
+
+  json += ",\"status_label\":\"";
+  json += web_json_escape(String(pcf85063_status_label()));
+  json += "\"";
+
+  json += ",\"alarm_label\":\"";
+  json += web_json_escape(String(pcf85063_alarm_status_label()));
+  json += "\"";
+
+  json += ",\"datetime\":\"";
+  json += web_json_escape(String(st.time_valid ? pcf85063_datetime_to_text(st.time) : "未设置"));
+  json += "\"";
+
+  json += ",\"year\":";
+  json += String((unsigned)st.time.year);
+  json += ",\"month\":";
+  json += String((unsigned)st.time.month);
+  json += ",\"day\":";
+  json += String((unsigned)st.time.day);
+  json += ",\"weekday\":";
+  json += String((unsigned)st.time.weekday);
+  json += ",\"hour\":";
+  json += String((unsigned)st.time.hour);
+  json += ",\"minute\":";
+  json += String((unsigned)st.time.minute);
+  json += ",\"second\":";
+  json += String((unsigned)st.time.second);
+}
+
+static void web_send_rtc_status_json() {
+  Pcf85063Status st{};
+  const bool ok = pcf85063_read_status(&st);
+  if (!ok) {
+    web_send_json_err("RTC状态读取失败", 500);
+    return;
+  }
+
+  String json;
+  json.reserve(512);
+  json += "{";
+  web_append_rtc_json_fields(json, st);
+  json += "}";
+  web_send_no_cache_headers();
+  s_server.send(200, "application/json; charset=utf-8", json);
+}
+
+static void web_handle_rtc_status() {
+  web_send_rtc_status_json();
+}
+
+static bool web_parse_rtc_int_arg(const char* name, int& out) {
+  if (!s_server.hasArg(name)) return false;
+  String s = s_server.arg(name);
+  s.trim();
+  if (!s.length()) return false;
+  out = s.toInt();
+  return true;
+}
+
+static bool web_validate_rtc_fields(const Pcf85063DateTime& t) {
+  return t.year >= 2000 && t.year <= 2099 &&
+         t.month >= 1 && t.month <= 12 &&
+         t.day >= 1 && t.day <= 31 &&
+         t.weekday <= 6 &&
+         t.hour <= 23 &&
+         t.minute <= 59 &&
+         t.second <= 59;
+}
+
+static void web_handle_rtc_set_time() {
+  int year = 0;
+  int month = 0;
+  int day = 0;
+  int weekday = 0;
+  int hour = 0;
+  int minute = 0;
+  int second = 0;
+
+  if (!web_parse_rtc_int_arg("year", year) ||
+      !web_parse_rtc_int_arg("month", month) ||
+      !web_parse_rtc_int_arg("day", day) ||
+      !web_parse_rtc_int_arg("weekday", weekday) ||
+      !web_parse_rtc_int_arg("hour", hour) ||
+      !web_parse_rtc_int_arg("minute", minute) ||
+      !web_parse_rtc_int_arg("second", second)) {
+    web_send_json_err("缺少RTC时间参数");
+    return;
+  }
+
+  Pcf85063DateTime t{};
+  t.year = (uint16_t)year;
+  t.month = (uint8_t)month;
+  t.day = (uint8_t)day;
+  t.weekday = (uint8_t)weekday;
+  t.hour = (uint8_t)hour;
+  t.minute = (uint8_t)minute;
+  t.second = (uint8_t)second;
+  t.valid = true;
+  t.oscillator_stopped = false;
+
+  if (!web_validate_rtc_fields(t)) {
+    web_send_json_err("RTC时间参数无效");
+    return;
+  }
+
+  if (!pcf85063_set_time(t)) {
+    web_send_json_err("RTC时间写入失败", 500);
+    return;
+  }
+
+  (void)pcf85063_clear_interrupt_flags();
+  web_send_rtc_status_json();
+}
+
+static void web_handle_rtc_alarm_test_1m() {
+  if (!pcf85063_is_ready()) {
+    web_send_json_err("RTC未就绪", 500);
+    return;
+  }
+  if (!pcf85063_set_test_alarm_after_one_minute()) {
+    web_send_json_err("RTC测试闹钟设置失败，请先校准RTC时间", 500);
+  return;
+}
+web_send_rtc_status_json();
+}
+
+static void web_handle_rtc_alarm_power_test_1m() {
+  if (!pcf85063_is_ready()) {
+    web_send_json_err("RTC未就绪", 500);
+    return;
+  }
+  if (!pcf85063_set_alarm_after_seconds(60)) {
+    web_send_json_err("RTC定时开机测试闹钟设置失败，请先校准RTC时间", 500);
+    return;
+  }
+
+  app_power_request_save_and_shutdown("RTC 1分钟后开机测试", 1500);
+  web_send_rtc_status_json();
+}
+
+static void web_handle_rtc_alarm_clear() {
+  if (!pcf85063_is_ready()) {
+    web_send_json_err("RTC未就绪", 500);
+    return;
+  }
+  if (!pcf85063_disable_alarm()) {
+    web_send_json_err("RTC闹钟清除失败", 500);
+    return;
+  }
+  web_send_rtc_status_json();
+}
+
 static void web_handle_status() {
   WebPlayerSnapshot snap = web_snapshot_capture();
   snap.net_mode = web_net_mode_cstr();
@@ -2089,6 +2272,11 @@ static void web_setup_routes() {
   s_server.on("/api/album/detail", HTTP_GET, web_handle_album_detail);
   s_server.on("/api/settings", HTTP_GET, web_handle_settings_get);
   s_server.on("/api/settings", HTTP_POST, web_handle_settings_post);
+  s_server.on("/api/rtc/status", HTTP_GET, web_handle_rtc_status);
+  s_server.on("/api/rtc/time", HTTP_POST, web_handle_rtc_set_time);
+  s_server.on("/api/rtc/alarm/test1m", HTTP_POST, web_handle_rtc_alarm_test_1m);
+  s_server.on("/api/rtc/alarm/power_test1m", HTTP_POST, web_handle_rtc_alarm_power_test_1m);
+  s_server.on("/api/rtc/alarm/clear", HTTP_POST, web_handle_rtc_alarm_clear);
   s_server.on("/api/cover/current", HTTP_GET, web_handle_cover_current);
   s_server.on("/api/radio/logo/current", HTTP_GET, web_handle_radio_logo_current);
   s_server.on("/api/artist/play", HTTP_POST, web_handle_artist_play);
