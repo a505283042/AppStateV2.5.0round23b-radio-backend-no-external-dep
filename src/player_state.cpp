@@ -43,7 +43,8 @@ static bool player_handle_alarm_wake_only_boot()
         return false;
     }
 
-    ui_show_player_placeholder("闹钟已唤醒", "只开机，不播放");
+    // 闹钟开机只保留一个弹窗提示，避免“整页提示 + 弹窗”重复。
+    ui_show_alarm_wakeup_popup("闹钟已唤醒", "只开机，不播放");
     player_mark_alarm_wakeup_handled("只开机");
     return true;
 }
@@ -55,7 +56,8 @@ static void player_auto_resume_alarm_after_snapshot()
     }
 
     player_apply_alarm_wakeup_volume();
-    ui_show_player_placeholder("闹钟已响", "正在恢复播放");
+    // 闹钟开机只保留一个弹窗提示，播放器界面继续负责显示封面/播放状态。
+    ui_show_alarm_wakeup_popup("闹钟已响", "正在恢复播放");
     player_toggle_play();
     player_mark_alarm_wakeup_handled("恢复上次播放");
 }
@@ -730,6 +732,7 @@ void player_state_run(void)
 
         if (app_alarm_should_auto_resume_last()) {
             player_apply_alarm_wakeup_volume();
+            ui_show_alarm_wakeup_popup("闹钟已响", "正在播放默认歌曲");
         }
         if (!player_play_idx_v3((uint32_t)start_idx, true, true)) {
             LOGE("[播放器] boot 播放失败");
@@ -760,6 +763,7 @@ void player_state_run(void)
         }
         if (app_alarm_should_auto_resume_last()) {
             player_apply_alarm_wakeup_volume();
+            ui_show_alarm_wakeup_popup("闹钟已响", "正在播放默认歌曲");
         }
         if (!player_play_idx_v3((uint32_t)start_idx, true, true)) {
             LOGE("[播放器] boot 播放失败 恢复回退后");

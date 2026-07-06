@@ -839,34 +839,23 @@ static const char WEBCTRL_SETTINGS_HTML[] PROGMEM = R"HTML(
     </div>
 
     <div class="card">
-      <h2>RTC时钟</h2>
-      <div class="muted" id="rtcStatusText">读取中...</div>
-      <div class="row"><label>RTC时间</label><div id="rtcTimeText">-</div></div>
-      <div class="row"><label>RTC状态</label><div id="rtcStateText">-</div></div>
-      <div class="row"><label>RTC闹钟寄存器</label><div id="rtcAlarmText">-</div></div>
-      <div class="row"><label>控制寄存器</label><div id="rtcCtrlText">-</div></div>
-      <div class="actions">
-        <button onclick="syncRtcFromBrowser()">用浏览器时间校准RTC</button>
-        <button class="secondary" onclick="loadRtcStatus()">刷新RTC状态</button>
-      </div>
-      <div class="muted">RTC卡片只保留校时和状态查看；正式收音机闹钟请在下面的“收音机闹钟”卡片设置、修改或删除。</div>
-    </div>
-
-    <div class="card">
-      <h2>收音机闹钟</h2>
-      <div class="muted" id="alarmStatusText">读取中...</div>
-      <div class="row"><label>当前状态</label><div id="alarmEnabledText">-</div></div>
-      <div class="row"><label>闹钟时间</label><div id="alarmTimeText">-</div></div>
-      <div class="row"><label>重复模式</label><div id="alarmRepeatText">-</div></div>
-      <div class="row"><label>闹钟动作</label><div id="alarmActionText">-</div></div>
+      <h2>时间与闹钟</h2>
+      <div class="row"><label>当前时间</label><div id="rtcTimeText">-</div></div>
+      <div class="row"><label>闹钟状态</label><div id="alarmEnabledText">-</div></div>
       <div class="row"><label>下次触发</label><div id="alarmNextText">-</div></div>
+      <div class="actions">
+        <button onclick="syncRtcFromBrowser()">校准时间</button>
+        <button class="secondary" onclick="refreshClockAlarmStatus()">刷新</button>
+      </div>
+      <div class="muted" id="rtcStatusText">首次使用闹钟前，请先校准时间。</div>
+
       <div class="time-fields">
-        <label>时间</label>
+        <label>闹钟时间</label>
         <input id="alarmHour" type="number" min="0" max="23" step="1" placeholder="时">
         <input id="alarmMinute" type="number" min="0" max="59" step="1" placeholder="分">
         <input id="alarmSecond" type="number" min="0" max="59" step="1" placeholder="秒">
       </div>
-      <div class="row"><label>重复模式</label>
+      <div class="row"><label>重复</label>
         <select id="alarmRepeat" onchange="updateAlarmRepeatUi()">
           <option value="once">单次</option>
           <option value="daily">每天</option>
@@ -876,7 +865,6 @@ static const char WEBCTRL_SETTINGS_HTML[] PROGMEM = R"HTML(
         </select>
       </div>
       <div id="alarmWeekdayBox">
-        <div class="muted">每周指定星期</div>
         <div class="weekday-fields">
           <label><input type="checkbox" class="alarmWeekday" value="1">周一</label>
           <label><input type="checkbox" class="alarmWeekday" value="2">周二</label>
@@ -887,20 +875,18 @@ static const char WEBCTRL_SETTINGS_HTML[] PROGMEM = R"HTML(
           <label><input type="checkbox" class="alarmWeekday" value="0">周日</label>
         </div>
       </div>
-      <div class="row"><label>响铃动作</label>
+      <div class="row"><label>动作</label>
         <select id="alarmAction">
           <option value="resume_last">恢复上次播放</option>
           <option value="wake_only">只开机</option>
         </select>
       </div>
-      <div class="row"><label>闹钟音量</label><input id="alarmVolume" type="number" min="0" max="100" step="1"></div>
+      <div class="row"><label>音量</label><input id="alarmVolume" type="number" min="0" max="100" step="1"></div>
       <div class="actions">
-        <button onclick="saveAlarm()">保存并启用闹钟</button>
-        <button class="secondary" onclick="disableAlarm()">关闭闹钟</button>
-        <button class="danger" onclick="deleteAlarm()">删除闹钟</button>
-        <button class="secondary" onclick="loadAlarmStatus()">刷新闹钟</button>
+        <button onclick="saveAlarm()">保存并启用</button>
+        <button class="secondary" onclick="disableAlarm()">关闭</button>
+        <button class="danger" onclick="deleteAlarm()">删除</button>
       </div>
-      <div class="muted">保存并启用会立即计算下一次触发并写入 PCF85063A；修改闹钟时直接改时间/重复模式/动作/音量后再次保存。单次闹钟触发开机后会自动关闭配置。</div>
     </div>
 
     <div class="card">
@@ -973,18 +959,15 @@ async function loadRtcStatus(){
     const r = await fetch('/api/rtc/status', {cache:'no-store'});
     const j = await r.json();
     if(!j.ok){
-      document.getElementById('rtcStatusText').textContent = (j && j.message) ? j.message : 'RTC读取失败';
+      document.getElementById('rtcStatusText').textContent = (j && j.message) ? j.message : '时间读取失败';
+      document.getElementById('rtcTimeText').textContent = '-';
       return;
     }
-    document.getElementById('rtcStatusText').textContent = j.ready ? 'RTC已连接' : 'RTC未就绪';
-    document.getElementById('rtcTimeText').textContent = j.time_valid ? (j.datetime || '-') : '未设置';
-    let state = j.status_label || '-';
-    if(j.oscillator_stopped) state += ' / 晶振停止';
-    document.getElementById('rtcStateText').textContent = state;
-    document.getElementById('rtcAlarmText').textContent = `${j.alarm_label || '-'} / 开机闹钟:${j.boot_alarm ? '是' : '否'} / INT:${j.rtc_int_known ? (j.rtc_int_level ? '高' : '低') : '未接'}`;
-    document.getElementById('rtcCtrlText').textContent = j.control2_hex || '-';
+    document.getElementById('rtcTimeText').textContent = j.time_valid ? (j.datetime || '-') : '未校准';
+    document.getElementById('rtcStatusText').textContent = j.time_valid ? '时间正常' : '请先校准时间';
   }catch(e){
-    document.getElementById('rtcStatusText').textContent = 'RTC状态读取失败';
+    document.getElementById('rtcStatusText').textContent = '时间读取失败';
+    document.getElementById('rtcTimeText').textContent = '-';
   }
 }
 
@@ -1006,13 +989,13 @@ async function syncRtcFromBrowser(){
     }, 3500);
     const j = await r.json();
     if(j && j.ok){
-      alert('RTC时间已校准');
-      await loadRtcStatus();
+      alert('时间已校准');
+      await refreshClockAlarmStatus();
     }else{
-      alert((j && j.message) ? j.message : 'RTC校准失败');
+      alert((j && j.message) ? j.message : '时间校准失败');
     }
   }catch(e){
-    alert('RTC校准失败');
+    alert('时间校准失败');
   }
 }
 
@@ -1066,18 +1049,12 @@ function fillAlarmForm(j){
 
 function renderAlarmStatus(j){
   if(!j || !j.ok){
-    document.getElementById('alarmStatusText').textContent = (j && j.message) ? j.message : '闹钟读取失败';
+    document.getElementById('alarmEnabledText').textContent = (j && j.message) ? j.message : '读取失败';
+    document.getElementById('alarmNextText').textContent = '-';
     return;
   }
-  const hh = String(j.hour ?? 0).padStart(2, '0');
-  const mm = String(j.minute ?? 0).padStart(2, '0');
-  const ss = String(j.second ?? 0).padStart(2, '0');
-  document.getElementById('alarmStatusText').textContent = j.enabled ? '闹钟已启用' : '闹钟已关闭';
   document.getElementById('alarmEnabledText').textContent = j.enabled ? '已启用' : '关闭';
-  document.getElementById('alarmTimeText').textContent = `${hh}:${mm}:${ss}`;
-  document.getElementById('alarmRepeatText').textContent = j.repeat_label ? `${j.repeat_label}${j.weekday_text ? ' / ' + j.weekday_text : ''}` : '-';
-  document.getElementById('alarmActionText').textContent = j.action_label || '-';
-  document.getElementById('alarmNextText').textContent = j.next_text || '-';
+  document.getElementById('alarmNextText').textContent = j.enabled ? (j.next_text || '-') : '未启用';
   fillAlarmForm(j);
 }
 
@@ -1087,8 +1064,14 @@ async function loadAlarmStatus(){
     const j = await r.json();
     renderAlarmStatus(j);
   }catch(e){
-    document.getElementById('alarmStatusText').textContent = '闹钟状态读取失败';
+    document.getElementById('alarmEnabledText').textContent = '读取失败';
+    document.getElementById('alarmNextText').textContent = '-';
   }
+}
+
+async function refreshClockAlarmStatus(){
+  await loadRtcStatus();
+  await loadAlarmStatus();
 }
 
 async function saveAlarm(){
@@ -1127,7 +1110,7 @@ async function saveAlarm(){
     if(j && j.ok){
       alert('收音机闹钟已保存并启用');
       renderAlarmStatus(j);
-      await loadRtcStatus();
+      await refreshClockAlarmStatus();
     }else{
       alert((j && j.message) ? j.message : '闹钟保存失败');
     }
@@ -1144,7 +1127,7 @@ async function disableAlarm(){
     if(j && j.ok){
       alert('闹钟已关闭');
       renderAlarmStatus(j);
-      await loadRtcStatus();
+      await refreshClockAlarmStatus();
     }else{
       alert((j && j.message) ? j.message : '闹钟关闭失败');
     }
@@ -1161,7 +1144,7 @@ async function deleteAlarm(){
     if(j && j.ok){
       alert('闹钟已删除');
       renderAlarmStatus(j);
-      await loadRtcStatus();
+      await refreshClockAlarmStatus();
     }else{
       alert((j && j.message) ? j.message : '闹钟删除失败');
     }
@@ -1170,8 +1153,7 @@ async function deleteAlarm(){
   }
 }
 
-loadRtcStatus();
-loadAlarmStatus();
+refreshClockAlarmStatus();
 loadSettings();
 </script>
 </body>

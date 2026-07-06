@@ -99,6 +99,8 @@ void ui_set_view(ui_player_view_t view);
 void ui_set_now_playing(const char* title, const char* artist);
 // 全屏旋转视图切歌提示：显示歌名和歌手，短时间自动消失。
 void ui_show_track_change_popup(const char* title, const char* artist);
+// RTC 收音机闹钟开机提示：播放器恢复过程中短时间显示。
+void ui_show_alarm_wakeup_popup(const char* title, const char* detail);
 void ui_set_album(const String& album);
 void ui_set_volume(uint8_t vol);
 void ui_volume_key_pressed();

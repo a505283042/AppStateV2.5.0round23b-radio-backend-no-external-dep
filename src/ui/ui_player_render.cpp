@@ -21,6 +21,7 @@
 #include "hal/board_hw_control.h"
 #include "utils/log.h"
 #include "app_diagnostics.h"
+#include "app_alarm.h"
 #include "app_power.h"
 #include "web/web_settings.h"
 
@@ -864,6 +865,128 @@ void ui_draw_battery_footer(LGFX_Sprite* dst)
     dst->setTextDatum(top_left);
 }
 
+// =============================================================================
+// 收音机闹钟状态 / 开机提示 Overlay
+// =============================================================================
+
+static constexpr uint32_t ALARM_WAKEUP_POPUP_DURATION_MS = 5000;
+
+static volatile uint32_t s_alarm_wakeup_popup_until_ms = 0;
+static String s_alarm_wakeup_popup_title;
+static String s_alarm_wakeup_popup_detail;
+
+static const char* alarm_repeat_short_label(AppAlarmRepeatMode mode)
+{
+    switch (mode) {
+        case AppAlarmRepeatMode::ONCE:     return "单次";
+        case AppAlarmRepeatMode::DAILY:    return "闹钟";
+        case AppAlarmRepeatMode::WEEKDAYS: return "工作日";
+        case AppAlarmRepeatMode::WEEKENDS: return "周末";
+        case AppAlarmRepeatMode::WEEKLY:   return "每周";
+        default:                           return "闹钟";
+    }
+}
+
+void ui_show_alarm_wakeup_popup(const char* title, const char* detail)
+{
+    s_alarm_wakeup_popup_title = title ? String(title) : String("闹钟已响");
+    s_alarm_wakeup_popup_detail = detail ? String(detail) : String("");
+    s_alarm_wakeup_popup_title.trim();
+    s_alarm_wakeup_popup_detail.trim();
+
+    if (s_alarm_wakeup_popup_title.isEmpty()) {
+        s_alarm_wakeup_popup_title = "闹钟已响";
+    }
+    if (s_alarm_wakeup_popup_detail.isEmpty()) {
+        s_alarm_wakeup_popup_detail = "正在处理";
+    }
+
+    s_alarm_wakeup_popup_until_ms = millis() + ALARM_WAKEUP_POPUP_DURATION_MS;
+    ui_request_refresh();
+}
+
+static bool alarm_wakeup_popup_active(uint32_t now)
+{
+    return s_alarm_wakeup_popup_until_ms != 0 &&
+           static_cast<int32_t>(s_alarm_wakeup_popup_until_ms - now) > 0;
+}
+
+static void draw_alarm_status_overlay(LGFX_Sprite* dst)
+{
+    if (!dst || !app_alarm_is_enabled()) {
+        return;
+    }
+
+    const AppAlarmConfig cfg = app_alarm_get_config();
+    char text[24];
+    snprintf(text,
+             sizeof(text),
+             "%s %02u:%02u",
+             alarm_repeat_short_label(cfg.repeat_mode),
+             static_cast<unsigned>(cfg.hour),
+             static_cast<unsigned>(cfg.minute));
+
+    const int box_y = app_power_sleep_timer_is_active() ? 30 : 8;
+    static constexpr int BOX_W = 116;
+    static constexpr int BOX_H = 18;
+    static constexpr int BOX_X = (240 - BOX_W) / 2;
+    static constexpr int BOX_R = 8;
+
+    const uint16_t border_color = TFT_DARKGREY;
+    const uint16_t text_color = TFT_LIGHTGREY;
+
+    dst->fillRoundRect(BOX_X, box_y, BOX_W, BOX_H, BOX_R, TFT_BLACK);
+    dst->drawRoundRect(BOX_X, box_y, BOX_W, BOX_H, BOX_R, border_color);
+
+    const int cx = BOX_X + 14;
+    const int cy = box_y + BOX_H / 2;
+    dst->drawCircle(cx, cy, 5, text_color);
+    dst->drawLine(cx, cy, cx, cy - 3, text_color);
+    dst->drawLine(cx, cy, cx + 3, cy, text_color);
+    dst->drawLine(cx - 5, cy - 6, cx - 2, cy - 8, text_color);
+    dst->drawLine(cx + 5, cy - 6, cx + 2, cy - 8, text_color);
+
+    dst->setFont(&g_font_cjk);
+    dst->setTextSize(1);
+    dst->setTextWrap(false);
+    dst->setTextColor(text_color, TFT_BLACK);
+    dst->setTextDatum(middle_left);
+    dst->drawString(text, BOX_X + 26, box_y + BOX_H / 2);
+    dst->setTextDatum(top_left);
+}
+
+static void draw_alarm_wakeup_popup_overlay(LGFX_Sprite* dst)
+{
+    if (!dst || !alarm_wakeup_popup_active(millis())) {
+        return;
+    }
+
+    static constexpr int BOX_W = 166;
+    static constexpr int BOX_H = 46;
+    static constexpr int BOX_X = (240 - BOX_W) / 2;
+    static constexpr int BOX_Y = 76;
+    static constexpr int BOX_R = 12;
+
+    const uint16_t border_color = TFT_YELLOW;
+    const uint16_t title_color = TFT_YELLOW;
+    const uint16_t detail_color = TFT_WHITE;
+
+    dst->fillRoundRect(BOX_X, BOX_Y, BOX_W, BOX_H, BOX_R, TFT_BLACK);
+    dst->drawRoundRect(BOX_X, BOX_Y, BOX_W, BOX_H, BOX_R, border_color);
+
+    dst->setFont(&g_font_cjk);
+    dst->setTextSize(1);
+    dst->setTextWrap(false);
+    dst->setTextDatum(middle_center);
+
+    dst->setTextColor(title_color, TFT_BLACK);
+    dst->drawString(s_alarm_wakeup_popup_title, 120, BOX_Y + 15);
+
+    dst->setTextColor(detail_color, TFT_BLACK);
+    dst->drawString(s_alarm_wakeup_popup_detail, 120, BOX_Y + 32);
+    dst->setTextDatum(top_left);
+}
+
 // 将旋转的封面渲染到后帧并推送到 LCD（稳定路径）
 // 参数: angle_deg - 旋转角度（度）
 // 功能: 将源精灵旋转指定角度后绘制到后帧，然后推送到屏幕
@@ -903,8 +1026,14 @@ void cover_rotate_draw(float angle_deg)
   // 睡眠关机倒计时只在启用时显示。
   draw_sleep_timer_overlay(dst);
 
+  // 收音机闹钟启用时显示一个小状态条。
+  draw_alarm_status_overlay(dst);
+
   // 低电弹窗比底部电池图标更明显，但仍低于音量/NFC 弹窗。
   draw_low_battery_hint_overlay(dst);
+
+  // RTC 闹钟开机后的临时提示。
+  draw_alarm_wakeup_popup_overlay(dst);
 
   // 绘制音量步进小提示，音量/NFC 弹窗保持在电池状态之上。
   draw_volume_step_hint_overlay(dst);
@@ -2346,10 +2475,16 @@ void cover_panel_draw(float angle_deg)
   // 7. 睡眠关机倒计时
   draw_sleep_timer_overlay(dst);
 
-  // 8. 低电弹窗
+  // 8. 收音机闹钟状态
+  draw_alarm_status_overlay(dst);
+
+  // 9. 低电弹窗
   draw_low_battery_hint_overlay(dst);
 
-  // 9. 绘制音量步进小提示
+  // 10. RTC 闹钟开机后的临时提示
+  draw_alarm_wakeup_popup_overlay(dst);
+
+  // 11. 绘制音量步进小提示
   draw_volume_step_hint_overlay(dst);
   draw_nfc_bind_target_popup_overlay(dst);
   draw_nfc_scan_popup_overlay(dst);
@@ -2575,11 +2710,16 @@ void cover_info_draw()
   // 7) 睡眠关机倒计时 Overlay
   draw_sleep_timer_overlay(dst);
 
-  // 8) 低电弹窗 Overlay
+  // 8) 收音机闹钟状态 Overlay
+  draw_alarm_status_overlay(dst);
+
+  // 9) 低电弹窗 Overlay
   draw_low_battery_hint_overlay(dst);
 
-  // 9) 音量步进小提示 Overlay
-  draw_volume_step_hint_overlay(dst);
+  // 10) RTC 闹钟开机后的临时提示 Overlay
+  draw_alarm_wakeup_popup_overlay(dst);
+
+  // 11) 音量步进小提示 Overlay
   draw_volume_step_hint_overlay(dst);
   draw_nfc_bind_target_popup_overlay(dst);
   draw_nfc_scan_popup_overlay(dst);
