@@ -10,18 +10,20 @@
 #include "player_source.h"
 #include "player_list_select.h"
 #include "ui/ui_power_prompt.h"
+#include "ui/ui.h"
 #include "web/web_settings.h"
 #include "utils/log.h"
 
 namespace {
 
-static constexpr uint16_t SLEEP_PRESETS_MINUTES[] = {0, 15, 30, 60, 90, 120};
+static constexpr uint16_t SLEEP_PRESETS_MINUTES[] = {0, 15, 30, 60, 90};
 static constexpr uint8_t SLEEP_PRESET_COUNT = sizeof(SLEEP_PRESETS_MINUTES) / sizeof(SLEEP_PRESETS_MINUTES[0]);
 
 static bool s_sleep_timer_active = false;
 static bool s_sleep_shutdown_started = false;
 static uint16_t s_sleep_preset_minutes = 0;
 static uint32_t s_sleep_deadline_ms = 0;
+static uint32_t s_sleep_last_ui_refresh_bucket = UINT32_MAX;
 
 static bool s_pending_shutdown_active = false;
 static uint32_t s_pending_shutdown_deadline_ms = 0;

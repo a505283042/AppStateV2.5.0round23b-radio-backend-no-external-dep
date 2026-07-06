@@ -3,6 +3,7 @@
 #include <Arduino.h>
 
 #include "app_flags.h"
+#include "app_alarm.h"
 #include "audio/audio.h"
 #include "audio/audio_service.h"
 #include "nfc/nfc.h"
@@ -22,6 +23,42 @@
 #include "storage/storage.h"
 #include "ui/ui.h"
 #include "utils/log.h"
+
+static void player_apply_alarm_wakeup_volume()
+{
+    const uint8_t volume = app_alarm_wakeup_volume();
+    audio_set_volume(volume);
+    ui_set_volume(volume);
+    LOGI("[闹钟] 已应用闹钟音量：%u", (unsigned)volume);
+}
+
+static void player_mark_alarm_wakeup_handled(const char* reason)
+{
+    app_alarm_mark_wakeup_handled(reason);
+}
+
+static bool player_handle_alarm_wake_only_boot()
+{
+    if (!app_alarm_should_block_player_boot_autoplay()) {
+        return false;
+    }
+
+    ui_show_player_placeholder("闹钟已唤醒", "只开机，不播放");
+    player_mark_alarm_wakeup_handled("只开机");
+    return true;
+}
+
+static void player_auto_resume_alarm_after_snapshot()
+{
+    if (!app_alarm_should_auto_resume_last()) {
+        return;
+    }
+
+    player_apply_alarm_wakeup_volume();
+    ui_show_player_placeholder("闹钟已响", "正在恢复播放");
+    player_toggle_play();
+    player_mark_alarm_wakeup_handled("恢复上次播放");
+}
 
 static const char* player_nfc_bind_type_label(NfcBindType type)
 {
@@ -644,6 +681,10 @@ void player_state_run(void)
         player_control_init_once();
         player_list_select_reset();
 
+        if (player_handle_alarm_wake_only_boot()) {
+            return;
+        }
+
         LOGD("[扫描] 专辑=%d 歌曲=%d",
              (int)storage_catalog_v3_album_count(),
              track_count);
@@ -657,6 +698,9 @@ void player_state_run(void)
                 ui_show_player_placeholder("没有歌曲", "请检查 /Music 目录");
             }
 
+            if (app_alarm_wakeup_pending()) {
+                player_mark_alarm_wakeup_handled("无可播放内容");
+            }
             return;
         }
 
@@ -684,8 +728,14 @@ void player_state_run(void)
             return;
         }
 
+        if (app_alarm_should_auto_resume_last()) {
+            player_apply_alarm_wakeup_volume();
+        }
         if (!player_play_idx_v3((uint32_t)start_idx, true, true)) {
             LOGE("[播放器] boot 播放失败");
+        }
+        if (app_alarm_should_auto_resume_last()) {
+            player_mark_alarm_wakeup_handled("无快照时播放默认歌曲");
         }
         return;
     }
@@ -698,6 +748,7 @@ void player_state_run(void)
 
         boot_restore_pending = false;
         if (restore_res == PLAYER_SNAPSHOT_RESTORE_DONE) {
+            player_auto_resume_alarm_after_snapshot();
             return;
         }
 
@@ -707,8 +758,14 @@ void player_state_run(void)
             LOGE("[播放器] 恢复回退后仍没有可播放歌曲");
             return;
         }
+        if (app_alarm_should_auto_resume_last()) {
+            player_apply_alarm_wakeup_volume();
+        }
         if (!player_play_idx_v3((uint32_t)start_idx, true, true)) {
             LOGE("[播放器] boot 播放失败 恢复回退后");
+        }
+        if (app_alarm_should_auto_resume_last()) {
+            player_mark_alarm_wakeup_handled("恢复失败后播放默认歌曲");
         }
         return;
     }

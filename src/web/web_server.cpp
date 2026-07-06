@@ -7,6 +7,7 @@
 
 #include "app_state.h"
 #include "app_power.h"
+#include "app_alarm.h"
 #include "app_flags.h"
 #include "audio/audio_service.h"
 #include "audio/audio.h"
@@ -1007,6 +1008,160 @@ static void web_handle_rtc_set_time() {
   web_send_rtc_status_json();
 }
 
+
+static void web_append_alarm_json_fields(String& json)
+{
+  const AppAlarmConfig cfg = app_alarm_get_config();
+  char next_text[64];
+  char weekday_text[64];
+  const bool has_next = app_alarm_next_trigger_text(next_text, sizeof(next_text));
+  if (cfg.repeat_mode == AppAlarmRepeatMode::ONCE) {
+    snprintf(weekday_text, sizeof(weekday_text), "下一次");
+  } else {
+    (void)app_alarm_weekday_mask_to_text(app_alarm_effective_weekday_mask(cfg), weekday_text, sizeof(weekday_text));
+  }
+
+  json += "\"ok\":true";
+  json += ",\"enabled\":";
+  json += (cfg.enabled ? "true" : "false");
+  json += ",\"hour\":";
+  json += String((unsigned)cfg.hour);
+  json += ",\"minute\":";
+  json += String((unsigned)cfg.minute);
+  json += ",\"second\":";
+  json += String((unsigned)cfg.second);
+  json += ",\"repeat\":\"";
+  json += web_json_escape(String(app_alarm_repeat_key(cfg.repeat_mode)));
+  json += "\"";
+  json += ",\"repeat_label\":\"";
+  json += web_json_escape(String(app_alarm_repeat_label(cfg.repeat_mode)));
+  json += "\"";
+  json += ",\"weekday_mask\":";
+  json += String((unsigned)(cfg.weekday_mask & APP_ALARM_WEEKDAY_ALL));
+  json += ",\"weekday_text\":\"";
+  json += web_json_escape(String(weekday_text));
+  json += "\"";
+  json += ",\"action\":\"";
+  json += web_json_escape(String(app_alarm_action_key(cfg.action)));
+  json += "\"";
+  json += ",\"action_label\":\"";
+  json += web_json_escape(String(app_alarm_action_label(cfg.action)));
+  json += "\"";
+  json += ",\"volume\":";
+  json += String((unsigned)cfg.volume);
+  json += ",\"next_text\":\"";
+  json += web_json_escape(String(next_text));
+  json += "\"";
+  json += ",\"has_next\":";
+  json += (has_next ? "true" : "false");
+  json += ",\"schedule_ok\":";
+  json += (app_alarm_last_schedule_ok() ? "true" : "false");
+  json += ",\"schedule_message\":\"";
+  json += web_json_escape(String(app_alarm_last_schedule_message()));
+  json += "\"";
+}
+
+static void web_send_alarm_status_json()
+{
+  String json;
+  json.reserve(640);
+  json += "{";
+  web_append_alarm_json_fields(json);
+  json += "}";
+  web_send_no_cache_headers();
+  s_server.send(200, "application/json; charset=utf-8", json);
+}
+
+static void web_handle_alarm_status()
+{
+  web_send_alarm_status_json();
+}
+
+static bool web_parse_alarm_config_from_args(AppAlarmConfig& cfg)
+{
+  int hour = 0;
+  int minute = 0;
+  int second = 0;
+  int volume = 0;
+  int weekday_mask = 0;
+  if (!web_parse_rtc_int_arg("hour", hour) ||
+      !web_parse_rtc_int_arg("minute", minute) ||
+      !web_parse_rtc_int_arg("second", second) ||
+      !web_parse_rtc_int_arg("volume", volume) ||
+      !web_parse_rtc_int_arg("weekday_mask", weekday_mask) ||
+      !s_server.hasArg("action") ||
+      !s_server.hasArg("repeat")) {
+    web_send_json_err("缺少闹钟参数");
+    return false;
+  }
+
+  AppAlarmAction action = AppAlarmAction::RESUME_LAST;
+  if (!app_alarm_action_from_key(s_server.arg("action"), action)) {
+    web_send_json_err("闹钟动作参数无效");
+    return false;
+  }
+
+  AppAlarmRepeatMode repeat_mode = AppAlarmRepeatMode::DAILY;
+  if (!app_alarm_repeat_from_key(s_server.arg("repeat"), repeat_mode)) {
+    web_send_json_err("闹钟重复模式无效");
+    return false;
+  }
+
+  if (weekday_mask < 0 || weekday_mask > APP_ALARM_WEEKDAY_ALL) {
+    web_send_json_err("闹钟星期参数无效");
+    return false;
+  }
+
+  cfg.enabled = true;
+  cfg.hour = static_cast<uint8_t>(hour);
+  cfg.minute = static_cast<uint8_t>(minute);
+  cfg.second = static_cast<uint8_t>(second);
+  cfg.repeat_mode = repeat_mode;
+  cfg.weekday_mask = static_cast<uint8_t>(weekday_mask) & APP_ALARM_WEEKDAY_ALL;
+  cfg.volume = static_cast<uint8_t>(volume);
+  cfg.action = action;
+
+  if (!app_alarm_validate_config(cfg)) {
+    web_send_json_err("闹钟参数无效；每周指定模式至少选择一天");
+    return false;
+  }
+
+  return true;
+}
+
+static void web_handle_alarm_save()
+{
+  AppAlarmConfig cfg{};
+  if (!web_parse_alarm_config_from_args(cfg)) {
+    return;
+  }
+
+  if (!app_alarm_save_config(cfg)) {
+    web_send_json_err(app_alarm_last_schedule_message(), 500);
+    return;
+  }
+
+  web_send_alarm_status_json();
+}
+
+static void web_handle_alarm_disable()
+{
+  if (!app_alarm_disable()) {
+    web_send_json_err(app_alarm_last_schedule_message(), 500);
+    return;
+  }
+  web_send_alarm_status_json();
+}
+
+static void web_handle_alarm_delete()
+{
+  if (!app_alarm_delete()) {
+    web_send_json_err(app_alarm_last_schedule_message(), 500);
+    return;
+  }
+  web_send_alarm_status_json();
+}
+
 static void web_handle_rtc_alarm_test_1m() {
   if (!pcf85063_is_ready()) {
     web_send_json_err("RTC未就绪", 500);
@@ -1014,9 +1169,76 @@ static void web_handle_rtc_alarm_test_1m() {
   }
   if (!pcf85063_set_test_alarm_after_one_minute()) {
     web_send_json_err("RTC测试闹钟设置失败，请先校准RTC时间", 500);
-  return;
+    return;
+  }
+  web_send_rtc_status_json();
 }
-web_send_rtc_status_json();
+
+static bool web_parse_rtc_alarm_time_args(int& hour, int& minute, int& second) {
+  if (!web_parse_rtc_int_arg("hour", hour) ||
+      !web_parse_rtc_int_arg("minute", minute) ||
+      !web_parse_rtc_int_arg("second", second)) {
+    web_send_json_err("缺少RTC闹钟时间参数");
+    return false;
+  }
+
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 59) {
+    web_send_json_err("RTC闹钟时间参数无效");
+    return false;
+  }
+
+  return true;
+}
+
+static void web_handle_rtc_alarm_time() {
+  if (!pcf85063_is_ready()) {
+    web_send_json_err("RTC未就绪", 500);
+    return;
+  }
+
+  int hour = 0;
+  int minute = 0;
+  int second = 0;
+  if (!web_parse_rtc_alarm_time_args(hour, minute, second)) {
+    return;
+  }
+
+  if (!pcf85063_set_alarm_time_of_day(static_cast<uint8_t>(hour),
+                                      static_cast<uint8_t>(minute),
+                                      static_cast<uint8_t>(second))) {
+    web_send_json_err("RTC每日闹钟设置失败", 500);
+    return;
+  }
+
+  LOGI("[Web] RTC每日闹钟已设置：%02d:%02d:%02d", hour, minute, second);
+  web_send_rtc_status_json();
+}
+
+static void web_handle_rtc_alarm_power_time() {
+  if (!pcf85063_is_ready()) {
+    web_send_json_err("RTC未就绪", 500);
+    return;
+  }
+
+  int hour = 0;
+  int minute = 0;
+  int second = 0;
+  if (!web_parse_rtc_alarm_time_args(hour, minute, second)) {
+    return;
+  }
+
+  if (!pcf85063_set_alarm_time_of_day(static_cast<uint8_t>(hour),
+                                      static_cast<uint8_t>(minute),
+                                      static_cast<uint8_t>(second))) {
+    web_send_json_err("RTC指定时间开机测试闹钟设置失败", 500);
+    return;
+  }
+
+  // 注意：app_power_request_save_and_shutdown() 目前只保存 reason 指针，
+  // 所以这里必须传字符串常量，不能传局部 char 数组。
+  LOGI("[Web] RTC指定时间开机测试已设置：%02d:%02d:%02d，准备保存并关机", hour, minute, second);
+  app_power_request_save_and_shutdown("RTC指定时间开机测试", 1500);
+  web_send_rtc_status_json();
 }
 
 static void web_handle_rtc_alarm_power_test_1m() {
@@ -2274,9 +2496,10 @@ static void web_setup_routes() {
   s_server.on("/api/settings", HTTP_POST, web_handle_settings_post);
   s_server.on("/api/rtc/status", HTTP_GET, web_handle_rtc_status);
   s_server.on("/api/rtc/time", HTTP_POST, web_handle_rtc_set_time);
-  s_server.on("/api/rtc/alarm/test1m", HTTP_POST, web_handle_rtc_alarm_test_1m);
-  s_server.on("/api/rtc/alarm/power_test1m", HTTP_POST, web_handle_rtc_alarm_power_test_1m);
-  s_server.on("/api/rtc/alarm/clear", HTTP_POST, web_handle_rtc_alarm_clear);
+  s_server.on("/api/alarm/status", HTTP_GET, web_handle_alarm_status);
+  s_server.on("/api/alarm/save", HTTP_POST, web_handle_alarm_save);
+  s_server.on("/api/alarm/disable", HTTP_POST, web_handle_alarm_disable);
+  s_server.on("/api/alarm/delete", HTTP_POST, web_handle_alarm_delete);
   s_server.on("/api/cover/current", HTTP_GET, web_handle_cover_current);
   s_server.on("/api/radio/logo/current", HTTP_GET, web_handle_radio_logo_current);
   s_server.on("/api/artist/play", HTTP_POST, web_handle_artist_play);

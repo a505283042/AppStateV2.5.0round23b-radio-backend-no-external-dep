@@ -474,7 +474,7 @@ const char* value_chg_level()
 
 const QuickMenuItem SYSTEM_ITEMS[] = {
     {"固件版本", QuickMenuItemType::Status, QuickMenuPage::SystemInfo, "", value_firmware_version, nullptr, true, false},
-    {"电池状态", QuickMenuItemType::SubPage, QuickMenuPage::BatteryInfo, "", value_open, nullptr, true, false},
+    // 电池详细页保留给内部代码/后续工程模式使用，但不再放在普通系统菜单入口里。
     {"运行内存", QuickMenuItemType::SubPage, QuickMenuPage::MemoryInfo, "", value_open, nullptr, true, false},
     {"任务余量", QuickMenuItemType::SubPage, QuickMenuPage::StackInfo, "", value_open, nullptr, true, false},
     {"扩展芯片", QuickMenuItemType::Status, QuickMenuPage::SystemInfo, "", value_mcp23017_status, nullptr, true, false},

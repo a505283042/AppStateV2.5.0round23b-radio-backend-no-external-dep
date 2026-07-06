@@ -51,15 +51,47 @@ uint8_t bin_to_bcd(uint8_t bin)
     return static_cast<uint8_t>(((bin / 10) << 4) | (bin % 10));
 }
 
+bool is_leap_year(uint16_t year)
+{
+    return ((year % 4) == 0 && (year % 100) != 0) || ((year % 400) == 0);
+}
+
+uint8_t days_in_month(uint16_t year, uint8_t month)
+{
+    switch (month) {
+    case 1:
+    case 3:
+    case 5:
+    case 7:
+    case 8:
+    case 10:
+    case 12:
+        return 31;
+    case 4:
+    case 6:
+    case 9:
+    case 11:
+        return 30;
+    case 2:
+        return is_leap_year(year) ? 29 : 28;
+    default:
+        return 0;
+    }
+}
+
 bool valid_datetime_fields(const Pcf85063DateTime& t)
 {
-    return t.year >= 2000 && t.year <= 2099 &&
-           t.month >= 1 && t.month <= 12 &&
-           t.day >= 1 && t.day <= 31 &&
-           t.weekday <= 6 &&
-           t.hour <= 23 &&
-           t.minute <= 59 &&
-           t.second <= 59;
+    if (t.year < 2000 || t.year > 2099 ||
+        t.month < 1 || t.month > 12 ||
+        t.weekday > 6 ||
+        t.hour > 23 ||
+        t.minute > 59 ||
+        t.second > 59) {
+        return false;
+    }
+
+    const uint8_t max_day = days_in_month(t.year, t.month);
+    return t.day >= 1 && t.day <= max_day;
 }
 
 static uint32_t seconds_of_day(const Pcf85063DateTime& t)
@@ -76,6 +108,45 @@ static void time_from_seconds_of_day(uint32_t sod, uint8_t& hour, uint8_t& minut
     second = (uint8_t)(sod % 60UL);
 }
 
+bool alarm_second_valid(uint8_t value)
+{
+    return value == PCF85063_ALARM_IGNORE || value <= 59;
+}
+
+bool alarm_minute_valid(uint8_t value)
+{
+    return value == PCF85063_ALARM_IGNORE || value <= 59;
+}
+
+bool alarm_hour_valid(uint8_t value)
+{
+    return value == PCF85063_ALARM_IGNORE || value <= 23;
+}
+
+bool alarm_day_valid(uint8_t value)
+{
+    return value == PCF85063_ALARM_IGNORE || (value >= 1 && value <= 31);
+}
+
+bool alarm_weekday_valid(uint8_t value)
+{
+    return value == PCF85063_ALARM_IGNORE || value <= 6;
+}
+
+bool alarm_has_any_enabled_field(uint8_t second, uint8_t minute, uint8_t hour, uint8_t day, uint8_t weekday)
+{
+    return second != PCF85063_ALARM_IGNORE ||
+           minute != PCF85063_ALARM_IGNORE ||
+           hour != PCF85063_ALARM_IGNORE ||
+           day != PCF85063_ALARM_IGNORE ||
+           weekday != PCF85063_ALARM_IGNORE;
+}
+
+uint8_t alarm_field_to_reg(uint8_t value)
+{
+    return value == PCF85063_ALARM_IGNORE ? ALARM_DISABLE : bin_to_bcd(value);
+}
+
 bool read_bytes_locked(uint8_t reg, uint8_t* out, size_t len)
 {
     if (!out || len == 0) return false;
@@ -88,9 +159,10 @@ bool read_bytes_locked(uint8_t reg, uint8_t* out, size_t len)
 
     delayMicroseconds(300);
 
-    const uint8_t n = Wire.requestFrom((int)PCF85063_ADDR, (int)len, true);
-    if (n != len || Wire.available() < (int)len) {
-        s_last_i2c_error = 0xF0 | n;
+    // 明确选择 TwoWire::requestFrom(uint8_t, size_t, bool) 重载，避免 ESP32 Arduino 下出现重载歧义警告。
+    const size_t n = Wire.requestFrom(static_cast<uint8_t>(PCF85063_ADDR), len, true);
+    if (n != len || Wire.available() < static_cast<int>(len)) {
+        s_last_i2c_error = static_cast<uint8_t>(0xF0 | (n & 0x0F));
         return false;
     }
 
@@ -375,6 +447,83 @@ bool pcf85063_clear_interrupt_flags()
     return ok;
 }
 
+bool pcf85063_set_alarm(uint8_t second, uint8_t minute, uint8_t hour, uint8_t day, uint8_t weekday)
+{
+    if (!i2c_ready_for_rtc()) return false;
+
+    if (!alarm_second_valid(second) ||
+        !alarm_minute_valid(minute) ||
+        !alarm_hour_valid(hour) ||
+        !alarm_day_valid(day) ||
+        !alarm_weekday_valid(weekday) ||
+        !alarm_has_any_enabled_field(second, minute, hour, day, weekday)) {
+        LOGW("[PCF85063] 设置闹钟失败：字段无效 sec=%u min=%u hour=%u day=%u weekday=%u",
+             (unsigned)second,
+             (unsigned)minute,
+             (unsigned)hour,
+             (unsigned)day,
+             (unsigned)weekday);
+        return false;
+    }
+
+    const uint8_t alarm_regs[5] = {
+        alarm_field_to_reg(second),
+        alarm_field_to_reg(minute),
+        alarm_field_to_reg(hour),
+        alarm_field_to_reg(day),
+        alarm_field_to_reg(weekday),
+    };
+
+    uint8_t ctrl2 = 0;
+    if (!read_control2(&ctrl2)) return false;
+
+    // 写入新闹钟前先清旧 AF，避免界面继续显示“已触发”。
+    ctrl2 &= static_cast<uint8_t>(~CTRL2_AF);
+
+    i2c_bus_lock();
+    const bool alarm_ok = write_bytes_locked(REG_SECOND_ALARM, alarm_regs, sizeof(alarm_regs));
+    i2c_bus_unlock();
+    if (!alarm_ok) {
+        LOGW("[PCF85063] 设置闹钟失败：写闹钟寄存器失败 err=%u", s_last_i2c_error);
+        return false;
+    }
+
+    // AIE 打开后，匹配到启用字段时 RTC 才会拉动闹钟中断输出。
+    ctrl2 |= CTRL2_AIE;
+    if (!write_control2(ctrl2)) {
+        LOGW("[PCF85063] 设置闹钟失败：启用AIE失败 err=%u", s_last_i2c_error);
+        return false;
+    }
+
+    s_last_control2 = ctrl2;
+
+    char sec_text[4] = "*";
+    char min_text[4] = "*";
+    char hour_text[4] = "*";
+    char day_text[4] = "*";
+    char weekday_text[4] = "*";
+    if (second != PCF85063_ALARM_IGNORE) snprintf(sec_text, sizeof(sec_text), "%u", (unsigned)second);
+    if (minute != PCF85063_ALARM_IGNORE) snprintf(min_text, sizeof(min_text), "%u", (unsigned)minute);
+    if (hour != PCF85063_ALARM_IGNORE) snprintf(hour_text, sizeof(hour_text), "%u", (unsigned)hour);
+    if (day != PCF85063_ALARM_IGNORE) snprintf(day_text, sizeof(day_text), "%u", (unsigned)day);
+    if (weekday != PCF85063_ALARM_IGNORE) snprintf(weekday_text, sizeof(weekday_text), "%u", (unsigned)weekday);
+
+    LOGI("[PCF85063] RTC闹钟已设置：sec=%s min=%s hour=%s day=%s weekday=%s ctrl2=0x%02X",
+         sec_text,
+         min_text,
+         hour_text,
+         day_text,
+         weekday_text,
+         ctrl2);
+    return true;
+}
+
+bool pcf85063_set_alarm_time_of_day(uint8_t hour, uint8_t minute, uint8_t second)
+{
+    // 每天匹配指定时:分:秒；日和星期不参与比较。
+    return pcf85063_set_alarm(second, minute, hour, PCF85063_ALARM_IGNORE, PCF85063_ALARM_IGNORE);
+}
+
 bool pcf85063_set_alarm_after_seconds(uint32_t seconds)
 {
     if (seconds == 0 || seconds > 24UL * 3600UL || !i2c_ready_for_rtc()) return false;
@@ -390,34 +539,11 @@ bool pcf85063_set_alarm_after_seconds(uint32_t seconds)
     uint8_t target_second = 0;
     time_from_seconds_of_day(seconds_of_day(now) + seconds, target_hour, target_minute, target_second);
 
-    const uint8_t alarm_regs[5] = {
-        bin_to_bcd(target_second),
-        bin_to_bcd(target_minute),
-        bin_to_bcd(target_hour),
-        ALARM_DISABLE,
-        ALARM_DISABLE,
-    };
-
-    uint8_t ctrl2 = 0;
-    if (!read_control2(&ctrl2)) return false;
-    ctrl2 &= static_cast<uint8_t>(~CTRL2_AF);
-
-    i2c_bus_lock();
-    const bool alarm_ok = write_bytes_locked(REG_SECOND_ALARM, alarm_regs, sizeof(alarm_regs));
-    i2c_bus_unlock();
-    if (!alarm_ok) {
-        LOGW("[PCF85063] 设置闹钟失败：写闹钟寄存器失败 err=%u", s_last_i2c_error);
+    if (!pcf85063_set_alarm_time_of_day(target_hour, target_minute, target_second)) {
         return false;
     }
 
-    ctrl2 |= CTRL2_AIE;
-    if (!write_control2(ctrl2)) {
-        LOGW("[PCF85063] 设置闹钟失败：启用AIE失败 err=%u", s_last_i2c_error);
-        return false;
-    }
-
-    s_last_control2 = ctrl2;
-    LOGI("[PCF85063] 已设置测试闹钟：%02u:%02u:%02u 后约%lu秒触发",
+    LOGI("[PCF85063] 已设置相对闹钟：%02u:%02u:%02u 后约%lu秒触发",
          (unsigned)target_hour,
          (unsigned)target_minute,
          (unsigned)target_second,

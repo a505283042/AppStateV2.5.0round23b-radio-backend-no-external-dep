@@ -40,7 +40,7 @@ uint16_t app_power_sleep_timer_preset_minutes();
 /**
  * @brief 切换到下一个睡眠关机档位。
  *
- * 档位：关闭 -> 15 -> 30 -> 60 -> 90 -> 120 -> 关闭。
+  * 档位：关闭 -> 15 -> 30 -> 60 -> 90 -> 关闭。
  * @return 切换后的档位分钟数，0 表示关闭。
  */
 uint16_t app_power_sleep_timer_cycle_next();

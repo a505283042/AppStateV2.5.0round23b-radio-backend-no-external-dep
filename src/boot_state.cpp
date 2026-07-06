@@ -14,6 +14,7 @@
 #include "utils/panic_diag.h"
 #include "web/web_server.h"
 #include "player_snapshot.h"
+#include "app_alarm.h"
 #include "net_music/net_music_catalog.h"
 
 static void prepare_music_catalogs()
@@ -47,6 +48,10 @@ void boot_state_run(void)
 
     // 1) 初始化两条 SPI：默认SPI=UI，SPI_SD=SD
     board_spi_init();
+
+    // RTC 初始化完成后加载收音机闹钟配置。
+    // 如果闹钟已启用，这里会把正式闹钟重新写入 PCF85063A。
+    app_alarm_begin();
 
     const bool sd_ok = storage_init();
     if (sd_ok) {

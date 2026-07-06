@@ -21,6 +21,7 @@
 #include "hal/board_hw_control.h"
 #include "utils/log.h"
 #include "app_diagnostics.h"
+#include "app_power.h"
 #include "web/web_settings.h"
 
 #undef LOG_TAG
@@ -175,6 +176,142 @@ static void draw_volume_step_hint_overlay(LGFX_Sprite* dst)
   dst->drawString(step_label, BOX_X + BOX_W - 9, BOX_Y + BOX_H / 2);
 
   dst->setTextDatum(top_left);
+}
+
+
+// =============================================================================
+// 低电量提示 Overlay
+// =============================================================================
+
+static constexpr uint8_t LOW_BATTERY_HINT_PERCENT = 15;
+static constexpr uint8_t CRITICAL_BATTERY_HINT_PERCENT = 5;
+static constexpr uint32_t LOW_BATTERY_HINT_INTERVAL_MS = 30000;
+static constexpr uint32_t LOW_BATTERY_HINT_DURATION_MS = 3000;
+
+static uint32_t s_low_battery_hint_window_start_ms = 0;
+static bool s_low_battery_hint_was_active = false;
+
+static void draw_low_battery_hint_overlay(LGFX_Sprite* dst)
+{
+    if (!dst) {
+        return;
+    }
+
+    const BatteryUiStatus bat = board_hw_get_battery_status_cached();
+    if (!bat.valid) {
+        s_low_battery_hint_was_active = false;
+        s_low_battery_hint_window_start_ms = 0;
+        return;
+    }
+
+    uint8_t percent = bat.percent;
+    if (percent > 100) {
+        percent = 100;
+    }
+
+    // 接上外部电源或正在充电时，不再提醒低电。
+    const bool plugged = bat.external_power_good;
+    const bool charging = bat.charging;
+    const bool active = !plugged && !charging && percent <= LOW_BATTERY_HINT_PERCENT;
+    if (!active) {
+        s_low_battery_hint_was_active = false;
+        s_low_battery_hint_window_start_ms = 0;
+        return;
+    }
+
+    const uint32_t now = millis();
+
+    // 刚进入低电状态时立即显示一次；之后每 30 秒显示 3 秒。
+    if (!s_low_battery_hint_was_active ||
+        s_low_battery_hint_window_start_ms == 0 ||
+        now - s_low_battery_hint_window_start_ms >= LOW_BATTERY_HINT_INTERVAL_MS) {
+        s_low_battery_hint_window_start_ms = now;
+        s_low_battery_hint_was_active = true;
+    }
+
+    if (now - s_low_battery_hint_window_start_ms > LOW_BATTERY_HINT_DURATION_MS) {
+        return;
+    }
+
+    const bool critical = percent <= CRITICAL_BATTERY_HINT_PERCENT;
+    const uint16_t border_color = critical ? TFT_RED : TFT_ORANGE;
+    const uint16_t text_color = critical ? TFT_RED : TFT_ORANGE;
+
+    static constexpr int BOX_W = 150;
+    static constexpr int BOX_H = 32;
+    static constexpr int BOX_X = (240 - BOX_W) / 2;
+    static constexpr int BOX_Y = 104;
+    static constexpr int BOX_R = 10;
+
+    dst->fillRoundRect(BOX_X, BOX_Y, BOX_W, BOX_H, BOX_R, TFT_BLACK);
+    dst->drawRoundRect(BOX_X, BOX_Y, BOX_W, BOX_H, BOX_R, border_color);
+
+    char text[32];
+    if (critical) {
+        snprintf(text, sizeof(text), "电量过低 %u%%", static_cast<unsigned>(percent));
+    } else {
+        snprintf(text, sizeof(text), "电量低 请充电 %u%%", static_cast<unsigned>(percent));
+    }
+
+    dst->setFont(&g_font_cjk);
+    dst->setTextSize(1);
+    dst->setTextWrap(false);
+    dst->setTextColor(text_color, TFT_BLACK);
+    dst->setTextDatum(middle_center);
+    dst->drawString(text, 120, BOX_Y + BOX_H / 2);
+    dst->setTextDatum(top_left);
+}
+
+
+// =============================================================================
+// 睡眠关机倒计时 Overlay
+// =============================================================================
+
+static void draw_sleep_timer_overlay(LGFX_Sprite* dst)
+{
+    if (!dst || !app_power_sleep_timer_is_active()) {
+        return;
+    }
+
+    const uint32_t remain = app_power_sleep_timer_remaining_seconds();
+    if (remain == 0) {
+        return;
+    }
+
+    char text[24];
+    if (remain >= 60) {
+        const uint32_t minutes = (remain + 59UL) / 60UL;
+        snprintf(text, sizeof(text), "睡眠 %lu分", (unsigned long)minutes);
+    } else {
+        snprintf(text, sizeof(text), "睡眠 %lu秒", (unsigned long)remain);
+    }
+
+    // 圆屏顶部中央相对安全，不占用底部电池图标区域。
+    static constexpr int BOX_W = 104;
+    static constexpr int BOX_H = 18;
+    static constexpr int BOX_X = (240 - BOX_W) / 2;
+    static constexpr int BOX_Y = 8;
+    static constexpr int BOX_R = 8;
+
+    const uint16_t border_color = TFT_DARKGREY;
+    const uint16_t text_color = TFT_LIGHTGREY;
+
+    dst->fillRoundRect(BOX_X, BOX_Y, BOX_W, BOX_H, BOX_R, TFT_BLACK);
+    dst->drawRoundRect(BOX_X, BOX_Y, BOX_W, BOX_H, BOX_R, border_color);
+
+    // 用一个简单月牙图形表示睡眠定时，避免依赖特殊字符字体。
+    const int moon_cx = BOX_X + 14;
+    const int moon_cy = BOX_Y + BOX_H / 2;
+    dst->fillCircle(moon_cx, moon_cy, 5, text_color);
+    dst->fillCircle(moon_cx + 3, moon_cy - 1, 5, TFT_BLACK);
+
+    dst->setFont(&g_font_cjk);
+    dst->setTextSize(1);
+    dst->setTextWrap(false);
+    dst->setTextColor(text_color, TFT_BLACK);
+    dst->setTextDatum(middle_left);
+    dst->drawString(text, BOX_X + 26, BOX_Y + BOX_H / 2);
+    dst->setTextDatum(top_left);
 }
 
 // =============================================================================
@@ -644,42 +781,86 @@ void ui_draw_battery_footer(LGFX_Sprite* dst)
         return;
     }
 
-    // 圆屏底部可视区域很窄，所以放在底部中间。
+    uint8_t percent = bat.percent;
+    if (percent > 100) {
+        percent = 100;
+    }
+
+    const bool plugged = bat.external_power_good;
+    const bool charging = bat.charging;
+    const bool low = !plugged && percent <= 15;
+    const bool critical = !plugged && percent <= 5;
+
+    uint16_t color = TFT_LIGHTGREY;
+    if (charging) {
+        // 正在充电时用黄色，配合闪电图标更直观。
+        color = TFT_YELLOW;
+    } else if (plugged) {
+        // 已接外部电源但不在充电，例如满电或充电芯片停止充电。
+        color = TFT_CYAN;
+    } else if (critical) {
+        color = TFT_RED;
+    } else if (low) {
+        color = TFT_ORANGE;
+    }
+
+    // 极低电时不再只画小图标，直接在底部显示明确提示。
+    if (critical) {
+        static constexpr int BOX_W = 86;
+        static constexpr int BOX_H = 18;
+        static constexpr int BOX_X = (240 - BOX_W) / 2;
+        static constexpr int BOX_Y = 217;
+
+        dst->fillRoundRect(BOX_X, BOX_Y, BOX_W, BOX_H, 8, TFT_BLACK);
+        dst->drawRoundRect(BOX_X, BOX_Y, BOX_W, BOX_H, 8, TFT_RED);
+
+        char warn[16];
+        snprintf(warn, sizeof(warn), "低电 %u%%", static_cast<unsigned>(percent));
+
+        dst->setFont(&g_font_cjk);
+        dst->setTextSize(1);
+        dst->setTextWrap(false);
+        dst->setTextColor(TFT_RED, TFT_BLACK);
+        dst->setTextDatum(middle_center);
+        dst->drawString(warn, 120, BOX_Y + BOX_H / 2);
+        dst->setTextDatum(top_left);
+        return;
+    }
+
+    // 正常电量时尽量少占空间：只显示小图标。
+    // 接电、充电、低电或 30% 以下时，才显示百分比。
+    const bool show_percent = plugged || charging || low || percent <= 30;
+
     static constexpr int Y = 220;
     // 电池图标约 18px，闪电约 5px，中间 1px 间隔。
     // ICON_W 包含：电池 + 闪电 + 1px 余量。
     static constexpr int ICON_W = 24;
     static constexpr int TEXT_W = 28;
     static constexpr int GAP = 1;
-    static constexpr int TOTAL_W = ICON_W + GAP + TEXT_W;
-    static constexpr int X = (240 - TOTAL_W) / 2;
+    const int total_w = show_percent ? (ICON_W + GAP + TEXT_W) : ICON_W;
+    const int x = (240 - total_w) / 2;
 
-    uint16_t color = TFT_LIGHTGREY;
+    draw_tiny_battery_icon(dst,
+                           x,
+                           Y,
+                           percent,
+                           plugged,
+                           charging,
+                           color);
 
-    if (bat.external_power_good) {
-        // 插 USB / 外部供电时更醒目。
-        color = bat.charging ? TFT_CYAN : TFT_LIGHTGREY;
-    } else if (bat.percent <= 15) {
-        color = TFT_ORANGE;
+    if (!show_percent) {
+        return;
     }
 
     char text[8];
-    snprintf(text, sizeof(text), "%u%%", static_cast<unsigned>(bat.percent));
-
-    draw_tiny_battery_icon(dst,
-                       X,
-                       Y,
-                       bat.percent,
-                       bat.external_power_good,
-                       bat.charging,
-                       color);
+    snprintf(text, sizeof(text), "%u%%", static_cast<unsigned>(percent));
 
     dst->setFont(&g_font_cjk);
     dst->setTextSize(1);
     dst->setTextWrap(false);
     dst->setTextColor(color);
     dst->setTextDatum(middle_left);
-    dst->drawString(text, X + ICON_W + GAP, Y + 4);
+    dst->drawString(text, x + ICON_W + GAP, Y + 4);
     dst->setTextDatum(top_left);
 }
 
@@ -719,7 +900,13 @@ void cover_rotate_draw(float angle_deg)
   // 全屏旋转页切歌时显示歌名/歌手；音量和 NFC 弹窗在其上层。
   draw_track_change_popup_overlay(dst);
 
-  // 绘制音量步进小提示
+  // 睡眠关机倒计时只在启用时显示。
+  draw_sleep_timer_overlay(dst);
+
+  // 低电弹窗比底部电池图标更明显，但仍低于音量/NFC 弹窗。
+  draw_low_battery_hint_overlay(dst);
+
+  // 绘制音量步进小提示，音量/NFC 弹窗保持在电池状态之上。
   draw_volume_step_hint_overlay(dst);
   draw_nfc_bind_target_popup_overlay(dst);
   draw_nfc_scan_popup_overlay(dst);
@@ -2156,7 +2343,13 @@ void cover_panel_draw(float angle_deg)
   // 6. 电池状态页脚
   ui_draw_battery_footer(dst);
 
-  // 7. 绘制音量步进小提示
+  // 7. 睡眠关机倒计时
+  draw_sleep_timer_overlay(dst);
+
+  // 8. 低电弹窗
+  draw_low_battery_hint_overlay(dst);
+
+  // 9. 绘制音量步进小提示
   draw_volume_step_hint_overlay(dst);
   draw_nfc_bind_target_popup_overlay(dst);
   draw_nfc_scan_popup_overlay(dst);
@@ -2379,7 +2572,14 @@ void cover_info_draw()
   // 6) 电池状态页脚
   ui_draw_battery_footer(dst);
 
-  // 7) 音量步进小提示 Overlay
+  // 7) 睡眠关机倒计时 Overlay
+  draw_sleep_timer_overlay(dst);
+
+  // 8) 低电弹窗 Overlay
+  draw_low_battery_hint_overlay(dst);
+
+  // 9) 音量步进小提示 Overlay
+  draw_volume_step_hint_overlay(dst);
   draw_volume_step_hint_overlay(dst);
   draw_nfc_bind_target_popup_overlay(dst);
   draw_nfc_scan_popup_overlay(dst);
