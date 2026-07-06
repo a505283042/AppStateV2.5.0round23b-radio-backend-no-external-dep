@@ -19,7 +19,7 @@ static bool s_active = false;
 static QuickMenuPage s_page = QuickMenuPage::Root;
 static int s_selected = 0;
 
-static constexpr uint8_t MENU_PAGE_STATE_COUNT = 17;
+static constexpr uint8_t MENU_PAGE_STATE_COUNT = 20;
 static uint8_t s_selected_by_page[MENU_PAGE_STATE_COUNT] = {};
 static uint32_t s_last_dynamic_refresh_ms = 0;
 
@@ -99,6 +99,7 @@ static bool quick_menu_page_is_dynamic(QuickMenuPage page)
         case QuickMenuPage::StackInfo:
         case QuickMenuPage::BatteryInfo:
         case QuickMenuPage::RtcInfo:
+        case QuickMenuPage::TimeAlarm:
             return true;
 
         default:

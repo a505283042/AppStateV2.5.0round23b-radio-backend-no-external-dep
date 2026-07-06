@@ -24,7 +24,7 @@
  * 按键输入模块。
  *
  * 当前 MODE 键的语义：
- * - 普通播放页：短按切换音量步进模式（X1 / X5）
+ * - 普通播放页：短按切换音量步进模式（X1 / X5），长按切换播放界面视图
  * - 列表页 / 快捷菜单 / NFC 管理页：作为返回、退出或取消键
  * - 扫描状态：作为取消扫描键
  */
@@ -946,8 +946,8 @@ void keys_update()
   // EC06_E：短按进入快捷菜单。
   handle_key(k_ec06e, enter_quick_menu_from_player, nullptr);
 
-  // MODE：短按切换大步音量模式。
-  handle_key(k_mode, volume_fast_mode_toggle, nullptr);
+  // MODE：短按切换大步音量模式；长按切换播放界面视图。
+  handle_key(k_mode, volume_fast_mode_toggle, ui_toggle_view);
 
   // PLAY：短按输出一次电磁铁短脉冲 + 播放/暂停，长按保存 NVS 后关机。
   handle_key(k_play, play_key_toggle_with_solenoid, app_power_save_and_shutdown);

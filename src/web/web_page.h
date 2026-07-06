@@ -954,18 +954,64 @@ async function saveSettings(){
     alert(j && j.ok ? '保存成功' : ((j && j.message) ? j.message : '保存失败'));
   }catch(e){ alert('保存失败'); }
 }
+let rtcClockBaseMs = 0;
+let rtcClockClientMs = 0;
+
+function parseRtcDateTimeText(text){
+  const m = String(text || '').match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})$/);
+  if(!m) return null;
+  return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]), Number(m[6]));
+}
+
+function pad2(n){
+  return String(n).padStart(2, '0');
+}
+
+function formatRtcClock(d){
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+}
+
+function updateRtcClockDisplay(){
+  if(!rtcClockBaseMs || !rtcClockClientMs) return;
+  const elapsed = Date.now() - rtcClockClientMs;
+  document.getElementById('rtcTimeText').textContent = formatRtcClock(new Date(rtcClockBaseMs + elapsed));
+}
+
+function startRtcClockDisplay(datetimeText){
+  const d = parseRtcDateTimeText(datetimeText);
+  if(!d || Number.isNaN(d.getTime())) {
+    rtcClockBaseMs = 0;
+    rtcClockClientMs = 0;
+    return false;
+  }
+  rtcClockBaseMs = d.getTime();
+  rtcClockClientMs = Date.now();
+  updateRtcClockDisplay();
+  return true;
+}
+
 async function loadRtcStatus(){
   try{
     const r = await fetch('/api/rtc/status', {cache:'no-store'});
     const j = await r.json();
     if(!j.ok){
+      rtcClockBaseMs = 0;
+      rtcClockClientMs = 0;
       document.getElementById('rtcStatusText').textContent = (j && j.message) ? j.message : '时间读取失败';
       document.getElementById('rtcTimeText').textContent = '-';
       return;
     }
-    document.getElementById('rtcTimeText').textContent = j.time_valid ? (j.datetime || '-') : '未校准';
-    document.getElementById('rtcStatusText').textContent = j.time_valid ? '时间正常' : '请先校准时间';
+    if(j.time_valid && j.datetime && startRtcClockDisplay(j.datetime)){
+      document.getElementById('rtcStatusText').textContent = '时间正常';
+    }else{
+      rtcClockBaseMs = 0;
+      rtcClockClientMs = 0;
+      document.getElementById('rtcTimeText').textContent = '未校准';
+      document.getElementById('rtcStatusText').textContent = '请先校准时间';
+    }
   }catch(e){
+    rtcClockBaseMs = 0;
+    rtcClockClientMs = 0;
     document.getElementById('rtcStatusText').textContent = '时间读取失败';
     document.getElementById('rtcTimeText').textContent = '-';
   }
@@ -1155,6 +1201,10 @@ async function deleteAlarm(){
 
 refreshClockAlarmStatus();
 loadSettings();
+
+// RTC时间只定期向设备校准一次，页面显示由浏览器每秒递增，避免“当前时间”看起来不走。
+setInterval(updateRtcClockDisplay, 1000);
+setInterval(loadRtcStatus, 60000);
 </script>
 </body>
 </html>

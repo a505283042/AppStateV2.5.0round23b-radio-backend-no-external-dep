@@ -1,5 +1,4 @@
 #include <Arduino.h>
-#include <WiFi.h>
 
 #ifndef UI_LYRICS_STATE_DEBUG_LOG
 #define UI_LYRICS_STATE_DEBUG_LOG 0
@@ -23,7 +22,6 @@
 #include "app_diagnostics.h"
 #include "app_alarm.h"
 #include "app_power.h"
-#include "web/web_settings.h"
 
 #undef LOG_TAG
 #define LOG_TAG "UI"
@@ -911,7 +909,7 @@ static bool alarm_wakeup_popup_active(uint32_t now)
            static_cast<int32_t>(s_alarm_wakeup_popup_until_ms - now) > 0;
 }
 
-static void draw_alarm_status_overlay(LGFX_Sprite* dst)
+static void draw_alarm_status_overlay(LGFX_Sprite* dst, int box_y = -1)
 {
     if (!dst || !app_alarm_is_enabled()) {
         return;
@@ -926,11 +924,17 @@ static void draw_alarm_status_overlay(LGFX_Sprite* dst)
              static_cast<unsigned>(cfg.hour),
              static_cast<unsigned>(cfg.minute));
 
-    const int box_y = app_power_sleep_timer_is_active() ? 30 : 8;
-    static constexpr int BOX_W = 116;
-    static constexpr int BOX_H = 18;
+    static constexpr int BOX_W = 108;
+    static constexpr int BOX_H = 16;
     static constexpr int BOX_X = (240 - BOX_W) / 2;
-    static constexpr int BOX_R = 8;
+    static constexpr int BOX_R = 7;
+
+    // 圆屏中心 120、半径约 120。状态条宽 108，左右边缘 x=66/174，
+    // 对应圆形安全顶部约 y=13。正常放在 y=16，既不出界也不压歌词。
+    // 如果睡眠倒计时已显示在 y=8..26，闹钟状态下移到 y=28，保留 2px 间隔。
+    if (box_y < 0) {
+        box_y = app_power_sleep_timer_is_active() ? 28 : 16;
+    }
 
     const uint16_t border_color = TFT_DARKGREY;
     const uint16_t text_color = TFT_LIGHTGREY;
@@ -938,20 +942,20 @@ static void draw_alarm_status_overlay(LGFX_Sprite* dst)
     dst->fillRoundRect(BOX_X, box_y, BOX_W, BOX_H, BOX_R, TFT_BLACK);
     dst->drawRoundRect(BOX_X, box_y, BOX_W, BOX_H, BOX_R, border_color);
 
-    const int cx = BOX_X + 14;
+    const int cx = BOX_X + 13;
     const int cy = box_y + BOX_H / 2;
-    dst->drawCircle(cx, cy, 5, text_color);
+    dst->drawCircle(cx, cy, 4, text_color);
     dst->drawLine(cx, cy, cx, cy - 3, text_color);
     dst->drawLine(cx, cy, cx + 3, cy, text_color);
-    dst->drawLine(cx - 5, cy - 6, cx - 2, cy - 8, text_color);
-    dst->drawLine(cx + 5, cy - 6, cx + 2, cy - 8, text_color);
+    dst->drawLine(cx - 4, cy - 5, cx - 2, cy - 7, text_color);
+    dst->drawLine(cx + 4, cy - 5, cx + 2, cy - 7, text_color);
 
     dst->setFont(&g_font_cjk);
     dst->setTextSize(1);
     dst->setTextWrap(false);
     dst->setTextColor(text_color, TFT_BLACK);
     dst->setTextDatum(middle_left);
-    dst->drawString(text, BOX_X + 26, box_y + BOX_H / 2);
+    dst->drawString(text, BOX_X + 24, box_y + BOX_H / 2);
     dst->setTextDatum(top_left);
 }
 
@@ -1020,22 +1024,11 @@ void cover_rotate_draw(float angle_deg)
   #endif
   }
 
-  // 全屏旋转页切歌时显示歌名/歌手；音量和 NFC 弹窗在其上层。
+  // 全屏旋转页保持纯封面展示，不显示常驻电池/闹钟/睡眠状态。
+  // 这里只保留临时提醒：切歌、低电、闹钟开机、音量和 NFC 弹窗。
   draw_track_change_popup_overlay(dst);
-
-  // 睡眠关机倒计时只在启用时显示。
-  draw_sleep_timer_overlay(dst);
-
-  // 收音机闹钟启用时显示一个小状态条。
-  draw_alarm_status_overlay(dst);
-
-  // 低电弹窗比底部电池图标更明显，但仍低于音量/NFC 弹窗。
   draw_low_battery_hint_overlay(dst);
-
-  // RTC 闹钟开机后的临时提示。
   draw_alarm_wakeup_popup_overlay(dst);
-
-  // 绘制音量步进小提示，音量/NFC 弹窗保持在电池状态之上。
   draw_volume_step_hint_overlay(dst);
   draw_nfc_bind_target_popup_overlay(dst);
   draw_nfc_scan_popup_overlay(dst);
@@ -1050,6 +1043,25 @@ void cover_rotate_draw(float angle_deg)
   uint8_t tmp = s_rotFront;
   s_rotFront = s_rotBack;
   s_rotBack = tmp;
+}
+
+
+static void draw_tiny_alarm_clock_icon(LGFX_Sprite* dst, int x, int y, uint16_t color)
+{
+  if (!dst) return;
+
+  // 小闹钟图标控制在 10x10 范围内，和右侧播放模式图标同尺寸、同基线。
+  const int cx = x + 5;
+  const int cy = y + 5;
+  dst->drawCircle(cx, cy, 4, color);
+  dst->drawLine(cx, cy, cx, cy - 3, color);
+  dst->drawLine(cx, cy, cx + 3, cy, color);
+
+  // 顶部两个小铃铛不越过 y，避免视觉上比右侧 10px 图标更高。
+  dst->drawPixel(cx - 4, y + 1, color);
+  dst->drawPixel(cx - 3, y, color);
+  dst->drawPixel(cx + 4, y + 1, color);
+  dst->drawPixel(cx + 3, y, color);
 }
 
 static void draw_cover_panel_status_icons(LGFX_Sprite* dst, int center_y, uint16_t fg)
@@ -1095,6 +1107,14 @@ static void draw_cover_panel_status_icons(LGFX_Sprite* dst, int center_y, uint16
   const int right_icon_x = panel_x + panel_w - margin - icon_size;
   const int left_icon_x  = right_icon_x - icon_size - 4;
   const int icon_y       = center_y - 5;
+
+  // 闹钟启用时，只在播放循环/随机模式图标左边显示一个小闹钟图标。
+  // 不显示文字和时间，避免把播放器界面做得太满。
+  if (app_alarm_is_enabled()) {
+    // 闹钟图标和右侧两个模式图标同为 10x10，使用同一个 icon_y 保持垂直居中。
+    const int alarm_icon_x = left_icon_x - icon_size - 8;
+    draw_tiny_alarm_clock_icon(dst, alarm_icon_x, icon_y, fg);
+  }
 
   switch (s_ui_play_mode) {
     case PLAY_MODE_ALL_SEQ:
@@ -2475,16 +2495,13 @@ void cover_panel_draw(float angle_deg)
   // 7. 睡眠关机倒计时
   draw_sleep_timer_overlay(dst);
 
-  // 8. 收音机闹钟状态
-  draw_alarm_status_overlay(dst);
-
-  // 9. 低电弹窗
+  // 8. 低电弹窗
   draw_low_battery_hint_overlay(dst);
 
-  // 10. RTC 闹钟开机后的临时提示
+  // 9. RTC 闹钟开机后的临时提示
   draw_alarm_wakeup_popup_overlay(dst);
 
-  // 11. 绘制音量步进小提示
+  // 10. 绘制音量步进小提示
   draw_volume_step_hint_overlay(dst);
   draw_nfc_bind_target_popup_overlay(dst);
   draw_nfc_scan_popup_overlay(dst);
@@ -2532,29 +2549,8 @@ void cover_info_draw()
   const int y_title = 176;   // 标题
   const int y_artist= 195;   // 歌手（下移3像素）
 
-  // 4) WiFi信息显示（屏幕最上方）- 在遮罩之后绘制，确保可见
-  const auto& ws = web_settings_get();
-  if (ws.show_wifi_info) {
-    const uint16_t c_wifi = 0xAD55;  // WiFi信息颜色（亮灰色）
-    const int y_wifi_name = 19;      // WiFi名称显示位置
-    const int y_wifi_ip = 34;        // IP地址显示位置
-    
-    // 获取WiFi名称和IP地址
-    String wifiName = "-";
-    String wifiIP = "0.0.0.0";
-    
-    if (WiFi.status() == WL_CONNECTED) {
-      wifiName = WiFi.SSID();
-      wifiIP = WiFi.localIP().toString();
-    } else if (WiFi.getMode() == WIFI_AP) {
-      wifiName = "AP模式";
-      wifiIP = WiFi.softAPIP().toString();
-    }
-    
-    // 分两行显示WiFi名称和IP地址
-    draw_center_text_on_sprite(dst, wifiName.c_str(), y_wifi_name, c_wifi, safe_pad);
-    draw_center_text_on_sprite(dst, wifiIP.c_str(), y_wifi_ip, c_wifi, safe_pad);
-  }
+  // 4) 歌词/信息页不再显示 WiFi 信息。
+  // WiFi 状态已放在菜单中查看，这里优先留给闹钟状态和歌词区域。
 
   // 5) 歌词显示（屏幕上半部分）- 在遮罩之后绘制，确保可见
   bool hasLyrics = g_lyricsDisplay.hasLyrics();
@@ -2710,7 +2706,8 @@ void cover_info_draw()
   // 7) 睡眠关机倒计时 Overlay
   draw_sleep_timer_overlay(dst);
 
-  // 8) 收音机闹钟状态 Overlay
+  // 8) 歌词/信息页显示闹钟状态。
+  // 位置由 draw_alarm_status_overlay() 根据圆屏安全区和睡眠倒计时自动计算。
   draw_alarm_status_overlay(dst);
 
   // 9) 低电弹窗 Overlay

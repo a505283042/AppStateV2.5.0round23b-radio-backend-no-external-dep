@@ -112,7 +112,7 @@ static void draw_status_dots(uint16_t accent, bool done, bool warn)
 
 static void draw_footer_hint(bool done, bool warn)
 {
-    const char* hint = done ? "可以安全断电" : (warn ? "部分数据未保存" : "正在写入 NVS / TF 卡");
+    const char* hint = done ? "正在断电" : (warn ? "部分未保存" : "请稍候");
     const uint16_t color = done ? COLOR_OK : (warn ? COLOR_WARN : COLOR_MUTED);
 
     tft.setTextSize(1);
