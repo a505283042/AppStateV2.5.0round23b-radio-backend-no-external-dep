@@ -6,6 +6,7 @@
 #include "board/board_pins.h"  /* 包含板级引脚定义 */
 
 #include "app_state.h"         /* 包含应用状态模块 */
+#include "hal/bt62sp_uart_debug.h"  /* BT62SP串口调试桥 */
 
 /* Arduino主设置函数 - 系统初始化入口点 */
 void setup() {  
@@ -22,6 +23,7 @@ void setup() {
   delay(100);
 
   Serial.printf("[电源] 提前拉高 POWER_CTRL GPIO%d，保持整机供电\n", PIN_POWER_CTRL);
+  bt62sp_uart_debug_begin();
   
   app_state_init();      /* 初始化应用状态 */
 }
@@ -29,5 +31,6 @@ void setup() {
 /* Arduino主循环函数 - 系统主循环 */
 void loop() {
   app_state_update();    /* 更新应用状态 */
+  bt62sp_uart_debug_update(); /* 处理电脑串口与BT62SP UART调试桥 */
   vTaskDelay(1);         /* 延时1ms */
 }
