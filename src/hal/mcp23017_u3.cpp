@@ -36,10 +36,11 @@ constexpr uint8_t REG_OLATB = 0x15;
 // INTA/INTB mirror + open-drain, reserved for later interrupt usage.
 constexpr uint8_t IOCON_MIRROR_ODR = 0x44;
 
-// A2/A3/A6/A7 input: BACK/MODE, EC06_E, PREV/NFC, NEXT/LIST
+// A2/A3/A4/A6/A7 input: BACK/MODE, EC06_E, BT_LINK, PREV/NFC, NEXT/LIST
 constexpr uint8_t IODIRA_VALUE =
     (1 << board::MCP_A_KEY_BACK_MODE) |
     (1 << board::MCP_A_EC06_E) |
+    (1 << board::MCP_A_BT_LINK) |
     (1 << board::MCP_A_KEY_PREV_NFC) |
     (1 << board::MCP_A_KEY_NEXT_LIST);
 
@@ -48,7 +49,7 @@ constexpr uint8_t IODIRB_VALUE =
     (1 << board::MCP_B_PG) |
     (1 << board::MCP_B_CHG_STAT);
 
-// 按键内部弱上拉；外部已有 10k 上拉，这里再开一层保险。
+// 按键和 BT_LINK 内部弱上拉；外部已有 10k 上拉时，这里再开一层保险。
 constexpr uint8_t GPPUA_VALUE = IODIRA_VALUE;
 
 // PG/CHG_STAT 外部已有 10k 上拉，可以不开；打开也通常没问题。

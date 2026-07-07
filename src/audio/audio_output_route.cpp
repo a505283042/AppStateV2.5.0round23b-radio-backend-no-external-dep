@@ -82,25 +82,28 @@ bool audio_output_route_enforce()
         // 耳机+蓝牙：功放必须保持关闭，避免音频任务把喇叭重新打开。
         ok = board_hw_set_amp_mute(true) && ok;
         ok = board_hw_set_amp_shutdown(true) && ok;
+        ok = board_hw_set_bt_mode(true) && ok;
         ok = board_hw_set_bt_power(true) && ok;
-        LOGD("[音频输出] 路线=耳机+蓝牙，功放静音并关断，蓝牙开启");
+        LOGD("[音频输出] 路线=耳机+蓝牙，功放静音并关断，蓝牙切到发射模式并上电");
         return ok;
     }
 
     if (audio_output_route_is_headphone_only()) {
-        // 仅耳机：关闭蓝牙发射，同时关闭功放，只保留硬件常通的耳机/Line out。
+        // 仅耳机：关闭蓝牙电源，BT_MODE_CTRL 回到接收/浮空模式，同时关闭功放。
         ok = board_hw_set_bt_power(false) && ok;
+        ok = board_hw_set_bt_mode(false) && ok;
         ok = board_hw_set_amp_mute(true) && ok;
         ok = board_hw_set_amp_shutdown(true) && ok;
-        LOGD("[音频输出] 路线=仅耳机，功放静音并关断，蓝牙关闭");
+        LOGD("[音频输出] 路线=仅耳机，功放静音并关断，蓝牙关闭并回到接收模式");
         return ok;
     }
 
-    // 耳机+功放：关闭蓝牙发射，释放功放关断，并允许功放输出。
+    // 耳机+功放：关闭蓝牙电源，BT_MODE_CTRL 回到接收/浮空模式，并允许功放输出。
     ok = board_hw_set_bt_power(false) && ok;
+    ok = board_hw_set_bt_mode(false) && ok;
     ok = board_hw_set_amp_shutdown(false) && ok;
     ok = board_hw_set_amp_mute(false) && ok;
-    LOGD("[音频输出] 路线=耳机+功放，蓝牙关闭，功放启用");
+    LOGD("[音频输出] 路线=耳机+功放，蓝牙关闭并回到接收模式，功放启用");
     return ok;
 }
 

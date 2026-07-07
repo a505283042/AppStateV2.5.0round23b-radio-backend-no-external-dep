@@ -12,7 +12,7 @@ namespace {
 #define MENU_COUNT(arr) static_cast<uint8_t>(sizeof(arr) / sizeof((arr)[0]))
 
 volatile bool s_bt_reboot_in_progress = false;
-bool s_bt_reboot_restore_wakeup = false;
+bool s_bt_reboot_restore_mode = false;
 
 bool bt_route_ready()
 {
@@ -46,17 +46,27 @@ const char* value_bt_pair()
     return s_bt_reboot_in_progress ? "重启中" : "按一下";
 }
 
-const char* value_bt_wakeup()
+const char* value_bt_mode()
 {
     if (s_bt_reboot_in_progress) {
         return "重启中";
     }
 
+    return board_hw_get_bt_mode() ? "发射" : "接收";
+}
+
+const char* value_bt_link()
+{
     if (!board_hw_get_bt_power()) {
         return "未上电";
     }
 
-    return board_hw_get_bt_wakeup() ? "保持" : "释放";
+    bool linked = false;
+    if (!board_hw_read_bt_link(&linked)) {
+        return "读取失败";
+    }
+
+    return linked ? "已连接" : "未连接";
 }
 
 const char* value_bt_reboot()
@@ -116,17 +126,17 @@ bool action_pulse_bt_switch()
     return board_hw_pulse_bt_switch(200);
 }
 
-bool action_toggle_bt_wakeup()
+bool action_toggle_bt_mode()
 {
     if (!bt_route_ready()) {
-        LOGW("[音频输出] bt wakeup 已忽略: 路线 not bluetooth or 正在重启");
+        LOGW("[音频输出] bt mode 已忽略: 路线 not bluetooth or 正在重启");
         return false;
     }
 
-    const bool next_enabled = !board_hw_get_bt_wakeup();
+    const bool next_enabled = !board_hw_get_bt_mode();
 
-    // WKP 是蓝牙模块唤醒控制脚，菜单中只切换控制电平，便于实机验证。
-    return board_hw_set_bt_wakeup(next_enabled);
+    // BT62SP 的 MODE_CTRL 由 ESP32 IO45 直接控制；有效电平可在硬件层统一调整。
+    return board_hw_set_bt_mode(next_enabled);
 }
 
 void bt_reboot_task(void*)
@@ -138,10 +148,10 @@ void bt_reboot_task(void*)
     vTaskDelay(pdMS_TO_TICKS(300));
 
     if (power_off_ok && audio_output_route_is_bluetooth_tx()) {
+        const bool mode_ok = board_hw_set_bt_mode(s_bt_reboot_restore_mode);
         const bool power_on_ok = board_hw_set_bt_power(true);
-        const bool wakeup_ok = board_hw_set_bt_wakeup(s_bt_reboot_restore_wakeup);
         (void)audio_output_route_enforce();
-        LOGI("[音频输出] 蓝牙重启完成：电源开启=%d 唤醒恢复=%d", power_on_ok ? 1 : 0, wakeup_ok ? 1 : 0);
+        LOGI("[音频输出] 蓝牙重启完成：电源开启=%d 模式恢复=%d", power_on_ok ? 1 : 0, mode_ok ? 1 : 0);
     } else if (!audio_output_route_is_bluetooth_tx()) {
         LOGW("[音频输出] bt reboot 已跳过 power on: 路线 changed");
     } else {
@@ -169,7 +179,7 @@ bool action_reboot_bt_module()
         return false;
     }
 
-    s_bt_reboot_restore_wakeup = board_hw_get_bt_wakeup();
+    s_bt_reboot_restore_mode = board_hw_get_bt_mode();
     s_bt_reboot_in_progress = true;
 
     const BaseType_t created = xTaskCreate(
@@ -209,8 +219,9 @@ const QuickMenuItem BLUETOOTH_TX_ITEMS[] = {
     {"输出路径", QuickMenuItemType::Status, QuickMenuPage::AudioOutput, "", value_output_path, nullptr, true, false},
     {"切到耳机", QuickMenuItemType::Action, QuickMenuPage::AudioOutput, "", value_switch_route, action_select_headphone_only, true, false},
     {"切到功放", QuickMenuItemType::Action, QuickMenuPage::AudioOutput, "", value_switch_route, action_select_speaker, true, false},
+    {"连接状态", QuickMenuItemType::Status, QuickMenuPage::AudioOutput, "", value_bt_link, nullptr, true, false},
+    {"蓝牙模式", QuickMenuItemType::Toggle, QuickMenuPage::AudioOutput, "", value_bt_mode, action_toggle_bt_mode, true, false},
     {"蓝牙配对", QuickMenuItemType::Action, QuickMenuPage::AudioOutput, "", value_bt_pair, action_pulse_bt_switch, true, false},
-    {"蓝牙待机", QuickMenuItemType::Toggle, QuickMenuPage::AudioOutput, "", value_bt_wakeup, action_toggle_bt_wakeup, true, false},
     {"蓝牙重启", QuickMenuItemType::Action, QuickMenuPage::AudioOutput, "", value_bt_reboot, action_reboot_bt_module, true, false},
     {"返回", QuickMenuItemType::Back, QuickMenuPage::Root, "", nullptr, nullptr, true, false},
 };

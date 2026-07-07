@@ -9,6 +9,8 @@
  * 这一层只负责最基础的硬件读写：
  * - BQ27441 电池电量计读取
  * - BT_PWR_EN 蓝牙电源控制
+ * - BT_MODE_CTRL 蓝牙发射/接收模式控制
+ * - BT_LINK 蓝牙连接状态读取
  * - MUTE_EN 功放静音控制
  * - SHDN_EN 功放关断控制
  *
@@ -90,8 +92,11 @@ BatterySample board_hw_read_battery();
 bool board_hw_set_bt_power(bool enabled);
 bool board_hw_get_bt_power();
 
-bool board_hw_set_bt_wakeup(bool enabled);
-bool board_hw_get_bt_wakeup();
+bool board_hw_set_bt_mode(bool transmit);
+bool board_hw_get_bt_mode();
+
+bool board_hw_read_bt_link(bool* linked);
+bool board_hw_is_bt_linked();
 
 bool board_hw_set_bt_switch(bool level);
 bool board_hw_get_bt_switch();

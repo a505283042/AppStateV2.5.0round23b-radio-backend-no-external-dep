@@ -71,16 +71,22 @@ static constexpr bool AMP_MUTE_ACTIVE_LEVEL = false;
 // 这里 enabled=true 表示“关断启用”，所以 active level 应该是 LOW。
 static constexpr bool AMP_SHDN_ACTIVE_LEVEL = false;
 
-// 先按常见做法：WKP 高电平唤醒。
+// EWM104-BT62SP 模式脚经 2N7002 下拉：
+// GPIO 为 HIGH 时 2N7002 导通，模块 BT_MODE 被拉低 = 发射模式；
+// GPIO 为 LOW 时 2N7002 关闭，模块 BT_MODE 浮空 = 接收模式。
+static constexpr bool BT_MODE_TX_GATE_LEVEL = true;
+
+// BT_LINK 先按高电平表示已连接验证。
 // 如果实测相反，只改这里。
-static constexpr bool BT_WKP_ACTIVE_LEVEL = true;
+static constexpr bool BT_LINK_ACTIVE_LEVEL = true;
 
 // SW 更像“按键脚”，常见是低有效按下。
 static constexpr bool BT_SW_ACTIVE_LEVEL = false;
 
 bool s_ready = false;
 bool s_bt_power_enabled = false;
-bool s_bt_wakeup_enabled = false;
+// true 表示蓝牙模块被切到发射模式；false 表示接收/浮空模式。
+bool s_bt_mode_transmit = false;
 bool s_bt_switch_level = !BT_SW_ACTIVE_LEVEL;
 bool s_amp_mute_enabled = true;
 bool s_amp_shutdown_enabled = true;
@@ -166,19 +172,22 @@ bool board_hw_control_begin()
     s_ready = true;
 
     // 安全默认：
-    // 蓝牙关闭；
+    // 蓝牙关闭，BT_MODE_CTRL 保持接收/浮空模式；
     // 功放保持“静音 + 关断”，等真正播放前再打开，减少开机爆破音。
+    pinMode(board::PIN_BT_MODE_CTRL, OUTPUT);
+    board_hw_set_bt_mode(false);
     board_hw_set_bt_power(false);
-    board_hw_set_bt_wakeup(false);
     board_hw_set_bt_switch(false);
     board_hw_set_amp_mute(true);
     board_hw_set_amp_shutdown(true);
     board_hw_solenoid_begin();
 
-    LOGI("[硬件控制] 初始化成功 BQ27441=%d GPOUT=GPIO%d 蓝牙电源=MCPB%d 功放静音=MCPA%d 功放关断=MCPA%d",
+    LOGI("[硬件控制] 初始化成功 BQ27441=%d GPOUT=GPIO%d 蓝牙电源=MCPB%d 蓝牙模式=GPIO%d 蓝牙连接=MCPA%d 功放静音=MCPA%d 功放关断=MCPA%d",
          bq27441_is_ready() ? 1 : 0,
          PIN_BQ27441_GPOUT,
          board::MCP_B_BT_PWR_EN,
+         board::PIN_BT_MODE_CTRL,
+         board::MCP_A_BT_LINK,
          board::MCP_A_MUTE_EN,
          board::MCP_A_SHDN_EN);
 
@@ -435,23 +444,43 @@ bool board_hw_get_bt_power()
     return s_bt_power_enabled;
 }
 
-bool board_hw_set_bt_wakeup(bool enabled)
+bool board_hw_set_bt_mode(bool transmit)
 {
-    if (!mcp23017_u3_is_ready()) return false;
+    const bool level = transmit ? BT_MODE_TX_GATE_LEVEL : !BT_MODE_TX_GATE_LEVEL;
+    digitalWrite(board::PIN_BT_MODE_CTRL, level ? HIGH : LOW);
 
-    const bool level = level_from_enabled(enabled, BT_WKP_ACTIVE_LEVEL);
-    if (!mcp23017_u3_set_a(board::MCP_A_BT_WKP_CTRL, level)) {
-        return false;
-    }
-
-    s_bt_wakeup_enabled = enabled;
-    LOGI("[硬件控制] 蓝牙唤醒 %s 电平=%d", enabled ? "开启" : "关闭", level ? 1 : 0);
+    s_bt_mode_transmit = transmit;
+    LOGI("[硬件控制] 蓝牙模式 %s GPIO%d=%d 模块BT_MODE=%s",
+         transmit ? "发射" : "接收",
+         board::PIN_BT_MODE_CTRL,
+         level ? 1 : 0,
+         transmit ? "拉低" : "浮空");
     return true;
 }
 
-bool board_hw_get_bt_wakeup()
+bool board_hw_get_bt_mode()
 {
-    return s_bt_wakeup_enabled;
+    return s_bt_mode_transmit;
+}
+
+bool board_hw_read_bt_link(bool* linked)
+{
+    if (!linked) return false;
+    if (!mcp23017_u3_is_ready()) return false;
+
+    bool level = false;
+    if (!mcp23017_u3_read_a_bit(board::MCP_A_BT_LINK, &level)) {
+        return false;
+    }
+
+    *linked = (level == BT_LINK_ACTIVE_LEVEL);
+    return true;
+}
+
+bool board_hw_is_bt_linked()
+{
+    bool linked = false;
+    return board_hw_read_bt_link(&linked) && linked;
 }
 
 bool board_hw_set_bt_switch(bool pressed)
@@ -615,7 +644,10 @@ void board_hw_debug_dump()
     (void)mcp23017_u3_read_b_bit(board::MCP_B_PG, &pg_level);
     (void)mcp23017_u3_read_b_bit(board::MCP_B_CHG_STAT, &chg_level);
 
-    LOGD("[硬件控制] 状态 bq_valid=%d 电池=%lumV soc=%u%% current=%dmA cap=%u/%umAh flags=0x%04X gpout=%d 蓝牙=%d 静音=%d 关断=%d PG=%d CHG=%d",
+    bool bt_linked = false;
+    (void)board_hw_read_bt_link(&bt_linked);
+
+    LOGD("[硬件控制] 状态 bq_valid=%d 电池=%lumV soc=%u%% current=%dmA cap=%u/%umAh flags=0x%04X gpout=%d 蓝牙电源=%d 蓝牙发射=%d 蓝牙连接=%d 静音=%d 关断=%d PG=%d CHG=%d",
          bat.valid ? 1 : 0,
          (unsigned long)bat.mv_battery,
          static_cast<unsigned>(bat.soc_percent),
@@ -625,6 +657,8 @@ void board_hw_debug_dump()
          static_cast<unsigned>(bat.flags),
          bat.gpout_level ? 1 : 0,
          s_bt_power_enabled ? 1 : 0,
+         s_bt_mode_transmit ? 1 : 0,
+         bt_linked ? 1 : 0,
          s_amp_mute_enabled ? 1 : 0,
          s_amp_shutdown_enabled ? 1 : 0,
          pg_level ? 1 : 0,

@@ -57,6 +57,10 @@ static constexpr int PIN_UART0_TX = 43;
 static constexpr int PIN_EC06_B = 38;
 static constexpr int PIN_EC06_A = 39;
 
+// Bluetooth module EWM104-BT62SP
+// IO45 是 ESP32-S3 启动绑带脚，外部电路不能强拉异常电平。
+static constexpr int PIN_BT_MODE_CTRL = 45;
+
 // I2S DAC
 static constexpr int PIN_I2S_LRCK = 40;
 static constexpr int PIN_I2S_DOUT = 41;
@@ -84,7 +88,7 @@ static constexpr uint8_t MCP_A_MUTE_EN = 0;
 static constexpr uint8_t MCP_A_SHDN_EN = 1;
 static constexpr uint8_t MCP_A_KEY_BACK_MODE = 2;
 static constexpr uint8_t MCP_A_EC06_E = 3;
-static constexpr uint8_t MCP_A_BT_WKP_CTRL = 4;
+static constexpr uint8_t MCP_A_BT_LINK = 4;
 static constexpr uint8_t MCP_A_BT_SW_CTRL = 5;
 static constexpr uint8_t MCP_A_KEY_PREV_NFC = 6;
 static constexpr uint8_t MCP_A_KEY_NEXT_LIST = 7;
