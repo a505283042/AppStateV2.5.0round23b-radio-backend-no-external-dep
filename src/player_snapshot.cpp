@@ -5,6 +5,7 @@
 
 #include "app_flags.h"
 #include "audio/audio.h"
+#include "audio/audio_output_route.h"
 #include "audio/audio_service.h"
 #include "lyrics/lyrics.h"
 #include "player_source.h"
@@ -215,7 +216,7 @@ bool player_snapshot_save_to_nvs()
 
     PlayerPersistSnapshot snap{};
     snap.version = kSnapshotVersion;
-    snap.volume = audio_get_volume();
+    snap.volume = audio_output_route_get_user_volume();
     snap.play_mode = (uint8_t)g_play_mode;
     snap.current_group_idx = player_playlist_get_current_group_idx();
     snap.track_idx = player_state_current_index();
@@ -327,7 +328,7 @@ PlayerSnapshotRestorePollResult player_snapshot_poll_restore()
     ui_set_now_playing(t.title.c_str(), t.artist.c_str());
     ui_set_album(t.album);
     ui_set_play_mode(g_play_mode);
-    ui_set_volume(audio_get_volume());
+    ui_set_volume(audio_output_route_get_user_volume());
 
     // 恢复曲目位置显示
     {

@@ -3,6 +3,7 @@
 #include "app_flags.h"
 #include "app_state.h"
 #include "audio/audio.h"
+#include "audio/audio_output_route.h"
 #include "audio/audio_service.h"
 #include "lyrics/lyrics.h"
 #include "player_playlist.h"
@@ -135,7 +136,7 @@ WebPlayerSnapshot web_snapshot_capture() {
   snap.is_paused = audio_service_is_paused();
   snap.play_ms = audio_get_play_ms();
   snap.total_ms = audio_get_total_ms();
-  snap.volume = audio_get_volume();
+  snap.volume = audio_output_route_get_user_volume();
   snap.mode = web_mode_to_key(g_play_mode);
   snap.current_group_idx = player_playlist_get_current_group_idx();
   snap.mode_label = web_mode_to_label(g_play_mode);

@@ -5,6 +5,7 @@
 #include "app_flags.h"
 #include "app_alarm.h"
 #include "audio/audio.h"
+#include "audio/audio_output_route.h"
 #include "audio/audio_service.h"
 #include "nfc/nfc.h"
 #include "nfc/nfc_binding.h"
@@ -346,7 +347,7 @@ static bool player_play_trackinfo_core(const TrackInfo& t,
 
     ui_set_track_pos(display_pos, display_total);
     ui_set_play_mode(g_play_mode);
-    ui_set_volume(audio_get_volume());
+    ui_set_volume(audio_output_route_get_user_volume());
     t_after_ui_prepare = millis();
 
     PlayerDeferredAssetJob asset_job{};

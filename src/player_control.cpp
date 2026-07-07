@@ -3,6 +3,7 @@
 #include <esp_heap_caps.h>
 
 #include "audio/audio.h"
+#include "audio/audio_output_route.h"
 #include "audio/audio_service.h"
 #include "app_flags.h"
 #include "keys/keys.h"
@@ -750,7 +751,7 @@ bool player_return_from_radio_to_local() {
     }
 
     audio_set_volume(s_radio_return.volume);
-    ui_set_volume(s_radio_return.volume);
+    ui_set_volume(audio_output_route_get_user_volume());
 
     LOGD("[电台] 已恢复本地歌曲：索引=%d", s_radio_return.track_idx);
     return true;
@@ -854,7 +855,7 @@ static bool control_play_net_track_index_impl(int idx, bool reset_shuffle)
     ui_set_album(item.album);
     ui_set_track_pos(idx, (int)net_music_catalog_count());
     ui_set_play_mode(g_play_mode);
-    ui_set_volume(audio_get_volume());
+    ui_set_volume(audio_output_route_get_user_volume());
     
 
     // NAS 播放起播时先显示网络封面加载图，避免继续显示上一首封面。
@@ -1103,12 +1104,10 @@ void player_toggle_play()
 
 void player_volume_step(int delta)
 {
-    int v = (int)audio_get_volume() + delta;
-    if (v < 0) v = 0;
-    if (v > 100) v = 100;
-    audio_set_volume((uint8_t)v);
-    ui_set_volume((uint8_t)v);
-    LOGD("[音量] %d%%", v);
+    (void)audio_output_route_step_user_volume(delta);
+    LOGD("[音量] 用户音量=%u%% 路线=%s",
+         (unsigned)audio_output_route_get_user_volume(),
+         audio_output_route_label());
 }
 
 void player_next_group()

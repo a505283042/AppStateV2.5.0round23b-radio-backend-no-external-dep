@@ -11,6 +11,7 @@
 #include "app_flags.h"
 #include "audio/audio_service.h"
 #include "audio/audio.h"
+#include "audio/audio_output_route.h"
 #include "player_control.h"
 #include "player_snapshot.h"
 #include "player_state.h"
@@ -2388,7 +2389,7 @@ static bool web_parse_volume_arg(uint8_t& out_value) { String s = s_server.arg("
 static void web_handle_volume() {
   if (g_app_state != STATE_PLAYER) { web_send_json_err("当前不在播放器状态"); return; }
   uint8_t v = 0; if (!web_parse_volume_arg(v)) { web_send_json_err("缺少音量参数 value"); return; }
-  audio_set_volume(v); ui_set_volume(v); ui_volume_key_pressed(); web_send_json_ok_simple();
+  (void)audio_output_route_set_user_volume(v); ui_volume_key_pressed(); web_send_json_ok_simple();
 }
 
 static bool web_parse_lock_value(bool& out_value, bool current_value) {

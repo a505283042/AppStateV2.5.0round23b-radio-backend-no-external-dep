@@ -21,6 +21,17 @@ bool audio_output_route_is_headphone_only();
 bool audio_output_route_is_speaker();
 bool audio_output_route_is_bluetooth_tx();
 
+/** @brief 面向用户显示/调节的音量。蓝牙发射模式下返回 BT62SP 模块音量。 */
+uint8_t audio_output_route_get_user_volume();
+/** @brief 设置面向用户的音量。蓝牙发射模式下只调 BT62SP，播放器输入固定安全值。 */
+bool audio_output_route_set_user_volume(uint8_t value);
+/** @brief 按步进调整面向用户的音量。 */
+bool audio_output_route_step_user_volume(int delta);
+/** @brief 蓝牙发射模式下固定送入 BT62SP 模拟输入的播放器音量。 */
+uint8_t audio_output_route_bluetooth_tx_player_fixed_volume();
+/** @brief 当前保存的 BT62SP 蓝牙发射音量。 */
+uint8_t audio_output_route_bluetooth_tx_volume();
+
 bool audio_output_route_select_headphone_only();
 bool audio_output_route_select_speaker();
 bool audio_output_route_select_bluetooth_tx();

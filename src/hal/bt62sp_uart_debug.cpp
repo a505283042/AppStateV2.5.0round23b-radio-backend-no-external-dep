@@ -243,6 +243,22 @@ void bt62sp_uart_debug_begin(uint32_t baud)
     Serial.println("[BT62SP] UART调试桥已启用：电脑串口输入 AT... 直接转发，输入 BT62 HELP 查看控制命令");
 }
 
+
+bool bt62sp_uart_debug_set_volume(uint8_t volume)
+{
+    if (!s_ready) {
+        return false;
+    }
+    if (volume > 100) {
+        volume = 100;
+    }
+
+    char cmd[20];
+    snprintf(cmd, sizeof(cmd), "AT+VOL=%u", static_cast<unsigned>(volume));
+    send_at_line(cmd);
+    return true;
+}
+
 void bt62sp_uart_debug_update()
 {
     if (!s_ready) {
