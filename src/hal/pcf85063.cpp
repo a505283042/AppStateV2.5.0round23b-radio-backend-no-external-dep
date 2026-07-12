@@ -36,7 +36,7 @@ Pcf85063DateTime s_last_time{};
 
 bool i2c_ready_for_rtc()
 {
-    if (i2c_bus_is_ready()) return true;
+    if (i2c_bus_io_allowed()) return true;
     s_last_i2c_error = 0xFE;
     return false;
 }
@@ -189,30 +189,33 @@ bool write_bytes_locked(uint8_t reg, const uint8_t* data, size_t len)
 
 bool read_u8(uint8_t reg, uint8_t* out)
 {
-    if (!out || !i2c_ready_for_rtc()) return false;
+    if (!out || !i2c_bus_io_allowed()) return false;
     i2c_bus_lock();
     const bool ok = read_bytes_locked(reg, out, 1);
     i2c_bus_unlock();
+    i2c_bus_note_critical_result(ok, s_last_i2c_error);
     return ok;
 }
 
 bool write_u8(uint8_t reg, uint8_t value)
 {
-    if (!i2c_ready_for_rtc()) return false;
+    if (!i2c_bus_io_allowed()) return false;
     i2c_bus_lock();
     const bool ok = write_bytes_locked(reg, &value, 1);
     i2c_bus_unlock();
+    i2c_bus_note_critical_result(ok, s_last_i2c_error);
     return ok;
 }
 
 bool probe_rtc()
 {
-    if (!i2c_ready_for_rtc()) return false;
+    if (!i2c_bus_io_allowed()) return false;
     i2c_bus_lock();
     Wire.beginTransmission(PCF85063_ADDR);
     const uint8_t err = Wire.endTransmission(true);
     i2c_bus_unlock();
     s_last_i2c_error = err;
+    i2c_bus_note_critical_result(err == 0, err);
     return err == 0;
 }
 
@@ -334,6 +337,7 @@ bool pcf85063_read_time(Pcf85063DateTime* out)
     i2c_bus_lock();
     const bool ok = read_bytes_locked(REG_SECONDS, data, sizeof(data));
     i2c_bus_unlock();
+    i2c_bus_note_critical_result(ok, s_last_i2c_error);
     if (!ok) return false;
 
     out->oscillator_stopped = (data[0] & SECONDS_OS) != 0;
@@ -367,6 +371,7 @@ bool pcf85063_set_time(const Pcf85063DateTime& t)
     i2c_bus_lock();
     const bool ok = write_bytes_locked(REG_SECONDS, data, sizeof(data));
     i2c_bus_unlock();
+    i2c_bus_note_critical_result(ok, s_last_i2c_error);
 
     if (ok) {
         s_last_time = t;
@@ -483,6 +488,7 @@ bool pcf85063_set_alarm(uint8_t second, uint8_t minute, uint8_t hour, uint8_t da
     i2c_bus_lock();
     const bool alarm_ok = write_bytes_locked(REG_SECOND_ALARM, alarm_regs, sizeof(alarm_regs));
     i2c_bus_unlock();
+    i2c_bus_note_critical_result(alarm_ok, s_last_i2c_error);
     if (!alarm_ok) {
         LOGW("[PCF85063] 设置闹钟失败：写闹钟寄存器失败 err=%u", s_last_i2c_error);
         return false;
@@ -575,6 +581,7 @@ bool pcf85063_disable_alarm()
     i2c_bus_lock();
     const bool alarm_ok = write_bytes_locked(REG_SECOND_ALARM, alarm_regs, sizeof(alarm_regs));
     i2c_bus_unlock();
+    i2c_bus_note_critical_result(alarm_ok, s_last_i2c_error);
     if (!alarm_ok) {
         LOGW("[PCF85063] 清除闹钟失败：写闹钟寄存器失败 err=%u", s_last_i2c_error);
         return false;

@@ -8,6 +8,7 @@
 #include "menu/quick_menu.h"
 #include "player_playlist.h"
 #include "player_source.h"
+#include "player_snapshot.h"
 #include "storage/storage_catalog_v3.h"
 #include "storage/storage_groups_v3.h"
 #include "radio/radio_catalog.h"
@@ -543,10 +544,16 @@ bool player_list_select_enter_net_track()
         source.net_track_idx >= 0 &&
         source.net_track_idx < total) {
         s_list_selected_idx = source.net_track_idx;
-    } else if (s_last_net_track_list_idx >= 0) {
-        s_list_selected_idx = list_select_clamp_index(s_last_net_track_list_idx, total);
     } else {
-        s_list_selected_idx = 0;
+        const int saved_net_idx = player_snapshot_resolve_net_track_index(
+            player_snapshot_net_track_index());
+        if (saved_net_idx >= 0 && saved_net_idx < total) {
+            s_list_selected_idx = saved_net_idx;
+        } else if (s_last_net_track_list_idx >= 0) {
+            s_list_selected_idx = list_select_clamp_index(s_last_net_track_list_idx, total);
+        } else {
+            s_list_selected_idx = 0;
+        }
     }
 
     if (!list_select_load_net_track_page_for_selected()) {

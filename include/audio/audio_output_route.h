@@ -23,6 +23,8 @@ bool audio_output_route_is_bluetooth_tx();
 
 /** @brief 面向用户显示/调节的音量。蓝牙发射模式下返回 BT62SP 模块音量。 */
 uint8_t audio_output_route_get_user_volume();
+/** @brief 普通耳机/功放路线音量；蓝牙发射时返回进入蓝牙前保存的播放器音量。 */
+uint8_t audio_output_route_get_normal_volume();
 /** @brief 设置面向用户的音量。蓝牙发射模式下只调 BT62SP，播放器输入固定安全值。 */
 bool audio_output_route_set_user_volume(uint8_t value);
 /** @brief 按步进调整面向用户的音量。 */

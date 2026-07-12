@@ -15,6 +15,7 @@
 #include "net_music/net_music_embedded_cover.h"
 #include "player_state.h"
 #include "player_source.h"
+#include "player_snapshot.h"
 #include "lyrics/lyrics.h"
 #include "audio/audio_radio_backend.h"
 #include "storage/storage.h"
@@ -47,6 +48,21 @@ bool s_user_paused = false;
 bool s_manual_stop_latched = false;
 uint32_t s_pause_time_ms = 0;
 constexpr uint32_t LOCAL_AUTO_NEXT_MIN_PLAY_MS = 1200;
+constexpr uint32_t LOCAL_END_EARLY_WINDOW_MS = 3000;
+constexpr uint32_t LOCAL_IO_ERROR_PROBE_GRACE_MS = 1500;
+
+struct LocalEndRecoveryState {
+    uint32_t end_serial = 0;
+    uint32_t first_seen_ms = 0;
+    bool storage_probe_attempted = false;
+};
+
+LocalEndRecoveryState s_local_end_recovery;
+
+static void control_reset_local_end_recovery()
+{
+    s_local_end_recovery = LocalEndRecoveryState{};
+}
 
 struct RadioReturnContext {
     bool valid = false;
@@ -187,7 +203,7 @@ static void control_apply_radio_cover(const RadioItem& item)
     (void)control_apply_cover_file("/System/default_cover.jpg");
 }
 
-static bool control_prepare_net_track_item(int idx, NetMusicItem& item, String& url)
+static bool control_prepare_net_track_item(int& idx, NetMusicItem& item, String& url)
 {
     if (idx < 0) return false;
 
@@ -195,6 +211,8 @@ static bool control_prepare_net_track_item(int idx, NetMusicItem& item, String& 
         LOGW("[网络歌曲] 目录 未加载 or 为空");
         return false;
     }
+
+    idx = player_snapshot_resolve_net_track_index(idx);
 
     if (!net_music_catalog_get((uint32_t)idx, &item) || !item.valid) {
         LOGW("[网络歌曲] 未找到条目：索引=%d 错误=%s",
@@ -613,6 +631,7 @@ void player_control_reset_runtime_flags()
     s_user_paused = false;
     s_manual_stop_latched = false;
     s_pause_time_ms = 0;
+    control_reset_local_end_recovery();
 }
 
 void player_control_on_track_started()
@@ -704,6 +723,71 @@ static bool control_poll_net_track_start()
     }
 
     return false;
+}
+
+static bool control_allow_local_auto_next_after_end(const AudioPlaybackEndState& end_state)
+{
+    const uint32_t now = millis();
+    if (end_state.serial != s_local_end_recovery.end_serial) {
+        s_local_end_recovery.end_serial = end_state.serial;
+        s_local_end_recovery.first_seen_ms = now;
+        s_local_end_recovery.storage_probe_attempted = false;
+    }
+
+    const uint32_t play_ms = end_state.play_ms > 0
+        ? end_state.play_ms
+        : audio_get_play_ms();
+    const uint32_t total_ms = end_state.total_ms > 0
+        ? end_state.total_ms
+        : audio_get_total_ms();
+    const bool ended_early = total_ms > 0 &&
+        play_ms + LOCAL_END_EARLY_WINDOW_MS < total_ms;
+
+    const bool source_io_error =
+        end_state.reason == AudioPlaybackEndReason::SourceIoError;
+    const bool storage_suspect = storage_has_recent_io_error();
+
+    if (source_io_error || storage_suspect) {
+        // 先给 TF 热插拔探测一个短窗口，避免真正拔卡时连续切歌。
+        if ((uint32_t)(now - s_local_end_recovery.first_seen_ms) <
+            LOCAL_IO_ERROR_PROBE_GRACE_MS) {
+            return false;
+        }
+
+        if (!storage_is_ready()) {
+            return false;
+        }
+
+        if (storage_has_recent_io_error() &&
+            !s_local_end_recovery.storage_probe_attempted) {
+            s_local_end_recovery.storage_probe_attempted = true;
+            if (storage_probe_alive()) {
+                storage_clear_io_error();
+                LOGW("[播放器] TF 读取异常后物理探测仍在线，清除瞬时错误并跳过当前歌曲");
+            } else {
+                LOGW("[播放器] TF 读取异常且物理探测失败，等待热插拔流程处理");
+                return false;
+            }
+        }
+
+        if (storage_has_recent_io_error()) {
+            return false;
+        }
+    }
+
+    if (ended_early) {
+        LOGW("[播放器] 本地音频提前结束：原因=%s 播放=%lums 总时长=%lums，将跳过当前歌曲",
+             audio_playback_end_reason_label(end_state.reason),
+             (unsigned long)play_ms,
+             (unsigned long)total_ms);
+    } else {
+        LOGI("[播放器] 本地音频结束：原因=%s 播放=%lums 总时长=%lums",
+             audio_playback_end_reason_label(end_state.reason),
+             (unsigned long)play_ms,
+             (unsigned long)total_ms);
+    }
+
+    return true;
 }
 
 bool player_control_try_auto_next(bool entered, bool started)
@@ -804,23 +888,39 @@ bool player_control_try_auto_next(bool entered, bool started)
 
     // 本地歌曲仍然保留原来的 started 保护。
     if (!started) return false;
-    if (audio_service_is_playing()) return false;
+    if (audio_service_is_playing()) {
+        control_reset_local_end_recovery();
+        return false;
+    }
 
-    // 从网络流切回本地时，解码器/I2S 刚复位的瞬间可能会出现短暂 not playing。
-    // 不能立刻判定“歌曲结束”，否则会出现响一下就连续自动下一首。
+    const AudioPlaybackEndState end_state = audio_get_last_end_state();
+
+    // 从网络流切回本地时，解码器/I2S 刚复位的瞬间可能短暂显示 not playing。
+    // 现在只有 AudioTask 已发布明确结束事件时才允许推进；没有结束事件仍保留最短播放保护。
     const uint32_t local_play_ms = audio_get_play_ms();
-    if (local_play_ms < LOCAL_AUTO_NEXT_MIN_PLAY_MS) {
-        LOGW("[播放器] auto 下一首 已抑制: 本地 play 过短 play_ms=%lu 来源=%s",
-            (unsigned long)local_play_ms,
-            player_source_type_key(source.type));
+    if (end_state.reason == AudioPlaybackEndReason::None &&
+        local_play_ms < LOCAL_AUTO_NEXT_MIN_PLAY_MS) {
+        LOGW("[播放器] 自动下一首已抑制：尚无结束事件 play_ms=%lu 来源=%s",
+             (unsigned long)local_play_ms,
+             player_source_type_key(source.type));
+        return false;
+    }
+
+    if (end_state.reason == AudioPlaybackEndReason::None ||
+        end_state.reason == AudioPlaybackEndReason::Stopped) {
+        // 没有明确结束事件，或属于显式停止/切换音源/关机，均不能自动下一首。
         return false;
     }
 
     const int track_count = control_track_count();
     if (track_count <= 0) return false;
 
-    if (!storage_is_ready() || storage_has_recent_io_error()) {
-        LOGW("[播放器] auto 下一首 被阻止: storage 未就绪 or IO error pending");
+    if (!control_allow_local_auto_next_after_end(end_state)) {
+        return false;
+    }
+
+    if (!storage_is_ready()) {
+        LOGW("[播放器] 本地自动下一首被阻止：TF 未就绪");
         return false;
     }
 
@@ -848,7 +948,10 @@ bool player_play_radio_index(int idx)
     const RadioItem* item = radio_catalog_get((size_t)idx);
     if (!item || !item->valid) return false;
 
-    // 保存当前播放状态到返回上下文
+    // 进入电台前先把当前本地或 NAS 状态保存到各自内存快照；电台不会覆盖这两套状态。
+    (void)player_snapshot_capture_current_source();
+
+    // 保留旧返回上下文作为兼容回退。
     player_save_radio_return_context_if_needed();
 
     if (player_source_get().type == PlayerSourceType::NET_RADIO) {
@@ -902,24 +1005,24 @@ bool player_return_from_radio_to_local() {
     // 避免立刻打开本地文件时误触发 EOF 或自动下一首。
     delay(30);
 
-    if (!s_radio_return.valid || s_radio_return.track_idx < 0) {
-        LOGW("[电台] no 返回 context");
+    (void)player_snapshot_apply_local_context();
+
+    int target = player_snapshot_local_track_index();
+    if (target < 0 && s_radio_return.valid) {
+        target = s_radio_return.track_idx;
+    }
+    if (target < 0) {
+        LOGW("[电台] 没有可恢复的本地快照");
         return false;
     }
 
-    g_play_mode = s_radio_return.mode;
-    player_playlist_set_current_group_idx(s_radio_return.group_idx);
-    player_playlist_force_rebuild();
-
-    const bool ok = player_play_idx_v3((uint32_t)s_radio_return.track_idx, true, true);
+    const bool ok = player_play_idx_v3((uint32_t)target, true, true);
     if (!ok) {
-        LOGW("[电台] 恢复本地歌曲失败：索引=%d", s_radio_return.track_idx);
+        LOGW("[电台] 恢复本地歌曲失败：索引=%d", target);
         return false;
     }
 
-    (void)audio_output_route_set_user_volume(s_radio_return.volume);
-
-    LOGD("[电台] 已恢复本地歌曲：索引=%d", s_radio_return.track_idx);
+    LOGD("[电台] 已恢复本地歌曲：索引=%d", target);
     return true;
 }
 
@@ -943,11 +1046,18 @@ bool player_return_from_network_to_local()
         return false;
     }
 
-    int target = s_net_track_return_local_idx;
+    // 切回本地前先捕获当前 NAS 曲目和 NAS 播放模式。
+    (void)player_snapshot_capture_current_source();
+    (void)player_snapshot_apply_local_context();
+
+    int target = player_snapshot_local_track_index();
+    if (target < 0) {
+        target = s_net_track_return_local_idx;
+    }
 
     if (target < 0 || target >= track_count) {
         target = 0;
-        LOGW("[网络歌曲] 返回本地失败，回退到 idx=0");
+        LOGW("[网络歌曲] 返回本地没有有效快照，回退到 idx=0");
     }
 
     LOGD("[网络歌曲] 返回本地目标=%d", target);
@@ -994,6 +1104,12 @@ static bool control_play_net_track_index_impl(int idx, bool reset_shuffle)
     }
 
     const PlayerSourceState before_source = player_source_get();
+
+    if (before_source.type != PlayerSourceType::NET_TRACK) {
+        // 从本地/电台进入 NAS 前，先保留原音源状态，再恢复 NAS 自己的顺序/随机模式。
+        (void)player_snapshot_capture_current_source();
+        (void)player_snapshot_apply_net_context();
+    }
 
     if (before_source.type == PlayerSourceType::LOCAL_TRACK) {
         const int cur = control_current_track_idx();
@@ -1066,6 +1182,7 @@ bool player_play_net_track_index(int idx)
 
 void player_stop_net_track()
 {
+    (void)player_snapshot_capture_current_source();
     control_clear_net_track_start_pending();
     net_music_embedded_cover_cancel();
     audio_service_stop(true);

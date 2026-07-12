@@ -253,6 +253,15 @@ uint8_t audio_output_route_get_user_volume()
     return audio_get_volume();
 }
 
+uint8_t audio_output_route_get_normal_volume()
+{
+    if (audio_output_route_is_bluetooth_tx()) {
+        return s_saved_normal_volume > 100 ? 100 : s_saved_normal_volume;
+    }
+    const uint8_t volume = audio_get_volume();
+    return volume > 100 ? 100 : volume;
+}
+
 bool audio_output_route_set_user_volume(uint8_t value)
 {
     return audio_service_set_user_volume(value, true);

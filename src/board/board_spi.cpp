@@ -1,4 +1,4 @@
-#include <Arduino.h> 
+#include <Arduino.h>
 #include <SPI.h>              /* 包含SPI库 */
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
@@ -35,6 +35,8 @@ void board_spi_init(void)
     // BQ27441 + MCP23017 + PCF85063 共用一条 I2C，总线优先稳定。
     // 400k 下 BQ27441 偶发 requestFrom 失败，降到 100k。
     Wire.setClock(100000);
+    // 明确限制单次事务超时，避免总线异常时每个按键/电池读取长时间阻塞。
+    Wire.setTimeOut(40);
     i2c_bus_set_ready(true);
 
     const bool mcp_ok = mcp23017_u3_begin();
@@ -66,7 +68,7 @@ void board_spi_init(void)
 
         mcp23017_u3_set_b(board::MCP_B_BLK, true);
         Serial.println("[总线] 背光使能 (BLK) -> 高电平");
-    
+
     } else {
         Serial.println("[总线] 初始化IIC扩展失败");
     }

@@ -63,10 +63,8 @@ void app_power_save_and_shutdown()
     // 暂停请求和功放静音均由 AudioTask 串行处理，避免关机线程直接碰音频硬件。
     (void)audio_service_pause(true);
 
-    const PlayerSourceState source = player_source_get();
-    const bool snapshot_ok = (source.type == PlayerSourceType::LOCAL_TRACK)
-                                 ? player_snapshot_save_to_nvs()
-                                 : true;
+    // 无论当前播放本地还是 NAS，都同时保存两套快照；当前音源只更新自己的那一套，另一套保持上次状态。
+    const bool snapshot_ok = player_snapshot_save_to_nvs();
 
     const bool list_ok = player_list_select_flush_persistent_state();
     const bool web_ok = web_settings_save_if_dirty();

@@ -3,23 +3,21 @@
 #include <Arduino.h>
 #include <stdint.h>
 
-/**
- * @brief PCB1 上的 U3 MCP23017 驱动。
- *
- * 第一版目标：
- * - 初始化 A/B 口方向和安全默认输出
- * - 提供 GPIOA/GPIOB 读写
- * - 提供单 bit set/read
- *
- * 先用轮询，不急着启用 INTA 中断。
- */
+/** PCB1 上的 U3 MCP23017 驱动。 */
 bool mcp23017_u3_begin();
-
 bool mcp23017_u3_is_ready();
+
+// 主循环维护入口：总线恢复或设备掉线后重新下发寄存器配置。
+void mcp23017_u3_service();
 
 bool mcp23017_u3_write_a(uint8_t value);
 bool mcp23017_u3_write_b(uint8_t value);
 
+// 推荐接口：返回值明确表示本次读取是否有效。
+bool mcp23017_u3_read_port_a(uint8_t* out);
+bool mcp23017_u3_read_port_b(uint8_t* out);
+
+// 兼容旧调用；失败时返回 0xFF。
 uint8_t mcp23017_u3_read_a();
 uint8_t mcp23017_u3_read_b();
 

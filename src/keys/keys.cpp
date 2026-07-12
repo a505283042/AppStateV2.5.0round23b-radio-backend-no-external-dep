@@ -70,6 +70,14 @@ static int s_enc_last = 0;
 static int s_enc_accum = 0;
 static uint32_t s_enc_last_step_ms = 0;
 
+// MCP23017 GPIOA 包含 4 个按键和 BT_LINK。按键扫描每轮只允许读取一次端口，
+// 不能为每一个按键分别发起 I2C 事务。
+static constexpr uint32_t MCP_KEY_SCAN_INTERVAL_MS = 10;
+static constexpr uint32_t MCP_KEY_RETRY_INTERVAL_MS = 100;
+static uint8_t s_mcp_a_cache = 0xFF;
+static bool s_mcp_a_cache_valid = false;
+static uint32_t s_mcp_a_cache_ms = 0;
+
 // EC06：12 定位 / 6 脉冲。
 // 这类编码器通常一格定位对应 2 个有效 quadrature 边沿。
 // 如果用 4 个边沿算一步，会变成转两格才触发一次。
@@ -414,14 +422,38 @@ static void list_select_key_and_refresh(key_event_t evt)
     ui_request_refresh_now();
 }
 
+static bool refresh_mcp_a_cache(bool force = false)
+{
+    const uint32_t now = millis();
+    const uint32_t interval_ms = s_mcp_a_cache_valid
+        ? MCP_KEY_SCAN_INTERVAL_MS
+        : MCP_KEY_RETRY_INTERVAL_MS;
+
+    if (!force && s_mcp_a_cache_ms != 0 && now - s_mcp_a_cache_ms < interval_ms) {
+        return s_mcp_a_cache_valid;
+    }
+
+    s_mcp_a_cache_ms = now;
+
+    uint8_t value = 0xFF;
+    if (!mcp23017_u3_read_port_a(&value)) {
+        s_mcp_a_cache = 0xFF;
+        s_mcp_a_cache_valid = false;
+        return false;
+    }
+
+    s_mcp_a_cache = value;
+    s_mcp_a_cache_valid = true;
+    return true;
+}
+
 static int read_mcp_a_active_low(uint8_t bit)
 {
-    if (!mcp23017_u3_is_ready()) {
+    if (!s_mcp_a_cache_valid) {
         return HIGH;
     }
 
-    const uint8_t a = mcp23017_u3_read_a();
-    return (a & (1 << bit)) ? HIGH : LOW;
+    return (s_mcp_a_cache & (1u << bit)) ? HIGH : LOW;
 }
 
 static int read_key_pin(int pin)
@@ -572,12 +604,12 @@ static void handle_key(KeyCtx& k,
   if (repeat && pressed(k.last) && on_repeat) {
     uint32_t hold_time = now - k.t_down;
     uint32_t repeat_interval = 150; // 默认 150ms 间隔
-    
+
     // 按住超过 2 秒后加速到 50ms 间隔
     if (hold_time > 2000) {
       repeat_interval = 50;
     }
-    
+
     if (now - k.t_repeat >= repeat_interval) {
       k.t_repeat = now;
       on_repeat();
@@ -639,6 +671,9 @@ void keys_init()
 void keys_sync_to_hw_state()
 {
   uint32_t now = millis();
+
+  // 同步整组按键前只强制刷新一次 GPIOA。
+  (void)refresh_mcp_a_cache(true);
 
   auto sync_one = [now](KeyCtx& k) {
     k.last = read_key_pin(k.pin);
@@ -705,12 +740,12 @@ static void handle_voldn_key_normal()
   if (pressed(k_voldn.last)) {
     uint32_t hold_time = now - k_voldn.t_down;
     uint32_t repeat_interval = 150; // 默认 150ms 间隔
-    
+
     // 按住超过 2 秒后加速到 50ms 间隔
     if (hold_time > 2000) {
       repeat_interval = 50;
     }
-    
+
     if (now - k_voldn.t_repeat >= repeat_interval) {
       k_voldn.t_repeat = now;
       player_volume_step(-5);
@@ -809,6 +844,10 @@ static bool handle_backlight_sleep_mode(int8_t encoder_step)
 
 void keys_update()
 {
+  // 一轮按键处理共享同一份 MCP GPIOA 快照。总线异常时最多每 100ms 尝试一次，
+  // 其余按键按“未按下”处理，避免 I2C 错误风暴。
+  (void)refresh_mcp_a_cache(false);
+
   const int8_t encoder_step = read_encoder_step();
 
   // HALL_OUT 是独立传感器输入，优先处理。
@@ -821,7 +860,7 @@ void keys_update()
 
   // --- 列表选择模式 ---
   if (player_list_select_is_active()) {
-    
+
     // 列表页里旋钮也用于上下移动，不再调音量。
     if (encoder_step > 0) {
       list_select_key_and_refresh(KEY_NEXT_SHORT);

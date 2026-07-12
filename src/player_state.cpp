@@ -259,7 +259,14 @@ static bool player_play_trackinfo_core(const TrackInfo& t,
     player_recover_init_once();
     player_binding_init_once();
 
-    if (player_source_get().type == PlayerSourceType::NET_RADIO) {
+    const PlayerSourceState before_source = player_source_get();
+    if (before_source.type != PlayerSourceType::LOCAL_TRACK) {
+        // 从 NAS/电台切回本地时，先保留 NAS 状态，再恢复本地自己的模式和分组。
+        (void)player_snapshot_capture_current_source();
+        (void)player_snapshot_apply_local_context();
+    }
+
+    if (before_source.type == PlayerSourceType::NET_RADIO) {
         audio_radio_backend_stop();
     }
 

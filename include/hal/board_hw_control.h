@@ -69,6 +69,9 @@ struct BatteryUiStatus {
     uint32_t updated_ms = 0;
 };
 
+// 主循环高频维护：处理 I2C 总线恢复和 MCP23017 重新初始化。
+void board_hw_i2c_service();
+
 void board_hw_battery_status_tick();
 BatteryUiStatus board_hw_get_battery_status_cached();
 

@@ -90,12 +90,10 @@ static void app_handle_tf_removed()
 
     const PlayerSourceState source = player_source_get();
 
-    // TF 拔卡事件只发生一次，这里保存一次即可。
+    // TF 拔卡事件只发生一次，这里把本地与 NAS 两套状态一起保存。
+    // 当前是 NAS 时，本地快照保持上次状态；当前是本地时，NAS 快照保持上次状态。
     // 不要放在 app_state_update() 高频循环里。
-    if (source.type == PlayerSourceType::LOCAL_TRACK &&
-        player_state_current_index() >= 0) {
-        player_snapshot_save_to_nvs();
-    }
+    (void)player_snapshot_save_to_nvs();
 
     storage_mark_not_ready();
     g_abort_scan = true;
@@ -159,7 +157,7 @@ static void app_handle_tf_mounted()
     } else {
         LOGW("[应用] 电台 目录 re加载 失败");
     }
-    
+
     // TF 卡插入后不主动加载 NAS/HTTP 歌曲索引。
     // 这里只清空旧的 NAS 内存列表，然后重新读取很小的 base 文件。
     // 后续进入 NAS 歌曲列表或 Web NAS 页面时，再从 HTTP 下载 net_music.txt 到内存。
@@ -215,6 +213,10 @@ static void app_handle_tf_mounted()
 /* 根据当前应用状态执行相应的状态处理函数 */
 void app_state_update(void)
 {
+    // 先维护 I2C 总线和 MCP23017。总线异常时先恢复，再扫描扩展按键，
+    // 避免多个按键读取连续触发超时并拖慢整个主循环。
+    board_hw_i2c_service();
+
     // 按键处理也需要高频调用，确保响应及时
     keys_update();
     // TC118S 电磁铁只允许短脉冲输出，tick 到时后自动断电。
@@ -230,9 +232,10 @@ void app_state_update(void)
             s_low_battery_shutdown_started = true;
             LOGW("[应用] 触发低电量关机: %s", board_hw_battery_shutdown_reason_label(reason));
             ui_show_player_placeholder("低电量关机", board_hw_battery_shutdown_reason_label(reason));
+            // 先保存当前音源状态，再停止音频，避免主动 stop 覆盖暂停/运行状态判断。
+            (void)player_snapshot_save_to_nvs();
             player_control_mark_manual_stop();
             audio_service_stop(true);
-            player_snapshot_save_to_nvs();
             delay(1000);
             board_hw_power_off();
             return;

@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <SdFat.h>
 
+#include "audio/audio.h"
 #include "audio/audio_mp3_source.h"
 
 bool audio_mp3_start_file(SdFat& sd, const char* path);
@@ -12,6 +13,7 @@ bool audio_mp3_start_source(const AudioMp3Source& source, const char* debug_name
 
 void audio_mp3_stop();
 bool audio_mp3_loop(); // 解码一段并输出，返回是否还在播放
+AudioPlaybackEndReason audio_mp3_get_end_reason();
 
 bool audio_mp3_is_active();
 bool audio_mp3_is_stream_source();

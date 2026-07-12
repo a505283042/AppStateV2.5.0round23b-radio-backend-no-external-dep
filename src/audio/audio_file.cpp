@@ -154,7 +154,11 @@ void audio_file_invalidate_dir_cache() {
 }
 
 bool AudioFile::open(SdFat& sd_ref, const char* path) {
+  _had_io_error = false;
+  _cached_size = 0;
+
   if (!storage_is_ready()) {
+    _had_io_error = true;
     LOGW("[音频文件] 跳过打开：存储未就绪 路径=%s", path ? path : "(null)");
     return false;
   }
@@ -165,7 +169,9 @@ bool AudioFile::open(SdFat& sd_ref, const char* path) {
   const uint32_t t_after_lock = millis();
   _last_open_stats.lock_wait_ms = t_after_lock - t_lock_begin;
   if (!sd_lock) {
-    LOGE("[音频文件] 打开 锁 超时");
+    _had_io_error = true;
+    LOGE("[音频文件] 打开锁超时");
+    storage_report_io_error("AudioFile::open_lock_timeout");
     return false;
   }
 
@@ -176,12 +182,14 @@ bool AudioFile::open(SdFat& sd_ref, const char* path) {
   char dir_path[AUDIO_PATH_BUF];
   const char* file_name = nullptr;
   if (!split_parent_dir(path, dir_path, sizeof(dir_path), &file_name)) {
+    _had_io_error = true;
     LOGE("[音频文件] 拆分路径失败：%s", path ? path : "(null)");
     return false;
   }
 
   if (!ensure_cached_dir_locked(sd_ref, dir_path, _last_open_stats)) {
-    LOGE("[音频文件] 打开 目录 失败: %s", dir_path);
+    _had_io_error = true;
+    LOGE("[音频文件] 打开目录失败: %s", dir_path);
     storage_report_io_error("AudioFile::open_dir");
     return false;
   }
@@ -195,6 +203,7 @@ bool AudioFile::open(SdFat& sd_ref, const char* path) {
 
   const uint32_t t_before_open = millis();
   if (!f.open(parent, file_name, O_RDONLY)) {
+    _had_io_error = true;
     _last_open_stats.file_open_ms = millis() - t_before_open;
     storage_report_io_error("AudioFile::open_file");
     return false;
@@ -220,14 +229,20 @@ void AudioFile::close() {
 
 ssize_t AudioFile::read(void* dst, size_t bytes) {
   if (!storage_is_ready()) {
+    _had_io_error = true;
     return -1;
   }
 
-  if (!f) return -1;
+  if (!f) {
+    _had_io_error = true;
+    return -1;
+  }
 
   StorageSdLockGuard sd_lock(500);
   if (!sd_lock) {
+    _had_io_error = true;
     LOGE("[音频文件] 获取 SD 锁超时");
+    storage_report_io_error("AudioFile::read_lock_timeout");
     return -1;
   }
 
@@ -245,9 +260,11 @@ ssize_t AudioFile::read(void* dst, size_t bytes) {
   int n = f.read(dst, remaining);
 
   if (n < 0) {
+    _had_io_error = true;
     storage_report_io_error("AudioFile::read_negative");
     return -1;
   } else if (n == 0 && remaining > 0) {
+    _had_io_error = true;
     LOGE("[音频文件] 读取异常：期望 %u 字节但返回 0", remaining);
     storage_report_io_error("AudioFile::read_zero_unexpected");
     return -1;
@@ -258,17 +275,21 @@ ssize_t AudioFile::read(void* dst, size_t bytes) {
 
 bool AudioFile::seek(uint32_t pos) {
   if (!storage_is_ready()) {
+    _had_io_error = true;
     return false;
   }
 
   if (!f) {
+    _had_io_error = true;
     LOGE("[音频文件] Seek 失败：文件未打开");
     return false;
   }
 
   StorageSdLockGuard sd_lock(500);
   if (!sd_lock) {
+    _had_io_error = true;
     LOGE("[音频文件] 获取 SD 锁超时");
+    storage_report_io_error("AudioFile::seek_lock_timeout");
     return false;
   }
 
@@ -280,6 +301,7 @@ bool AudioFile::seek(uint32_t pos) {
   bool result = f.seekSet(pos);
 
   if (!result) {
+    _had_io_error = true;
     LOGE("[音频文件] Seek 失败：位置 %u，文件大小 %u", pos, _cached_size);
     storage_report_io_error("AudioFile::seek");
   }

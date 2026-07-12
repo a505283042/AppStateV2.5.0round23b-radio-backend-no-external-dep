@@ -33,6 +33,14 @@ static uint8_t s_mp3_channels = 0;
 static uint32_t s_mp3_bitrate_kbps = 0;
 static String s_mp3_last_error;
 static String s_mp3_debug_name;
+static AudioPlaybackEndReason s_end_reason = AudioPlaybackEndReason::None;
+
+static void set_end_reason_if_none(AudioPlaybackEndReason reason)
+{
+  if (s_end_reason == AudioPlaybackEndReason::None) {
+    s_end_reason = reason;
+  }
+}
 
 static constexpr size_t kMp3FileInputBufferBytes = 8 * 1024;
 // 网络 MP3 流比本地文件更怕 UI/菜单短时间抢 CPU。
@@ -211,6 +219,7 @@ static bool fill_input_buffer(size_t min_fill_target, uint32_t wait_timeout_ms =
       return true;
     }
 
+    set_end_reason_if_none(AudioPlaybackEndReason::SourceIoError);
     LOGE("[MP3] 音源读取失败：名称=%s 代码=%d", s_debug_name ? s_debug_name : "<null>", n);
     return false;
   }
@@ -222,6 +231,7 @@ static bool fill_input_buffer(size_t min_fill_target, uint32_t wait_timeout_ms =
 bool audio_mp3_start_source(const AudioMp3Source& source, const char* debug_name)
 {
   audio_mp3_stop();
+  s_end_reason = AudioPlaybackEndReason::None;
 
   if (!source.read) {
     LOGE("[MP3] 无效音源：缺少读取回调");
@@ -297,6 +307,7 @@ uint32_t audio_mp3_get_sample_rate() { return s_mp3_sample_rate; }
 uint8_t audio_mp3_get_channels() { return s_mp3_channels; }
 uint32_t audio_mp3_get_bitrate_kbps() { return s_mp3_bitrate_kbps; }
 const char* audio_mp3_get_last_error() { return s_mp3_last_error.c_str(); }
+AudioPlaybackEndReason audio_mp3_get_end_reason() { return s_end_reason; }
 
 bool audio_mp3_start_file(SdFat& sd, const char* path)
 {
@@ -349,6 +360,10 @@ bool audio_mp3_start_url_from_offset(const char* url, uint32_t start_offset, uin
 
 void audio_mp3_stop()
 {
+  if (g_playing && s_end_reason == AudioPlaybackEndReason::None) {
+    s_end_reason = AudioPlaybackEndReason::Stopped;
+  }
+
   s_pending_off = 0;
   s_pending_frames = 0;
 
@@ -394,7 +409,11 @@ bool audio_mp3_loop()
   // --- A) 先把 pending 的 PCM 写完 ---
   if (s_pending_frames > 0) {
     size_t w = audio_i2s_write_frames(g_pcm + s_pending_off * 2, s_pending_frames);
-    if (w == SIZE_MAX) { audio_mp3_stop(); return false; }
+    if (w == SIZE_MAX) {
+      set_end_reason_if_none(AudioPlaybackEndReason::OutputError);
+      audio_mp3_stop();
+      return false;
+    }
     s_pending_off    += w;
     s_pending_frames -= w;
     return true;
@@ -429,6 +448,7 @@ bool audio_mp3_loop()
 #endif
     if (g_inbuf_filled == 0) {
       if (g_source_eof) {
+        set_end_reason_if_none(AudioPlaybackEndReason::NaturalEof);
         audio_mp3_stop();
         return false;
       }
@@ -480,6 +500,7 @@ bool audio_mp3_loop()
 
     // 文件源且已经 EOF：继续冲一轮残余字节后退出；流源则保持等待下一批输入。
     if (g_source_eof && g_inbuf_filled <= 1) {
+      set_end_reason_if_none(AudioPlaybackEndReason::NaturalEof);
       audio_mp3_stop();
       return false;
     }
@@ -491,6 +512,7 @@ bool audio_mp3_loop()
     memmove(g_inbuf, g_inbuf + info.frame_bytes, g_inbuf_filled - info.frame_bytes);
     g_inbuf_filled -= info.frame_bytes;
   } else {
+    set_end_reason_if_none(AudioPlaybackEndReason::DecodeError);
     audio_mp3_stop();
     return false;
   }
@@ -525,7 +547,11 @@ bool audio_mp3_loop()
 
     // 先尝试写一次，写不完就留 pending
     size_t w = audio_i2s_write_frames(g_pcm, s_pending_frames);
-    if (w == SIZE_MAX) { audio_mp3_stop(); return false; }
+    if (w == SIZE_MAX) {
+      set_end_reason_if_none(AudioPlaybackEndReason::OutputError);
+      audio_mp3_stop();
+      return false;
+    }
     s_pending_off    += w;
     s_pending_frames -= w;
   }

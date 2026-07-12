@@ -57,7 +57,8 @@ constexpr uint16_t OPCONFIG_GPIOPOL = (1u << 11);
 constexpr uint16_t OPCONFIG_BATLOWEN = (1u << 2);
 
 constexpr uint32_t BQ27441_WARN_INTERVAL_MS = 60UL * 1000UL;
-constexpr uint32_t BQ27441_SCAN_INTERVAL_MS = 60UL * 1000UL;
+constexpr uint32_t BQ27441_RETRY_AFTER_RUNTIME_FAILURE_MS = 15UL * 1000UL;
+constexpr uint32_t BQ27441_RETRY_AFTER_MISSING_MS = 60UL * 1000UL;
 
 #ifndef BQ27441_DESIGN_CAPACITY_MAH
 #define BQ27441_DESIGN_CAPACITY_MAH 500
@@ -97,7 +98,6 @@ constexpr uint32_t BQ27441_SCAN_INTERVAL_MS = 60UL * 1000UL;
 
 bool s_ready = false;
 uint8_t s_last_i2c_error = 0;
-uint32_t s_last_failed_begin_ms = 0;
 uint32_t s_last_warn_ms = 0;
 uint32_t s_last_read_warn_ms = 0;
 uint8_t s_consecutive_mandatory_read_failures = 0;
@@ -106,14 +106,17 @@ bool s_missing_warned_once = false;
 uint16_t s_design_capacity_mah = 0;
 bool s_config_attempted_this_boot = false;
 bool s_config_ok_this_boot = false;
+bool s_ever_ready = false;
+bool s_scan_done_this_boot = false;
+uint32_t s_next_begin_attempt_ms = 0;
+uint32_t s_seen_bus_generation = 0;
 
 const char* known_i2c_label(uint8_t addr)
 {
     switch (addr) {
         case 0x20: return "MCP23017";
-        case 0x51: return "AT24C";
+        case 0x51: return "PCF85063/AT24C";
         case 0x55: return "BQ27441";
-        case 0x5F: return "PCF85063";
         default: return "";
     }
 }
@@ -128,39 +131,35 @@ bool warn_due(uint32_t& last_ms, uint32_t interval_ms)
 
 bool i2c_ready_for_bq()
 {
-    if (i2c_bus_is_ready()) return true;
+    if (i2c_bus_io_allowed()) return true;
     s_last_i2c_error = 0xFE;
     return false;
 }
 
 void log_i2c_scan_once()
 {
-    if (!i2c_ready_for_bq()) return;
-    const uint32_t now = millis();
-    if (s_last_failed_begin_ms != 0 && now - s_last_failed_begin_ms < 5000) return;
-    s_last_failed_begin_ms = now;
+    // 全地址扫描只允许在“本次开机从未成功识别电量计”时执行一次。
+    // 运行中总线异常时扫描 126 个地址只会进一步占用总线。
+    if (s_scan_done_this_boot || s_ever_ready || !i2c_ready_for_bq()) return;
+    s_scan_done_this_boot = true;
 
-    char buf[200];
+    // 只探测本机已知地址，避免总线异常时扫描 126 个地址造成数秒阻塞。
+    static constexpr uint8_t known_addrs[] = {0x20, 0x51, 0x55};
+
+    char buf[160];
     size_t pos = 0;
     int found = 0;
-    pos += snprintf(buf + pos, sizeof(buf) - pos, "[BQ27441] I2C扫描：");
+    pos += snprintf(buf + pos, sizeof(buf) - pos, "[BQ27441] I2C已知地址探测：");
 
     i2c_bus_lock();
-    for (uint8_t addr = 1; addr < 0x7F; ++addr) {
+    for (uint8_t addr : known_addrs) {
         Wire.beginTransmission(addr);
         const uint8_t err = Wire.endTransmission(true);
         if (err == 0) {
             ++found;
             const char* label = known_i2c_label(addr);
-            if (pos + 16 < sizeof(buf)) {
-                if (*label) {
-                    pos += snprintf(buf + pos, sizeof(buf) - pos, " 0x%02X(%s)", addr, label);
-                } else {
-                    pos += snprintf(buf + pos, sizeof(buf) - pos, " 0x%02X", addr);
-                }
-            }
+            pos += snprintf(buf + pos, sizeof(buf) - pos, " 0x%02X(%s)", addr, label);
         }
-        delay(1);
     }
     i2c_bus_unlock();
 
@@ -555,6 +554,13 @@ bool configure_500mah_data_memory(uint16_t flags_hint)
 bool bq27441_begin()
 {
     if (!i2c_ready_for_bq()) return false;
+
+    const uint32_t now = millis();
+    if (s_next_begin_attempt_ms != 0 &&
+        static_cast<int32_t>(now - s_next_begin_attempt_ms) < 0) {
+        return false;
+    }
+
     s_ready = false;
 
     uint16_t device_type = 0;
@@ -563,6 +569,9 @@ bool bq27441_begin()
     uint16_t flags = 0;
 
     if (!detect_bq27441(&device_type, &control_status, &voltage_mv, &flags)) {
+        s_next_begin_attempt_ms = now + (s_ever_ready
+            ? BQ27441_RETRY_AFTER_RUNTIME_FAILURE_MS
+            : BQ27441_RETRY_AFTER_MISSING_MS);
         return false;
     }
 
@@ -572,7 +581,10 @@ bool bq27441_begin()
     (void)read_word(CMD_EXT_DESIGN_CAPACITY, &s_design_capacity_mah);
 
     s_ready = true;
-    s_last_failed_begin_ms = 0;
+    s_ever_ready = true;
+    s_scan_done_this_boot = true;
+    s_next_begin_attempt_ms = 0;
+    s_seen_bus_generation = i2c_bus_generation();
     s_consecutive_mandatory_read_failures = 0;
     s_missing_warned_once = false;
     LOGI("[BQ27441] 初始化成功：地址=0x55 device=0x%04X control=0x%04X voltage=%umV flags=0x%04X design=%umAh",
@@ -596,11 +608,7 @@ uint8_t bq27441_last_i2c_error()
 
 uint16_t bq27441_design_capacity_mah()
 {
-    if (!i2c_bus_is_ready()) return s_design_capacity_mah;
-    uint16_t cap = 0;
-    if (read_word(CMD_EXT_DESIGN_CAPACITY, &cap)) {
-        s_design_capacity_mah = cap;
-    }
+    // 菜单/UI 只读取缓存，避免每次绘制状态页都访问 I2C。
     return s_design_capacity_mah;
 }
 
@@ -643,6 +651,13 @@ bool bq27441_read(Bq27441Sample* out)
 
     Bq27441Sample s{};
 
+    // 总线恢复后允许立即重试一次，不必等待原来的离线退避截止时间。
+    const uint32_t generation = i2c_bus_generation();
+    if (generation != s_seen_bus_generation) {
+        s_seen_bus_generation = generation;
+        s_next_begin_attempt_ms = 0;
+    }
+
     if (!s_ready) {
         (void)bq27441_begin();
     }
@@ -680,6 +695,7 @@ bool bq27441_read(Bq27441Sample* out)
         }
         if (s_consecutive_mandatory_read_failures >= 3) {
             s_ready = false;
+            s_next_begin_attempt_ms = millis() + BQ27441_RETRY_AFTER_RUNTIME_FAILURE_MS;
         }
         *out = Bq27441Sample{};
         return false;

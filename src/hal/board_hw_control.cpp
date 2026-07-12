@@ -6,6 +6,7 @@
 #include "board/board_pins.h"
 #include "board/board_pins_pcb1_mcp23017.h"
 #include "hal/bq27441.h"
+#include "hal/i2c_bus_lock.h"
 #include "hal/mcp23017_u3.h"
 #include "utils/log.h"
 
@@ -194,6 +195,14 @@ bool board_hw_control_begin()
     return s_ready;
 }
 
+
+void board_hw_i2c_service()
+{
+    // 总线恢复只在主循环执行，避免在任意设备事务内部重建 Wire。
+    (void)i2c_bus_service();
+    mcp23017_u3_service();
+}
+
 BatterySample board_hw_read_battery()
 {
     BatterySample s{};
@@ -229,13 +238,16 @@ ChargerStatus board_hw_read_charger_status()
         return s;
     }
 
-    bool pg_level = true;
-    bool chg_level = true;
+    // GPIOB 一次读取同时得到 PG/CHG，避免每秒为两个 bit 发起两次 I2C 事务。
+    uint8_t gpio_b = 0xFF;
+    if (!mcp23017_u3_read_port_b(&gpio_b)) {
+        return s;
+    }
 
-    const bool pg_ok = mcp23017_u3_read_b_bit(board::MCP_B_PG, &pg_level);
-    const bool chg_ok = mcp23017_u3_read_b_bit(board::MCP_B_CHG_STAT, &chg_level);
+    const bool pg_level = (gpio_b & (1u << board::MCP_B_PG)) != 0;
+    const bool chg_level = (gpio_b & (1u << board::MCP_B_CHG_STAT)) != 0;
 
-    s.valid = pg_ok && chg_ok;
+    s.valid = true;
     s.pg_level = pg_level;
     s.chg_level = chg_level;
 
@@ -468,11 +480,12 @@ bool board_hw_read_bt_link(bool* linked)
     if (!linked) return false;
     if (!mcp23017_u3_is_ready()) return false;
 
-    bool level = false;
-    if (!mcp23017_u3_read_a_bit(board::MCP_A_BT_LINK, &level)) {
+    uint8_t gpio_a = 0xFF;
+    if (!mcp23017_u3_read_port_a(&gpio_a)) {
         return false;
     }
 
+    const bool level = (gpio_a & (1u << board::MCP_A_BT_LINK)) != 0;
     *linked = (level == BT_LINK_ACTIVE_LEVEL);
     return true;
 }

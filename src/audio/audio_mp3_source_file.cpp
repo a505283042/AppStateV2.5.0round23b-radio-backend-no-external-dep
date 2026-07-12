@@ -25,9 +25,10 @@ static int file_source_read(void* ctx, uint8_t* dst, size_t bytes)
   if (!dst || bytes == 0) return AUDIO_MP3_SOURCE_ERROR;
   if (!s_open) return AUDIO_MP3_SOURCE_EOF;
 
-  int n = g_file.read(dst, bytes);
-  if (n > 0) return n;
-  return AUDIO_MP3_SOURCE_EOF;
+  const ssize_t n = g_file.read(dst, bytes);
+  if (n > 0) return (int)n;
+  if (n == 0) return AUDIO_MP3_SOURCE_EOF;
+  return AUDIO_MP3_SOURCE_ERROR;
 }
 
 static void file_source_close(void* ctx)

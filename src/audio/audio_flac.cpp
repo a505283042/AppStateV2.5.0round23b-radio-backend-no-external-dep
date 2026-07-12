@@ -18,6 +18,14 @@ static size_t s_pending_off = 0;
 static size_t s_pending_frames = 0;
 static const int16_t* s_pending_pcm = nullptr;
 static int s_last_sr = 0; // 上次设置的采样率（文件级 static，便于重置）
+static AudioPlaybackEndReason s_end_reason = AudioPlaybackEndReason::None;
+
+static void set_end_reason_if_none(AudioPlaybackEndReason reason)
+{
+  if (s_end_reason == AudioPlaybackEndReason::None) {
+    s_end_reason = reason;
+  }
+}
 
 // FLAC 每次解码 1024 frames，44.1k 下约 23ms。
 static constexpr uint32_t FLAC_BUFFER_FRAMES = 1024;
@@ -75,8 +83,19 @@ static void clear_prime_buffer()
 static size_t on_read(void* user, void* bufferOut, size_t bytesToRead)
 {
   AudioFile* af = (AudioFile*)user;
-  int n = af->read(bufferOut, bytesToRead);
-  if (n <= 0) return 0;
+  if (!af) {
+    set_end_reason_if_none(AudioPlaybackEndReason::SourceIoError);
+    return 0;
+  }
+
+  const ssize_t n = af->read(bufferOut, bytesToRead);
+  if (n < 0) {
+    set_end_reason_if_none(AudioPlaybackEndReason::SourceIoError);
+    return 0;
+  }
+  if (n == 0) {
+    return 0;
+  }
   return (size_t)n;
 }
 
@@ -99,7 +118,11 @@ static drflac_bool32 on_seek(void* user, int offset, drflac_seek_origin origin)
   if (target < 0) target = 0;
   if (target > size) target = size;
 
-  return af->seek((uint32_t)target) ? DRFLAC_TRUE : DRFLAC_FALSE;
+  if (!af->seek((uint32_t)target)) {
+    set_end_reason_if_none(AudioPlaybackEndReason::SourceIoError);
+    return DRFLAC_FALSE;
+  }
+  return DRFLAC_TRUE;
 }
 
 static drflac_bool32 on_tell(void* user, drflac_int64* pCursor)
@@ -133,6 +156,7 @@ static uint32_t decode_one_chunk_to(int16_t* out_pcm)
 bool audio_flac_start(SdFat& sd, const char* path)
 {
   audio_flac_stop();
+  s_end_reason = AudioPlaybackEndReason::None;
   const uint32_t t0 = millis();
   uint32_t t_after_open = t0;
   uint32_t t_after_drflac_open = t0;
@@ -185,6 +209,10 @@ bool audio_flac_start(SdFat& sd, const char* path)
 
 void audio_flac_stop()
 {
+  if (g_playing && s_end_reason == AudioPlaybackEndReason::None) {
+    s_end_reason = AudioPlaybackEndReason::Stopped;
+  }
+
   // ✅ 清 pending PCM（非常重要）
   s_pending_off = 0;
   s_pending_frames = 0;
@@ -194,6 +222,11 @@ void audio_flac_stop()
   if (g_flac) { drflac_close(g_flac); g_flac = nullptr; }
   if (g_file.f) g_file.close();
   g_playing = false;
+}
+
+AudioPlaybackEndReason audio_flac_get_end_reason()
+{
+  return s_end_reason;
 }
 
 uint32_t audio_flac_prime_pcm_ms(uint32_t target_ms, uint32_t max_chunks)
@@ -261,7 +294,11 @@ static bool write_pending_pcm()
   if (s_pending_frames == 0 || !s_pending_pcm) return true;
 
   size_t w = audio_i2s_write_frames(s_pending_pcm + s_pending_off * 2, s_pending_frames);
-  if (w == SIZE_MAX) { audio_flac_stop(); return false; }
+  if (w == SIZE_MAX) {
+    set_end_reason_if_none(AudioPlaybackEndReason::OutputError);
+    audio_flac_stop();
+    return false;
+  }
   s_pending_off += w;
   s_pending_frames -= w;
   if (s_pending_frames == 0) {
@@ -304,7 +341,22 @@ bool audio_flac_loop()
   // C) 读新 PCM（按 channels 读）
   uint32_t frames_read = decode_one_chunk_to(s_decode_pcm);
 
-  if (frames_read == 0) { audio_flac_stop(); return false; }
+  if (frames_read == 0) {
+    if (g_file.had_io_error()) {
+      set_end_reason_if_none(AudioPlaybackEndReason::SourceIoError);
+    } else if (g_file.tell() >= g_file.size()) {
+      set_end_reason_if_none(AudioPlaybackEndReason::NaturalEof);
+    } else {
+      set_end_reason_if_none(AudioPlaybackEndReason::DecodeError);
+    }
+
+    LOGI("[FLAC] 播放结束：原因=%s 文件位置=%lu/%lu",
+         audio_playback_end_reason_label(s_end_reason),
+         (unsigned long)g_file.tell(),
+         (unsigned long)g_file.size());
+    audio_flac_stop();
+    return false;
+  }
 
   // D) 设置采样率（不要重 init）
   if (g_sr != s_last_sr) {
@@ -318,7 +370,11 @@ bool audio_flac_loop()
   s_pending_frames = frames_read;
 
   size_t w = audio_i2s_write_frames(s_pending_pcm, s_pending_frames);
-  if (w == SIZE_MAX) { audio_flac_stop(); return false; }
+  if (w == SIZE_MAX) {
+    set_end_reason_if_none(AudioPlaybackEndReason::OutputError);
+    audio_flac_stop();
+    return false;
+  }
   s_pending_off += w;
   s_pending_frames -= w;
   if (s_pending_frames == 0) {

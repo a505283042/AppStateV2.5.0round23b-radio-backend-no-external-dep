@@ -28,7 +28,8 @@ struct AudioFileOpenStats {
 
 struct AudioFile {
   File32 f;
-  uint32_t _cached_size;  // 缓存文件大小，避免频繁查询
+  uint32_t _cached_size = 0;  // 缓存文件大小，避免频繁查询
+  bool _had_io_error = false;
   AudioFileOpenStats _last_open_stats;
 
   bool open(SdFat& sd, const char* path);
@@ -39,6 +40,7 @@ struct AudioFile {
   uint32_t size();
 
   const AudioFileOpenStats& last_open_stats() const { return _last_open_stats; }
+  bool had_io_error() const { return _had_io_error; }
 };
 
 void audio_file_invalidate_dir_cache();

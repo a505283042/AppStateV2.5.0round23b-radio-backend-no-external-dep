@@ -24,8 +24,68 @@ static enum { DEC_NONE, DEC_MP3, DEC_FLAC } g_dec = DEC_NONE;
 #endif
 // --- Total duration (ms), 0 = unknown ---
 static volatile uint32_t s_total_ms = 0;
+static portMUX_TYPE s_end_state_mux = portMUX_INITIALIZER_UNLOCKED;
+static AudioPlaybackEndState s_end_state;
+
 uint32_t audio_get_total_ms() { return s_total_ms; }
 void audio_set_total_ms(uint32_t ms) { s_total_ms = ms; }
+
+const char* audio_playback_end_reason_label(AudioPlaybackEndReason reason)
+{
+  switch (reason) {
+    case AudioPlaybackEndReason::NaturalEof: return "natural_eof";
+    case AudioPlaybackEndReason::SourceIoError: return "source_io_error";
+    case AudioPlaybackEndReason::DecodeError: return "decode_error";
+    case AudioPlaybackEndReason::OutputError: return "output_error";
+    case AudioPlaybackEndReason::Stopped: return "stopped";
+    case AudioPlaybackEndReason::None:
+    default: return "none";
+  }
+}
+
+static void audio_clear_end_state_for_new_play()
+{
+  portENTER_CRITICAL(&s_end_state_mux);
+  s_end_state.reason = AudioPlaybackEndReason::None;
+  s_end_state.play_ms = 0;
+  s_end_state.total_ms = 0;
+  s_end_state.ended_at_ms = 0;
+  portEXIT_CRITICAL(&s_end_state_mux);
+}
+
+static void audio_publish_end_state(AudioPlaybackEndReason reason)
+{
+  if (reason == AudioPlaybackEndReason::None) {
+    reason = AudioPlaybackEndReason::DecodeError;
+  }
+
+  AudioPlaybackEndState next{};
+  portENTER_CRITICAL(&s_end_state_mux);
+  next.serial = s_end_state.serial + 1;
+  portEXIT_CRITICAL(&s_end_state_mux);
+  next.reason = reason;
+  next.play_ms = audio_i2s_get_play_ms();
+  next.total_ms = s_total_ms;
+  next.ended_at_ms = millis();
+
+  portENTER_CRITICAL(&s_end_state_mux);
+  s_end_state = next;
+  portEXIT_CRITICAL(&s_end_state_mux);
+
+  LOGI("[音频] 播放结束：序号=%lu 原因=%s 播放=%lums 总时长=%lums",
+       (unsigned long)next.serial,
+       audio_playback_end_reason_label(next.reason),
+       (unsigned long)next.play_ms,
+       (unsigned long)next.total_ms);
+}
+
+AudioPlaybackEndState audio_get_last_end_state()
+{
+  portENTER_CRITICAL(&s_end_state_mux);
+  const AudioPlaybackEndState snapshot = s_end_state;
+  portEXIT_CRITICAL(&s_end_state_mux);
+  return snapshot;
+}
 
 static bool ends_ci(const char* s, const char* ext)
 {
@@ -314,6 +374,11 @@ bool audio_init()
 
 void audio_stop()
 {
+  const bool was_playing = (g_dec != DEC_NONE);
+  if (was_playing) {
+    audio_publish_end_state(AudioPlaybackEndReason::Stopped);
+  }
+
   // 切换“网络流 -> 本地文件”时，g_dec 可能已经因为 EOF/断流被置为 DEC_NONE，
   // 但底层 MP3/FLAC 文件句柄或 HTTP source 仍需要确保关闭。
   // 这里无条件停止两个解码器，避免残留 source 影响下一首本地播放。
@@ -326,6 +391,7 @@ void audio_stop()
 bool audio_play(const char* path)
 {
   audio_stop();
+  audio_clear_end_state_for_new_play();
   audio_reset_play_pos();
   s_total_ms = 0; // round13: 首播路径不再同步探测总时长，优先尽快出声。
 
@@ -376,6 +442,7 @@ bool audio_play(const char* path)
 bool audio_play_stream_mp3(const char* url, uint32_t operation_id)
 {
   audio_stop();
+  audio_clear_end_state_for_new_play();
   audio_reset_play_pos();
   s_total_ms = 0;
   if (!url) return false;
@@ -392,6 +459,7 @@ bool audio_play_stream_mp3_from_offset(const char* url, uint32_t start_offset, u
   }
 
   audio_stop();
+  audio_clear_end_state_for_new_play();
   audio_reset_play_pos();
   s_total_ms = 0;
   if (!url) return false;
@@ -403,13 +471,21 @@ bool audio_play_stream_mp3_from_offset(const char* url, uint32_t start_offset, u
 
 void audio_loop()
 {
-  if (g_dec == DEC_MP3) { 
-    if (!audio_mp3_loop()) g_dec = DEC_NONE; 
-    return; 
+  if (g_dec == DEC_MP3) {
+    if (!audio_mp3_loop()) {
+      const AudioPlaybackEndReason reason = audio_mp3_get_end_reason();
+      g_dec = DEC_NONE;
+      audio_publish_end_state(reason);
+    }
+    return;
   }
-  if (g_dec == DEC_FLAC) { 
-    if (!audio_flac_loop()) g_dec = DEC_NONE; 
-    return; 
+  if (g_dec == DEC_FLAC) {
+    if (!audio_flac_loop()) {
+      const AudioPlaybackEndReason reason = audio_flac_get_end_reason();
+      g_dec = DEC_NONE;
+      audio_publish_end_state(reason);
+    }
+    return;
   }
 }
 
