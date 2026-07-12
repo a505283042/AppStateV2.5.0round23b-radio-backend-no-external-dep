@@ -65,6 +65,8 @@ bool audio_service_set_output_route(AudioOutputRoute route, bool wait = true);
 bool audio_service_set_amp_mute(bool enabled, bool wait = true);
 bool audio_service_set_amp_shutdown(bool enabled, bool wait = true);
 bool audio_service_set_user_volume(uint8_t value, bool wait = true);
+// 相对音量调整也必须由 AudioTask 串行执行，避免未知蓝牙音量被占位值误当成真实基准。
+bool audio_service_step_user_volume(int delta, bool wait = true);
 
 // 淡入淡出控制
 float audio_service_get_fade_gain(void);

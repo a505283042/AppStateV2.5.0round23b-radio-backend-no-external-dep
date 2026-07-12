@@ -11,6 +11,24 @@ constexpr size_t USB_LINE_MAX = 160;
 constexpr size_t BT_RX_LINE_MAX = 256;
 constexpr uint32_t BT_RX_PARTIAL_FLUSH_MS = 80;
 
+// 模块上电查询可能撞上启动输出，因此使用非阻塞多次重试并结合 UART 启动信息重排查询。
+constexpr uint32_t BT_VOLUME_QUERY_RESPONSE_TIMEOUT_MS = 1500;
+constexpr uint32_t BT_VOLUME_QUERY_RETRY_DELAY_MS = 500;
+constexpr uint32_t BT_VOLUME_QUERY_AFTER_RX_DELAY_MS = 300;
+constexpr uint8_t BT_VOLUME_QUERY_MAX_ATTEMPTS = 4;
+
+enum class VolumeQueryPhase : uint8_t {
+    Idle = 0,
+    WaitBeforeSend,
+    WaitResponse,
+};
+
+enum class PendingVolumeTx : uint8_t {
+    None = 0,
+    Query,
+    Set,
+};
+
 uint32_t s_bt_baud = 1000000;
 bool s_ready = false;
 
@@ -20,6 +38,26 @@ size_t s_usb_len = 0;
 char s_bt_rx_line[BT_RX_LINE_MAX];
 size_t s_bt_rx_len = 0;
 uint32_t s_bt_rx_last_ms = 0;
+
+// AudioTask 只提交请求、读取结果；Serial1 的实际收发仍统一在 loopTask 的 update() 中执行。
+portMUX_TYPE s_volume_mux = portMUX_INITIALIZER_UNLOCKED;
+VolumeQueryPhase s_volume_query_phase = VolumeQueryPhase::Idle;
+uint32_t s_volume_query_request_id = 0;
+uint32_t s_next_volume_query_request_id = 1;
+uint32_t s_volume_query_due_ms = 0;
+uint32_t s_volume_query_sent_ms = 0;
+uint8_t s_volume_query_attempts = 0;
+
+bool s_volume_query_event_pending = false;
+Bt62spVolumeQueryEvent s_volume_query_event{};
+
+bool s_pending_set_volume_valid = false;
+uint8_t s_pending_set_volume = 0;
+
+bool time_reached(uint32_t now, uint32_t target)
+{
+    return static_cast<int32_t>(now - target) >= 0;
+}
 
 String trim_copy(const char* text)
 {
@@ -33,6 +71,25 @@ String upper_copy(const String& src)
     String s(src);
     s.toUpperCase();
     return s;
+}
+
+void clear_volume_query_locked()
+{
+    s_volume_query_phase = VolumeQueryPhase::Idle;
+    s_volume_query_request_id = 0;
+    s_volume_query_due_ms = 0;
+    s_volume_query_sent_ms = 0;
+    s_volume_query_attempts = 0;
+}
+
+void publish_volume_query_event_locked(Bt62spVolumeQueryResult result,
+                                       uint32_t request_id,
+                                       uint8_t volume)
+{
+    s_volume_query_event.result = result;
+    s_volume_query_event.request_id = request_id;
+    s_volume_query_event.volume = volume;
+    s_volume_query_event_pending = true;
 }
 
 void bt_uart_begin(uint32_t baud)
@@ -53,7 +110,7 @@ void print_help()
 {
     Serial.println("[BT62SP] USB串口调试命令：");
     Serial.println("  AT                         -> 直接转发 AT 到 BT62SP");
-    Serial.println("  AT+VER? / AT+MODE? / AT+STATUS? / AT+LIST?");
+    Serial.println("  AT+VER? / AT+MODE? / AT+STATUS? / AT+LIST? / AT+VOL?");
     Serial.println("  BT62 HELP                  -> 显示帮助");
     Serial.println("  BT62 PWR ON|OFF            -> 控制 BT_PWR_EN");
     Serial.println("  BT62 MODE TX|RX            -> TX=发射，RX=接收");
@@ -89,6 +146,110 @@ bool parse_on_off(const String& upper, bool* out)
     return false;
 }
 
+bool parse_volume_response(const char* text, uint8_t* out_volume)
+{
+    if (!text || !out_volume) {
+        return false;
+    }
+
+    String upper = trim_copy(text);
+    upper.toUpperCase();
+
+    const int marker = upper.indexOf("VOL:");
+    if (marker < 0) {
+        return false;
+    }
+
+    int pos = marker + 4;
+    while (pos < static_cast<int>(upper.length()) && upper[pos] == ' ') {
+        ++pos;
+    }
+
+    int value = 0;
+    bool has_digit = false;
+    while (pos < static_cast<int>(upper.length())) {
+        const char c = upper[pos];
+        if (c < '0' || c > '9') {
+            break;
+        }
+        has_digit = true;
+        value = value * 10 + (c - '0');
+        if (value > 100) {
+            return false;
+        }
+        ++pos;
+    }
+
+    if (!has_digit || value < 0 || value > 100) {
+        return false;
+    }
+
+    *out_volume = static_cast<uint8_t>(value);
+    return true;
+}
+
+void note_module_rx_activity_for_volume_query(const char* text)
+{
+    if (!text || !*text) return;
+
+    const uint32_t now = millis();
+    portENTER_CRITICAL(&s_volume_mux);
+
+    // 模块上电时常先输出 CLEAR OK 等启动信息。收到任何有效行说明 UART 已经活跃：
+    // - 尚未发送第一次查询时，允许提前到启动信息后的 300ms；
+    // - 查询已经过早发出时，重新安排一次查询，避免命令被启动阶段吞掉。
+    if (s_volume_query_request_id != 0) {
+        if (s_volume_query_phase == VolumeQueryPhase::WaitBeforeSend &&
+            s_volume_query_attempts == 0) {
+            const uint32_t candidate = now + BT_VOLUME_QUERY_AFTER_RX_DELAY_MS;
+            if (!time_reached(candidate, s_volume_query_due_ms)) {
+                s_volume_query_due_ms = candidate;
+            }
+        } else if (s_volume_query_phase == VolumeQueryPhase::WaitResponse &&
+                   s_volume_query_attempts < BT_VOLUME_QUERY_MAX_ATTEMPTS) {
+            s_volume_query_phase = VolumeQueryPhase::WaitBeforeSend;
+            s_volume_query_due_ms = now + BT_VOLUME_QUERY_AFTER_RX_DELAY_MS;
+        }
+    }
+
+    portEXIT_CRITICAL(&s_volume_mux);
+}
+
+void handle_volume_response_line(const char* text)
+{
+    uint8_t volume = 0;
+    if (!parse_volume_response(text, &volume)) {
+        return;
+    }
+
+    uint32_t request_id = 0;
+    bool accepted = false;
+
+    portENTER_CRITICAL(&s_volume_mux);
+    // 第一次查询超时后、准备重试期间也接受迟到响应；尚未发送过查询时不接收旧串口残留。
+    const bool waiting_response = s_volume_query_phase == VolumeQueryPhase::WaitResponse;
+    const bool waiting_retry = s_volume_query_phase == VolumeQueryPhase::WaitBeforeSend &&
+                               s_volume_query_attempts > 0;
+    if ((waiting_response || waiting_retry) && s_volume_query_request_id != 0) {
+        request_id = s_volume_query_request_id;
+        publish_volume_query_event_locked(Bt62spVolumeQueryResult::Success,
+                                          request_id,
+                                          volume);
+        clear_volume_query_locked();
+        accepted = true;
+    }
+    portEXIT_CRITICAL(&s_volume_mux);
+
+    if (accepted) {
+        Serial.printf("[BT62SP] 音量查询完成：请求=%lu 音量=%u%%\n",
+                      static_cast<unsigned long>(request_id),
+                      static_cast<unsigned>(volume));
+    } else {
+        Serial.printf("[BT62SP] 收到非事务音量响应：%u%%\n",
+                      static_cast<unsigned>(volume));
+    }
+}
+
 void handle_bt62_command(const String& line)
 {
     const String upper = upper_copy(line);
@@ -104,6 +265,7 @@ void handle_bt62_command(const String& line)
         send_at_line("AT+MODE?");
         send_at_line("AT+STATUS?");
         send_at_line("AT+LIST?");
+        send_at_line("AT+VOL?");
         return;
     }
 
@@ -195,6 +357,8 @@ void flush_bt_rx_line(bool partial)
         return;
     }
     s_bt_rx_line[s_bt_rx_len] = '\0';
+    handle_volume_response_line(s_bt_rx_line);
+    note_module_rx_activity_for_volume_query(s_bt_rx_line);
     Serial.printf(partial ? "[BT62SP RX*] %s\n" : "[BT62SP RX] %s\n", s_bt_rx_line);
     s_bt_rx_len = 0;
 }
@@ -234,34 +398,174 @@ void append_usb_char(char c)
     s_usb_line[s_usb_len++] = c;
 }
 
+void service_volume_command_state()
+{
+    const uint32_t now = millis();
+    PendingVolumeTx action = PendingVolumeTx::None;
+    uint8_t set_volume = 0;
+    uint32_t query_request_id = 0;
+    uint8_t query_attempt = 0;
+    bool query_timed_out = false;
+
+    portENTER_CRITICAL(&s_volume_mux);
+
+    // 用户设置优先级高于查询。连续旋钮操作只保留最新音量，避免 UART 队列堆积。
+    if (s_pending_set_volume_valid) {
+        set_volume = s_pending_set_volume;
+        s_pending_set_volume_valid = false;
+        action = PendingVolumeTx::Set;
+    } else if (s_volume_query_phase == VolumeQueryPhase::WaitBeforeSend &&
+               time_reached(now, s_volume_query_due_ms)) {
+        ++s_volume_query_attempts;
+        s_volume_query_sent_ms = now;
+        s_volume_query_phase = VolumeQueryPhase::WaitResponse;
+        query_request_id = s_volume_query_request_id;
+        query_attempt = s_volume_query_attempts;
+        action = PendingVolumeTx::Query;
+    } else if (s_volume_query_phase == VolumeQueryPhase::WaitResponse &&
+               (now - s_volume_query_sent_ms) >= BT_VOLUME_QUERY_RESPONSE_TIMEOUT_MS) {
+        if (s_volume_query_attempts < BT_VOLUME_QUERY_MAX_ATTEMPTS) {
+            s_volume_query_phase = VolumeQueryPhase::WaitBeforeSend;
+            s_volume_query_due_ms = now + BT_VOLUME_QUERY_RETRY_DELAY_MS;
+        } else {
+            query_request_id = s_volume_query_request_id;
+            publish_volume_query_event_locked(Bt62spVolumeQueryResult::Timeout,
+                                              query_request_id,
+                                              0);
+            clear_volume_query_locked();
+            query_timed_out = true;
+        }
+    }
+
+    portEXIT_CRITICAL(&s_volume_mux);
+
+    if (action == PendingVolumeTx::Set) {
+        char cmd[20];
+        snprintf(cmd, sizeof(cmd), "AT+VOL=%u", static_cast<unsigned>(set_volume));
+        send_at_line(cmd);
+    } else if (action == PendingVolumeTx::Query) {
+        send_at_line("AT+VOL?");
+        Serial.printf("[BT62SP] 音量查询已发送：请求=%lu 尝试=%u/%u\n",
+                      static_cast<unsigned long>(query_request_id),
+                      static_cast<unsigned>(query_attempt),
+                      static_cast<unsigned>(BT_VOLUME_QUERY_MAX_ATTEMPTS));
+    }
+
+    if (query_timed_out) {
+        Serial.printf("[BT62SP] 音量查询超时：请求=%lu，保持模块原音量，不写入默认值\n",
+                      static_cast<unsigned long>(query_request_id));
+    }
+}
+
 }  // namespace
 
 void bt62sp_uart_debug_begin(uint32_t baud)
 {
     bt_uart_begin(baud);
+
+    portENTER_CRITICAL(&s_volume_mux);
     s_ready = true;
+    clear_volume_query_locked();
+    s_volume_query_event_pending = false;
+    s_pending_set_volume_valid = false;
+    portEXIT_CRITICAL(&s_volume_mux);
+
     Serial.println("[BT62SP] UART调试桥已启用：电脑串口输入 AT... 直接转发，输入 BT62 HELP 查看控制命令");
 }
 
+bool bt62sp_uart_debug_request_volume_query(uint32_t settle_ms,
+                                            uint32_t* out_request_id)
+{
+    if (out_request_id) {
+        *out_request_id = 0;
+    }
+
+    const uint32_t now = millis();
+    uint32_t request_id = 0;
+
+    portENTER_CRITICAL(&s_volume_mux);
+    if (!s_ready || s_pending_set_volume_valid) {
+        // 用户设置命令优先，不能为了重新查询而丢弃尚未发送的设置值。
+        portEXIT_CRITICAL(&s_volume_mux);
+        return false;
+    }
+
+    request_id = s_next_volume_query_request_id++;
+    if (s_next_volume_query_request_id == 0) {
+        s_next_volume_query_request_id = 1;
+    }
+
+    s_volume_query_request_id = request_id;
+    s_volume_query_phase = VolumeQueryPhase::WaitBeforeSend;
+    s_volume_query_due_ms = now + settle_ms;
+    s_volume_query_sent_ms = 0;
+    s_volume_query_attempts = 0;
+    s_volume_query_event_pending = false;
+    s_pending_set_volume_valid = false;
+    portEXIT_CRITICAL(&s_volume_mux);
+
+    if (out_request_id) {
+        *out_request_id = request_id;
+    }
+
+    Serial.printf("[BT62SP] 音量查询已排队：请求=%lu 上电稳定等待=%lums\n",
+                  static_cast<unsigned long>(request_id),
+                  static_cast<unsigned long>(settle_ms));
+    return true;
+}
+
+void bt62sp_uart_debug_cancel_volume_query()
+{
+    portENTER_CRITICAL(&s_volume_mux);
+    clear_volume_query_locked();
+    s_volume_query_event_pending = false;
+    portEXIT_CRITICAL(&s_volume_mux);
+}
+
+bool bt62sp_uart_debug_take_volume_query_event(Bt62spVolumeQueryEvent* out_event)
+{
+    if (!out_event) {
+        return false;
+    }
+
+    bool available = false;
+    portENTER_CRITICAL(&s_volume_mux);
+    if (s_volume_query_event_pending) {
+        *out_event = s_volume_query_event;
+        s_volume_query_event_pending = false;
+        available = true;
+    }
+    portEXIT_CRITICAL(&s_volume_mux);
+    return available;
+}
 
 bool bt62sp_uart_debug_set_volume(uint8_t volume)
 {
-    if (!s_ready) {
-        return false;
-    }
     if (volume > 100) {
         volume = 100;
     }
 
-    char cmd[20];
-    snprintf(cmd, sizeof(cmd), "AT+VOL=%u", static_cast<unsigned>(volume));
-    send_at_line(cmd);
+    portENTER_CRITICAL(&s_volume_mux);
+    if (!s_ready) {
+        portEXIT_CRITICAL(&s_volume_mux);
+        return false;
+    }
+
+    // 用户主动设置后，迟到的查询响应不能再覆盖用户选择。
+    clear_volume_query_locked();
+    s_volume_query_event_pending = false;
+    s_pending_set_volume = volume;
+    s_pending_set_volume_valid = true;
+    portEXIT_CRITICAL(&s_volume_mux);
     return true;
 }
 
 void bt62sp_uart_debug_update()
 {
-    if (!s_ready) {
+    portENTER_CRITICAL(&s_volume_mux);
+    const bool ready = s_ready;
+    portEXIT_CRITICAL(&s_volume_mux);
+    if (!ready) {
         return;
     }
 
@@ -278,4 +582,6 @@ void bt62sp_uart_debug_update()
     if (s_bt_rx_len > 0 && millis() - s_bt_rx_last_ms >= BT_RX_PARTIAL_FLUSH_MS) {
         flush_bt_rx_line(true);
     }
+
+    service_volume_command_state();
 }

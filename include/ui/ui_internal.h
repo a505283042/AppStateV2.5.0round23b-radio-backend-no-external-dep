@@ -61,6 +61,7 @@ extern int s_album_scroll_x;
 extern uint32_t s_scroll_last_ms;
 
 extern volatile uint8_t s_ui_volume;
+extern volatile bool s_ui_volume_known;
 extern volatile play_mode_t s_ui_play_mode;
 extern volatile int s_ui_track_idx;
 extern volatile int s_ui_track_total;

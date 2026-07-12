@@ -157,7 +157,11 @@ static void draw_volume_step_hint_overlay(LGFX_Sprite* dst)
   draw_volume_icon(dst, BOX_X + 9, BOX_Y + 10, icon_color);
 
   char volume_label[8];
-  snprintf(volume_label, sizeof(volume_label), "%u%%", static_cast<unsigned>(volume));
+  if (s_ui_volume_known) {
+    snprintf(volume_label, sizeof(volume_label), "%u%%", static_cast<unsigned>(volume));
+  } else {
+    snprintf(volume_label, sizeof(volume_label), "--");
+  }
 
   char step_label[8];
   snprintf(step_label, sizeof(step_label), "x%u", static_cast<unsigned>(step));
@@ -1090,7 +1094,11 @@ static void draw_cover_panel_status_icons(LGFX_Sprite* dst, int center_y, uint16
   draw_volume_icon(dst, vol_icon_x, vol_icon_y, volume_color);
 
   char vol_str[8];
-  snprintf(vol_str, sizeof(vol_str), "%u%%", (unsigned)s_ui_volume);
+  if (s_ui_volume_known) {
+    snprintf(vol_str, sizeof(vol_str), "%u%%", (unsigned)s_ui_volume);
+  } else {
+    snprintf(vol_str, sizeof(vol_str), "--");
+  }
 
   dst->setTextColor(volume_color);
   dst->setCursor(vol_icon_x + 15, center_y - 8);
@@ -2850,6 +2858,13 @@ void ui_set_volume(uint8_t vol)
 {
   if (vol > 100) vol = 100;
   s_ui_volume = vol;
+  s_ui_volume_known = true;
+  ui_request_refresh();
+}
+
+void ui_set_volume_unknown()
+{
+  s_ui_volume_known = false;
   ui_request_refresh();
 }
 

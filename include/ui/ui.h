@@ -103,6 +103,8 @@ void ui_show_track_change_popup(const char* title, const char* artist);
 void ui_show_alarm_wakeup_popup(const char* title, const char* detail);
 void ui_set_album(const String& album);
 void ui_set_volume(uint8_t vol);
+// 当前音量尚未从硬件查询成功时显示“--”，禁止用占位数字冒充真实音量。
+void ui_set_volume_unknown();
 void ui_volume_key_pressed();
 
 // 显示音量步进小提示，例如：音量图标 x5

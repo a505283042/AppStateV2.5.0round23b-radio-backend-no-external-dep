@@ -346,7 +346,7 @@ static bool player_play_trackinfo_core(const TrackInfo& t,
 
     ui_set_track_pos(display_pos, display_total);
     ui_set_play_mode(g_play_mode);
-    ui_set_volume(audio_output_route_get_user_volume());
+    audio_output_route_sync_ui_volume();
     t_after_ui_prepare = millis();
 
     PlayerDeferredAssetJob asset_job{};

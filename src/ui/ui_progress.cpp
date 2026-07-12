@@ -9,6 +9,7 @@
 // 外部声明全局变量
 extern lgfx::U8g2font g_font_cjk;
 extern volatile uint8_t s_ui_volume;   // 0~100
+extern volatile bool s_ui_volume_known; // 蓝牙音量是否已经从模块查询确认
 extern volatile play_mode_t s_ui_play_mode;  // 播放模式
 extern volatile int     s_ui_track_idx;  // 0-based
 extern volatile int     s_ui_track_total;
@@ -170,7 +171,11 @@ void draw_status_row(LGFX_Sprite* dst,
   draw_volume_icon(dst, xL, y + 3, volume_color);  // 上移2像素
   
   char vol_str[8];
-  snprintf(vol_str, sizeof(vol_str), "%u%%", (unsigned)s_ui_volume);
+  if (s_ui_volume_known) {
+    snprintf(vol_str, sizeof(vol_str), "%u%%", (unsigned)s_ui_volume);
+  } else {
+    snprintf(vol_str, sizeof(vol_str), "--");
+  }
   dst->setTextColor(volume_color);
   dst->setCursor(xL + 11 + 4, y);  // 上移2像素
   dst->print(vol_str);

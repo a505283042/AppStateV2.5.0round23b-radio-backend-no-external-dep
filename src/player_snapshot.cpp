@@ -327,7 +327,7 @@ PlayerSnapshotRestorePollResult player_snapshot_poll_restore()
     ui_set_now_playing(t.title.c_str(), t.artist.c_str());
     ui_set_album(t.album);
     ui_set_play_mode(g_play_mode);
-    ui_set_volume(audio_output_route_get_user_volume());
+    audio_output_route_sync_ui_volume();
 
     // 恢复曲目位置显示
     {

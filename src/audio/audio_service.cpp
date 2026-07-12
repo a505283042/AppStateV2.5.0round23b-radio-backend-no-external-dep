@@ -60,6 +60,7 @@ enum AudioCmdType : uint8_t {
   CMD_SET_AMP_MUTE = 10,
   CMD_SET_AMP_SHUTDOWN = 11,
   CMD_SET_USER_VOLUME = 12,
+  CMD_STEP_USER_VOLUME = 13,
 };
 
 struct AudioRequest {
@@ -76,6 +77,7 @@ struct AudioRequest {
   AudioOutputRoute output_route = AudioOutputRoute::Speaker;
   bool enabled = false;
   uint8_t volume = 0;
+  int16_t volume_delta = 0;
 
   // 请求结果只保存在请求对象内部，AudioTask 不再写调用方栈地址。
   bool success = false;
@@ -606,6 +608,10 @@ static void audio_task_entry(void*){
   audio_task_publish_state();
 
   for (;;) {
+    // 接收由 loopTask 串口解析后发布的 BT62SP 音量查询结果。
+    // 这里只读取小型事件快照，不直接访问 Serial1。
+    audio_output_route_poll_from_audio_task();
+
     // 1) 先处理队列里的控制命令（暂停时依然可以接收停止命令）
     AudioRequest* request = nullptr;
     while (s_q && xQueueReceive(s_q, &request, 0) == pdTRUE) {
@@ -812,6 +818,12 @@ static void audio_task_entry(void*){
              (unsigned)cmd.volume,
              success ? 1 : 0,
              (unsigned long)cmd.request_id);
+      } else if (cmd.type == CMD_STEP_USER_VOLUME) {
+        success = audio_output_route_step_user_volume_from_audio_task(cmd.volume_delta);
+        LOGD("[音频] 服务命令“步进音量”：增量=%d 成功=%d 请求=%lu",
+             (int)cmd.volume_delta,
+             success ? 1 : 0,
+             (unsigned long)cmd.request_id);
       } else if (cmd.type == CMD_FETCH_TOTAL_MS) {
         const uint32_t t_cmd = millis();
         const bool ok = audio_task_fetch_total_ms_impl(cmd.path, &cmd.result_total_ms);
@@ -986,6 +998,7 @@ static uint32_t audio_request_timeout_ms(AudioCmdType type)
     case CMD_SET_AMP_MUTE:
     case CMD_SET_AMP_SHUTDOWN:
     case CMD_SET_USER_VOLUME:
+    case CMD_STEP_USER_VOLUME:
       return 2000;
     case CMD_SET_OUTPUT_ROUTE:
       return 4000;
@@ -1287,6 +1300,22 @@ bool audio_service_set_user_volume(uint8_t value, bool wait)
 {
   if (value > 100) value = 100;
   return audio_service_dispatch_control(CMD_SET_USER_VOLUME, false, AudioOutputRoute::Speaker, value, wait);
+}
+
+bool audio_service_step_user_volume(int delta, bool wait)
+{
+  if (delta < -100) delta = -100;
+  if (delta > 100) delta = 100;
+
+  AudioRequest* request = audio_request_new(wait);
+  if (!request) return false;
+
+  request->type = CMD_STEP_USER_VOLUME;
+  request->volume_delta = static_cast<int16_t>(delta);
+
+  const bool ok = dispatch_request(request, wait);
+  audio_request_release(request);
+  return ok;
 }
 
 bool audio_service_is_paused(void)

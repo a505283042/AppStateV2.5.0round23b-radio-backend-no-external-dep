@@ -51,6 +51,7 @@ int s_album_scroll_x = 0;
 uint32_t s_scroll_last_ms = 0;
 
 volatile uint8_t s_ui_volume = 100;
+volatile bool s_ui_volume_known = true;
 volatile play_mode_t s_ui_play_mode = PLAY_MODE_ALL_SEQ;
 volatile int s_ui_track_idx = 0;
 volatile int s_ui_track_total = 0;

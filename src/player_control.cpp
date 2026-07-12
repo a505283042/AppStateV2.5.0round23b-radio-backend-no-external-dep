@@ -1022,7 +1022,7 @@ static bool control_play_net_track_index_impl(int idx, bool reset_shuffle)
     ui_set_album(item.album);
     ui_set_track_pos(idx, (int)net_music_catalog_count());
     ui_set_play_mode(g_play_mode);
-    ui_set_volume(audio_output_route_get_user_volume());
+    audio_output_route_sync_ui_volume();
     
 
     // NAS 播放起播时先显示网络封面加载图，避免继续显示上一首封面。
@@ -1262,7 +1262,13 @@ void player_toggle_play()
 
 void player_volume_step(int delta)
 {
-    (void)audio_output_route_step_user_volume(delta);
+    const bool ok = audio_output_route_step_user_volume(delta);
+    if (audio_output_route_is_bluetooth_tx() &&
+        !audio_output_route_bluetooth_tx_volume_known()) {
+        LOGD("[音量] 蓝牙音量等待查询：增量=%d 请求=%s", delta, ok ? "已受理" : "失败");
+        return;
+    }
+
     LOGD("[音量] 用户音量=%u%% 路线=%s",
          (unsigned)audio_output_route_get_user_volume(),
          audio_output_route_label());
