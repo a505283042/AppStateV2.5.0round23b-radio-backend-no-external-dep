@@ -56,3 +56,13 @@ bool audio_output_route_set_amp_mute(bool enabled);
  * 非功放模式下不允许释放功放关断。
  */
 bool audio_output_route_set_amp_shutdown(bool enabled);
+/**
+ * @brief 仅供 AudioTask 调用的底层实现。
+ *
+ * 这些函数会直接操作功放、蓝牙和播放器音量；其他任务必须调用上面的公开接口，
+ * 由 audio_service 转发到 AudioTask，避免跨任务并发访问音频硬件。
+ */
+bool audio_output_route_apply_from_audio_task(AudioOutputRoute route);
+bool audio_output_route_set_amp_mute_from_audio_task(bool enabled);
+bool audio_output_route_set_amp_shutdown_from_audio_task(bool enabled);
+bool audio_output_route_set_user_volume_from_audio_task(uint8_t value);

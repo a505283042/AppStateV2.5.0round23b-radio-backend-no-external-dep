@@ -26,8 +26,6 @@ static constexpr size_t kInternalFallbackMaxBytes = 32 * 1024;
 static constexpr uint32_t kLyricsJobDelayMs = 250;
 static constexpr uint32_t kCoverJobDelayMs = 600;
 static constexpr uint32_t kHttpTimeoutMs = 5000;
-static constexpr uint32_t kStartupProbeHttpTimeoutMs = 1500;
-static constexpr uint32_t kMaxStartupSkipBytes = 2 * 1024 * 1024u;
 static constexpr uint16_t kCoverTaskStackBytes = 12288;
 static constexpr UBaseType_t kCoverTaskPrio = 1;
 
@@ -54,75 +52,6 @@ static SemaphoreHandle_t runtime_cover_mutex()
   return s_runtime_cover_mu;
 }
 
-
-static uint32_t id3_synchsafe32(const uint8_t* p)
-{
-  if (!p) return 0;
-  return ((uint32_t)(p[0] & 0x7F) << 21) |
-         ((uint32_t)(p[1] & 0x7F) << 14) |
-         ((uint32_t)(p[2] & 0x7F) << 7) |
-         ((uint32_t)(p[3] & 0x7F));
-}
-
-static bool http_range_get_small_no_job(const String& url,
-                                        uint32_t start,
-                                        uint32_t len,
-                                        uint8_t* dst,
-                                        uint32_t timeout_ms)
-{
-  if (!dst || len == 0) return false;
-  if (!WiFi.isConnected()) return false;
-
-  HTTPClient http;
-  http.setTimeout(timeout_ms);
-  http.setReuse(false);
-
-  if (!http.begin(url)) {
-    return false;
-  }
-
-  String range;
-  range.reserve(32);
-  range += "bytes=";
-  range += start;
-  range += "-";
-  range += (start + len - 1);
-  http.addHeader("Range", range);
-
-  const int code = http.GET();
-  if (code != HTTP_CODE_PARTIAL_CONTENT) {
-    LOGW("[网络歌曲] 起播 Range 探测失败 HTTP=%d range=%s", code, range.c_str());
-    http.end();
-    return false;
-  }
-
-  WiFiClient* stream = http.getStreamPtr();
-  uint32_t copied = 0;
-  const uint32_t t0 = millis();
-
-  while (copied < len && http.connected()) {
-    const int avail = stream ? stream->available() : 0;
-    if (avail > 0) {
-      const uint32_t remain = len - copied;
-      const uint32_t want = (uint32_t)avail > remain ? remain : (uint32_t)avail;
-      const int got = stream->readBytes(dst + copied, want);
-      if (got > 0) {
-        copied += (uint32_t)got;
-        continue;
-      }
-    }
-
-    if (millis() - t0 > timeout_ms) {
-      http.end();
-      return false;
-    }
-
-    vTaskDelay(1);
-  }
-
-  http.end();
-  return copied == len;
-}
 
 static uint32_t fnv1a_add_bytes(uint32_t h, const char* s)
 {
@@ -774,54 +703,6 @@ static void net_cover_task_entry(void* arg)
 }
 
 }  // namespace
-
-bool net_music_mp3_probe_audio_start_offset(const String& mp3_url, uint32_t* out_offset)
-{
-  if (out_offset) *out_offset = 0;
-  if (!out_offset || mp3_url.length() == 0) return false;
-
-  uint8_t hdr[10] = {0};
-  const uint32_t t0 = millis();
-
-  if (!http_range_get_small_no_job(mp3_url, 0, sizeof(hdr), hdr, kStartupProbeHttpTimeoutMs)) {
-    LOGW("[网络歌曲] 起播 ID3 探测失败，回退普通起播 URL=%s", mp3_url.c_str());
-    return false;
-  }
-
-  if (hdr[0] != 'I' || hdr[1] != 'D' || hdr[2] != '3') {
-    *out_offset = 0;
-    LOGD("[网络歌曲] 起播 ID3 探测：无 ID3v2 耗时=%lums",
-         (unsigned long)(millis() - t0));
-    return true;
-  }
-
-  const uint8_t major = hdr[3];
-  const uint8_t flags = hdr[5];
-  uint32_t tag_size = id3_synchsafe32(hdr + 6);
-  uint32_t offset = 10u + tag_size;
-
-  // ID3v2.4 footer flag。多数 MP3 没有 footer；有 footer 时音频帧在 footer 之后。
-  if (major >= 4 && (flags & 0x10)) {
-    offset += 10u;
-  }
-
-  if (offset <= 10u || offset > kMaxStartupSkipBytes) {
-    LOGW("[网络歌曲] 起播 ID3 offset 异常 version=2.%u tag=%lu offset=%lu，回退普通起播",
-         (unsigned)major,
-         (unsigned long)tag_size,
-         (unsigned long)offset);
-    *out_offset = 0;
-    return false;
-  }
-
-  *out_offset = offset;
-  LOGI("[网络歌曲] 起播跳过 ID3v2.%u tag=%lu offset=%lu 耗时=%lums",
-       (unsigned)major,
-       (unsigned long)tag_size,
-       (unsigned long)offset,
-       (unsigned long)(millis() - t0));
-  return true;
-}
 
 void net_music_embedded_cover_start(int net_track_idx, const String& mp3_url)
 {

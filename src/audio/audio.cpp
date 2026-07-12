@@ -373,22 +373,22 @@ bool audio_play(const char* path)
 }
 
 
-bool audio_play_stream_mp3(const char* url)
+bool audio_play_stream_mp3(const char* url, uint32_t operation_id)
 {
   audio_stop();
   audio_reset_play_pos();
   s_total_ms = 0;
   if (!url) return false;
   LOGD("[音频] 播放 MP3 流: %s", url);
-  bool ok = audio_mp3_start_url(url);
+  bool ok = audio_mp3_start_url(url, operation_id);
   if (ok) g_dec = DEC_MP3;
   return ok;
 }
 
-bool audio_play_stream_mp3_from_offset(const char* url, uint32_t start_offset)
+bool audio_play_stream_mp3_from_offset(const char* url, uint32_t start_offset, uint32_t operation_id)
 {
   if (start_offset == 0) {
-    return audio_play_stream_mp3(url);
+    return audio_play_stream_mp3(url, operation_id);
   }
 
   audio_stop();
@@ -396,7 +396,7 @@ bool audio_play_stream_mp3_from_offset(const char* url, uint32_t start_offset)
   s_total_ms = 0;
   if (!url) return false;
   LOGD("[音频] 播放 MP3 Range 流: offset=%lu URL=%s", (unsigned long)start_offset, url);
-  bool ok = audio_mp3_start_url_from_offset(url, start_offset);
+  bool ok = audio_mp3_start_url_from_offset(url, start_offset, operation_id);
   if (ok) g_dec = DEC_MP3;
   return ok;
 }

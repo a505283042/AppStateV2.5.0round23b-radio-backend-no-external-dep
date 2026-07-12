@@ -1,6 +1,7 @@
 #include "audio/audio_output_route.h"
 
 #include "audio/audio.h"
+#include "audio/audio_service.h"
 #include "hal/bt62sp_uart_debug.h"
 #include "hal/board_hw_control.h"
 #include "ui/ui.h"
@@ -27,8 +28,8 @@ AudioOutputRoute current_route()
 
 bool set_route(AudioOutputRoute route)
 {
-    s_route = static_cast<uint8_t>(route);
-    return audio_output_route_enforce();
+    // 路由状态和相关硬件切换统一交给 AudioTask 串行执行。
+    return audio_service_set_output_route(route, true);
 }
 
 bool route_allows_amp()
@@ -120,26 +121,7 @@ uint8_t audio_output_route_get_user_volume()
 
 bool audio_output_route_set_user_volume(uint8_t value)
 {
-    if (value > 100) {
-        value = 100;
-    }
-
-    if (audio_output_route_is_bluetooth_tx()) {
-        s_bt_tx_volume = value;
-        audio_set_volume(BT_TX_PLAYER_FIXED_VOLUME);
-        ui_set_volume(value);
-        (void)bt62sp_uart_debug_set_volume(value);
-        LOGD("[音量] 蓝牙模块音量=%u 播放器固定=%u",
-             (unsigned)value,
-             (unsigned)BT_TX_PLAYER_FIXED_VOLUME);
-        return true;
-    }
-
-    s_saved_normal_volume = value;
-    audio_set_volume(value);
-    ui_set_volume(value);
-    LOGD("[音量] 播放器音量=%u", (unsigned)value);
-    return true;
+    return audio_service_set_user_volume(value, true);
 }
 
 bool audio_output_route_step_user_volume(int delta)
@@ -171,10 +153,28 @@ bool audio_output_route_select_bluetooth_tx()
 
 bool audio_output_route_enforce()
 {
+    return audio_service_set_output_route(current_route(), true);
+}
+
+bool audio_output_route_set_amp_mute(bool enabled)
+{
+    return audio_service_set_amp_mute(enabled, true);
+}
+
+bool audio_output_route_set_amp_shutdown(bool enabled)
+{
+    return audio_service_set_amp_shutdown(enabled, true);
+}
+
+bool audio_output_route_apply_from_audio_task(AudioOutputRoute route)
+{
+    // 只有 AudioTask 可以更新路由并直接操作音频输出硬件。
+    s_route = static_cast<uint8_t>(route);
+
     bool ok = true;
 
     if (audio_output_route_is_bluetooth_tx()) {
-        // 耳机+蓝牙：功放必须保持关闭，避免音频任务把喇叭重新打开。
+        // 耳机+蓝牙：功放必须保持关闭，避免喇叭与蓝牙同时出声。
         ok = board_hw_set_amp_mute(true) && ok;
         ok = board_hw_set_amp_shutdown(true) && ok;
         ok = board_hw_set_bt_mode(true) && ok;
@@ -186,7 +186,7 @@ bool audio_output_route_enforce()
 
     if (audio_output_route_is_headphone_only()) {
         restore_normal_volume_policy_if_needed();
-        // 仅耳机：关闭蓝牙电源，BT_MODE_CTRL 回到接收/浮空模式，同时关闭功放。
+        // 仅耳机：关闭蓝牙，同时保持功放静音和关断。
         ok = board_hw_set_bt_power(false) && ok;
         ok = board_hw_set_bt_mode(false) && ok;
         ok = board_hw_set_amp_mute(true) && ok;
@@ -196,19 +196,19 @@ bool audio_output_route_enforce()
     }
 
     restore_normal_volume_policy_if_needed();
-    // 耳机+功放：关闭蓝牙电源，BT_MODE_CTRL 回到接收/浮空模式，并允许功放输出。
+    // 切到功放时先解除关断但继续静音。是否取消静音由 AudioTask 根据播放/暂停状态决定。
     ok = board_hw_set_bt_power(false) && ok;
     ok = board_hw_set_bt_mode(false) && ok;
+    ok = board_hw_set_amp_mute(true) && ok;
     ok = board_hw_set_amp_shutdown(false) && ok;
-    ok = board_hw_set_amp_mute(false) && ok;
-    LOGD("[音频输出] 路线=耳机+功放，蓝牙关闭并回到接收模式，功放启用");
+    LOGD("[音频输出] 路线=耳机+功放，功放已解除关断并保持静音");
     return ok;
 }
 
-bool audio_output_route_set_amp_mute(bool enabled)
+bool audio_output_route_set_amp_mute_from_audio_task(bool enabled)
 {
     if (!enabled && !route_allows_amp()) {
-        // 非功放模式下，任何取消静音请求都被改成保持静音。
+        // 非功放模式下，任何取消静音请求都改为保持静音。
         LOGD("[音频输出] 功放取消静音被阻止：路线=%s", audio_output_route_label());
         return board_hw_set_amp_mute(true);
     }
@@ -216,10 +216,10 @@ bool audio_output_route_set_amp_mute(bool enabled)
     return board_hw_set_amp_mute(enabled);
 }
 
-bool audio_output_route_set_amp_shutdown(bool enabled)
+bool audio_output_route_set_amp_shutdown_from_audio_task(bool enabled)
 {
     if (!enabled && !route_allows_amp()) {
-        // 非功放模式下，任何释放关断请求都被改成继续关断。
+        // 非功放模式下，任何释放关断请求都改为继续关断。
         LOGD("[音频输出] 功放解除关断被阻止：路线=%s", audio_output_route_label());
         bool ok = board_hw_set_amp_mute(true);
         ok = board_hw_set_amp_shutdown(true) && ok;
@@ -227,4 +227,29 @@ bool audio_output_route_set_amp_shutdown(bool enabled)
     }
 
     return board_hw_set_amp_shutdown(enabled);
+}
+
+
+bool audio_output_route_set_user_volume_from_audio_task(uint8_t value)
+{
+    if (value > 100) {
+        value = 100;
+    }
+
+    if (audio_output_route_is_bluetooth_tx()) {
+        s_bt_tx_volume = value;
+        audio_set_volume(BT_TX_PLAYER_FIXED_VOLUME);
+        ui_set_volume(value);
+        (void)bt62sp_uart_debug_set_volume(value);
+        LOGD("[音量] 蓝牙模块音量=%u 播放器固定=%u",
+             (unsigned)value,
+             (unsigned)BT_TX_PLAYER_FIXED_VOLUME);
+        return true;
+    }
+
+    s_saved_normal_volume = value;
+    audio_set_volume(value);
+    ui_set_volume(value);
+    LOGD("[音量] 播放器音量=%u", (unsigned)value);
+    return true;
 }

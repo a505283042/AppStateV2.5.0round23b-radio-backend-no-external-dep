@@ -1,4 +1,5 @@
 #include "player_control.h"
+#include <WiFi.h>
 #include <esp_system.h>
 #include <esp_heap_caps.h>
 
@@ -242,6 +243,61 @@ static constexpr uint32_t NET_TRACK_EOF_END_WINDOW_MS = 3000;
 
 // 接近结尾后，播放进度停滞 1.5 秒即可切下一首。
 static constexpr uint32_t NET_TRACK_EOF_KNOWN_STALL_MS = 1500;
+
+static constexpr uint32_t NET_TRACK_START_TIMEOUT_MS = 25000;
+
+struct NetTrackStartPending {
+    uint32_t request_id = 0;
+    uint32_t queued_ms = 0;
+    int idx = -1;
+    bool reset_shuffle = false;
+};
+
+NetTrackStartPending s_net_track_start_pending;
+
+static void control_clear_net_track_start_pending()
+{
+    s_net_track_start_pending = NetTrackStartPending{};
+}
+
+// 网络歌曲异常中断时只锁定当前一次自动推进。
+// 用户仍可通过“播放/下一首/上一首”主动重试，避免断网时主循环无限连接下一首。
+static void control_latch_net_track_failure(const PlayerSourceState& source,
+                                            const char* reason)
+{
+    if (source.type != PlayerSourceType::NET_TRACK) return;
+
+    s_net_track_eof_watch.armed = false;
+    control_clear_net_track_start_pending();
+    net_music_embedded_cover_cancel();
+
+    const String error = (reason && *reason)
+        ? String(reason)
+        : String("stream_interrupted");
+
+    player_source_set_net_track_status(false, String("error"), error);
+    ui_request_refresh_now();
+
+    LOGW("[网络歌曲] 已停止自动下一首：索引=%d 原因=%s 播放=%lums",
+         source.net_track_idx,
+         error.c_str(),
+         (unsigned long)audio_get_play_ms());
+}
+
+static bool control_net_track_is_near_natural_end(const PlayerSourceState& source)
+{
+    uint32_t duration_ms = source.net_track_duration_ms;
+    if (duration_ms == 0) {
+        duration_ms = audio_get_total_ms();
+    }
+
+    // 没有可靠总时长时，不把突然停止当成自然结束。
+    // 这样服务器断开或 NAS 离线不会触发连续自动下一首。
+    if (duration_ms == 0) return false;
+
+    const uint32_t play_ms = audio_get_play_ms();
+    return play_ms + NET_TRACK_EOF_END_WINDOW_MS >= duration_ms;
+}
 
 static bool control_is_net_track_random_mode()
 {
@@ -586,12 +642,93 @@ bool player_control_should_block_idle()
     return s_manual_stop_latched && !audio_service_is_playing();
 }
 
+static bool control_poll_net_track_start()
+{
+    if (s_net_track_start_pending.request_id == 0) return false;
+
+    const PlayerSourceState source = player_source_get();
+    if (source.type != PlayerSourceType::NET_TRACK ||
+        source.net_track_idx != s_net_track_start_pending.idx) {
+        control_clear_net_track_start_pending();
+        return false;
+    }
+
+    if (millis() - s_net_track_start_pending.queued_ms >= NET_TRACK_START_TIMEOUT_MS) {
+        (void)audio_service_stop(false);
+        control_latch_net_track_failure(source, "startup_timeout");
+        return true;
+    }
+
+    AudioNetworkStateSnapshot network{};
+    if (!audio_service_get_network_state(&network) ||
+        network.start_request_id != s_net_track_start_pending.request_id) {
+        return false;
+    }
+
+    if (network.start_phase == AudioNetworkStartPhase::Connecting) {
+        if (source.net_track_state != "connecting" || !source.net_track_active) {
+            player_source_set_net_track_status(true, String("connecting"), String());
+            ui_request_refresh_now();
+        }
+        return false;
+    }
+
+    if (network.start_phase == AudioNetworkStartPhase::Playing && network.active) {
+        player_source_set_net_track_status(true, String("playing"), String());
+        audio_set_total_ms(source.net_track_duration_ms);
+
+        if (s_net_track_start_pending.reset_shuffle && control_is_net_track_random_mode()) {
+            control_reset_net_track_shuffle(source.net_track_idx);
+        }
+
+        control_reset_net_track_eof_watch(source.net_track_idx);
+        net_music_embedded_cover_start(source.net_track_idx, source.net_track_url);
+
+        LOGI("[网络歌曲] 异步起播完成 索引=%d 标题=%s 时长=%lums 请求=%lu URL=%s",
+             source.net_track_idx,
+             source.net_track_title.c_str(),
+             (unsigned long)source.net_track_duration_ms,
+             (unsigned long)s_net_track_start_pending.request_id,
+             source.net_track_url.c_str());
+
+        control_clear_net_track_start_pending();
+        ui_request_refresh_now();
+        return true;
+    }
+
+    if (network.start_phase == AudioNetworkStartPhase::Failed ||
+        network.start_phase == AudioNetworkStartPhase::Cancelled) {
+        const char* reason = network.error[0] ? network.error : "stream_start_failed";
+        control_latch_net_track_failure(source, reason);
+        return true;
+    }
+
+    return false;
+}
+
 bool player_control_try_auto_next(bool entered, bool started)
 {
     if (!entered) return false;
-    if (s_user_paused) return false;
+
+    if (control_poll_net_track_start()) {
+        return true;
+    }
 
     const PlayerSourceState source = player_source_get();
+
+    // 网络歌曲播放期间一旦 WiFi 断开，立即停止当前网络音频并锁定错误状态。
+    // 必须放在 s_user_paused 判断之前，否则“暂停后断网”会保留失效流，恢复时再次误触发自动下一首。
+    if (source.type == PlayerSourceType::NET_TRACK && WiFi.status() != WL_CONNECTED) {
+        if (audio_service_is_playing() || audio_service_is_paused()) {
+            (void)audio_service_stop(true);
+        }
+        if (source.net_track_active || source.net_track_state != "error") {
+            control_latch_net_track_failure(source, "wifi_disconnected");
+        }
+        return false;
+    }
+
+    if (s_user_paused) return false;
 
     // 网络电台是连续流，不做自动下一台。
     if (source.type == PlayerSourceType::NET_RADIO) {
@@ -600,9 +737,39 @@ bool player_control_try_auto_next(bool entered, bool started)
 
     // NAS/HTTP 网络歌曲：先处理 URLStream 不报 EOF 的情况。
     if (source.type == PlayerSourceType::NET_TRACK) {
+        // 异步 HTTP 起播尚未完成时，不能把“当前还没播放”误判成中途断流。
+        if (source.net_track_state == "connecting") {
+            return false;
+        }
+
+        // 起播失败、断网或流异常已经写入 error 状态时，禁止自动推进。
+        // 手动播放/下一首仍会重新进入 control_play_net_track_index_impl()，不受此保护影响。
+        if (!source.net_track_active ||
+            source.net_track_state == "error" ||
+            source.net_track_state == "stopped") {
+            return false;
+        }
+
         bool should_advance = false;
 
         if (!audio_service_is_playing()) {
+            // 只有播放位置已经接近元数据总时长时，才把“停止”认定为自然播完。
+            // 中途断流、NAS 离线、HTTP socket 异常都停在当前曲目并显示错误，不能连续扫下一首。
+            if (!control_net_track_is_near_natural_end(source)) {
+                AudioNetworkStateSnapshot network{};
+                (void)audio_service_get_network_state(&network);
+
+                const char* reason = "stream_interrupted";
+                if (network.error[0] != '\0') {
+                    reason = network.error;
+                } else if (network.waiting_for_data) {
+                    reason = "stream_timeout";
+                }
+
+                control_latch_net_track_failure(source, reason);
+                return false;
+            }
+
             should_advance = true;
         } else if (control_net_track_eof_watch_triggered(source)) {
             // URLStream 对普通 HTTP 文件播完后可能不返回 EOF，
@@ -750,8 +917,7 @@ bool player_return_from_radio_to_local() {
         return false;
     }
 
-    audio_set_volume(s_radio_return.volume);
-    ui_set_volume(audio_output_route_get_user_volume());
+    (void)audio_output_route_set_user_volume(s_radio_return.volume);
 
     LOGD("[电台] 已恢复本地歌曲：索引=%d", s_radio_return.track_idx);
     return true;
@@ -786,6 +952,7 @@ bool player_return_from_network_to_local()
 
     LOGD("[网络歌曲] 返回本地目标=%d", target);
 
+    control_clear_net_track_start_pending();
     audio_service_stop(true);
 
     // 清掉 NET_TRACK，避免 EOF watchdog 或自动下一首继续把 NAS 歌曲拉起来。
@@ -849,8 +1016,8 @@ static bool control_play_net_track_index_impl(int idx, bool reset_shuffle)
     player_source_set_net_track_stub(idx, item, url, String("connecting"), String());
     player_state_set_current_index(-1);
     player_control_reset_runtime_flags();
-    audio_service_resume();
 
+    // 新流的播放命令会在 AudioTask 内复位暂停状态并按安全时序打开功放。
     ui_set_now_playing(item.title.c_str(), item.artist.c_str());
     ui_set_album(item.album);
     ui_set_track_pos(idx, (int)net_music_catalog_count());
@@ -865,47 +1032,31 @@ static bool control_play_net_track_index_impl(int idx, bool reset_shuffle)
     }
     ui_request_refresh_now();
 
-    uint32_t stream_start_offset = 0;
-    (void)net_music_mp3_probe_audio_start_offset(url, &stream_start_offset);
-
-    const bool ok = (stream_start_offset > 0)
-        ? audio_service_play_stream_mp3_from_offset(url.c_str(), stream_start_offset, true)
-        : audio_service_play_stream_mp3(url.c_str(), true);
-    if (ok) {
-        player_source_set_net_track_status(true, String("playing"), String());
-
-        // NAS/HTTP 文件播放路径会先把 audio total 清零。
-        // 这里用 net_music.txt 预生成的 duration_ms 写回 audio 层，
-        // 这样屏幕 UI 里 audio_get_total_ms() 才能拿到总时长。
-        audio_set_total_ms(item.duration_ms);
-
-        if (reset_shuffle && control_is_net_track_random_mode()) {
-            control_reset_net_track_shuffle(idx);
-        }
-
-        control_reset_net_track_eof_watch(idx);
-
-        // 播放先启动，NAS MP3 内嵌封面通过 HTTP Range 后台解析和应用，
-        // 避免起播被 ID3/APIC 网络读取拖慢。
-        LOGI("[网络封面] 准备启动 NAS 内嵌封面任务 idx=%d url=%s", idx, url.c_str());
-        net_music_embedded_cover_start(idx, url);
-
-        LOGI("[网络歌曲] 播放网络歌曲 索引=%d 标题=%s 时长=%lums offset=%lu URL=%s",
-            idx,
-            item.title.c_str(),
-            (unsigned long)item.duration_ms,
-            (unsigned long)stream_start_offset,
-            url.c_str());
-        return true;
+    uint32_t request_id = 0;
+    const bool queued = audio_service_play_stream_mp3_auto_offset_async(url.c_str(), &request_id);
+    if (!queued || request_id == 0) {
+        player_source_set_net_track_status(false, String("error"), String("queue_failed"));
+        LOGW("[网络歌曲] 起播请求入队失败：索引=%d 标题=%s URL=%s",
+             idx,
+             item.title.c_str(),
+             url.c_str());
+        s_net_track_eof_watch.armed = false;
+        control_clear_net_track_start_pending();
+        return false;
     }
 
-    player_source_set_net_track_status(false, String("error"), String("stream_start_failed"));
-    LOGW("[网络歌曲] 播放失败：索引=%d 标题=%s URL=%s",
+    s_net_track_start_pending.request_id = request_id;
+    s_net_track_start_pending.queued_ms = millis();
+    s_net_track_start_pending.idx = idx;
+    s_net_track_start_pending.reset_shuffle = reset_shuffle;
+
+    player_source_set_net_track_status(true, String("connecting"), String());
+    LOGI("[网络歌曲] 起播请求已入队：索引=%d 标题=%s 请求=%lu URL=%s",
          idx,
          item.title.c_str(),
+         (unsigned long)request_id,
          url.c_str());
-    s_net_track_eof_watch.armed = false;
-    return false;
+    return true;
 }
 
 bool player_play_net_track_index(int idx)
@@ -915,6 +1066,7 @@ bool player_play_net_track_index(int idx)
 
 void player_stop_net_track()
 {
+    control_clear_net_track_start_pending();
     net_music_embedded_cover_cancel();
     audio_service_stop(true);
     player_source_clear_net_track();
@@ -1061,7 +1213,10 @@ void player_toggle_play()
     }
 
     if (audio_service_is_paused()) {
-        audio_service_resume();
+        if (!audio_service_resume(true)) {
+            LOGW("[播放器] 恢复命令执行失败");
+            return;
+        }
         s_user_paused = false;
         s_pause_time_ms = 0;
 
@@ -1074,7 +1229,10 @@ void player_toggle_play()
     }
 
     if (audio_service_is_playing()) {
-        audio_service_pause();
+        if (!audio_service_pause(true)) {
+            LOGW("[播放器] 暂停命令执行失败");
+            return;
+        }
         s_user_paused = true;
         s_pause_time_ms = millis();
         if (source.type == PlayerSourceType::NET_TRACK) {

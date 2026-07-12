@@ -28,8 +28,7 @@
 static void player_apply_alarm_wakeup_volume()
 {
     const uint8_t volume = app_alarm_wakeup_volume();
-    audio_set_volume(volume);
-    ui_set_volume(volume);
+    (void)audio_output_route_set_user_volume(volume);
     LOGI("[闹钟] 已应用闹钟音量：%u", (unsigned)volume);
 }
 
@@ -789,7 +788,11 @@ void player_state_run(void)
     if (source.type == PlayerSourceType::NET_RADIO && source.radio_active) {
         audio_radio_backend_loop();
         const RadioBackendStatus rb = audio_radio_backend_get_status();
-        String state = rb.paused ? String("paused") : (rb.connecting ? String("connecting") : (rb.running ? String("playing") : String("stopped")));
+        String state = !rb.error.isEmpty()
+            ? String("error")
+            : (rb.paused
+                ? String("paused")
+                : (rb.connecting ? String("connecting") : (rb.running ? String("playing") : String("stopped"))));
         player_source_set_radio_runtime(String(audio_radio_backend_name()), rb.stream_title, rb.bitrate, state, rb.active);
         if (!rb.station.isEmpty() && rb.station != source.radio_name) {
             RadioItem item{};
@@ -803,7 +806,7 @@ void player_state_run(void)
             player_source_set_radio_runtime(String(audio_radio_backend_name()), rb.stream_title, rb.bitrate, state, rb.active);
         }
         if (!rb.active && !rb.connecting && !rb.running && !rb.paused) {
-            player_source_set_radio_status(false, String("stopped"), rb.error);
+            player_source_set_radio_status(false, rb.error.isEmpty() ? String("stopped") : String("error"), rb.error);
         }
     }
 

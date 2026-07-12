@@ -19,7 +19,6 @@
 #include "player_list_select.h"
 #include "audio/audio.h"
 #include "audio/audio_service.h"
-#include "audio/audio_mp3.h"
 #include "hal/board_hw_control.h"
 
 lgfx::U8g2font g_font_cjk(u8g2_font_wenquanyi_merged);
@@ -313,7 +312,9 @@ static void ui_task_entry(void*)
         ui_draw_unlock();
         const uint32_t draw_ms = millis() - draw_t0;
 #if APP_DIAG_UI_RUNTIME
-        if (audio_mp3_is_active() && audio_mp3_is_stream_source() && draw_ms >= kUiDiagQuickMenuDrawMs) {
+        AudioNetworkStateSnapshot network{};
+        (void)audio_service_get_network_state(&network);
+        if (network.active && draw_ms >= kUiDiagQuickMenuDrawMs) {
           const uint32_t log_now = millis();
           if (s_ui_diag_last_quick_menu_log_ms == 0 ||
               log_now - s_ui_diag_last_quick_menu_log_ms >= kUiDiagQuickMenuLogIntervalMs) {

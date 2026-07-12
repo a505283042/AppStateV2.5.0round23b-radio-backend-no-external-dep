@@ -218,9 +218,10 @@ bool read_bytes_locked(uint8_t addr, uint8_t reg, uint8_t* out, size_t len)
 
     delayMicroseconds(300);
 
-    const uint8_t n = Wire.requestFrom((int)addr, (int)len, true);
-    if (n != len || Wire.available() < (int)len) {
-        s_last_i2c_error = 0xF0 | n;
+    // 明确使用 uint8_t + size_t + bool 重载，避免 Arduino-ESP32 2.x 下重载解析歧义。
+    const size_t received = Wire.requestFrom(addr, len, true);
+    if (received != len || Wire.available() < static_cast<int>(len)) {
+        s_last_i2c_error = static_cast<uint8_t>(0xF0u | (received & 0x0Fu));
         s_last_failed_cmd = reg;
         return false;
     }

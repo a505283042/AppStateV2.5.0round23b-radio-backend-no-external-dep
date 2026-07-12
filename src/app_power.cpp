@@ -59,9 +59,8 @@ void app_power_save_and_shutdown()
     ui_power_show_shutdown_stage("正在关机", "正在保存...");
     delay(200);
 
-    // 先暂停音频、静音功放，降低关机爆音风险。
-    audio_service_pause();
-    (void)board_hw_set_amp_mute(true);
+    // 暂停请求和功放静音均由 AudioTask 串行处理，避免关机线程直接碰音频硬件。
+    (void)audio_service_pause(true);
 
     const PlayerSourceState source = player_source_get();
     const bool snapshot_ok = (source.type == PlayerSourceType::LOCAL_TRACK)
@@ -91,9 +90,9 @@ void app_power_save_and_shutdown()
 
     delay(350);
 
-    // 可选：关闭高功耗外设。
+    // 可选：关闭高功耗外设。功放关断仍由 AudioTask 执行。
     (void)board_hw_set_bt_power(false);
-    (void)board_hw_set_amp_shutdown(true);
+    (void)audio_service_set_amp_shutdown(true, true);
 
     delay(80);
 

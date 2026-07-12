@@ -152,8 +152,7 @@ static void snapshot_apply_light_state(const PlayerPersistSnapshot& snap)
 {
     const play_mode_t mode = snapshot_sanitize_mode((int)snap.play_mode);
 
-    audio_set_volume(snap.volume);
-    ui_set_volume(snap.volume);
+    (void)audio_output_route_set_user_volume(snap.volume);
 
     if ((uint8_t)ui_get_view() != snap.ui_view) {
         ui_set_view((ui_player_view_t)snap.ui_view);

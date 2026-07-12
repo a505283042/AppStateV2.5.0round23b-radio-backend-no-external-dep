@@ -13,10 +13,6 @@ void net_music_embedded_cover_start(int net_track_idx, const String& mp3_url);
 /** @brief 使当前/待完成的 NAS 封面任务失效。 */
 void net_music_embedded_cover_cancel();
 
-// 快速探测 NAS/HTTP MP3 的 ID3v2 标签长度，用于 Range 跳过大内嵌封面后起播。
-// 成功时 out_offset=0 表示无 ID3 或无需跳过；失败时上层应回退普通 URL 起播。
-bool net_music_mp3_probe_audio_start_offset(const String& mp3_url, uint32_t* out_offset);
-
 /**
  * @brief 查询当前 NAS 曲目的内嵌封面运行时状态。
  *

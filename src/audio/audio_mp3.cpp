@@ -263,6 +263,11 @@ bool audio_mp3_start_source(const AudioMp3Source& source, const char* debug_name
   }
 
   if (g_source_is_stream && g_inbuf_filled <= 0) {
+    if (g_source_eof) {
+      LOGW("[MP3] 网络流在起播前已结束：名称=%s", s_debug_name ? s_debug_name : "<null>");
+      audio_mp3_stop();
+      return false;
+    }
     LOGW("[MP3] 网络流以空输入缓冲区启动：名称=%s", s_debug_name ? s_debug_name : "<null>");
   }
 
@@ -308,10 +313,10 @@ bool audio_mp3_start_file(SdFat& sd, const char* path)
   return true;
 }
 
-bool audio_mp3_start_url(const char* url)
+bool audio_mp3_start_url(const char* url, uint32_t operation_id)
 {
   AudioMp3Source src{};
-  if (!audio_mp3_audiotools_source_open(url, src)) {
+  if (!audio_mp3_audiotools_source_open(url, operation_id, src)) {
     return false;
   }
 
@@ -323,14 +328,14 @@ bool audio_mp3_start_url(const char* url)
   return true;
 }
 
-bool audio_mp3_start_url_from_offset(const char* url, uint32_t start_offset)
+bool audio_mp3_start_url_from_offset(const char* url, uint32_t start_offset, uint32_t operation_id)
 {
   if (start_offset == 0) {
-    return audio_mp3_start_url(url);
+    return audio_mp3_start_url(url, operation_id);
   }
 
   AudioMp3Source src{};
-  if (!audio_mp3_audiotools_source_open_from_offset(url, start_offset, src)) {
+  if (!audio_mp3_audiotools_source_open_from_offset(url, start_offset, operation_id, src)) {
     return false;
   }
 

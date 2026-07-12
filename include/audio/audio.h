@@ -5,8 +5,8 @@
 bool audio_init();
 void audio_stop();
 bool audio_play(const char* path); // 自动识别 .mp3 / .flac
-bool audio_play_stream_mp3(const char* url); // HTTP MP3 流
-bool audio_play_stream_mp3_from_offset(const char* url, uint32_t start_offset); // HTTP MP3 Range 跳过 ID3 起播
+bool audio_play_stream_mp3(const char* url, uint32_t operation_id); // HTTP MP3 流
+bool audio_play_stream_mp3_from_offset(const char* url, uint32_t start_offset, uint32_t operation_id); // HTTP MP3 Range 跳过 ID3 起播
 void audio_loop();
 bool audio_is_playing();
 
