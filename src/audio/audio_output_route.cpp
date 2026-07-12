@@ -1,5 +1,7 @@
 #include "audio/audio_output_route.h"
 
+#include <Preferences.h>
+
 #include "audio/audio.h"
 #include "audio/audio_service.h"
 #include "hal/bt62sp_uart_debug.h"
@@ -15,17 +17,28 @@ volatile uint8_t s_route = static_cast<uint8_t>(AudioOutputRoute::Speaker);
 // 蓝牙发射模式下，BT62SP 的 L/R 是模拟输入。播放器音量过高会让模块输入级过载，
 // 蓝牙音箱端听起来会发糊。因此进入蓝牙发射后固定播放器音量，只调 BT62SP AT+VOL。
 static constexpr uint8_t BT_TX_PLAYER_FIXED_VOLUME = 20;
-// 该值只作为内部缓存初值；音量未知时 UI 显示“--”，绝不能把 50 当成真实调节基准。
-static constexpr uint8_t BT_TX_VOLUME_CACHE_INITIAL = 50;
-// BT62SP 上电后会先输出启动信息，等待更充分后再查询；整个过程仍为非阻塞状态机。
-static constexpr uint32_t BT_TX_VOLUME_QUERY_SETTLE_MS = 2500;
+// BT62SP 上电默认音量为 50%，模块不会自动持久化 AT+VOL 设置。
+// ESP32 使用 NVS 保存最近一次蓝牙发射音量；首次没有保存值时使用 50%。
+static constexpr uint8_t BT_TX_VOLUME_DEFAULT = 50;
+static constexpr char BT_TX_PREFS_NAMESPACE[] = "audio_route";
+static constexpr char BT_TX_PREFS_KEY[] = "bt_vol";
 
-volatile uint8_t s_bt_tx_volume = BT_TX_VOLUME_CACHE_INITIAL;
+// 模块上电后可能先接收命令、稍后才完成音频运行态初始化。
+// 先在固定等待后应用一次；收到 CLEAR OK 后再应用一次最新值。
+static constexpr uint32_t BT_TX_VOLUME_APPLY_FALLBACK_MS = 2500;
+static constexpr uint32_t BT_TX_VOLUME_APPLY_AFTER_READY_MS = 300;
+static constexpr uint32_t BT_TX_VOLUME_APPLY_RETRY_MS = 100;
+
+volatile uint8_t s_bt_tx_volume = BT_TX_VOLUME_DEFAULT;
 volatile uint8_t s_saved_normal_volume = 80;
 volatile bool s_bt_tx_volume_known = false;
 bool s_bt_tx_volume_policy_active = false;
-uint32_t s_bt_tx_volume_query_id = 0;
-int16_t s_bt_tx_pending_delta = 0;
+bool s_bt_tx_nvs_loaded = false;
+bool s_bt_tx_nvs_valid = false;
+uint8_t s_bt_tx_persisted_volume = BT_TX_VOLUME_DEFAULT;
+bool s_bt_tx_apply_pending = false;
+uint32_t s_bt_tx_apply_due_ms = 0;
+uint32_t s_bt_tx_ready_generation_seen = 0;
 
 AudioOutputRoute current_route()
 {
@@ -41,6 +54,87 @@ bool set_route(AudioOutputRoute route)
 bool route_allows_amp()
 {
     return current_route() == AudioOutputRoute::Speaker;
+}
+
+bool time_reached(uint32_t now, uint32_t target)
+{
+    return static_cast<int32_t>(now - target) >= 0;
+}
+
+void load_bt_tx_volume_from_nvs_once()
+{
+    if (s_bt_tx_nvs_loaded) {
+        return;
+    }
+
+    s_bt_tx_nvs_loaded = true;
+    s_bt_tx_nvs_valid = false;
+    s_bt_tx_persisted_volume = BT_TX_VOLUME_DEFAULT;
+    s_bt_tx_volume = BT_TX_VOLUME_DEFAULT;
+
+    Preferences pref;
+    if (!pref.begin(BT_TX_PREFS_NAMESPACE, true)) {
+        LOGW("[音量] 打开蓝牙音量 NVS 失败，首次使用默认值=%u",
+             (unsigned)BT_TX_VOLUME_DEFAULT);
+        s_bt_tx_volume_known = true;
+        return;
+    }
+
+    if (pref.isKey(BT_TX_PREFS_KEY)) {
+        const uint8_t saved = pref.getUChar(BT_TX_PREFS_KEY, BT_TX_VOLUME_DEFAULT);
+        if (saved <= 100) {
+            s_bt_tx_volume = saved;
+            s_bt_tx_persisted_volume = saved;
+            s_bt_tx_nvs_valid = true;
+            LOGI("[音量] 已从 NVS 读取蓝牙发射音量=%u", (unsigned)saved);
+        } else {
+            LOGW("[音量] NVS 蓝牙音量无效=%u，改用默认值=%u",
+                 (unsigned)saved,
+                 (unsigned)BT_TX_VOLUME_DEFAULT);
+        }
+    } else {
+        LOGI("[音量] NVS 尚无蓝牙音量，首次使用默认值=%u",
+             (unsigned)BT_TX_VOLUME_DEFAULT);
+    }
+
+    pref.end();
+    s_bt_tx_volume_known = true;
+}
+
+bool save_bt_tx_volume_to_nvs_if_needed()
+{
+    load_bt_tx_volume_from_nvs_once();
+
+    const uint8_t volume = s_bt_tx_volume > 100 ? 100 : s_bt_tx_volume;
+    if (s_bt_tx_nvs_valid && s_bt_tx_persisted_volume == volume) {
+        LOGD("[音量] 蓝牙发射音量未变化，跳过 NVS 写入=%u", (unsigned)volume);
+        return true;
+    }
+
+    Preferences pref;
+    if (!pref.begin(BT_TX_PREFS_NAMESPACE, false)) {
+        LOGE("[音量] 保存蓝牙发射音量失败：打开 NVS namespace");
+        return false;
+    }
+
+    const bool ok = pref.putUChar(BT_TX_PREFS_KEY, volume) > 0;
+    pref.end();
+
+    if (!ok) {
+        LOGE("[音量] 保存蓝牙发射音量失败：写入 NVS");
+        return false;
+    }
+
+    s_bt_tx_persisted_volume = volume;
+    s_bt_tx_nvs_valid = true;
+    LOGI("[音量] 退出蓝牙发射，已保存音量到 NVS=%u", (unsigned)volume);
+    return true;
+}
+
+void schedule_bt_tx_volume_apply(uint32_t delay_ms)
+{
+    s_bt_tx_apply_pending = true;
+    s_bt_tx_apply_due_ms = millis() + delay_ms;
 }
 
 void sync_ui_volume_from_route_state()
@@ -63,24 +157,19 @@ void apply_bluetooth_tx_volume_policy()
         LOGD("[音量] 进入蓝牙发射：保存播放器音量=%u", (unsigned)s_saved_normal_volume);
     }
 
+    load_bt_tx_volume_from_nvs_once();
+
     // 送入 BT62SP 模拟输入的播放器音量固定在安全值。
-    // BT62SP 自身音量必须以上电查询结果为准，禁止在进入路线时写入默认值。
+    // BT62SP 不负责持久化音量；进入发射模式时由 ESP32 把 NVS 保存值主动下发。
     audio_set_volume(BT_TX_PLAYER_FIXED_VOLUME);
-    s_bt_tx_pending_delta = 0;
+    bt62sp_uart_debug_cancel_volume_query();
+    s_bt_tx_ready_generation_seen = bt62sp_uart_debug_ready_generation();
+    schedule_bt_tx_volume_apply(BT_TX_VOLUME_APPLY_FALLBACK_MS);
     sync_ui_volume_from_route_state();
 
-    uint32_t request_id = 0;
-    if (bt62sp_uart_debug_request_volume_query(BT_TX_VOLUME_QUERY_SETTLE_MS, &request_id)) {
-        s_bt_tx_volume_query_id = request_id;
-        LOGD("[音量] 蓝牙发射：播放器固定=%u，查询模块保存音量 请求=%lu 已知=%d 临时显示=%u",
-             (unsigned)BT_TX_PLAYER_FIXED_VOLUME,
-             (unsigned long)request_id,
-             s_bt_tx_volume_known ? 1 : 0,
-             (unsigned)s_bt_tx_volume);
-    } else {
-        s_bt_tx_volume_query_id = 0;
-        LOGW("[音量] BT62SP 音量查询排队失败，保持模块当前音量，不写默认值");
-    }
+    LOGI("[音量] 蓝牙发射：播放器固定=%u，等待下发 NVS 音量=%u",
+         (unsigned)BT_TX_PLAYER_FIXED_VOLUME,
+         (unsigned)s_bt_tx_volume);
 }
 
 void restore_normal_volume_policy_if_needed()
@@ -89,9 +178,13 @@ void restore_normal_volume_policy_if_needed()
         return;
     }
 
+    // 在关闭 BT62SP 电源前保存当前音量。只有数值变化时才写 NVS，避免无效擦写。
+    (void)save_bt_tx_volume_to_nvs_if_needed();
+
     bt62sp_uart_debug_cancel_volume_query();
-    s_bt_tx_volume_query_id = 0;
-    s_bt_tx_pending_delta = 0;
+    s_bt_tx_apply_pending = false;
+    s_bt_tx_apply_due_ms = 0;
+    s_bt_tx_ready_generation_seen = bt62sp_uart_debug_ready_generation();
 
     const uint8_t restore = s_saved_normal_volume > 100 ? 100 : s_saved_normal_volume;
     s_bt_tx_volume_policy_active = false;
@@ -271,55 +364,36 @@ bool audio_output_route_set_amp_shutdown_from_audio_task(bool enabled)
 
 void audio_output_route_poll_from_audio_task()
 {
-    Bt62spVolumeQueryEvent event{};
-    if (!bt62sp_uart_debug_take_volume_query_event(&event)) {
+    if (!audio_output_route_is_bluetooth_tx()) {
         return;
     }
 
-    // 只接收当前路线发起的查询；离开蓝牙路线或被用户调音取消后，迟到结果直接丢弃。
-    if (!audio_output_route_is_bluetooth_tx() ||
-        s_bt_tx_volume_query_id == 0 ||
-        event.request_id != s_bt_tx_volume_query_id) {
-        LOGD("[音量] 忽略过期 BT62SP 音量结果：事件请求=%lu 当前请求=%lu 路线=%s",
-             (unsigned long)event.request_id,
-             (unsigned long)s_bt_tx_volume_query_id,
-             audio_output_route_label());
+    const uint32_t now = millis();
+    const uint32_t ready_generation = bt62sp_uart_debug_ready_generation();
+
+    if (ready_generation != 0 && ready_generation != s_bt_tx_ready_generation_seen) {
+        s_bt_tx_ready_generation_seen = ready_generation;
+
+        // CLEAR OK 表示模块音频运行态已经重新初始化。
+        // 再次下发当前 NVS 音量，避免上电早期命令被模块忽略。
+        schedule_bt_tx_volume_apply(BT_TX_VOLUME_APPLY_AFTER_READY_MS);
+        LOGI("[音量] BT62SP 启动完成，准备重新应用 NVS 音量：代次=%lu 音量=%u",
+             (unsigned long)ready_generation,
+             (unsigned)s_bt_tx_volume);
+    }
+
+    if (!s_bt_tx_apply_pending || !time_reached(now, s_bt_tx_apply_due_ms)) {
         return;
     }
 
-    s_bt_tx_volume_query_id = 0;
-
-    if (event.result == Bt62spVolumeQueryResult::Success) {
-        const uint8_t queried = event.volume > 100 ? 100 : event.volume;
-        s_bt_tx_volume = queried;
-        s_bt_tx_volume_known = true;
-
-        if (s_bt_tx_pending_delta != 0) {
-            int adjusted = static_cast<int>(queried) + static_cast<int>(s_bt_tx_pending_delta);
-            if (adjusted < 0) adjusted = 0;
-            if (adjusted > 100) adjusted = 100;
-            s_bt_tx_pending_delta = 0;
-            s_bt_tx_volume = static_cast<uint8_t>(adjusted);
-            const bool queued = bt62sp_uart_debug_set_volume(s_bt_tx_volume);
-            LOGI("[音量] 查询到 BT62SP=%u，应用等待中的相对调节后=%u 命令排队=%d",
-                 (unsigned)queried,
-                 (unsigned)s_bt_tx_volume,
-                 queued ? 1 : 0);
-        } else {
-            LOGI("[音量] 已同步 BT62SP 保存音量=%u，未写入默认值",
-                 (unsigned)s_bt_tx_volume);
-        }
-
+    if (bt62sp_uart_debug_set_volume(s_bt_tx_volume)) {
+        s_bt_tx_apply_pending = false;
+        s_bt_tx_apply_due_ms = 0;
         sync_ui_volume_from_route_state();
-        return;
-    }
-
-    if (event.result == Bt62spVolumeQueryResult::Timeout) {
-        const int pending_delta = s_bt_tx_pending_delta;
-        s_bt_tx_pending_delta = 0;
-        sync_ui_volume_from_route_state();
-        LOGW("[音量] BT62SP 音量查询超时：保持模块原音量；音量仍显示未知，未应用等待增量=%d",
-             pending_delta);
+        LOGI("[音量] 已向 BT62SP 应用 NVS 音量=%u", (unsigned)s_bt_tx_volume);
+    } else {
+        // UART 尚未就绪时短暂重试，保持非阻塞。
+        s_bt_tx_apply_due_ms = now + BT_TX_VOLUME_APPLY_RETRY_MS;
     }
 }
 
@@ -330,15 +404,15 @@ bool audio_output_route_set_user_volume_from_audio_task(uint8_t value)
     }
 
     if (audio_output_route_is_bluetooth_tx()) {
-        // 绝对音量设置由用户明确指定，可以直接覆盖尚未完成的查询。
-        s_bt_tx_volume_query_id = 0;
-        s_bt_tx_pending_delta = 0;
+        load_bt_tx_volume_from_nvs_once();
         s_bt_tx_volume = value;
         s_bt_tx_volume_known = true;
         audio_set_volume(BT_TX_PLAYER_FIXED_VOLUME);
         sync_ui_volume_from_route_state();
+
+        // 立即下发改善交互；若模块随后输出 CLEAR OK，poll() 会再应用一次最新值。
         const bool queued = bt62sp_uart_debug_set_volume(value);
-        LOGD("[音量] 蓝牙模块音量=%u 播放器固定=%u 命令排队=%d",
+        LOGD("[音量] 蓝牙模块音量=%u 播放器固定=%u 命令排队=%d，退出蓝牙时写入 NVS",
              (unsigned)value,
              (unsigned)BT_TX_PLAYER_FIXED_VOLUME,
              queued ? 1 : 0);
@@ -357,26 +431,6 @@ bool audio_output_route_step_user_volume_from_audio_task(int delta)
     if (delta < -100) delta = -100;
     if (delta > 100) delta = 100;
     if (delta == 0) return true;
-
-    if (audio_output_route_is_bluetooth_tx() && !s_bt_tx_volume_known) {
-        int pending = static_cast<int>(s_bt_tx_pending_delta) + delta;
-        if (pending < -100) pending = -100;
-        if (pending > 100) pending = 100;
-        s_bt_tx_pending_delta = static_cast<int16_t>(pending);
-        sync_ui_volume_from_route_state();
-
-        // 查询如果尚未排队或已经超时，旋钮操作会立即重新触发查询。
-        if (s_bt_tx_volume_query_id == 0) {
-            uint32_t request_id = 0;
-            if (bt62sp_uart_debug_request_volume_query(0, &request_id)) {
-                s_bt_tx_volume_query_id = request_id;
-            }
-        }
-
-        LOGI("[音量] BT62SP 实际音量未知：暂存相对调节=%d，等待查询后应用",
-             (int)s_bt_tx_pending_delta);
-        return s_bt_tx_volume_query_id != 0;
-    }
 
     int value = static_cast<int>(audio_output_route_get_user_volume()) + delta;
     if (value < 0) value = 0;

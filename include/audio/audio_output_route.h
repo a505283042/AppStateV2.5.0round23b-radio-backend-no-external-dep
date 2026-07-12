@@ -27,13 +27,13 @@ uint8_t audio_output_route_get_user_volume();
 bool audio_output_route_set_user_volume(uint8_t value);
 /** @brief 按步进调整面向用户的音量。 */
 bool audio_output_route_step_user_volume(int delta);
-/** @brief 按当前路线和音量有效性同步 UI；蓝牙音量未知时显示“--”。 */
+/** @brief 按当前路线同步 UI；蓝牙发射音量来自 NVS，首次使用默认 50%。 */
 void audio_output_route_sync_ui_volume();
 /** @brief 蓝牙发射模式下固定送入 BT62SP 模拟输入的播放器音量。 */
 uint8_t audio_output_route_bluetooth_tx_player_fixed_volume();
 /** @brief 当前缓存的 BT62SP 蓝牙发射音量。 */
 uint8_t audio_output_route_bluetooth_tx_volume();
-/** @brief 是否已从模块查询成功，或已由用户主动设置过。 */
+/** @brief 是否已完成蓝牙发射音量初始化（NVS 保存值或首次默认值）。 */
 bool audio_output_route_bluetooth_tx_volume_known();
 
 bool audio_output_route_select_headphone_only();

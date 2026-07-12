@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 
+#include "audio/audio_output_route.h"
 #include "audio/audio_service.h"
 #include "hal/board_hw_control.h"
 #include "menu/quick_menu.h"
@@ -89,6 +90,12 @@ void app_power_save_and_shutdown()
     }
 
     delay(350);
+
+    // 如果关机时仍处于蓝牙发射模式，先走正常退出路径。
+    // 这样可以把当前 BT62SP 音量保存到 NVS，再关闭蓝牙电源。
+    if (audio_output_route_is_bluetooth_tx()) {
+        (void)audio_service_set_output_route(AudioOutputRoute::HeadphoneOnly, true);
+    }
 
     // 可选：关闭高功耗外设。功放关断仍由 AudioTask 执行。
     (void)board_hw_set_bt_power(false);

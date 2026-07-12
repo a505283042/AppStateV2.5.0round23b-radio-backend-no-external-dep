@@ -54,6 +54,10 @@ Bt62spVolumeQueryEvent s_volume_query_event{};
 bool s_pending_set_volume_valid = false;
 uint8_t s_pending_set_volume = 0;
 
+// BT62SP 在音频运行态初始化完成后会输出 CLEAR OK。
+// 使用递增序号而不是简单布尔值，便于识别每一次新的启动完成事件。
+uint32_t s_module_ready_generation = 0;
+
 bool time_reached(uint32_t now, uint32_t target)
 {
     return static_cast<int32_t>(now - target) >= 0;
@@ -146,6 +150,21 @@ bool parse_on_off(const String& upper, bool* out)
     return false;
 }
 
+bool is_module_ready_line(const char* text)
+{
+    if (!text || !*text) {
+        return false;
+    }
+
+    String upper = trim_copy(text);
+    upper.toUpperCase();
+
+    // 实机启动完成日志为 CLEAR OK；同时兼容后续固件可能使用的 READY 文本。
+    return upper.indexOf("CLEAR OK") >= 0 ||
+           upper == "READY" ||
+           upper.indexOf("BT READY") >= 0;
+}
+
 bool parse_volume_response(const char* text, uint8_t* out_volume)
 {
     if (!text || !out_volume) {
@@ -192,19 +211,27 @@ void note_module_rx_activity_for_volume_query(const char* text)
 {
     if (!text || !*text) return;
 
+    const bool module_ready = is_module_ready_line(text);
+    if (!module_ready) {
+        return;
+    }
+
     const uint32_t now = millis();
+    uint32_t generation = 0;
+
     portENTER_CRITICAL(&s_volume_mux);
 
-    // 模块上电时常先输出 CLEAR OK 等启动信息。收到任何有效行说明 UART 已经活跃：
-    // - 尚未发送第一次查询时，允许提前到启动信息后的 300ms；
-    // - 查询已经过早发出时，重新安排一次查询，避免命令被启动阶段吞掉。
+    ++s_module_ready_generation;
+    if (s_module_ready_generation == 0) {
+        s_module_ready_generation = 1;
+    }
+    generation = s_module_ready_generation;
+
+    // 只有明确收到启动完成标志后才重排查询。
+    // 普通 VOL/STATUS 等响应不能被当作模块已经完成音频运行态初始化。
     if (s_volume_query_request_id != 0) {
-        if (s_volume_query_phase == VolumeQueryPhase::WaitBeforeSend &&
-            s_volume_query_attempts == 0) {
-            const uint32_t candidate = now + BT_VOLUME_QUERY_AFTER_RX_DELAY_MS;
-            if (!time_reached(candidate, s_volume_query_due_ms)) {
-                s_volume_query_due_ms = candidate;
-            }
+        if (s_volume_query_phase == VolumeQueryPhase::WaitBeforeSend) {
+            s_volume_query_due_ms = now + BT_VOLUME_QUERY_AFTER_RX_DELAY_MS;
         } else if (s_volume_query_phase == VolumeQueryPhase::WaitResponse &&
                    s_volume_query_attempts < BT_VOLUME_QUERY_MAX_ATTEMPTS) {
             s_volume_query_phase = VolumeQueryPhase::WaitBeforeSend;
@@ -213,6 +240,9 @@ void note_module_rx_activity_for_volume_query(const char* text)
     }
 
     portEXIT_CRITICAL(&s_volume_mux);
+
+    Serial.printf("[BT62SP] 模块启动完成：代次=%lu\n",
+                  static_cast<unsigned long>(generation));
 }
 
 void handle_volume_response_line(const char* text)
@@ -468,9 +498,19 @@ void bt62sp_uart_debug_begin(uint32_t baud)
     clear_volume_query_locked();
     s_volume_query_event_pending = false;
     s_pending_set_volume_valid = false;
+    s_module_ready_generation = 0;
     portEXIT_CRITICAL(&s_volume_mux);
 
     Serial.println("[BT62SP] UART调试桥已启用：电脑串口输入 AT... 直接转发，输入 BT62 HELP 查看控制命令");
+}
+
+uint32_t bt62sp_uart_debug_ready_generation()
+{
+    uint32_t generation = 0;
+    portENTER_CRITICAL(&s_volume_mux);
+    generation = s_module_ready_generation;
+    portEXIT_CRITICAL(&s_volume_mux);
+    return generation;
 }
 
 bool bt62sp_uart_debug_request_volume_query(uint32_t settle_ms,

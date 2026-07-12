@@ -24,6 +24,10 @@ void bt62sp_uart_debug_begin(uint32_t baud = 1000000);
 // - 同时推进音量查询/设置命令状态机。
 void bt62sp_uart_debug_update();
 
+// 返回模块最近一次启动完成标志的递增序号。
+// BT62SP 上电后输出 CLEAR OK 时序号会变化，调用方可据此重新应用音量等运行时设置。
+uint32_t bt62sp_uart_debug_ready_generation();
+
 // 非阻塞请求查询 BT62SP 当前保存音量。
 // settle_ms 用于等待模块上电稳定，不会调用 delay() 阻塞当前任务。
 // 返回 true 表示查询已排队，最终结果由 bt62sp_uart_debug_take_volume_query_event() 获取。
