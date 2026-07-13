@@ -4,6 +4,8 @@
 
 #include "menu/quick_menu_pages.h"
 #include "menu/quick_menu_page_nfc.h"
+#include "menu/quick_menu_page_system.h"
+#include "menu/quick_menu_page_time_alarm.h"
 #include "audio/audio_service.h"
 #include "player_source.h"
 #include "utils/log.h"
@@ -19,7 +21,8 @@ static bool s_active = false;
 static QuickMenuPage s_page = QuickMenuPage::Root;
 static int s_selected = 0;
 
-static constexpr uint8_t MENU_PAGE_STATE_COUNT = 20;
+static constexpr uint8_t MENU_PAGE_STATE_COUNT =
+    static_cast<uint8_t>(QuickMenuPage::Count);
 static uint8_t s_selected_by_page[MENU_PAGE_STATE_COUNT] = {};
 static uint32_t s_last_dynamic_refresh_ms = 0;
 
@@ -100,6 +103,7 @@ static bool quick_menu_page_is_dynamic(QuickMenuPage page)
         case QuickMenuPage::BatteryInfo:
         case QuickMenuPage::RtcInfo:
         case QuickMenuPage::TimeAlarm:
+        case QuickMenuPage::AlarmSettings:
             return true;
 
         default:
@@ -337,6 +341,9 @@ bool quick_menu_is_active()
 
 void quick_menu_enter()
 {
+    quick_menu_reset_battery_capacity_draft();
+    quick_menu_reset_alarm_draft();
+
     // 每次从播放器重新进入菜单，都从根菜单第一项开始。
     // 子菜单的选中记忆也只在本次菜单会话内有效。
     reset_menu_session_selection();
@@ -365,6 +372,9 @@ void quick_menu_exit()
     if (!s_active) {
         return;
     }
+
+    quick_menu_reset_battery_capacity_draft();
+    quick_menu_reset_alarm_draft();
 
     s_active = false;
     s_page = QuickMenuPage::Root;

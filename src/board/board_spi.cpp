@@ -57,7 +57,7 @@ void board_spi_init(void)
         mcp23017_u3_set_b(board::MCP_B_RST_TFT, false);
         mcp23017_u3_set_b(board::MCP_B_RST_NFC, false);
 
-        mcp23017_u3_set_b(board::MCP_B_BLK, false);
+        (void)board_hw_set_backlight(false);
 
         delay(20);
 
@@ -66,8 +66,9 @@ void board_spi_init(void)
 
         delay(120);
 
-        mcp23017_u3_set_b(board::MCP_B_BLK, true);
-        Serial.println("[总线] 背光使能 (BLK) -> 高电平");
+        // TFT 控制器此时尚未 init，背光继续保持关闭。
+        // ui_init() 绘制完成黑色启动首帧后再开启，避免白屏、花屏或残影。
+        Serial.println("[总线] 背光保持关闭，等待 UI 首帧完成");
 
     } else {
         Serial.println("[总线] 初始化IIC扩展失败");

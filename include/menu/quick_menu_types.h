@@ -18,6 +18,7 @@ enum class QuickMenuPage : uint8_t {
     Source,
     Display,
     TimeAlarm,
+    AlarmSettings,
     AlarmTime,
     AlarmWeekday,
     Network,
@@ -30,8 +31,10 @@ enum class QuickMenuPage : uint8_t {
     MemoryInfo,
     StackInfo,
     BatteryInfo,
+    BatteryCapacity,
     RtcInfo,
     FactoryResetConfirm,
+    Count,
 };
 
 enum class QuickMenuItemType : uint8_t {

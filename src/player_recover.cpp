@@ -298,8 +298,21 @@ bool player_recover_try_handle_rescan_done()
 
     const int tl_count = (int)storage_catalog_v3_track_count();
     const bool rescan_success = g_rescan_success;
+    const bool rescan_aborted = g_abort_scan;
     g_rescanning = false;
     g_rescan_success = false;
+    g_abort_scan = false;
+
+    // 用户取消扫描时，保留取消瞬间的播放状态。
+    // 扫描任务开始时已经安全停止音频，因此这里不重新派发歌曲、
+    // 不改暂停状态，也不重建播放列表上下文。
+    if (rescan_aborted) {
+        s_rescan_restore_path = "";
+        LOGI("[播放器] 曲库扫描已取消，保持当前播放状态不变");
+        ui_return_to_player();
+        ui_request_refresh_now();
+        return true;
+    }
 
     player_recover_rebuild_path_index_if_needed();
 

@@ -16,6 +16,8 @@
 #include "player_snapshot.h"
 #include "app_alarm.h"
 #include "net_music/net_music_catalog.h"
+#include "keys/keys.h"
+#include "hal/mcp23017_u3.h"
 
 static void prepare_music_catalogs()
 {
@@ -38,8 +40,7 @@ void boot_state_run(void)
     if (done) return;
     done = true;
 
-    Serial.begin(115200);
-    delay(300);
+    // 主串口已经在 setup() 中初始化，这里只输出启动阶段日志。
     Serial.println("[启动] 开始");
 
     Serial.printf("[内存] PSRAM存在=%d，总容量=%u，可用=%u\n",
@@ -48,6 +49,15 @@ void boot_state_run(void)
 
     // 1) 初始化两条 SPI：默认SPI=UI，SPI_SD=SD
     board_spi_init();
+
+    // keys_init() 早于 MCP23017 初始化执行。扩展器就绪后必须重新同步一次，
+    // 消费上电期间的残留电平，避免首次松键被误判为短按。
+    if (mcp23017_u3_is_ready()) {
+        keys_sync_to_hw_state();
+        LOGI("[启动] MCP23017 就绪后已重新同步按键状态");
+    } else {
+        LOGW("[启动] MCP23017 未就绪，扩展按键保持未按下状态");
+    }
 
     // RTC 初始化完成后加载收音机闹钟配置。
     // 如果闹钟已启用，这里会把正式闹钟重新写入 PCF85063A。

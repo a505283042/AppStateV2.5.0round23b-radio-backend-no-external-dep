@@ -50,6 +50,9 @@ const QuickMenuPageDef& quick_menu_get_page_def(QuickMenuPage page)
         case QuickMenuPage::TimeAlarm:
             return quick_menu_get_time_alarm_page();
 
+        case QuickMenuPage::AlarmSettings:
+            return quick_menu_get_alarm_settings_page();
+
         case QuickMenuPage::AlarmTime:
             return quick_menu_get_alarm_time_page();
 
@@ -82,6 +85,9 @@ const QuickMenuPageDef& quick_menu_get_page_def(QuickMenuPage page)
 
         case QuickMenuPage::BatteryInfo:
             return quick_menu_get_battery_page();
+
+        case QuickMenuPage::BatteryCapacity:
+            return quick_menu_get_battery_capacity_page();
 
         case QuickMenuPage::RtcInfo:
             return quick_menu_get_rtc_page();

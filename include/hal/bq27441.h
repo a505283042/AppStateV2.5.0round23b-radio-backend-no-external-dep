@@ -31,5 +31,7 @@ bool bq27441_read(Bq27441Sample* out);
 uint8_t bq27441_last_i2c_error();
 
 uint16_t bq27441_design_capacity_mah();
-bool bq27441_configure_500mah_if_needed(uint16_t flags_hint = 0);
+uint16_t bq27441_target_design_capacity_mah();
+bool bq27441_set_design_capacity_mah(uint16_t capacity_mah);
+bool bq27441_configure_if_needed(uint16_t flags_hint = 0);
 const char* bq27441_flags_to_text(uint16_t flags);

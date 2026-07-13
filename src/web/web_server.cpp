@@ -2353,7 +2353,7 @@ static void web_handle_netmusic_toggle() {
     return;
   }
 
-  player_toggle_play();
+  player_toggle_play(PlayerToggleTrigger::Web);
   web_send_json_ok_simple("NAS 播放 / 暂停");
 }
 
@@ -2379,7 +2379,7 @@ static void web_handle_netmusic_return_local() {
   web_send_json_ok_simple("已返回本地播放");
 }
 
-static void web_handle_playpause() { if (!web_require_player_state()) return; player_toggle_play(); web_send_json_ok_simple(); }
+static void web_handle_playpause() { if (!web_require_player_state()) return; player_toggle_play(PlayerToggleTrigger::Web); web_send_json_ok_simple(); }
 static void web_handle_next() { if (!web_require_player_state()) return; player_next_track(); web_send_json_ok_simple(); }
 static void web_handle_prev() { if (!web_require_player_state()) return; player_prev_track(); web_send_json_ok_simple(); }
 static void web_handle_mode_toggle() { if (!web_require_player_state()) return; player_toggle_random(); web_send_json_ok_simple(); }

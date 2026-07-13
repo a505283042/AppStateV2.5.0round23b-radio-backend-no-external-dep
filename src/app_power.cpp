@@ -26,6 +26,13 @@ static uint16_t s_sleep_preset_minutes = 0;
 static uint32_t s_sleep_deadline_ms = 0;
 static uint32_t s_sleep_last_ui_refresh_bucket = UINT32_MAX;
 
+// 设置睡眠关机后，屏幕保持一小段时间供用户确认，然后自动熄屏。
+// 熄屏后按界面类按键只负责唤醒；再次唤醒后会重新计时。
+static constexpr uint32_t SLEEP_SCREEN_OFF_DELAY_MS = 15000;
+static bool s_sleep_screen_off_pending = false;
+static bool s_sleep_last_backlight_enabled = true;
+static uint32_t s_sleep_screen_off_deadline_ms = 0;
+
 static bool s_pending_shutdown_active = false;
 static uint32_t s_pending_shutdown_deadline_ms = 0;
 static const char* s_pending_shutdown_reason = nullptr;
@@ -50,6 +57,8 @@ void app_power_save_and_shutdown()
     s_sleep_timer_active = false;
     s_sleep_preset_minutes = 0;
     s_sleep_deadline_ms = 0;
+    s_sleep_screen_off_pending = false;
+    s_sleep_screen_off_deadline_ms = 0;
     s_sleep_shutdown_started = true;
 
     // 如果是从未来某个菜单入口触发，也先退出菜单。
@@ -135,18 +144,29 @@ void app_power_sleep_timer_set_minutes(uint16_t minutes)
     s_sleep_timer_active = true;
     s_sleep_shutdown_started = false;
 
-    LOGI("[电源] sleep timer 设置: %u minutes", (unsigned)minutes);
+    s_sleep_last_backlight_enabled = board_hw_get_backlight();
+    s_sleep_screen_off_pending = s_sleep_last_backlight_enabled;
+    s_sleep_screen_off_deadline_ms = s_sleep_screen_off_pending
+        ? millis() + SLEEP_SCREEN_OFF_DELAY_MS
+        : 0;
+
+    LOGI("[电源] 睡眠定时已设置：%u 分钟，屏幕将在 %lu 秒后自动关闭",
+         (unsigned)minutes,
+         (unsigned long)(SLEEP_SCREEN_OFF_DELAY_MS / 1000UL));
 }
 
 void app_power_sleep_timer_cancel()
 {
     if (s_sleep_timer_active || s_sleep_preset_minutes != 0) {
-        LOGI("[电源] sleep timer 取消ed");
+        LOGI("[电源] 睡眠定时已取消");
     }
 
     s_sleep_timer_active = false;
     s_sleep_preset_minutes = 0;
     s_sleep_deadline_ms = 0;
+    s_sleep_screen_off_pending = false;
+    s_sleep_screen_off_deadline_ms = 0;
+    s_sleep_last_backlight_enabled = board_hw_get_backlight();
     s_sleep_shutdown_started = false;
 }
 
@@ -205,7 +225,31 @@ void app_power_sleep_timer_tick()
         return;
     }
 
-    if ((int32_t)(millis() - s_sleep_deadline_ms) < 0) {
+    const uint32_t now = millis();
+    const bool backlight_enabled = board_hw_get_backlight();
+
+    // 睡眠定时有效期间，屏幕每次被唤醒后重新开始 15 秒息屏计时。
+    if (backlight_enabled && !s_sleep_last_backlight_enabled) {
+        s_sleep_screen_off_pending = true;
+        s_sleep_screen_off_deadline_ms = now + SLEEP_SCREEN_OFF_DELAY_MS;
+    } else if (!backlight_enabled) {
+        s_sleep_screen_off_pending = false;
+        s_sleep_screen_off_deadline_ms = 0;
+    }
+    s_sleep_last_backlight_enabled = backlight_enabled;
+
+    if (s_sleep_screen_off_pending &&
+        backlight_enabled &&
+        (int32_t)(now - s_sleep_screen_off_deadline_ms) >= 0) {
+        quick_menu_exit();
+        (void)board_hw_set_backlight(false);
+        s_sleep_screen_off_pending = false;
+        s_sleep_screen_off_deadline_ms = 0;
+        s_sleep_last_backlight_enabled = false;
+        LOGI("[电源] 睡眠定时仍在运行，屏幕已自动关闭");
+    }
+
+    if ((int32_t)(now - s_sleep_deadline_ms) < 0) {
         return;
     }
 

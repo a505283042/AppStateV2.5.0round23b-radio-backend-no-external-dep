@@ -71,6 +71,24 @@ static const char* value_rtc_time()
     return buf;
 }
 
+static const char* value_alarm_saved_switch()
+{
+    return app_alarm_get_config().enabled ? "已启用" : "已关闭";
+}
+
+static const char* value_alarm_saved_time()
+{
+    static char buf[12];
+    const AppAlarmConfig cfg = app_alarm_get_config();
+    snprintf(buf,
+             sizeof(buf),
+             "%02u:%02u:%02u",
+             (unsigned)cfg.hour,
+             (unsigned)cfg.minute,
+             (unsigned)cfg.second);
+    return buf;
+}
+
 static const char* value_alarm_switch()
 {
     load_draft_if_needed();
@@ -293,17 +311,24 @@ static bool action_toggle_sun() { return toggle_weekday(APP_ALARM_WEEKDAY_SUN); 
 
 const QuickMenuItem TIME_ALARM_ITEMS[] = {
     {"当前时间", QuickMenuItemType::Status, QuickMenuPage::TimeAlarm, "", value_rtc_time, nullptr, true, false},
-    {"闹钟开关", QuickMenuItemType::Toggle, QuickMenuPage::TimeAlarm, "", value_alarm_switch, action_toggle_alarm_switch, true, false},
+    {"闹钟状态", QuickMenuItemType::Status, QuickMenuPage::TimeAlarm, "", value_alarm_saved_switch, nullptr, true, false},
+    {"闹钟时间", QuickMenuItemType::Status, QuickMenuPage::TimeAlarm, "", value_alarm_saved_time, nullptr, true, false},
     {"下次触发", QuickMenuItemType::Status, QuickMenuPage::TimeAlarm, "", value_next_trigger, nullptr, true, false},
-    {"闹钟时间", QuickMenuItemType::SubPage, QuickMenuPage::AlarmTime, "", value_alarm_time, nullptr, true, false},
-    {"重复模式", QuickMenuItemType::Toggle, QuickMenuPage::TimeAlarm, "", value_repeat_mode, action_cycle_repeat_mode, true, false},
-    {"每周选择", QuickMenuItemType::SubPage, QuickMenuPage::AlarmWeekday, "", value_weekday_text, nullptr, true, false},
-    {"响铃动作", QuickMenuItemType::Toggle, QuickMenuPage::TimeAlarm, "", value_action, action_cycle_action, true, false},
-    {"闹钟音量", QuickMenuItemType::Toggle, QuickMenuPage::TimeAlarm, "", value_volume, action_cycle_volume, true, false},
-    {"保存启用", QuickMenuItemType::Action, QuickMenuPage::TimeAlarm, "", nullptr, action_save_enable, true, false},
-    {"关闭闹钟", QuickMenuItemType::Action, QuickMenuPage::TimeAlarm, "", nullptr, action_disable_alarm, true, false},
-    {"删除闹钟", QuickMenuItemType::Action, QuickMenuPage::TimeAlarm, "", nullptr, action_delete_alarm, true, false},
+    {"闹钟设置", QuickMenuItemType::SubPage, QuickMenuPage::AlarmSettings, "", value_alarm_saved_switch, nullptr, true, false},
     {"返回", QuickMenuItemType::Back, QuickMenuPage::Root, "", nullptr, nullptr, true, false},
+};
+
+const QuickMenuItem ALARM_SETTINGS_ITEMS[] = {
+    {"闹钟开关", QuickMenuItemType::Toggle, QuickMenuPage::AlarmSettings, "", value_alarm_switch, action_toggle_alarm_switch, true, false},
+    {"闹钟时间", QuickMenuItemType::SubPage, QuickMenuPage::AlarmTime, "", value_alarm_time, nullptr, true, false},
+    {"重复模式", QuickMenuItemType::Toggle, QuickMenuPage::AlarmSettings, "", value_repeat_mode, action_cycle_repeat_mode, true, false},
+    {"每周选择", QuickMenuItemType::SubPage, QuickMenuPage::AlarmWeekday, "", value_weekday_text, nullptr, true, false},
+    {"响铃动作", QuickMenuItemType::Toggle, QuickMenuPage::AlarmSettings, "", value_action, action_cycle_action, true, false},
+    {"闹钟音量", QuickMenuItemType::Toggle, QuickMenuPage::AlarmSettings, "", value_volume, action_cycle_volume, true, false},
+    {"保存启用", QuickMenuItemType::Action, QuickMenuPage::AlarmSettings, "", nullptr, action_save_enable, true, false},
+    {"关闭闹钟", QuickMenuItemType::Action, QuickMenuPage::AlarmSettings, "", nullptr, action_disable_alarm, true, false},
+    {"删除闹钟", QuickMenuItemType::Action, QuickMenuPage::AlarmSettings, "", nullptr, action_delete_alarm, true, false},
+    {"返回", QuickMenuItemType::Back, QuickMenuPage::TimeAlarm, "", nullptr, nullptr, true, false},
 };
 
 const QuickMenuItem ALARM_TIME_ITEMS[] = {
@@ -311,7 +336,7 @@ const QuickMenuItem ALARM_TIME_ITEMS[] = {
     {"分钟", QuickMenuItemType::Toggle, QuickMenuPage::AlarmTime, "", value_minute, action_cycle_minute, true, false},
     {"秒", QuickMenuItemType::Toggle, QuickMenuPage::AlarmTime, "", value_second, action_cycle_second, true, false},
     {"保存启用", QuickMenuItemType::Action, QuickMenuPage::AlarmTime, "", nullptr, action_save_enable, true, false},
-    {"返回", QuickMenuItemType::Back, QuickMenuPage::TimeAlarm, "", nullptr, nullptr, true, false},
+    {"返回", QuickMenuItemType::Back, QuickMenuPage::AlarmSettings, "", nullptr, nullptr, true, false},
 };
 
 const QuickMenuItem ALARM_WEEKDAY_ITEMS[] = {
@@ -323,10 +348,17 @@ const QuickMenuItem ALARM_WEEKDAY_ITEMS[] = {
     {"周六", QuickMenuItemType::Toggle, QuickMenuPage::AlarmWeekday, "", value_sat, action_toggle_sat, true, false},
     {"周日", QuickMenuItemType::Toggle, QuickMenuPage::AlarmWeekday, "", value_sun, action_toggle_sun, true, false},
     {"保存启用", QuickMenuItemType::Action, QuickMenuPage::AlarmWeekday, "", nullptr, action_save_enable, true, false},
-    {"返回", QuickMenuItemType::Back, QuickMenuPage::TimeAlarm, "", nullptr, nullptr, true, false},
+    {"返回", QuickMenuItemType::Back, QuickMenuPage::AlarmSettings, "", nullptr, nullptr, true, false},
 };
 
 } // namespace
+
+void quick_menu_reset_alarm_draft()
+{
+    s_draft = AppAlarmConfig{};
+    s_draft_loaded = false;
+    s_draft_dirty = false;
+}
 
 const QuickMenuPageDef& quick_menu_get_time_alarm_page()
 {
@@ -340,12 +372,24 @@ const QuickMenuPageDef& quick_menu_get_time_alarm_page()
     return page;
 }
 
+const QuickMenuPageDef& quick_menu_get_alarm_settings_page()
+{
+    static const QuickMenuPageDef page = {
+        "闹钟设置",
+        QuickMenuPage::AlarmSettings,
+        QuickMenuPage::TimeAlarm,
+        ALARM_SETTINGS_ITEMS,
+        MENU_COUNT(ALARM_SETTINGS_ITEMS),
+    };
+    return page;
+}
+
 const QuickMenuPageDef& quick_menu_get_alarm_time_page()
 {
     static const QuickMenuPageDef page = {
         "闹钟时间",
         QuickMenuPage::AlarmTime,
-        QuickMenuPage::TimeAlarm,
+        QuickMenuPage::AlarmSettings,
         ALARM_TIME_ITEMS,
         MENU_COUNT(ALARM_TIME_ITEMS),
     };
@@ -357,7 +401,7 @@ const QuickMenuPageDef& quick_menu_get_alarm_weekday_page()
     static const QuickMenuPageDef page = {
         "每周选择",
         QuickMenuPage::AlarmWeekday,
-        QuickMenuPage::TimeAlarm,
+        QuickMenuPage::AlarmSettings,
         ALARM_WEEKDAY_ITEMS,
         MENU_COUNT(ALARM_WEEKDAY_ITEMS),
     };

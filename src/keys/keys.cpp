@@ -395,7 +395,7 @@ static void play_key_toggle_with_solenoid()
     if (web_settings_get().solenoid_enabled) {
         (void)board_hw_solenoid_flip();
     }
-    player_toggle_play();
+    player_toggle_play(PlayerToggleTrigger::PlayKey);
 }
 
 static void enter_quick_menu_from_player()
@@ -551,10 +551,8 @@ static void handle_hall_out_play_pause()
 
         s_hall_last_trigger_ms = now;
         LOGI("[HALL] GPIO%d 触发播放/暂停", PIN_KEY_HALL_OUT);
-        player_toggle_play();
+        player_toggle_play(PlayerToggleTrigger::Hall);
     }
-#else
-    (void)player_toggle_play;
 #endif
 }
 

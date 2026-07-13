@@ -146,7 +146,10 @@ bool storage_mount(void)
 
     storage_refresh_card_identity_locked();
 
+#if LOG_LEVEL >= 3
+    // 根目录枚举只用于调试；INFO 构建不再额外打开根目录。
     storage_list_root();
+#endif
     return true;
 }
 

@@ -386,16 +386,24 @@ void flush_bt_rx_line(bool partial)
     if (s_bt_rx_len == 0) {
         return;
     }
+
     s_bt_rx_line[s_bt_rx_len] = '\0';
-    handle_volume_response_line(s_bt_rx_line);
-    note_module_rx_activity_for_volume_query(s_bt_rx_line);
-    Serial.printf(partial ? "[BT62SP RX*] %s\n" : "[BT62SP RX] %s\n", s_bt_rx_line);
+    const String line = trim_copy(s_bt_rx_line);
     s_bt_rx_len = 0;
+
+    // 模块上电时可能产生 NUL、空格或空行，只过滤无实际内容的日志。
+    if (line.length() == 0) {
+        return;
+    }
+
+    handle_volume_response_line(line.c_str());
+    note_module_rx_activity_for_volume_query(line.c_str());
+    Serial.printf(partial ? "[BT62SP RX*] %s\n" : "[BT62SP RX] %s\n", line.c_str());
 }
 
 void append_bt_rx_char(char c)
 {
-    if (c == '\r') {
+    if (c == '\0' || c == '\r') {
         return;
     }
     if (c == '\n') {

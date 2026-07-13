@@ -72,11 +72,20 @@ static void audio_publish_end_state(AudioPlaybackEndReason reason)
   s_end_state = next;
   portEXIT_CRITICAL(&s_end_state_mux);
 
-  LOGI("[音频] 播放结束：序号=%lu 原因=%s 播放=%lums 总时长=%lums",
-       (unsigned long)next.serial,
-       audio_playback_end_reason_label(next.reason),
-       (unsigned long)next.play_ms,
-       (unsigned long)next.total_ms);
+  if (next.reason == AudioPlaybackEndReason::NaturalEof ||
+      next.reason == AudioPlaybackEndReason::Stopped) {
+    LOGD("[音频] 播放结束：序号=%lu 原因=%s 播放=%lums 总时长=%lums",
+         (unsigned long)next.serial,
+         audio_playback_end_reason_label(next.reason),
+         (unsigned long)next.play_ms,
+         (unsigned long)next.total_ms);
+  } else {
+    LOGW("[音频] 播放异常结束：序号=%lu 原因=%s 播放=%lums 总时长=%lums",
+         (unsigned long)next.serial,
+         audio_playback_end_reason_label(next.reason),
+         (unsigned long)next.play_ms,
+         (unsigned long)next.total_ms);
+  }
 }
 
 AudioPlaybackEndState audio_get_last_end_state()

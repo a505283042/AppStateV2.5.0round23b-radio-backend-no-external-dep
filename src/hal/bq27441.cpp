@@ -1,6 +1,7 @@
 #include "hal/bq27441.h"
 
 #include <Wire.h>
+#include <Preferences.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -68,6 +69,12 @@ constexpr uint32_t BQ27441_RETRY_AFTER_MISSING_MS = 60UL * 1000UL;
 #define BQ27441_DESIGN_ENERGY_MWH 1850
 #endif
 
+constexpr uint16_t BQ27441_CAPACITY_MIN_MAH = 100;
+constexpr uint16_t BQ27441_CAPACITY_MAX_MAH = 5000;
+constexpr uint16_t BQ27441_NOMINAL_VOLTAGE_MV = 3700;
+constexpr char BQ27441_PREFS_NAMESPACE[] = "battery";
+constexpr char BQ27441_PREFS_CAPACITY_KEY[] = "design_mah";
+
 #ifndef BQ27441_TERMINATE_VOLTAGE_MV
 #define BQ27441_TERMINATE_VOLTAGE_MV 3300
 #endif
@@ -104,12 +111,53 @@ uint8_t s_consecutive_mandatory_read_failures = 0;
 uint8_t s_last_failed_cmd = 0;
 bool s_missing_warned_once = false;
 uint16_t s_design_capacity_mah = 0;
+uint16_t s_target_design_capacity_mah = BQ27441_DESIGN_CAPACITY_MAH;
+bool s_capacity_pref_loaded = false;
 bool s_config_attempted_this_boot = false;
 bool s_config_ok_this_boot = false;
 bool s_ever_ready = false;
 bool s_scan_done_this_boot = false;
 uint32_t s_next_begin_attempt_ms = 0;
 uint32_t s_seen_bus_generation = 0;
+
+
+uint16_t clamp_design_capacity_mah(uint16_t capacity_mah)
+{
+    if (capacity_mah < BQ27441_CAPACITY_MIN_MAH) return BQ27441_CAPACITY_MIN_MAH;
+    if (capacity_mah > BQ27441_CAPACITY_MAX_MAH) return BQ27441_CAPACITY_MAX_MAH;
+    return capacity_mah;
+}
+
+void load_design_capacity_pref_once()
+{
+    if (s_capacity_pref_loaded) return;
+    s_capacity_pref_loaded = true;
+
+    Preferences pref;
+    uint16_t value = BQ27441_DESIGN_CAPACITY_MAH;
+    if (pref.begin(BQ27441_PREFS_NAMESPACE, true)) {
+        value = pref.getUShort(BQ27441_PREFS_CAPACITY_KEY, BQ27441_DESIGN_CAPACITY_MAH);
+        pref.end();
+    }
+
+    s_target_design_capacity_mah = clamp_design_capacity_mah(value);
+    LOGI("[BQ27441] 目标设计容量=%umAh", (unsigned)s_target_design_capacity_mah);
+}
+
+uint16_t design_energy_mwh_for_capacity(uint16_t capacity_mah)
+{
+    const uint32_t energy =
+        ((uint32_t)capacity_mah * BQ27441_NOMINAL_VOLTAGE_MV + 500UL) / 1000UL;
+    return static_cast<uint16_t>(energy > 0xFFFFUL ? 0xFFFFUL : energy);
+}
+
+uint16_t taper_rate_for_capacity(uint16_t capacity_mah)
+{
+    // 延续原 500mAh -> TaperRate 100 的配置比例。
+    const uint32_t rate = ((uint32_t)capacity_mah * BQ27441_TAPER_RATE + 250UL) / 500UL;
+    if (rate == 0) return 1;
+    return static_cast<uint16_t>(rate > 0xFFFFUL ? 0xFFFFUL : rate);
+}
 
 const char* known_i2c_label(uint8_t addr)
 {
@@ -460,10 +508,15 @@ bool exit_config_update(bool was_sealed)
     return left;
 }
 
-bool configure_500mah_data_memory(uint16_t flags_hint)
+bool configure_design_capacity_data_memory(uint16_t flags_hint)
 {
     if (s_config_attempted_this_boot) return s_config_ok_this_boot;
     s_config_attempted_this_boot = true;
+
+    load_design_capacity_pref_once();
+    const uint16_t target_capacity = s_target_design_capacity_mah;
+    const uint16_t target_energy = design_energy_mwh_for_capacity(target_capacity);
+    const uint16_t target_taper_rate = taper_rate_for_capacity(target_capacity);
 
     uint16_t design_capacity = 0;
     const bool got_design_capacity = read_word(CMD_EXT_DESIGN_CAPACITY, &design_capacity);
@@ -472,7 +525,7 @@ bool configure_500mah_data_memory(uint16_t flags_hint)
     }
 
     const bool itpor = flags_has(flags_hint, BQ27441_FLAG_ITPOR);
-    const bool capacity_mismatch = !got_design_capacity || design_capacity != BQ27441_DESIGN_CAPACITY_MAH;
+    const bool capacity_mismatch = !got_design_capacity || design_capacity != target_capacity;
     if (!itpor && !capacity_mismatch) {
         LOGD("[BQ27441] 配置已匹配：DesignCapacity=%umAh flags=0x%04X",
              design_capacity,
@@ -483,7 +536,7 @@ bool configure_500mah_data_memory(uint16_t flags_hint)
 
     LOGI("[BQ27441] 准备写入电池参数：DesignCapacity=%umAh->%u mAh ITPOR=%d",
          got_design_capacity ? design_capacity : 0,
-         (unsigned)BQ27441_DESIGN_CAPACITY_MAH,
+         (unsigned)target_capacity,
          itpor ? 1 : 0);
 
     bool was_sealed = false;
@@ -495,10 +548,10 @@ bool configure_500mah_data_memory(uint16_t flags_hint)
 
     bool ok = true;
     i2c_bus_lock();
-    ok &= write_extended_u16_be_locked(CLASS_STATE, STATE_OFF_DESIGN_CAPACITY, BQ27441_DESIGN_CAPACITY_MAH);
-    ok &= write_extended_u16_be_locked(CLASS_STATE, STATE_OFF_DESIGN_ENERGY, BQ27441_DESIGN_ENERGY_MWH);
+    ok &= write_extended_u16_be_locked(CLASS_STATE, STATE_OFF_DESIGN_CAPACITY, target_capacity);
+    ok &= write_extended_u16_be_locked(CLASS_STATE, STATE_OFF_DESIGN_ENERGY, target_energy);
     ok &= write_extended_u16_be_locked(CLASS_STATE, STATE_OFF_TERMINATE_VOLTAGE, BQ27441_TERMINATE_VOLTAGE_MV);
-    ok &= write_extended_u16_be_locked(CLASS_STATE, STATE_OFF_TAPER_RATE, BQ27441_TAPER_RATE);
+    ok &= write_extended_u16_be_locked(CLASS_STATE, STATE_OFF_TAPER_RATE, target_taper_rate);
 
     ok &= write_extended_u8_locked(CLASS_DISCHARGE, DISCHARGE_OFF_SOC1_SET, BQ27441_SOC1_SET_PERCENT);
     ok &= write_extended_u8_locked(CLASS_DISCHARGE, DISCHARGE_OFF_SOC1_CLEAR, BQ27441_SOC1_CLEAR_PERCENT);
@@ -528,13 +581,13 @@ bool configure_500mah_data_memory(uint16_t flags_hint)
         s_design_capacity_mah = new_design_capacity;
     }
 
-    s_config_ok_this_boot = ok && new_design_capacity == BQ27441_DESIGN_CAPACITY_MAH;
+    s_config_ok_this_boot = ok && new_design_capacity == target_capacity;
     if (s_config_ok_this_boot) {
         LOGI("[BQ27441] 电池参数已配置：容量=%umAh 能量=%umWh 截止=%umV Taper=%u SOC1=%u/%u SOCF=%u/%u GPOUT=低有效",
-             (unsigned)BQ27441_DESIGN_CAPACITY_MAH,
-             (unsigned)BQ27441_DESIGN_ENERGY_MWH,
+             (unsigned)target_capacity,
+             (unsigned)target_energy,
              (unsigned)BQ27441_TERMINATE_VOLTAGE_MV,
-             (unsigned)BQ27441_TAPER_RATE,
+             (unsigned)target_taper_rate,
              (unsigned)BQ27441_SOC1_SET_PERCENT,
              (unsigned)BQ27441_SOC1_CLEAR_PERCENT,
              (unsigned)BQ27441_SOCF_SET_PERCENT,
@@ -553,6 +606,7 @@ bool configure_500mah_data_memory(uint16_t flags_hint)
 
 bool bq27441_begin()
 {
+    load_design_capacity_pref_once();
     if (!i2c_ready_for_bq()) return false;
 
     const uint32_t now = millis();
@@ -575,7 +629,7 @@ bool bq27441_begin()
         return false;
     }
 
-    (void)configure_500mah_data_memory(flags);
+    (void)configure_design_capacity_data_memory(flags);
 
     (void)read_word(CMD_FLAGS, &flags);
     (void)read_word(CMD_EXT_DESIGN_CAPACITY, &s_design_capacity_mah);
@@ -612,10 +666,56 @@ uint16_t bq27441_design_capacity_mah()
     return s_design_capacity_mah;
 }
 
-bool bq27441_configure_500mah_if_needed(uint16_t flags_hint)
+uint16_t bq27441_target_design_capacity_mah()
+{
+    load_design_capacity_pref_once();
+    return s_target_design_capacity_mah;
+}
+
+bool bq27441_set_design_capacity_mah(uint16_t capacity_mah)
+{
+    const uint16_t target = clamp_design_capacity_mah(capacity_mah);
+
+    Preferences pref;
+    if (!pref.begin(BQ27441_PREFS_NAMESPACE, false)) {
+        LOGW("[BQ27441] 无法打开容量配置 NVS");
+        return false;
+    }
+    const size_t written = pref.putUShort(BQ27441_PREFS_CAPACITY_KEY, target);
+    pref.end();
+    if (written != sizeof(uint16_t)) {
+        LOGW("[BQ27441] 保存目标容量失败：%umAh", (unsigned)target);
+        return false;
+    }
+
+    s_capacity_pref_loaded = true;
+    s_target_design_capacity_mah = target;
+    s_config_attempted_this_boot = false;
+    s_config_ok_this_boot = false;
+
+    if (!s_ready) {
+        LOGI("[BQ27441] 已保存目标容量=%umAh，电量计恢复后应用", (unsigned)target);
+        return true;
+    }
+
+    const bool applied = configure_design_capacity_data_memory(0);
+    if (!applied) {
+        // NVS 已保存成功；保留后续重试机会，不让一次瞬时 I2C 失败丢失用户设置。
+        s_config_attempted_this_boot = false;
+        LOGW("[BQ27441] 目标容量已保存=%umAh，本次应用失败，后续采样时重试",
+             (unsigned)target);
+        return true;
+    }
+
+    LOGI("[BQ27441] 自定义容量保存并应用：目标=%umAh 结果=1",
+         (unsigned)target);
+    return true;
+}
+
+bool bq27441_configure_if_needed(uint16_t flags_hint)
 {
     if (!i2c_ready_for_bq()) return false;
-    return configure_500mah_data_memory(flags_hint);
+    return configure_design_capacity_data_memory(flags_hint);
 }
 
 const char* bq27441_flags_to_text(uint16_t flags)
@@ -703,8 +803,8 @@ bool bq27441_read(Bq27441Sample* out)
 
     s_consecutive_mandatory_read_failures = 0;
 
-    if (flags_has(s.flags, BQ27441_FLAG_ITPOR) || s_design_capacity_mah != BQ27441_DESIGN_CAPACITY_MAH) {
-        (void)configure_500mah_data_memory(s.flags);
+    if (flags_has(s.flags, BQ27441_FLAG_ITPOR) || s_design_capacity_mah != bq27441_target_design_capacity_mah()) {
+        (void)configure_design_capacity_data_memory(s.flags);
     }
 
     uint8_t optional_failed_cmd = 0;

@@ -350,10 +350,17 @@ bool audio_flac_loop()
       set_end_reason_if_none(AudioPlaybackEndReason::DecodeError);
     }
 
-    LOGI("[FLAC] 播放结束：原因=%s 文件位置=%lu/%lu",
-         audio_playback_end_reason_label(s_end_reason),
-         (unsigned long)g_file.tell(),
-         (unsigned long)g_file.size());
+    if (s_end_reason == AudioPlaybackEndReason::NaturalEof) {
+      LOGD("[FLAC] 播放结束：原因=%s 文件位置=%lu/%lu",
+           audio_playback_end_reason_label(s_end_reason),
+           (unsigned long)g_file.tell(),
+           (unsigned long)g_file.size());
+    } else {
+      LOGW("[FLAC] 播放异常结束：原因=%s 文件位置=%lu/%lu",
+           audio_playback_end_reason_label(s_end_reason),
+           (unsigned long)g_file.tell(),
+           (unsigned long)g_file.size());
+    }
     audio_flac_stop();
     return false;
   }

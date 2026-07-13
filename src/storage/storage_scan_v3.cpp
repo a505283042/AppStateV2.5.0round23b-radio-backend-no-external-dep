@@ -453,7 +453,8 @@ bool storage_scan_music_v3(std::vector<TrackBuildTempV3>& out_tracks,
         return false;
     }
 
-    g_abort_scan = false;
+    // 取消标志只在 app_request_start_rescan() 中初始化。
+    // 这里不能再次清零，否则扫描任务刚启动时可能吞掉用户的快速取消请求。
     scan_v3_reset_coop_state();
     ui_scan_begin();
 

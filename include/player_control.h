@@ -62,6 +62,17 @@ void player_stop_net_track();
 void player_next_track();
 /** 播放当前 playlist 的上一首。 */
 void player_prev_track();
+
+/** 播放/暂停请求来源，用于定位上电误触发和跨模块控制。 */
+enum class PlayerToggleTrigger : uint8_t {
+    Unknown = 0,
+    PlayKey,
+    Hall,
+    Web,
+    Alarm,
+    NfcAdminResume,
+};
+
 /**
  * @brief 切换播放/暂停。
  *
@@ -70,7 +81,7 @@ void player_prev_track();
  * - 已暂停 -> 继续
  * - 已停止但仍有当前歌曲 -> 重新播放当前曲目
  */
-void player_toggle_play();
+void player_toggle_play(PlayerToggleTrigger trigger = PlayerToggleTrigger::Unknown);
 /** 按步长调整音量，delta 可正可负。 */
 void player_volume_step(int delta);
 /**

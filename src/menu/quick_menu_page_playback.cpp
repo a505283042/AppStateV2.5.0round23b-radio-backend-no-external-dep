@@ -193,7 +193,7 @@ bool action_toggle_solenoid()
 
 bool action_cycle_sleep_timer()
 {
-    // 每次确认切换一个睡眠关机档位：关闭 -> 15 -> 30 -> 60 -> 90 -> 120 -> 关闭。
+    // 每次确认切换一个睡眠关机档位：关闭 -> 15 -> 30 -> 60 -> 90 -> 关闭。
     app_power_sleep_timer_cycle_next();
     return true;
 }

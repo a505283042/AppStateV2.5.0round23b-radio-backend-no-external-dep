@@ -58,7 +58,7 @@ static void player_auto_resume_alarm_after_snapshot()
     player_apply_alarm_wakeup_volume();
     // 闹钟开机只保留一个弹窗提示，播放器界面继续负责显示封面/播放状态。
     ui_show_alarm_wakeup_popup("闹钟已响", "正在恢复播放");
-    player_toggle_play();
+    player_toggle_play(PlayerToggleTrigger::Alarm);
     player_mark_alarm_wakeup_handled("恢复上次播放");
 }
 

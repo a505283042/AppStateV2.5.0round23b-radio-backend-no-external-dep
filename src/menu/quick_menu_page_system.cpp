@@ -351,12 +351,99 @@ const char* value_bq_design_capacity()
 {
     static char buf[16];
     const BatteryUiStatus& bat = battery_menu_sample();
-    const uint16_t cap = bat.design_capacity_mah ? bat.design_capacity_mah : bq27441_design_capacity_mah();
+    const uint16_t driver_capacity = bq27441_design_capacity_mah();
+    const uint16_t cap = driver_capacity ? driver_capacity : bat.design_capacity_mah;
     if (cap == 0) {
         return "未知";
     }
     snprintf(buf, sizeof(buf), "%umAh", static_cast<unsigned>(cap));
     return buf;
+}
+
+
+static constexpr uint16_t BATTERY_CAPACITY_MIN_MAH = 100;
+static constexpr uint16_t BATTERY_CAPACITY_MAX_MAH = 5000;
+static constexpr uint16_t BATTERY_CAPACITY_STEP_MAH = 100;
+
+static uint16_t s_battery_capacity_draft_mah = 500;
+static bool s_battery_capacity_draft_loaded = false;
+static bool s_battery_capacity_draft_dirty = false;
+
+static void load_battery_capacity_draft_if_needed()
+{
+    if (s_battery_capacity_draft_loaded) return;
+    s_battery_capacity_draft_mah = bq27441_target_design_capacity_mah();
+    s_battery_capacity_draft_loaded = true;
+    s_battery_capacity_draft_dirty = false;
+}
+
+const char* value_battery_target_capacity()
+{
+    static char buf[16];
+    snprintf(buf,
+             sizeof(buf),
+             "%umAh%s",
+             (unsigned)bq27441_target_design_capacity_mah(),
+             s_battery_capacity_draft_dirty ? "*" : "");
+    return buf;
+}
+
+const char* value_battery_capacity_draft()
+{
+    static char buf[16];
+    load_battery_capacity_draft_if_needed();
+    snprintf(buf,
+             sizeof(buf),
+             "%umAh%s",
+             (unsigned)s_battery_capacity_draft_mah,
+             s_battery_capacity_draft_dirty ? "*" : "");
+    return buf;
+}
+
+const char* value_battery_capacity_edit_state()
+{
+    load_battery_capacity_draft_if_needed();
+    return s_battery_capacity_draft_dirty ? "未保存" : "已保存";
+}
+
+bool action_battery_capacity_increase()
+{
+    load_battery_capacity_draft_if_needed();
+    if (s_battery_capacity_draft_mah >= BATTERY_CAPACITY_MAX_MAH) return false;
+    s_battery_capacity_draft_mah = static_cast<uint16_t>(
+        s_battery_capacity_draft_mah + BATTERY_CAPACITY_STEP_MAH);
+    s_battery_capacity_draft_dirty = true;
+    return true;
+}
+
+bool action_battery_capacity_decrease()
+{
+    load_battery_capacity_draft_if_needed();
+    if (s_battery_capacity_draft_mah <= BATTERY_CAPACITY_MIN_MAH) return false;
+    s_battery_capacity_draft_mah = static_cast<uint16_t>(
+        s_battery_capacity_draft_mah - BATTERY_CAPACITY_STEP_MAH);
+    s_battery_capacity_draft_dirty = true;
+    return true;
+}
+
+bool action_battery_capacity_default()
+{
+    load_battery_capacity_draft_if_needed();
+    s_battery_capacity_draft_mah = 500;
+    s_battery_capacity_draft_dirty =
+        s_battery_capacity_draft_mah != bq27441_target_design_capacity_mah();
+    return true;
+}
+
+bool action_battery_capacity_save()
+{
+    load_battery_capacity_draft_if_needed();
+    const bool ok = bq27441_set_design_capacity_mah(s_battery_capacity_draft_mah);
+    if (ok) {
+        s_battery_capacity_draft_dirty = false;
+        s_battery_cache_ms = 0;
+    }
+    return ok;
 }
 
 const char* value_battery_soh()
@@ -474,7 +561,7 @@ const char* value_chg_level()
 
 const QuickMenuItem SYSTEM_ITEMS[] = {
     {"固件版本", QuickMenuItemType::Status, QuickMenuPage::SystemInfo, "", value_firmware_version, nullptr, true, false},
-    // 电池详细页保留给内部代码/后续工程模式使用，但不再放在普通系统菜单入口里。
+    {"电池信息", QuickMenuItemType::SubPage, QuickMenuPage::BatteryInfo, "", value_battery_percent, nullptr, true, false},
     {"运行内存", QuickMenuItemType::SubPage, QuickMenuPage::MemoryInfo, "", value_open, nullptr, true, false},
     {"任务余量", QuickMenuItemType::SubPage, QuickMenuPage::StackInfo, "", value_open, nullptr, true, false},
     {"扩展芯片", QuickMenuItemType::Status, QuickMenuPage::SystemInfo, "", value_mcp23017_status, nullptr, true, false},
@@ -506,12 +593,13 @@ const QuickMenuItem STACK_ITEMS[] = {
 };
 
 const QuickMenuItem BATTERY_ITEMS[] = {
+    {"容量设置", QuickMenuItemType::SubPage, QuickMenuPage::BatteryCapacity, "", value_battery_target_capacity, nullptr, true, false},
     {"电池电压", QuickMenuItemType::Status, QuickMenuPage::BatteryInfo, "", value_battery_voltage, nullptr, true, false},
     {"剩余电量", QuickMenuItemType::Status, QuickMenuPage::BatteryInfo, "", value_battery_percent, nullptr, true, false},
     {"电池状态", QuickMenuItemType::Status, QuickMenuPage::BatteryInfo, "", value_battery_state, nullptr, true, false},
     {"平均电流", QuickMenuItemType::Status, QuickMenuPage::BatteryInfo, "", value_battery_current, nullptr, true, false},
     {"剩余容量", QuickMenuItemType::Status, QuickMenuPage::BatteryInfo, "", value_battery_capacity, nullptr, true, false},
-    {"设计容量", QuickMenuItemType::Status, QuickMenuPage::BatteryInfo, "", value_bq_design_capacity, nullptr, true, false},
+    {"芯片容量", QuickMenuItemType::Status, QuickMenuPage::BatteryInfo, "", value_bq_design_capacity, nullptr, true, false},
     {"健康度", QuickMenuItemType::Status, QuickMenuPage::BatteryInfo, "", value_battery_soh, nullptr, true, false},
     {"输入电源", QuickMenuItemType::Status, QuickMenuPage::BatteryInfo, "", value_external_power, nullptr, true, false},
     {"充电状态", QuickMenuItemType::Status, QuickMenuPage::BatteryInfo, "", value_charge_state, nullptr, true, false},
@@ -520,6 +608,16 @@ const QuickMenuItem BATTERY_ITEMS[] = {
     {"BQ标志", QuickMenuItemType::Status, QuickMenuPage::BatteryInfo, "", value_bq_flags, nullptr, true, false},
     {"标志说明", QuickMenuItemType::Status, QuickMenuPage::BatteryInfo, "", value_bq_flags_text, nullptr, true, false},
     {"返回", QuickMenuItemType::Back, QuickMenuPage::SystemInfo, "", nullptr, nullptr, true, false},
+};
+
+const QuickMenuItem BATTERY_CAPACITY_ITEMS[] = {
+    {"目标容量", QuickMenuItemType::Status, QuickMenuPage::BatteryCapacity, "", value_battery_capacity_draft, nullptr, true, false},
+    {"增加100mAh", QuickMenuItemType::Action, QuickMenuPage::BatteryCapacity, "", nullptr, action_battery_capacity_increase, true, false},
+    {"减少100mAh", QuickMenuItemType::Action, QuickMenuPage::BatteryCapacity, "", nullptr, action_battery_capacity_decrease, true, false},
+    {"设为500mAh", QuickMenuItemType::Action, QuickMenuPage::BatteryCapacity, "", nullptr, action_battery_capacity_default, true, false},
+    {"保存并应用", QuickMenuItemType::Action, QuickMenuPage::BatteryCapacity, "", nullptr, action_battery_capacity_save, true, false},
+    {"修改状态", QuickMenuItemType::Status, QuickMenuPage::BatteryCapacity, "", value_battery_capacity_edit_state, nullptr, true, false},
+    {"返回", QuickMenuItemType::Back, QuickMenuPage::BatteryInfo, "", nullptr, nullptr, true, false},
 };
 
 const QuickMenuItem RTC_ITEMS[] = {
@@ -539,6 +637,13 @@ const QuickMenuItem FACTORY_RESET_CONFIRM_ITEMS[] = {
 };
 
 } // namespace
+
+void quick_menu_reset_battery_capacity_draft()
+{
+    s_battery_capacity_draft_mah = bq27441_target_design_capacity_mah();
+    s_battery_capacity_draft_loaded = false;
+    s_battery_capacity_draft_dirty = false;
+}
 
 const QuickMenuPageDef& quick_menu_get_system_page()
 {
@@ -582,11 +687,24 @@ const QuickMenuPageDef& quick_menu_get_stack_page()
 const QuickMenuPageDef& quick_menu_get_battery_page()
 {
     static const QuickMenuPageDef page = {
-        "电池状态",
+        "电池详细信息",
         QuickMenuPage::BatteryInfo,
         QuickMenuPage::SystemInfo,
         BATTERY_ITEMS,
         MENU_COUNT(BATTERY_ITEMS),
+    };
+
+    return page;
+}
+
+const QuickMenuPageDef& quick_menu_get_battery_capacity_page()
+{
+    static const QuickMenuPageDef page = {
+        "电池容量设置",
+        QuickMenuPage::BatteryCapacity,
+        QuickMenuPage::BatteryInfo,
+        BATTERY_CAPACITY_ITEMS,
+        MENU_COUNT(BATTERY_CAPACITY_ITEMS),
     };
 
     return page;

@@ -21,6 +21,7 @@ void app_power_request_save_and_shutdown(const char* reason, uint32_t delay_ms);
 /**
  * @brief 设置睡眠关机定时。
  *
+ * 定时启用后，屏幕会在 15 秒后自动关闭；再次唤醒后重新计时。
  * @param minutes 分钟数；传 0 表示取消睡眠关机。
  */
 void app_power_sleep_timer_set_minutes(uint16_t minutes);

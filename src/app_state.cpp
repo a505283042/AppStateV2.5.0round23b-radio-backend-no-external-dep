@@ -231,13 +231,9 @@ void app_state_update(void)
         if (reason != BatteryShutdownReason::None) {
             s_low_battery_shutdown_started = true;
             LOGW("[应用] 触发低电量关机: %s", board_hw_battery_shutdown_reason_label(reason));
-            ui_show_player_placeholder("低电量关机", board_hw_battery_shutdown_reason_label(reason));
-            // 先保存当前音源状态，再停止音频，避免主动 stop 覆盖暂停/运行状态判断。
-            (void)player_snapshot_save_to_nvs();
-            player_control_mark_manual_stop();
-            audio_service_stop(true);
-            delay(1000);
-            board_hw_power_off();
+            // 低电量也走统一保存关机流程：同时保存本地/NAS 双快照、
+            // 普通音量、蓝牙发射音量、列表/Web/NFC 脏数据，再安全断电。
+            app_power_save_and_shutdown();
             return;
         }
     }
@@ -366,7 +362,7 @@ void app_request_exit_nfc_admin()
 
     if (nfc_admin_state_consume_resume_request()) {
         LOGD("[应用] NFC admin 退出: 恢复 当前 歌曲");
-        player_toggle_play();
+        player_toggle_play(PlayerToggleTrigger::NfcAdminResume);
     }
 }
 

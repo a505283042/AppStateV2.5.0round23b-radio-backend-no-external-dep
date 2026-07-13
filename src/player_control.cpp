@@ -1305,9 +1305,27 @@ void player_prev_track()
     }
 }
 
-void player_toggle_play()
+static const char* control_toggle_trigger_label(PlayerToggleTrigger trigger)
+{
+    switch (trigger) {
+        case PlayerToggleTrigger::PlayKey:        return "play_key";
+        case PlayerToggleTrigger::Hall:           return "hall";
+        case PlayerToggleTrigger::Web:            return "web";
+        case PlayerToggleTrigger::Alarm:          return "alarm";
+        case PlayerToggleTrigger::NfcAdminResume: return "nfc_admin";
+        case PlayerToggleTrigger::Unknown:
+        default:                                  return "unknown";
+    }
+}
+
+void player_toggle_play(PlayerToggleTrigger trigger)
 {
     const PlayerSourceState source = player_source_get();
+    LOGI("[播放器] 播放/暂停请求：来源=%s 音源=%d playing=%d paused=%d",
+         control_toggle_trigger_label(trigger),
+         static_cast<int>(source.type),
+         audio_service_is_playing() ? 1 : 0,
+         audio_service_is_paused() ? 1 : 0);
     const int track_count = control_track_count();
     if (track_count <= 0 &&
         source.type != PlayerSourceType::NET_RADIO &&

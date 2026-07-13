@@ -515,6 +515,11 @@ void ui_init(void)
 
   s_screen = UI_SCREEN_BOOT;
   ui_draw_unlock();
+
+  // 屏幕控制器初始化和黑色启动首帧都已完成，现在再开启背光。
+  if (!board_hw_set_backlight(true)) {
+    LOGW("[界面] 开启屏幕背光失败");
+  }
 }
 
 void ui_set_screen(ui_screen_t screen)
