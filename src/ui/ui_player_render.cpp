@@ -17,6 +17,7 @@
 #include "lyrics/lyrics.h"
 #include "player_assets.h"
 #include "player_state.h"
+#include "player_source.h"
 #include "hal/board_hw_control.h"
 #include "utils/log.h"
 #include "app_diagnostics.h"
@@ -302,11 +303,8 @@ static void draw_sleep_timer_overlay(LGFX_Sprite* dst)
     dst->fillRoundRect(BOX_X, BOX_Y, BOX_W, BOX_H, BOX_R, TFT_BLACK);
     dst->drawRoundRect(BOX_X, BOX_Y, BOX_W, BOX_H, BOX_R, border_color);
 
-    // 用一个简单月牙图形表示睡眠定时，避免依赖特殊字符字体。
-    const int moon_cx = BOX_X + 14;
-    const int moon_cy = BOX_Y + BOX_H / 2;
-    dst->fillCircle(moon_cx, moon_cy, 5, text_color);
-    dst->fillCircle(moon_cx + 3, moon_cy - 1, 5, TFT_BLACK);
+    // 使用统一的 11x10 睡眠点阵图标。
+    draw_sleep_icon(dst, BOX_X + 8, BOX_Y + 4, text_color);
 
     dst->setFont(&g_font_cjk);
     dst->setTextSize(1);
@@ -946,13 +944,8 @@ static void draw_alarm_status_overlay(LGFX_Sprite* dst, int box_y = -1)
     dst->fillRoundRect(BOX_X, box_y, BOX_W, BOX_H, BOX_R, TFT_BLACK);
     dst->drawRoundRect(BOX_X, box_y, BOX_W, BOX_H, BOX_R, border_color);
 
-    const int cx = BOX_X + 13;
-    const int cy = box_y + BOX_H / 2;
-    dst->drawCircle(cx, cy, 4, text_color);
-    dst->drawLine(cx, cy, cx, cy - 3, text_color);
-    dst->drawLine(cx, cy, cx + 3, cy, text_color);
-    dst->drawLine(cx - 4, cy - 5, cx - 2, cy - 7, text_color);
-    dst->drawLine(cx + 4, cy - 5, cx + 2, cy - 7, text_color);
+    // 使用统一的 10x10 闹钟点阵图标。
+    draw_alarm_icon(dst, BOX_X + 8, box_y + 3, text_color);
 
     dst->setFont(&g_font_cjk);
     dst->setTextSize(1);
@@ -1050,24 +1043,6 @@ void cover_rotate_draw(float angle_deg)
 }
 
 
-static void draw_tiny_alarm_clock_icon(LGFX_Sprite* dst, int x, int y, uint16_t color)
-{
-  if (!dst) return;
-
-  // 小闹钟图标控制在 10x10 范围内，和右侧播放模式图标同尺寸、同基线。
-  const int cx = x + 5;
-  const int cy = y + 5;
-  dst->drawCircle(cx, cy, 4, color);
-  dst->drawLine(cx, cy, cx, cy - 3, color);
-  dst->drawLine(cx, cy, cx + 3, cy, color);
-
-  // 顶部两个小铃铛不越过 y，避免视觉上比右侧 10px 图标更高。
-  dst->drawPixel(cx - 4, y + 1, color);
-  dst->drawPixel(cx - 3, y, color);
-  dst->drawPixel(cx + 4, y + 1, color);
-  dst->drawPixel(cx + 3, y, color);
-}
-
 static void draw_cover_panel_status_icons(LGFX_Sprite* dst, int center_y, uint16_t fg)
 {
   if (!dst) return;
@@ -1113,15 +1088,39 @@ static void draw_cover_panel_status_icons(LGFX_Sprite* dst, int center_y, uint16
       mode_highlight ? UI_COLOR_VOLUME_ACTIVE : fg;
 
   const int right_icon_x = panel_x + panel_w - margin - icon_size;
-  const int left_icon_x  = right_icon_x - icon_size - 4;
-  const int icon_y       = center_y - 5;
+  const int icon_y = center_y - 5;
 
-  // 闹钟启用时，只在播放循环/随机模式图标左边显示一个小闹钟图标。
-  // 不显示文字和时间，避免把播放器界面做得太满。
+  const PlayerSourceType source_type = player_source_type_get();
+  const bool is_nas = source_type == PlayerSourceType::NET_TRACK;
+  const bool is_radio = source_type == PlayerSourceType::NET_RADIO;
+  const int source_icon_w = is_nas ? 11 : icon_size;
+  const int left_icon_x = right_icon_x - source_icon_w - 4;
+
+  // 闹钟启用时，只在播放来源/循环模式图标左边显示统一的 10x10 图标。
   if (app_alarm_is_enabled()) {
-    // 闹钟图标和右侧两个模式图标同为 10x10，使用同一个 icon_y 保持垂直居中。
     const int alarm_icon_x = left_icon_x - icon_size - 8;
-    draw_tiny_alarm_clock_icon(dst, alarm_icon_x, icon_y, fg);
+    draw_alarm_icon(dst, alarm_icon_x, icon_y, fg);
+  }
+
+  // NAS 和网络收音机没有“歌手/专辑”播放大类。左侧固定显示当前网络来源，
+  // 右侧仍保留顺序/随机状态。
+  if (is_nas || is_radio) {
+    if (is_nas) {
+      draw_nas_icon(dst, left_icon_x, icon_y, mode_color);
+    } else {
+      draw_radio_icon(dst, left_icon_x, icon_y, mode_color);
+    }
+
+    const bool random_mode =
+        s_ui_play_mode == PLAY_MODE_ALL_RND ||
+        s_ui_play_mode == PLAY_MODE_ARTIST_RND ||
+        s_ui_play_mode == PLAY_MODE_ALBUM_RND;
+    if (random_mode) {
+      draw_random_icon(dst, right_icon_x, icon_y, mode_color);
+    } else {
+      draw_repeat_icon(dst, right_icon_x, icon_y, mode_color);
+    }
+    return;
   }
 
   switch (s_ui_play_mode) {

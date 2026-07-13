@@ -198,6 +198,13 @@ PlayerSourceState player_source_get() {
   return copy;
 }
 
+PlayerSourceType player_source_type_get() {
+  lock_state();
+  const PlayerSourceType type = s_state.type;
+  unlock_state();
+  return type;
+}
+
 const char* player_source_type_key(PlayerSourceType type) {
   switch (type) {
     case PlayerSourceType::LOCAL_TRACK: return "track";

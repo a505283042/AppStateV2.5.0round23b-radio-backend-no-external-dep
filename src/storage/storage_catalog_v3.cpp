@@ -69,10 +69,22 @@ static bool try_load_v3(const char* v3_index_path)
     return false;
   }
 
+  const char* load_source = storage_index_last_load_source_v3();
+  if (storage_index_last_load_needs_rewrite_v3()) {
+    // 旧版索引没有 CRC，或恢复文件未能提升为正式文件时，
+    // 在完整加载和语义校验通过后立即用原子流程重写一次。
+    if (storage_index_save_v3(s_catalog_v3, v3_index_path)) {
+      LOGI("[曲库] 索引已升级为带 CRC 的原子格式：来源=%s", load_source);
+    } else {
+      LOGW("[曲库] 索引升级写回失败，当前内存曲库仍可继续使用：来源=%s", load_source);
+    }
+  }
+
   s_catalog_v3.generation = ++s_catalog_generation_seq;
   s_v3_ready = true;
 
-  LOGI("[曲库] 加载成功：歌曲=%lu 专辑=%lu 歌手=%lu 字符池=%lu 歌手分组=%d 专辑分组=%d",
+  LOGI("[曲库] 加载成功：来源=%s 歌曲=%lu 专辑=%lu 歌手=%lu 字符池=%lu 歌手分组=%d 专辑分组=%d",
+      load_source,
       (unsigned long)s_catalog_v3.track_count,
       (unsigned long)s_catalog_v3.album_count,
       (unsigned long)s_catalog_v3.artist_count,

@@ -59,5 +59,7 @@ void player_source_set_net_track_status(bool active,
 void player_source_clear_net_track();
 
 PlayerSourceState player_source_get();
+// 仅获取当前音源类型，不复制状态中的 String，供高频 UI 绘制使用。
+PlayerSourceType player_source_type_get();
 const char* player_source_type_key(PlayerSourceType type);
 

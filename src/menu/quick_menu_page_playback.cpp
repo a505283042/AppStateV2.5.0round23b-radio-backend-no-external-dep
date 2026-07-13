@@ -79,6 +79,11 @@ int& local_browse_category_ref()
 
 const char* value_play_category()
 {
+    const PlayerSourceType source_type = player_source_type_get();
+    if (source_type == PlayerSourceType::NET_TRACK ||
+        source_type == PlayerSourceType::NET_RADIO) {
+        return "固定全部";
+    }
     return category_label(mode_category(g_play_mode));
 }
 
@@ -140,6 +145,13 @@ bool action_toggle_play_order()
 
 bool action_cycle_play_category()
 {
+    const PlayerSourceType source_type = player_source_type_get();
+    if (source_type == PlayerSourceType::NET_TRACK ||
+        source_type == PlayerSourceType::NET_RADIO) {
+        player_cycle_mode_category();
+        return false;
+    }
+
     ui_mode_switch_highlight();
     player_cycle_mode_category();
     return true;

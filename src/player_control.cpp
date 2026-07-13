@@ -141,6 +141,21 @@ void control_update_track_pos_for_mode(int current_idx)
     }
 }
 
+void control_normalize_remote_mode_category(const char* source_label)
+{
+    const bool random_mode = control_mode_is_random(g_play_mode);
+    const play_mode_t normalized = random_mode ? PLAY_MODE_ALL_RND : PLAY_MODE_ALL_SEQ;
+    if (g_play_mode == normalized) {
+        return;
+    }
+
+    g_play_mode = normalized;
+    ui_set_play_mode(g_play_mode);
+    LOGI("[播放器] %s 仅支持全部列表，播放大类已归一为全部（%s）",
+         source_label ? source_label : "网络音源",
+         random_mode ? "随机" : "顺序");
+}
+
 void control_prepare_for_radio_source()
 {
     net_music_embedded_cover_cancel();
@@ -961,6 +976,7 @@ bool player_play_radio_index(int idx)
         audio_service_stop(true);
     }
     control_prepare_for_radio_source();
+    control_normalize_remote_mode_category("网络收音机");
 
     player_source_set_radio_stub(idx, *item, String("connecting"), String());
     player_state_set_current_index(-1);
@@ -1128,6 +1144,7 @@ static bool control_play_net_track_index_impl(int idx, bool reset_shuffle)
     }
 
     control_prepare_for_radio_source();
+    control_normalize_remote_mode_category("NAS播放");
 
     player_source_set_net_track_stub(idx, item, url, String("connecting"), String());
     player_state_set_current_index(-1);
@@ -1479,8 +1496,22 @@ void control_apply_mode_context(play_mode_t new_mode, int current_idx, bool verb
 
 void player_toggle_random()
 {
-    const int category = control_mode_category(g_play_mode);
+    const PlayerSourceType source_type = player_source_type_get();
     const bool next_random = !control_mode_is_random(g_play_mode);
+
+    if (source_type == PlayerSourceType::NET_TRACK ||
+        source_type == PlayerSourceType::NET_RADIO) {
+        // 网络音源只允许在“全部顺序/全部随机”之间切换，
+        // 不触碰本地歌手/专辑播放列表上下文。
+        g_play_mode = next_random ? PLAY_MODE_ALL_RND : PLAY_MODE_ALL_SEQ;
+        ui_set_play_mode(g_play_mode);
+        ui_request_refresh_now();
+        LOGI("[播放器] 网络音源播放顺序切换: %s",
+             next_random ? "随机" : "顺序");
+        return;
+    }
+
+    const int category = control_mode_category(g_play_mode);
     const play_mode_t new_mode = control_make_mode(category, next_random);
 
     control_apply_mode_context(new_mode, control_current_track_idx(), false);
@@ -1490,6 +1521,16 @@ void player_toggle_random()
 
 void player_cycle_mode_category()
 {
+    const PlayerSourceType source_type = player_source_type_get();
+    if (source_type == PlayerSourceType::NET_TRACK ||
+        source_type == PlayerSourceType::NET_RADIO) {
+        control_normalize_remote_mode_category(
+            source_type == PlayerSourceType::NET_TRACK ? "NAS播放" : "网络收音机");
+        LOGI("[播放器] 当前网络音源不支持切换歌手/专辑大类");
+        ui_request_refresh_now();
+        return;
+    }
+
     const int cur = control_current_track_idx();
     const bool is_random = control_mode_is_random(g_play_mode);
     const int old_category = control_mode_category(g_play_mode);

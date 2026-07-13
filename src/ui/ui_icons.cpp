@@ -2,6 +2,118 @@
 #include "ui/gc9a01_lgfx.h"
 #include "ui/ui_icon_images.h"
 
+namespace {
+
+struct MonoRowIcon {
+  const uint16_t* rows;
+  uint8_t width;
+  uint8_t height;
+};
+
+// 10x10 闹钟图标数据（每个元素是一行，最高有效位在左侧）。
+static const uint16_t kAlarmIconRows[10] = {
+  0x017A,
+  0x0285,
+  0x0122,
+  0x0221,
+  0x0221,
+  0x0211,
+  0x0209,
+  0x0102,
+  0x0084,
+  0x037B,
+};
+
+// 睡眠图标原始数据包含第 11 位，按 11x10 绘制，避免左侧像素被截掉。
+static const uint16_t kSleepIconRows[10] = {
+  0x01D7,
+  0x0342,
+  0x0277,
+  0x0440,
+  0x0421,
+  0x040F,
+  0x0401,
+  0x0202,
+  0x0104,
+  0x00F8,
+};
+
+// 11x10 NAS 图标数据。
+static const uint16_t kNasIconRows[10] = {
+  0x03FE,
+  0x0711,
+  0x0555,
+  0x0755,
+  0x0511,
+  0x0711,
+  0x0711,
+  0x0711,
+  0x0711,
+  0x03FE,
+};
+
+// 10x10 网络收音机图标数据。
+static const uint16_t kRadioIconRows[10] = {
+  0x003C,
+  0x00C0,
+  0x01FE,
+  0x0281,
+  0x0219,
+  0x03A5,
+  0x0225,
+  0x0399,
+  0x0201,
+  0x01FE,
+};
+
+static const MonoRowIcon kAlarmIcon = {kAlarmIconRows, 10, 10};
+static const MonoRowIcon kSleepIcon = {kSleepIconRows, 11, 10};
+static const MonoRowIcon kNasIcon = {kNasIconRows, 11, 10};
+static const MonoRowIcon kRadioIcon = {kRadioIconRows, 10, 10};
+
+void draw_mono_row_icon(LGFX_Sprite* dst,
+                        int x,
+                        int y,
+                        uint16_t color,
+                        const MonoRowIcon& icon)
+{
+  if (!dst || !icon.rows || icon.width == 0 || icon.height == 0 || icon.width > 16) {
+    return;
+  }
+
+  for (uint8_t row = 0; row < icon.height; ++row) {
+    const uint16_t bits = icon.rows[row];
+    for (uint8_t col = 0; col < icon.width; ++col) {
+      const uint8_t shift = static_cast<uint8_t>(icon.width - 1U - col);
+      if ((bits & static_cast<uint16_t>(1U << shift)) != 0) {
+        dst->drawPixel(x + col, y + row, color);
+      }
+    }
+  }
+}
+
+} // namespace
+
+void draw_alarm_icon(LGFX_Sprite* dst, int x, int y, uint16_t color)
+{
+  draw_mono_row_icon(dst, x, y, color, kAlarmIcon);
+}
+
+void draw_sleep_icon(LGFX_Sprite* dst, int x, int y, uint16_t color)
+{
+  draw_mono_row_icon(dst, x, y, color, kSleepIcon);
+}
+
+void draw_nas_icon(LGFX_Sprite* dst, int x, int y, uint16_t color)
+{
+  draw_mono_row_icon(dst, x, y, color, kNasIcon);
+}
+
+void draw_radio_icon(LGFX_Sprite* dst, int x, int y, uint16_t color)
+{
+  draw_mono_row_icon(dst, x, y, color, kRadioIcon);
+}
+
 // 绘制音量图标
 void draw_volume_icon(LGFX_Sprite* dst, int x, int y, uint16_t color)
 {

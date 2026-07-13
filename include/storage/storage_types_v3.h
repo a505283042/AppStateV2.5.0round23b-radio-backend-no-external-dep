@@ -86,6 +86,7 @@ struct PlaylistGroup {
 
 static constexpr uint32_t INDEX_V3_MAGIC = 0x4D494458;   // 'MIDX'
 static constexpr uint16_t INDEX_V3_VERSION = 3;
+static constexpr uint16_t INDEX_V3_FLAG_CRC32 = 1u << 0;
 static constexpr uint32_t INVALID_OFF32 = 0;
 static constexpr uint32_t INVALID_ID32  = 0xFFFFFFFFu;
 
@@ -182,7 +183,7 @@ struct IndexV3Header {
   uint32_t artist_count = 0;
   uint32_t string_pool_size = 0;
 
-  uint32_t crc32 = 0;   // 先预留，第一版可写 0
+  uint32_t crc32 = 0;   // P0-19 起覆盖区段表与全部数据区；0 表示旧版未启用
 };
 
 struct IndexSectionV3 {

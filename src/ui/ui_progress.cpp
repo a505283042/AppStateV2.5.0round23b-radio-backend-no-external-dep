@@ -5,6 +5,7 @@
 #include "ui/ui.h"
 #include "ui/ui_icon_images.h"
 #include "audio/audio_service.h"
+#include "player_source.h"
 
 // 外部声明全局变量
 extern lgfx::U8g2font g_font_cjk;
@@ -194,47 +195,71 @@ void draw_status_row(LGFX_Sprite* dst,
   bool mode_highlight = (now - s_ui_mode_switch_time < MODE_SWITCH_HIGHLIGHT_MS);
   uint16_t mode_color = mode_highlight ? UI_COLOR_VOLUME_ACTIVE : fg;
 
-  // 根据播放模式显示对应的图标
-  // 左边图标往右移3像素，右边图标位置不变
-  int xL_icon = xR + 3;  // 左边图标位置
-  int xR_icon = xR + icon_size + 4;  // 右边图标位置不变
-  
-  switch (s_ui_play_mode) {
+  // 根据当前音源和播放模式显示对应图标。
+  // 左边图标往右移3像素，右边图标位置不变。
+  const int xL_icon = xR + 3;
+  const int xR_icon = xR + icon_size + 4;
+  const int icon_y = y - icon_size / 2 + 8;
+
+  const PlayerSourceType source_type = player_source_type_get();
+  const bool is_nas = source_type == PlayerSourceType::NET_TRACK;
+  const bool is_radio = source_type == PlayerSourceType::NET_RADIO;
+
+  if (is_nas || is_radio) {
+    // NAS 图标宽 11px，左移 1px 后与原来的 10px 图标位保持居中。
+    if (is_nas) {
+      draw_nas_icon(dst, xL_icon - 1, icon_y, mode_color);
+    } else {
+      draw_radio_icon(dst, xL_icon, icon_y, mode_color);
+    }
+
+    const bool random_mode =
+        s_ui_play_mode == PLAY_MODE_ALL_RND ||
+        s_ui_play_mode == PLAY_MODE_ARTIST_RND ||
+        s_ui_play_mode == PLAY_MODE_ALBUM_RND;
+    if (random_mode) {
+      draw_random_icon(dst, xR_icon, icon_y, mode_color);
+    } else {
+      draw_repeat_icon(dst, xR_icon, icon_y, mode_color);
+    }
+  } else {
+    switch (s_ui_play_mode) {
     case PLAY_MODE_ALL_SEQ:
       // 全部顺序：TF卡图标 + 顺序图标
-      draw_tfcard_icon(dst, xL_icon, y - icon_size / 2 + 8, mode_color);
-      draw_repeat_icon(dst, xR_icon, y - icon_size / 2 + 8, mode_color);
+      draw_tfcard_icon(dst, xL_icon, icon_y, mode_color);
+      draw_repeat_icon(dst, xR_icon, icon_y, mode_color);
       break;
 
     case PLAY_MODE_ALL_RND:
       // 全部随机：TF卡图标 + 随机图标
-      draw_tfcard_icon(dst, xL_icon, y - icon_size / 2 + 8, mode_color);
-      draw_random_icon(dst, xR_icon, y - icon_size / 2 + 8, mode_color);
+      draw_tfcard_icon(dst, xL_icon, icon_y, mode_color);
+      draw_random_icon(dst, xR_icon, icon_y, mode_color);
       break;
 
     case PLAY_MODE_ARTIST_SEQ:
       // 歌手顺序：歌手图标 + 顺序图标
-      draw_artist_icon(dst, xL_icon, y - icon_size / 2 + 8, mode_color);
-      draw_repeat_icon(dst, xR_icon, y - icon_size / 2 + 8, mode_color);
+      draw_artist_icon(dst, xL_icon, icon_y, mode_color);
+      draw_repeat_icon(dst, xR_icon, icon_y, mode_color);
       break;
 
     case PLAY_MODE_ARTIST_RND:
       // 歌手随机：歌手图标 + 随机图标
-      draw_artist_icon(dst, xL_icon, y - icon_size / 2 + 8, mode_color);
-      draw_random_icon(dst, xR_icon, y - icon_size / 2 + 8, mode_color);
+      draw_artist_icon(dst, xL_icon, icon_y, mode_color);
+      draw_random_icon(dst, xR_icon, icon_y, mode_color);
       break;
 
     case PLAY_MODE_ALBUM_SEQ:
       // 专辑顺序：专辑图标 + 顺序图标
-      draw_album_icon(dst, xL_icon, y - icon_size / 2 + 8, mode_color);
-      draw_repeat_icon(dst, xR_icon, y - icon_size / 2 + 8, mode_color);
+      draw_album_icon(dst, xL_icon, icon_y, mode_color);
+      draw_repeat_icon(dst, xR_icon, icon_y, mode_color);
       break;
 
     case PLAY_MODE_ALBUM_RND:
       // 专辑随机：专辑图标 + 随机图标
-      draw_album_icon(dst, xL_icon, y - icon_size / 2 + 8, mode_color);
-      draw_random_icon(dst, xR_icon, y - icon_size / 2 + 8, mode_color);
+      draw_album_icon(dst, xL_icon, icon_y, mode_color);
+      draw_random_icon(dst, xR_icon, icon_y, mode_color);
       break;
+    }
   }
 
   // 中间：专辑名（带专辑图标，空就给个占位）
