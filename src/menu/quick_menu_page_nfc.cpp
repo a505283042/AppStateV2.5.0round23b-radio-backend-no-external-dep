@@ -379,7 +379,7 @@ static const char* label_nfc_list_entry(int slot)
 
 static const char* value_nfc_list_entry(int slot)
 {
-    static char bufs[NFC_LIST_PAGE_SIZE][96];
+    static char bufs[NFC_LIST_PAGE_SIZE][160];
 
     if (slot < 0 || slot >= NFC_LIST_PAGE_SIZE) {
         return "";
@@ -489,7 +489,7 @@ static bool action_nfc_list_next_page()
 
 static const char* value_nfc_detail_uid()
 {
-    static char buf[40];
+    static char buf[64];
     NfcBindingEntry entry;
     if (!nfc_get_detail_entry(entry)) {
         return "已删除";
@@ -510,7 +510,7 @@ static const char* value_nfc_detail_type()
 
 static const char* value_nfc_detail_name()
 {
-    static char buf[96];
+    static char buf[160];
     NfcBindingEntry entry;
     if (!nfc_get_detail_entry(entry)) {
         return "";

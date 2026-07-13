@@ -24,6 +24,11 @@ namespace {
 // 4. PG/CHG 是充电芯片数字状态，单独每 1 秒刷新一次，插 USB 后闪电能尽快显示。
 static constexpr uint32_t BATTERY_UI_BOOT_SAMPLE_INTERVAL_MS = 3000;
 static constexpr uint32_t BATTERY_UI_STABLE_SAMPLE_INTERVAL_MS = 60UL * 1000UL;
+static constexpr uint32_t BATTERY_RUNTIME_SAMPLE_INTERVAL_MS = 10UL * 1000UL;
+static constexpr uint32_t BATTERY_RUNTIME_SETTLE_MS = 30UL * 1000UL;
+static constexpr uint16_t BATTERY_RUNTIME_MIN_DISCHARGE_MA = 20;
+static constexpr uint16_t BATTERY_RUNTIME_SHIFT_MIN_MA = 35;
+static constexpr uint8_t BATTERY_RUNTIME_SHIFT_PERCENT = 30;
 static constexpr uint32_t CHARGER_UI_SAMPLE_INTERVAL_MS = 1000;
 static constexpr uint8_t BATTERY_UI_BOOT_SAMPLE_COUNT = 5;
 
@@ -40,7 +45,126 @@ static uint8_t s_battery_shutdown_confirm_count = 0;
 static BatteryShutdownReason s_battery_shutdown_last_reason = BatteryShutdownReason::None;
 static uint32_t s_battery_ui_last_sample_ms = 0;
 static uint32_t s_charger_ui_last_sample_ms = 0;
+static uint32_t s_battery_runtime_last_sample_ms = 0;
 static uint8_t s_battery_ui_sample_count = 0;
+
+static bool s_battery_runtime_filter_ready = false;
+static uint16_t s_battery_runtime_filtered_ma = 0;
+static uint32_t s_battery_runtime_stable_since_ms = 0;
+static portMUX_TYPE s_battery_runtime_event_mux = portMUX_INITIALIZER_UNLOCKED;
+static bool s_battery_runtime_load_change_pending = false;
+
+static bool take_battery_runtime_load_change()
+{
+    portENTER_CRITICAL(&s_battery_runtime_event_mux);
+    const bool pending = s_battery_runtime_load_change_pending;
+    s_battery_runtime_load_change_pending = false;
+    portEXIT_CRITICAL(&s_battery_runtime_event_mux);
+    return pending;
+}
+
+static void reset_battery_runtime_estimate(BatteryRuntimeEstimateState state,
+                                           uint32_t now)
+{
+    s_battery_runtime_filter_ready = false;
+    s_battery_runtime_filtered_ma = 0;
+    s_battery_runtime_stable_since_ms = now;
+
+    s_battery_ui_status.runtime_estimate_state = state;
+    s_battery_ui_status.estimated_discharge_current_ma = 0;
+    s_battery_ui_status.estimated_runtime_minutes = 0;
+    s_battery_ui_status.estimate_stable_ms = 0;
+    s_battery_ui_status.estimate_updated_ms = now;
+}
+
+static void update_battery_runtime_estimate(int16_t average_current_ma,
+                                            uint16_t remaining_capacity_mah,
+                                            uint32_t now)
+{
+    if (!s_battery_ui_status.valid || remaining_capacity_mah == 0) {
+        reset_battery_runtime_estimate(BatteryRuntimeEstimateState::Unavailable, now);
+        return;
+    }
+
+    if (s_battery_ui_status.charging) {
+        reset_battery_runtime_estimate(BatteryRuntimeEstimateState::Charging, now);
+        return;
+    }
+
+    if (s_battery_ui_status.external_power_good) {
+        reset_battery_runtime_estimate(BatteryRuntimeEstimateState::ExternalPower, now);
+        return;
+    }
+
+    // BQ27441 放电电流为负数；接近零时续航除法会被放大，不输出不可靠结果。
+    if (average_current_ma >= -static_cast<int16_t>(BATTERY_RUNTIME_MIN_DISCHARGE_MA)) {
+        reset_battery_runtime_estimate(BatteryRuntimeEstimateState::LowCurrent, now);
+        return;
+    }
+
+    const uint16_t discharge_ma = static_cast<uint16_t>(-static_cast<int32_t>(average_current_ma));
+
+    if (!s_battery_runtime_filter_ready) {
+        s_battery_runtime_filter_ready = true;
+        s_battery_runtime_filtered_ma = discharge_ma;
+        s_battery_runtime_stable_since_ms = now;
+    } else {
+        const uint16_t previous = s_battery_runtime_filtered_ma;
+        const uint16_t difference = discharge_ma > previous
+            ? static_cast<uint16_t>(discharge_ma - previous)
+            : static_cast<uint16_t>(previous - discharge_ma);
+        const uint16_t relative_threshold = static_cast<uint16_t>(
+            (static_cast<uint32_t>(previous) * BATTERY_RUNTIME_SHIFT_PERCENT) / 100UL);
+        const uint16_t shift_threshold = relative_threshold > BATTERY_RUNTIME_SHIFT_MIN_MA
+            ? relative_threshold
+            : BATTERY_RUNTIME_SHIFT_MIN_MA;
+
+        if (difference >= shift_threshold) {
+            // 亮屏、切换功放/蓝牙、开始网络播放等负载突变后重新稳定。
+            s_battery_runtime_filtered_ma = discharge_ma;
+            s_battery_runtime_stable_since_ms = now;
+        } else {
+            // 约 60 秒时间常数的整数 EMA；10 秒采样时新值权重为 1/6。
+            s_battery_runtime_filtered_ma = static_cast<uint16_t>(
+                (static_cast<uint32_t>(previous) * 5UL + discharge_ma + 3UL) / 6UL);
+        }
+    }
+
+    const uint32_t stable_ms = now - s_battery_runtime_stable_since_ms;
+    s_battery_ui_status.estimated_discharge_current_ma = s_battery_runtime_filtered_ma;
+    s_battery_ui_status.estimate_stable_ms = stable_ms;
+    s_battery_ui_status.estimate_updated_ms = now;
+
+    if (stable_ms < BATTERY_RUNTIME_SETTLE_MS || s_battery_runtime_filtered_ma == 0) {
+        s_battery_ui_status.runtime_estimate_state =
+            BatteryRuntimeEstimateState::Stabilizing;
+        s_battery_ui_status.estimated_runtime_minutes = 0;
+        return;
+    }
+
+    const uint32_t minutes =
+        (static_cast<uint32_t>(remaining_capacity_mah) * 60UL +
+         s_battery_runtime_filtered_ma / 2U) /
+        s_battery_runtime_filtered_ma;
+
+    s_battery_ui_status.runtime_estimate_state = BatteryRuntimeEstimateState::Ready;
+    s_battery_ui_status.estimated_runtime_minutes = minutes;
+}
+
+static void apply_battery_runtime_load_change(uint32_t now)
+{
+    if (s_battery_ui_status.charging) {
+        reset_battery_runtime_estimate(BatteryRuntimeEstimateState::Charging, now);
+    } else if (s_battery_ui_status.external_power_good) {
+        reset_battery_runtime_estimate(BatteryRuntimeEstimateState::ExternalPower, now);
+    } else if (s_battery_ui_status.valid) {
+        reset_battery_runtime_estimate(BatteryRuntimeEstimateState::Stabilizing, now);
+        // 负载切换后下一轮立即重新采样，而不是继续使用切换前的电流。
+        s_battery_runtime_last_sample_ms = 0;
+    } else {
+        reset_battery_runtime_estimate(BatteryRuntimeEstimateState::Unavailable, now);
+    }
+}
 
 static void configure_bq27441_gpout_input()
 {
@@ -270,11 +394,19 @@ static void board_hw_update_charger_status_cache()
         return;
     }
 
+    const bool power_state_changed =
+        s_battery_ui_status.external_power_good != chg.external_power_good ||
+        s_battery_ui_status.charging != chg.charging;
+
     // PG/CHG 是数字状态，更新它不需要重新访问 BQ27441。
     // 这样插 USB 后，闪电图标最多 1 秒内出现。
     s_battery_ui_status.external_power_good = chg.external_power_good;
     s_battery_ui_status.charging = chg.charging;
     s_charger_ui_last_sample_ms = millis();
+
+    if (power_state_changed) {
+        board_hw_battery_estimate_notify_load_change();
+    }
 }
 
 static void board_hw_update_battery_status_cache()
@@ -310,6 +442,14 @@ static void board_hw_update_battery_status_cache()
 
     s_battery_ui_status = out;
     s_battery_ui_last_sample_ms = out.updated_ms;
+    s_battery_runtime_last_sample_ms = out.updated_ms;
+
+    if (bat.valid) {
+        update_battery_runtime_estimate(
+            bat.average_current_ma,
+            bat.remaining_capacity_mah,
+            out.updated_ms);
+    }
 
     if (s_battery_ui_sample_count < 255) {
         ++s_battery_ui_sample_count;
@@ -327,25 +467,79 @@ void board_hw_battery_status_tick()
         board_hw_update_charger_status_cache();
     }
 
+    // 负载变化可能来自 AudioTask 或主循环；这里只消费事件并修改估算状态，
+    // 保持电池缓存由 UI 任务单写。
+    if (take_battery_runtime_load_change()) {
+        apply_battery_runtime_load_change(now);
+    }
+
     const bool boot_sampling =
         s_battery_ui_sample_count < BATTERY_UI_BOOT_SAMPLE_COUNT;
 
-    const uint32_t interval_ms = boot_sampling
+    const uint32_t full_interval_ms = boot_sampling
         ? BATTERY_UI_BOOT_SAMPLE_INTERVAL_MS
         : BATTERY_UI_STABLE_SAMPLE_INTERVAL_MS;
 
-    // 第一次立即采样；上电前几次快速采样；稳定后 1 分钟一次。
-    if (s_battery_ui_last_sample_ms != 0 &&
-        now - s_battery_ui_last_sample_ms < interval_ms) {
+    const bool full_sample_due =
+        s_battery_ui_last_sample_ms == 0 ||
+        now - s_battery_ui_last_sample_ms >= full_interval_ms;
+
+    if (full_sample_due) {
+        // 第一次立即完整采样；上电前几次快速采样；稳定后每分钟一次。
+        board_hw_update_battery_status_cache();
         return;
     }
 
-    board_hw_update_battery_status_cache();
+    if (s_battery_runtime_last_sample_ms != 0 &&
+        now - s_battery_runtime_last_sample_ms < BATTERY_RUNTIME_SAMPLE_INTERVAL_MS) {
+        return;
+    }
+
+    // 续航估算只额外读取两个寄存器，不提高完整电池采样频率。
+    Bq27441RuntimeSample runtime{};
+    s_battery_runtime_last_sample_ms = now;
+    if (!bq27441_read_runtime(&runtime) || !runtime.valid) {
+        if (!bq27441_is_ready()) {
+            reset_battery_runtime_estimate(
+                BatteryRuntimeEstimateState::Unavailable,
+                now);
+        }
+        return;
+    }
+
+    s_battery_ui_status.average_current_ma = runtime.average_current_ma;
+    s_battery_ui_status.remaining_capacity_mah = runtime.remaining_capacity_mah;
+    s_battery_ui_status.updated_ms = now;
+
+    update_battery_runtime_estimate(
+        runtime.average_current_ma,
+        runtime.remaining_capacity_mah,
+        now);
 }
 
 BatteryUiStatus board_hw_get_battery_status_cached()
 {
     return s_battery_ui_status;
+}
+
+const char* board_hw_battery_runtime_state_label(BatteryRuntimeEstimateState state)
+{
+    switch (state) {
+        case BatteryRuntimeEstimateState::Charging: return "充电中";
+        case BatteryRuntimeEstimateState::ExternalPower: return "外接电源";
+        case BatteryRuntimeEstimateState::LowCurrent: return "负载过低";
+        case BatteryRuntimeEstimateState::Stabilizing: return "计算中";
+        case BatteryRuntimeEstimateState::Ready: return "稳定";
+        case BatteryRuntimeEstimateState::Unavailable:
+        default: return "不可用";
+    }
+}
+
+void board_hw_battery_estimate_notify_load_change()
+{
+    portENTER_CRITICAL(&s_battery_runtime_event_mux);
+    s_battery_runtime_load_change_pending = true;
+    portEXIT_CRITICAL(&s_battery_runtime_event_mux);
 }
 
 const char* board_hw_battery_shutdown_reason_label(BatteryShutdownReason reason)
@@ -446,7 +640,9 @@ bool board_hw_set_bt_power(bool enabled)
         return false;
     }
 
+    const bool changed = s_bt_power_enabled != enabled;
     s_bt_power_enabled = enabled;
+    if (changed) board_hw_battery_estimate_notify_load_change();
     LOGI("[硬件控制] 蓝牙电源 %s 电平=%d", enabled ? "开启" : "关闭", level ? 1 : 0);
     return true;
 }
@@ -461,7 +657,9 @@ bool board_hw_set_bt_mode(bool transmit)
     const bool level = transmit ? BT_MODE_TX_GATE_LEVEL : !BT_MODE_TX_GATE_LEVEL;
     digitalWrite(board::PIN_BT_MODE_CTRL, level ? HIGH : LOW);
 
+    const bool changed = s_bt_mode_transmit != transmit;
     s_bt_mode_transmit = transmit;
+    if (changed) board_hw_battery_estimate_notify_load_change();
     LOGI("[硬件控制] 蓝牙模式 %s GPIO%d=%d 模块BT_MODE=%s",
          transmit ? "发射" : "接收",
          board::PIN_BT_MODE_CTRL,
@@ -525,7 +723,9 @@ bool board_hw_set_backlight(bool enabled)
         return false;
     }
 
+    const bool changed = s_backlight_enabled != enabled;
     s_backlight_enabled = enabled;
+    if (changed) board_hw_battery_estimate_notify_load_change();
     LOGI("[硬件控制] 背光 %s", enabled ? "开启" : "关闭");
     return true;
 }
@@ -620,6 +820,7 @@ bool board_hw_set_amp_mute(bool enabled)
     }
 
     s_amp_mute_enabled = enabled;
+    board_hw_battery_estimate_notify_load_change();
     LOGD("[硬件控制] 功放静音 %s 电平=%d", enabled ? "开启" : "关闭", level ? 1 : 0);
     return true;
 }
@@ -633,12 +834,14 @@ bool board_hw_set_amp_shutdown(bool enabled)
 {
     if (!mcp23017_u3_is_ready()) return false;
 
+    const bool changed = s_amp_shutdown_enabled != enabled;
     const bool level = level_from_enabled(enabled, AMP_SHDN_ACTIVE_LEVEL);
     if (!mcp23017_u3_set_a(board::MCP_A_SHDN_EN, level)) {
         return false;
     }
 
     s_amp_shutdown_enabled = enabled;
+    if (changed) board_hw_battery_estimate_notify_load_change();
     LOGI("[硬件控制] 功放关断 %s 电平=%d", enabled ? "开启" : "关闭", level ? 1 : 0);
     return true;
 }

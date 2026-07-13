@@ -27,6 +27,9 @@ uint32_t quick_menu_get_full_refresh_seq();
 QuickMenuPage quick_menu_get_page();
 const char* quick_menu_get_page_title();
 
+// 返回当前菜单页相对根菜单的层级：根菜单为0，一级子菜单为1。
+uint8_t quick_menu_get_page_depth();
+
 uint8_t quick_menu_get_item_count();
 int quick_menu_get_selected_index();
 

@@ -113,7 +113,7 @@ static bool action_toggle_alarm_switch()
 
 static const char* value_next_trigger()
 {
-    static char buf[32];
+    static char buf[48];
     if (!app_alarm_next_trigger_text(buf, sizeof(buf))) {
         return buf;
     }

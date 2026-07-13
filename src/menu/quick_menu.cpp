@@ -522,6 +522,24 @@ const char* quick_menu_get_page_title()
     return current_page_def().title;
 }
 
+uint8_t quick_menu_get_page_depth()
+{
+    QuickMenuPage page = s_page;
+    uint8_t depth = 0;
+
+    // 最多向上追溯8层，防止错误父级配置造成死循环。
+    for (uint8_t guard = 0; guard < 8 && page != QuickMenuPage::Root; ++guard) {
+        const QuickMenuPageDef& def = quick_menu_get_page_def(page);
+        if (def.parent == page) {
+            break;
+        }
+        page = def.parent;
+        ++depth;
+    }
+
+    return depth;
+}
+
 uint8_t quick_menu_get_item_count()
 {
     return current_page_def().item_count;

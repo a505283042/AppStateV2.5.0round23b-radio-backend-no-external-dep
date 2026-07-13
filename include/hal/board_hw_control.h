@@ -47,6 +47,15 @@ struct ChargerStatus {
     bool charging = false;
 };
 
+enum class BatteryRuntimeEstimateState : uint8_t {
+    Unavailable = 0,
+    Charging,
+    ExternalPower,
+    LowCurrent,
+    Stabilizing,
+    Ready,
+};
+
 struct BatteryUiStatus {
     bool valid = false;
 
@@ -66,6 +75,13 @@ struct BatteryUiStatus {
     bool external_power_good = false;
     bool charging = false;
 
+    BatteryRuntimeEstimateState runtime_estimate_state =
+        BatteryRuntimeEstimateState::Unavailable;
+    uint16_t estimated_discharge_current_ma = 0;
+    uint32_t estimated_runtime_minutes = 0;
+    uint32_t estimate_stable_ms = 0;
+    uint32_t estimate_updated_ms = 0;
+
     uint32_t updated_ms = 0;
 };
 
@@ -74,6 +90,8 @@ void board_hw_i2c_service();
 
 void board_hw_battery_status_tick();
 BatteryUiStatus board_hw_get_battery_status_cached();
+const char* board_hw_battery_runtime_state_label(BatteryRuntimeEstimateState state);
+void board_hw_battery_estimate_notify_load_change();
 
 enum class BatteryShutdownReason : uint8_t {
     None = 0,

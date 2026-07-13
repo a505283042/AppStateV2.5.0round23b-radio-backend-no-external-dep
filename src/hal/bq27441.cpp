@@ -49,17 +49,22 @@ constexpr uint16_t CTRL_CONTROL_STATUS = 0x0000;
 constexpr uint16_t CTRL_DEVICE_TYPE = 0x0001;
 constexpr uint16_t CTRL_SET_CFGUPDATE = 0x0013;
 constexpr uint16_t CTRL_SEALED = 0x0020;
-constexpr uint16_t CTRL_SOFT_RESET = 0x0042;
 constexpr uint16_t CTRL_EXIT_CFGUPDATE = 0x0043;
+constexpr uint16_t CTRL_EXIT_RESIM = 0x0044;
 constexpr uint16_t CTRL_UNSEAL_KEY = 0x8000;
 
+constexpr uint16_t STATUS_INITCOMP = (1u << 7);
+constexpr uint16_t STATUS_SLEEP = (1u << 4);
+constexpr uint16_t STATUS_HIBERNATE = (1u << 6);
 constexpr uint16_t STATUS_SS = (1u << 13);
+constexpr uint16_t STATUS_WDRESET = (1u << 15);
 constexpr uint16_t OPCONFIG_GPIOPOL = (1u << 11);
 constexpr uint16_t OPCONFIG_BATLOWEN = (1u << 2);
 
 constexpr uint32_t BQ27441_WARN_INTERVAL_MS = 60UL * 1000UL;
 constexpr uint32_t BQ27441_RETRY_AFTER_RUNTIME_FAILURE_MS = 15UL * 1000UL;
 constexpr uint32_t BQ27441_RETRY_AFTER_MISSING_MS = 60UL * 1000UL;
+constexpr uint32_t BQ27441_CONFIG_RETRY_MS = 15UL * 1000UL;
 
 #ifndef BQ27441_DESIGN_CAPACITY_MAH
 #define BQ27441_DESIGN_CAPACITY_MAH 500
@@ -119,7 +124,48 @@ bool s_ever_ready = false;
 bool s_scan_done_this_boot = false;
 uint32_t s_next_begin_attempt_ms = 0;
 uint32_t s_seen_bus_generation = 0;
+uint8_t s_consecutive_runtime_read_failures = 0;
+uint32_t s_last_runtime_warn_ms = 0;
+uint32_t s_next_config_attempt_ms = 0;
 
+enum class BqConfigTrigger : uint8_t {
+    Startup = 0,
+    Runtime,
+    User,
+};
+
+struct BqDiagnosticSnapshot {
+    uint16_t control_status = 0;
+    uint16_t flags = 0;
+    uint16_t voltage_mv = 0;
+    int16_t average_current_ma = 0;
+    uint16_t soc_percent = 0;
+    uint16_t remaining_capacity_mah = 0;
+    uint16_t full_charge_capacity_mah = 0;
+    uint16_t design_capacity_mah = 0;
+    uint16_t valid_mask = 0;
+};
+
+enum BqDiagnosticField : uint16_t {
+    DIAG_CONTROL = 1u << 0,
+    DIAG_FLAGS = 1u << 1,
+    DIAG_VOLTAGE = 1u << 2,
+    DIAG_CURRENT = 1u << 3,
+    DIAG_SOC = 1u << 4,
+    DIAG_RM = 1u << 5,
+    DIAG_FCC = 1u << 6,
+    DIAG_DESIGN = 1u << 7,
+};
+
+const char* config_trigger_name(BqConfigTrigger trigger)
+{
+    switch (trigger) {
+        case BqConfigTrigger::Startup: return "开机";
+        case BqConfigTrigger::Runtime: return "运行时";
+        case BqConfigTrigger::User: return "用户设置";
+        default: return "未知";
+    }
+}
 
 uint16_t clamp_design_capacity_mah(uint16_t capacity_mah)
 {
@@ -135,7 +181,9 @@ void load_design_capacity_pref_once()
 
     Preferences pref;
     uint16_t value = BQ27441_DESIGN_CAPACITY_MAH;
-    if (pref.begin(BQ27441_PREFS_NAMESPACE, true)) {
+    // 以读写模式打开：首次使用时自动创建命名空间，避免只读打开输出 NOT_FOUND。
+    // 这里只读取配置；除首次创建命名空间外不会反复写入容量值。
+    if (pref.begin(BQ27441_PREFS_NAMESPACE, false)) {
         value = pref.getUShort(BQ27441_PREFS_CAPACITY_KEY, BQ27441_DESIGN_CAPACITY_MAH);
         pref.end();
     }
@@ -476,7 +524,71 @@ bool write_extended_u8_locked(uint8_t class_id, uint8_t offset, uint8_t value)
     return write_extended_data_locked(class_id, offset, &value, 1);
 }
 
-bool enter_config_update(bool* was_sealed)
+bool capture_diagnostic_snapshot(BqDiagnosticSnapshot* out)
+{
+    if (!out) return false;
+    *out = BqDiagnosticSnapshot{};
+
+    uint16_t current_raw = 0;
+    if (control_word(CTRL_CONTROL_STATUS, &out->control_status)) out->valid_mask |= DIAG_CONTROL;
+    if (read_word(CMD_FLAGS, &out->flags)) out->valid_mask |= DIAG_FLAGS;
+    if (read_word(CMD_VOLTAGE, &out->voltage_mv)) out->valid_mask |= DIAG_VOLTAGE;
+    if (read_word(CMD_AVERAGE_CURRENT, &current_raw)) {
+        out->average_current_ma = static_cast<int16_t>(current_raw);
+        out->valid_mask |= DIAG_CURRENT;
+    }
+    if (read_word(CMD_STATE_OF_CHARGE, &out->soc_percent)) out->valid_mask |= DIAG_SOC;
+    if (read_word(CMD_REMAINING_CAPACITY, &out->remaining_capacity_mah)) out->valid_mask |= DIAG_RM;
+    if (read_word(CMD_FULL_CHARGE_CAPACITY, &out->full_charge_capacity_mah)) out->valid_mask |= DIAG_FCC;
+    if (read_word(CMD_EXT_DESIGN_CAPACITY, &out->design_capacity_mah)) out->valid_mask |= DIAG_DESIGN;
+
+    return (out->valid_mask & (DIAG_CONTROL | DIAG_FLAGS | DIAG_VOLTAGE)) ==
+           (DIAG_CONTROL | DIAG_FLAGS | DIAG_VOLTAGE);
+}
+
+void log_diagnostic_snapshot(const char* stage,
+                             BqConfigTrigger trigger,
+                             const BqDiagnosticSnapshot& s)
+{
+    LOGI("[BQ27441][重启诊断][%s][%s] valid=0x%02X control=0x%04X INITCOMP=%d WDRESET=%d SEALED=%d SLEEP=%d HIBERNATE=%d flags=0x%04X[%s] ITPOR=%d CFGUP=%d BAT=%d voltage=%umV current=%dmA SOC=%u%% RM=%umAh FCC=%umAh Design=%umAh target=%umAh",
+         config_trigger_name(trigger),
+         stage ? stage : "未知",
+         (unsigned)s.valid_mask,
+         s.control_status,
+         (s.control_status & STATUS_INITCOMP) ? 1 : 0,
+         (s.control_status & STATUS_WDRESET) ? 1 : 0,
+         (s.control_status & STATUS_SS) ? 1 : 0,
+         (s.control_status & STATUS_SLEEP) ? 1 : 0,
+         (s.control_status & STATUS_HIBERNATE) ? 1 : 0,
+         s.flags,
+         bq27441_flags_to_text(s.flags),
+         flags_has(s.flags, BQ27441_FLAG_ITPOR) ? 1 : 0,
+         flags_has(s.flags, BQ27441_FLAG_CFGUPMODE) ? 1 : 0,
+         flags_has(s.flags, BQ27441_FLAG_BAT_DET) ? 1 : 0,
+         s.voltage_mv,
+         s.average_current_ma,
+         s.soc_percent,
+         s.remaining_capacity_mah,
+         s.full_charge_capacity_mah,
+         s.design_capacity_mah,
+         bq27441_target_design_capacity_mah());
+}
+
+void log_diagnostic_delta(const BqDiagnosticSnapshot& before,
+                          const BqDiagnosticSnapshot& after)
+{
+    const int soc_delta = static_cast<int>(after.soc_percent) - static_cast<int>(before.soc_percent);
+    const int rm_delta = static_cast<int>(after.remaining_capacity_mah) -
+                         static_cast<int>(before.remaining_capacity_mah);
+    const int fcc_delta = static_cast<int>(after.full_charge_capacity_mah) -
+                          static_cast<int>(before.full_charge_capacity_mah);
+    LOGI("[BQ27441][重启诊断][配置变化] SOC=%+d%% RM=%+dmAh FCC=%+dmAh；自动流程未使用 SOFT_RESET",
+         soc_delta,
+         rm_delta,
+         fcc_delta);
+}
+
+bool enter_config_update(bool* was_sealed, bool already_in_cfgupdate)
 {
     if (was_sealed) *was_sealed = false;
 
@@ -489,15 +601,25 @@ bool enter_config_update(bool* was_sealed)
         delay(10);
     }
 
+    if (already_in_cfgupdate) {
+        LOGW("[BQ27441][配置模式] 检测到上次遗留 CFGUPMODE，复用当前配置模式");
+        return true;
+    }
+
     if (!execute_control(CTRL_SET_CFGUPDATE)) return false;
     return wait_for_cfgupdate(true, 1000);
 }
 
-bool exit_config_update(bool was_sealed)
+bool exit_config_update(bool was_sealed, bool resimulate)
 {
-    bool ok = execute_control(CTRL_SOFT_RESET);
-    if (!ok) {
+    const uint16_t preferred = resimulate ? CTRL_EXIT_RESIM : CTRL_EXIT_CFGUPDATE;
+    bool ok = execute_control(preferred);
+    uint16_t used = preferred;
+
+    // EXIT_RESIM 失败时只回退到无重模拟的退出命令，自动流程绝不发送 SOFT_RESET。
+    if (!ok && preferred != CTRL_EXIT_CFGUPDATE) {
         ok = execute_control(CTRL_EXIT_CFGUPDATE);
+        used = CTRL_EXIT_CFGUPDATE;
     }
     if (!ok) return false;
 
@@ -505,12 +627,23 @@ bool exit_config_update(bool was_sealed)
     if (was_sealed) {
         (void)execute_control(CTRL_SEALED);
     }
+
+    LOGI("[BQ27441][配置退出] 命令=%s(0x%04X) left=%d；未发送 SOFT_RESET",
+         used == CTRL_EXIT_RESIM ? "EXIT_RESIM" : "EXIT_CFGUPDATE",
+         used,
+         left ? 1 : 0);
     return left;
 }
 
-bool configure_design_capacity_data_memory(uint16_t flags_hint)
+bool configure_design_capacity_data_memory(uint16_t flags_hint, BqConfigTrigger trigger)
 {
-    if (s_config_attempted_this_boot) return s_config_ok_this_boot;
+    const uint32_t now = millis();
+    if (trigger != BqConfigTrigger::User &&
+        s_next_config_attempt_ms != 0 &&
+        static_cast<int32_t>(now - s_next_config_attempt_ms) < 0) {
+        return false;
+    }
+
     s_config_attempted_this_boot = true;
 
     load_design_capacity_pref_once();
@@ -518,31 +651,58 @@ bool configure_design_capacity_data_memory(uint16_t flags_hint)
     const uint16_t target_energy = design_energy_mwh_for_capacity(target_capacity);
     const uint16_t target_taper_rate = taper_rate_for_capacity(target_capacity);
 
-    uint16_t design_capacity = 0;
-    const bool got_design_capacity = read_word(CMD_EXT_DESIGN_CAPACITY, &design_capacity);
+    BqDiagnosticSnapshot before{};
+    (void)capture_diagnostic_snapshot(&before);
+    if ((before.valid_mask & DIAG_FLAGS) == 0) before.flags = flags_hint;
+    log_diagnostic_snapshot("配置前", trigger, before);
+
+    const bool got_design_capacity = (before.valid_mask & DIAG_DESIGN) != 0;
+    const uint16_t design_capacity = before.design_capacity_mah;
     if (got_design_capacity) {
         s_design_capacity_mah = design_capacity;
     }
 
-    const bool itpor = flags_has(flags_hint, BQ27441_FLAG_ITPOR);
-    const bool capacity_mismatch = !got_design_capacity || design_capacity != target_capacity;
-    if (!itpor && !capacity_mismatch) {
-        LOGD("[BQ27441] 配置已匹配：DesignCapacity=%umAh flags=0x%04X",
-             design_capacity,
-             flags_hint);
+    const uint16_t effective_flags = (before.valid_mask & DIAG_FLAGS) ? before.flags : flags_hint;
+    const bool itpor = flags_has(effective_flags, BQ27441_FLAG_ITPOR);
+    const bool cfgupmode = flags_has(effective_flags, BQ27441_FLAG_CFGUPMODE);
+
+    // 读取 DesignCapacity 失败时绝不能把“未知”当成“不匹配”并贸然进入配置模式。
+    if (!got_design_capacity) {
+        s_config_ok_this_boot = false;
+        s_next_config_attempt_ms = now + BQ27441_CONFIG_RETRY_MS;
+        LOGW("[BQ27441][配置决策] 延后：无法读取 DesignCapacity，ITPOR=%d CFGUP=%d err=%u；未进入 CFGUPDATE，未发送 SOFT_RESET",
+             itpor ? 1 : 0,
+             cfgupmode ? 1 : 0,
+             s_last_i2c_error);
+        return false;
+    }
+
+    const bool capacity_mismatch = design_capacity != target_capacity;
+    const bool need_config = itpor || cfgupmode || capacity_mismatch;
+    if (!need_config) {
+        LOGI("[BQ27441][配置决策] 跳过：ITPOR=0 CFGUP=0 DesignCapacity=%umAh 与目标一致；未进入 CFGUPDATE，未发送 SOFT_RESET",
+             design_capacity);
         s_config_ok_this_boot = true;
+        s_next_config_attempt_ms = 0;
         return true;
     }
 
-    LOGI("[BQ27441] 准备写入电池参数：DesignCapacity=%umAh->%u mAh ITPOR=%d",
-         got_design_capacity ? design_capacity : 0,
-         (unsigned)target_capacity,
-         itpor ? 1 : 0);
+    char reason[80] = {0};
+    snprintf(reason, sizeof(reason), "%s%s%s",
+             itpor ? "ITPOR " : "",
+             cfgupmode ? "CFGUP残留 " : "",
+             capacity_mismatch ? "容量不匹配" : "");
+    LOGW("[BQ27441][配置决策] 执行：来源=%s 原因=%s DesignCapacity=%umAh->%umAh",
+         config_trigger_name(trigger),
+         reason,
+         design_capacity,
+         target_capacity);
 
     bool was_sealed = false;
-    if (!enter_config_update(&was_sealed)) {
+    if (!enter_config_update(&was_sealed, cfgupmode)) {
         LOGW("[BQ27441] 进入配置模式失败 err=%u", s_last_i2c_error);
         s_config_ok_this_boot = false;
+        s_next_config_attempt_ms = millis() + BQ27441_CONFIG_RETRY_MS;
         return false;
     }
 
@@ -571,7 +731,9 @@ bool configure_design_capacity_data_memory(uint16_t flags_hint)
     }
     i2c_bus_unlock();
 
-    const bool exited = exit_config_update(was_sealed);
+    // 参数全部写入成功时使用 EXIT_RESIM：更新计算但不做 OCV 测量。
+    // 写入失败时仅退出配置模式，避免对部分配置执行重模拟。
+    const bool exited = exit_config_update(was_sealed, ok);
     ok = ok && exited;
 
     delay(120);
@@ -582,7 +744,14 @@ bool configure_design_capacity_data_memory(uint16_t flags_hint)
     }
 
     s_config_ok_this_boot = ok && new_design_capacity == target_capacity;
+
+    BqDiagnosticSnapshot after{};
+    (void)capture_diagnostic_snapshot(&after);
+    log_diagnostic_snapshot("配置后", trigger, after);
+    log_diagnostic_delta(before, after);
+
     if (s_config_ok_this_boot) {
+        s_next_config_attempt_ms = 0;
         LOGI("[BQ27441] 电池参数已配置：容量=%umAh 能量=%umWh 截止=%umV Taper=%u SOC1=%u/%u SOCF=%u/%u GPOUT=低有效",
              (unsigned)target_capacity,
              (unsigned)target_energy,
@@ -593,6 +762,7 @@ bool configure_design_capacity_data_memory(uint16_t flags_hint)
              (unsigned)BQ27441_SOCF_SET_PERCENT,
              (unsigned)BQ27441_SOCF_CLEAR_PERCENT);
     } else {
+        s_next_config_attempt_ms = millis() + BQ27441_CONFIG_RETRY_MS;
         LOGW("[BQ27441] 电池参数配置失败 ok=%d exited=%d design=%u err=%u",
              ok ? 1 : 0,
              exited ? 1 : 0,
@@ -629,7 +799,7 @@ bool bq27441_begin()
         return false;
     }
 
-    (void)configure_design_capacity_data_memory(flags);
+    (void)configure_design_capacity_data_memory(flags, BqConfigTrigger::Startup);
 
     (void)read_word(CMD_FLAGS, &flags);
     (void)read_word(CMD_EXT_DESIGN_CAPACITY, &s_design_capacity_mah);
@@ -640,12 +810,14 @@ bool bq27441_begin()
     s_next_begin_attempt_ms = 0;
     s_seen_bus_generation = i2c_bus_generation();
     s_consecutive_mandatory_read_failures = 0;
+    s_consecutive_runtime_read_failures = 0;
     s_missing_warned_once = false;
-    LOGI("[BQ27441] 初始化成功：地址=0x55 device=0x%04X control=0x%04X voltage=%umV flags=0x%04X design=%umAh",
+    LOGI("[BQ27441] 初始化成功：地址=0x55 device=0x%04X control=0x%04X voltage=%umV flags=0x%04X[%s] design=%umAh",
          device_type,
          control_status,
          voltage_mv,
          flags,
+         bq27441_flags_to_text(flags),
          s_design_capacity_mah);
     return true;
 }
@@ -692,13 +864,14 @@ bool bq27441_set_design_capacity_mah(uint16_t capacity_mah)
     s_target_design_capacity_mah = target;
     s_config_attempted_this_boot = false;
     s_config_ok_this_boot = false;
+    s_next_config_attempt_ms = 0;
 
     if (!s_ready) {
         LOGI("[BQ27441] 已保存目标容量=%umAh，电量计恢复后应用", (unsigned)target);
         return true;
     }
 
-    const bool applied = configure_design_capacity_data_memory(0);
+    const bool applied = configure_design_capacity_data_memory(0, BqConfigTrigger::User);
     if (!applied) {
         // NVS 已保存成功；保留后续重试机会，不让一次瞬时 I2C 失败丢失用户设置。
         s_config_attempted_this_boot = false;
@@ -715,12 +888,12 @@ bool bq27441_set_design_capacity_mah(uint16_t capacity_mah)
 bool bq27441_configure_if_needed(uint16_t flags_hint)
 {
     if (!i2c_ready_for_bq()) return false;
-    return configure_design_capacity_data_memory(flags_hint);
+    return configure_design_capacity_data_memory(flags_hint, BqConfigTrigger::Runtime);
 }
 
 const char* bq27441_flags_to_text(uint16_t flags)
 {
-    static char buf[80];
+    static char buf[160];
     size_t pos = 0;
     auto add = [&](const char* label) {
         if (pos >= sizeof(buf) - 1) return;
@@ -744,6 +917,59 @@ const char* bq27441_flags_to_text(uint16_t flags)
     return buf;
 }
 
+bool bq27441_read_runtime(Bq27441RuntimeSample* out)
+{
+    if (!out) return false;
+    *out = Bq27441RuntimeSample{};
+    if (!i2c_ready_for_bq()) return false;
+
+    // I2C 总线恢复后允许立即重新初始化。
+    const uint32_t generation = i2c_bus_generation();
+    if (generation != s_seen_bus_generation) {
+        s_seen_bus_generation = generation;
+        s_next_begin_attempt_ms = 0;
+        s_next_config_attempt_ms = 0;
+    }
+
+    if (!s_ready) {
+        (void)bq27441_begin();
+    }
+    if (!s_ready) return false;
+
+    uint16_t remaining_capacity = 0;
+    uint16_t current_raw = 0;
+
+    i2c_bus_lock();
+    const bool got_capacity =
+        read_word_at_locked(BQ27441_ADDR, CMD_REMAINING_CAPACITY, &remaining_capacity);
+    const bool got_current = got_capacity &&
+        read_word_at_locked(BQ27441_ADDR, CMD_AVERAGE_CURRENT, &current_raw);
+    i2c_bus_unlock();
+
+    if (!got_capacity || !got_current) {
+        if (s_consecutive_runtime_read_failures < 255) {
+            ++s_consecutive_runtime_read_failures;
+        }
+        if (warn_due(s_last_runtime_warn_ms, BQ27441_WARN_INTERVAL_MS)) {
+            LOGW("[BQ27441] 续航轻量采样失败：命令=0x%02X err=%u 连续失败=%u",
+                 s_last_failed_cmd,
+                 s_last_i2c_error,
+                 s_consecutive_runtime_read_failures);
+        }
+        if (s_consecutive_runtime_read_failures >= 3) {
+            s_ready = false;
+            s_next_begin_attempt_ms = millis() + BQ27441_RETRY_AFTER_RUNTIME_FAILURE_MS;
+        }
+        return false;
+    }
+
+    s_consecutive_runtime_read_failures = 0;
+    out->valid = true;
+    out->remaining_capacity_mah = remaining_capacity;
+    out->average_current_ma = static_cast<int16_t>(current_raw);
+    return true;
+}
+
 bool bq27441_read(Bq27441Sample* out)
 {
     if (!out) return false;
@@ -756,6 +982,7 @@ bool bq27441_read(Bq27441Sample* out)
     if (generation != s_seen_bus_generation) {
         s_seen_bus_generation = generation;
         s_next_begin_attempt_ms = 0;
+        s_next_config_attempt_ms = 0;
     }
 
     if (!s_ready) {
@@ -802,9 +1029,10 @@ bool bq27441_read(Bq27441Sample* out)
     }
 
     s_consecutive_mandatory_read_failures = 0;
+    s_consecutive_runtime_read_failures = 0;
 
     if (flags_has(s.flags, BQ27441_FLAG_ITPOR) || s_design_capacity_mah != bq27441_target_design_capacity_mah()) {
-        (void)configure_design_capacity_data_memory(s.flags);
+        (void)configure_design_capacity_data_memory(s.flags, BqConfigTrigger::Runtime);
     }
 
     uint8_t optional_failed_cmd = 0;

@@ -314,6 +314,57 @@ const char* value_battery_current()
     return buf;
 }
 
+const char* value_battery_runtime()
+{
+    static char buf[24];
+    const BatteryUiStatus& bat = battery_menu_sample();
+
+    if (bat.runtime_estimate_state != BatteryRuntimeEstimateState::Ready) {
+        return board_hw_battery_runtime_state_label(bat.runtime_estimate_state);
+    }
+
+    const uint32_t minutes = bat.estimated_runtime_minutes;
+    if (minutes == 0) return "不可用";
+    if (minutes >= 24UL * 60UL) return "超过24小时";
+    if (minutes < 60) {
+        snprintf(buf, sizeof(buf), "约%lu分钟", (unsigned long)minutes);
+        return buf;
+    }
+
+    const uint32_t hours = minutes / 60UL;
+    const uint32_t remain_minutes = minutes % 60UL;
+    snprintf(buf,
+             sizeof(buf),
+             "约%lu时%lu分",
+             (unsigned long)hours,
+             (unsigned long)remain_minutes);
+    return buf;
+}
+
+const char* value_battery_estimate_current()
+{
+    static char buf[20];
+    const BatteryUiStatus& bat = battery_menu_sample();
+
+    if ((bat.runtime_estimate_state != BatteryRuntimeEstimateState::Ready &&
+         bat.runtime_estimate_state != BatteryRuntimeEstimateState::Stabilizing) ||
+        bat.estimated_discharge_current_ma == 0) {
+        return "--";
+    }
+
+    snprintf(buf,
+             sizeof(buf),
+             "-%umA",
+             static_cast<unsigned>(bat.estimated_discharge_current_ma));
+    return buf;
+}
+
+const char* value_battery_estimate_state()
+{
+    const BatteryUiStatus& bat = battery_menu_sample();
+    return board_hw_battery_runtime_state_label(bat.runtime_estimate_state);
+}
+
 const char* value_battery_capacity()
 {
     static char buf[24];
@@ -598,6 +649,9 @@ const QuickMenuItem BATTERY_ITEMS[] = {
     {"剩余电量", QuickMenuItemType::Status, QuickMenuPage::BatteryInfo, "", value_battery_percent, nullptr, true, false},
     {"电池状态", QuickMenuItemType::Status, QuickMenuPage::BatteryInfo, "", value_battery_state, nullptr, true, false},
     {"平均电流", QuickMenuItemType::Status, QuickMenuPage::BatteryInfo, "", value_battery_current, nullptr, true, false},
+    {"预计续航", QuickMenuItemType::Status, QuickMenuPage::BatteryInfo, "", value_battery_runtime, nullptr, true, false},
+    {"估算电流", QuickMenuItemType::Status, QuickMenuPage::BatteryInfo, "", value_battery_estimate_current, nullptr, true, false},
+    {"估算状态", QuickMenuItemType::Status, QuickMenuPage::BatteryInfo, "", value_battery_estimate_state, nullptr, true, false},
     {"剩余容量", QuickMenuItemType::Status, QuickMenuPage::BatteryInfo, "", value_battery_capacity, nullptr, true, false},
     {"芯片容量", QuickMenuItemType::Status, QuickMenuPage::BatteryInfo, "", value_bq_design_capacity, nullptr, true, false},
     {"健康度", QuickMenuItemType::Status, QuickMenuPage::BatteryInfo, "", value_battery_soh, nullptr, true, false},

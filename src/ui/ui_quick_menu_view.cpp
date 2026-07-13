@@ -21,12 +21,56 @@ static constexpr int MARK_X = 20;
 static constexpr int LABEL_X = 34;
 static constexpr int VALUE_X = 210;
 
-static constexpr uint16_t COLOR_BG = TFT_BLACK;
-static constexpr uint16_t COLOR_TEXT = TFT_WHITE;
-static constexpr uint16_t COLOR_DIM = TFT_LIGHTGREY;
-static constexpr uint16_t COLOR_DISABLED = TFT_DARKGREY;
-static constexpr uint16_t COLOR_SELECTED_BG = 0x4208;
-static constexpr uint16_t COLOR_SELECTED_TEXT = TFT_YELLOW;
+static constexpr int DETAIL_X = 20;
+static constexpr int DETAIL_AREA_Y = 156;
+static constexpr int DETAIL_W = 200;
+static constexpr int DETAIL_AREA_H = 74;
+static constexpr int DETAIL_R = 8;
+static constexpr uint8_t DETAIL_MAX_LINES = 4;
+
+struct DetailLayout {
+    uint8_t line_count;
+    int panel_y;
+    int panel_h;
+    int line_y[DETAIL_MAX_LINES];
+    int line_w[DETAIL_MAX_LINES];
+};
+
+// 内容需要几行，面板就扩展到几行；越靠近圆屏底部，可用宽度越小。
+static constexpr DetailLayout DETAIL_LAYOUTS[DETAIL_MAX_LINES] = {
+    {1, 177, 30, {192, 0, 0, 0}, {184, 0, 0, 0}},
+    {2, 169, 46, {182, 201, 0, 0}, {184, 174, 0, 0}},
+    {3, 160, 64, {174, 192, 210, 0}, {184, 174, 148, 0}},
+    {4, 157, 70, {166, 183, 200, 217}, {184, 176, 158, 128}},
+};
+
+struct MenuPalette {
+    uint16_t background;
+    uint16_t selected_background;
+    uint16_t accent;
+    uint16_t selected_text;
+};
+
+static constexpr uint16_t COLOR_TEXT = 0xFFDF;
+static constexpr uint16_t COLOR_DIM = 0xCEBC;
+static constexpr uint16_t COLOR_DISABLED = 0x63B1;
+
+const MenuPalette& current_menu_palette()
+{
+    // 不同菜单层级使用低亮度深色背景，既能区分层级，也避免圆屏夜间过亮。
+    static constexpr MenuPalette palettes[] = {
+        {0x0083, 0x29A8, 0xF4E1, 0xF4E1}, // 根菜单：深灰蓝 + 琥珀
+        {0x08C5, 0x11CA, 0x3DFF, 0xFFDF}, // 一级菜单：深海蓝 + 天蓝
+        {0x0904, 0x1207, 0x2EB7, 0xFFDF}, // 二级菜单：深青绿 + 青绿
+        {0x20A5, 0x494B, 0xC43F, 0xFFDF}, // 三级及以下：深紫 + 淡紫
+    };
+
+    uint8_t depth = quick_menu_get_page_depth();
+    if (depth >= static_cast<uint8_t>(sizeof(palettes) / sizeof(palettes[0]))) {
+        depth = static_cast<uint8_t>((sizeof(palettes) / sizeof(palettes[0])) - 1);
+    }
+    return palettes[depth];
+}
 
 static bool s_first_draw = true;
 static QuickMenuPage s_last_page = QuickMenuPage::Root;
@@ -37,6 +81,7 @@ static uint32_t s_last_revision = 0;
 static uint32_t s_last_full_refresh_seq = 0;
 static String s_last_row_signature[ROW_COUNT];
 static bool s_last_row_valid[ROW_COUNT] = {};
+static String s_last_footer_signature;
 
 String clip_utf8_for_tft(const String& text, int max_w)
 {
@@ -110,7 +155,7 @@ void clear_menu_row(int row)
     get_menu_row_rect(row, row_top, row_h);
 
     // 清掉旧行区域，避免菜单行数变少或内容变短时留下残影。
-    tft.fillRoundRect(ROW_X, row_top, ROW_W, row_h, ROW_R, COLOR_BG);
+    tft.fillRoundRect(ROW_X, row_top, ROW_W, row_h, ROW_R, current_menu_palette().background);
 }
 
 void draw_menu_header(const char* title)
@@ -119,10 +164,11 @@ void draw_menu_header(const char* title)
     tft.setTextSize(1);
     tft.setTextWrap(false);
 
-    tft.setTextColor(COLOR_TEXT, COLOR_BG);
+    const MenuPalette& palette = current_menu_palette();
+    tft.setTextColor(palette.accent, palette.background);
     draw_center_text(title, TITLE_Y);
 
-    tft.drawFastHLine(28, TITLE_LINE_Y, 184, COLOR_DIM);
+    tft.drawFastHLine(28, TITLE_LINE_Y, 184, palette.accent);
 }
 
 void draw_scroll_bar(int start_idx, int total)
@@ -152,28 +198,37 @@ void draw_scroll_bar(int start_idx, int total)
         thumb_y = bar_y + bar_h - thumb_h;
     }
 
-    tft.drawRect(bar_x, bar_y, bar_w, bar_h, TFT_DARKGREY);
-    tft.fillRect(bar_x, thumb_y, bar_w, thumb_h, COLOR_DIM);
+    const MenuPalette& palette = current_menu_palette();
+    tft.drawRect(bar_x, bar_y, bar_w, bar_h, COLOR_DISABLED);
+    tft.fillRect(bar_x, thumb_y, bar_w, thumb_h, palette.accent);
+}
+
+void clear_footer_area()
+{
+    const MenuPalette& palette = current_menu_palette();
+    tft.fillRect(8, DETAIL_AREA_Y, 224, DETAIL_AREA_H, palette.background);
 }
 
 void draw_footer()
 {
+    const MenuPalette& palette = current_menu_palette();
+    clear_footer_area();
+
     tft.setFont(&g_font_cjk);
     tft.setTextSize(1);
     tft.setTextWrap(false);
 
-    tft.setTextColor(COLOR_DIM, COLOR_BG);
-tft.setTextColor(COLOR_DIM, COLOR_BG);
-draw_center_text("旋钮选 按下确认 MODE返/长退", 178);
-draw_center_text(">进 !执行 +切换 =状态", 193);
+    tft.setTextColor(COLOR_DIM, palette.background);
+    draw_center_text("旋钮选 按下确认 MODE返/长退", 178);
+    draw_center_text(">进 !执行 +切换 =状态", 193);
 }
 
 void draw_menu_frame(const char* title, int start_idx, int total)
 {
-    tft.fillScreen(COLOR_BG);
+    const MenuPalette& palette = current_menu_palette();
+    tft.fillScreen(palette.background);
     draw_menu_header(title);
     draw_scroll_bar(start_idx, total);
-    draw_footer();
 }
 
 const char* menu_type_marker(QuickMenuItemType type, bool placeholder)
@@ -199,6 +254,8 @@ const char* menu_type_marker(QuickMenuItemType type, bool placeholder)
     }
 }
 
+int menu_value_max_width(QuickMenuPage page);
+
 bool menu_type_is_operable(QuickMenuItemType type)
 {
     return type == QuickMenuItemType::SubPage ||
@@ -219,15 +276,16 @@ void draw_menu_row(const QuickMenuItemView& item, int row, bool draw_bg)
     const bool operable = item.enabled && menu_type_is_operable(item.type) && !placeholder;
     const bool status_only = item.type == QuickMenuItemType::Status && !placeholder;
 
-    const uint16_t bg = item.selected ? COLOR_SELECTED_BG : COLOR_BG;
+    const MenuPalette& palette = current_menu_palette();
+    const uint16_t bg = item.selected ? palette.selected_background : palette.background;
     const uint16_t marker_color = item.enabled
-        ? (item.selected ? COLOR_SELECTED_TEXT : (operable ? COLOR_TEXT : COLOR_DIM))
+        ? (item.selected ? palette.selected_text : (operable ? COLOR_TEXT : COLOR_DIM))
         : COLOR_DISABLED;
     const uint16_t label_color = item.enabled
-        ? (item.selected ? COLOR_SELECTED_TEXT : (status_only ? COLOR_DIM : COLOR_TEXT))
+        ? (item.selected ? palette.selected_text : (status_only ? COLOR_DIM : COLOR_TEXT))
         : COLOR_DISABLED;
     const uint16_t value_color = item.enabled
-        ? (item.selected ? COLOR_SELECTED_TEXT : (operable ? COLOR_TEXT : COLOR_DIM))
+        ? (item.selected ? palette.selected_text : (operable ? COLOR_TEXT : COLOR_DIM))
         : COLOR_DISABLED;
 
     if (draw_bg) {
@@ -255,7 +313,7 @@ void draw_menu_row(const QuickMenuItemView& item, int row, bool draw_bg)
     const int row_label_x = hide_marker ? MARK_X : LABEL_X;
     const int row_value_x = nfc_compact_row ? 218 : VALUE_X;
 
-    const int value_max_w = nfc_list_row ? 108 : (nfc_detail_row ? 124 : 96);
+    const int value_max_w = menu_value_max_width(current_page);
     const int value_w = value.length() > 0
         ? min(tft.textWidth(value), value_max_w)
         : 0;
@@ -300,6 +358,208 @@ void draw_menu_row(const QuickMenuItemView& item, int row, bool draw_bg)
         tft.setTextDatum(middle_right);
         tft.setTextColor(value_color, bg);
         tft.drawString(value, row_value_x, row_y);
+    }
+
+    tft.setTextDatum(top_left);
+}
+
+int utf8_char_length(uint8_t first)
+{
+    if ((first & 0x80u) == 0) return 1;
+    if ((first & 0xE0u) == 0xC0u) return 2;
+    if ((first & 0xF0u) == 0xE0u) return 3;
+    if ((first & 0xF8u) == 0xF0u) return 4;
+    return 1;
+}
+
+uint8_t wrap_utf8_for_tft(const String& text,
+                          const int* line_widths,
+                          String* lines,
+                          uint8_t max_lines,
+                          bool add_ellipsis,
+                          bool* out_truncated)
+{
+    if (out_truncated) *out_truncated = false;
+    if (!line_widths || !lines || max_lines == 0 || text.length() == 0) {
+        return 0;
+    }
+
+    for (uint8_t i = 0; i < max_lines; ++i) {
+        lines[i] = "";
+    }
+
+    uint8_t line_count = 0;
+    String current;
+    int pos = 0;
+
+    while (pos < text.length() && line_count < max_lines) {
+        int char_len = utf8_char_length(static_cast<uint8_t>(text[pos]));
+        if (pos + char_len > text.length()) {
+            char_len = 1;
+        }
+
+        const String ch = text.substring(pos, pos + char_len);
+        const String candidate = current + ch;
+        const int max_w = line_widths[line_count];
+
+        if (current.length() > 0 && tft.textWidth(candidate) > max_w) {
+            current.trim();
+            lines[line_count++] = current;
+            current = "";
+            // 当前字符尚未消费，下一行继续处理。
+            continue;
+        }
+
+        current = candidate;
+        pos += char_len;
+    }
+
+    if (pos == text.length() && current.length() > 0 && line_count < max_lines) {
+        current.trim();
+        lines[line_count++] = current;
+        current = "";
+    }
+
+    const bool truncated = pos < text.length() || current.length() > 0;
+    if (out_truncated) *out_truncated = truncated;
+
+    if (truncated && add_ellipsis && line_count > 0) {
+        lines[line_count - 1] = clip_utf8_for_tft(
+            lines[line_count - 1] + "...",
+            line_widths[line_count - 1]);
+    }
+
+    return line_count;
+}
+
+int menu_value_max_width(QuickMenuPage page)
+{
+    if (page == QuickMenuPage::NfcList) return 108;
+    if (page == QuickMenuPage::NfcDetail) return 124;
+    return 96;
+}
+
+bool menu_item_value_is_truncated(const QuickMenuItemView& item,
+                                  QuickMenuPage page)
+{
+    if (!item.selected || !item.value || item.value[0] == '\0') {
+        return false;
+    }
+
+    tft.setFont(&g_font_cjk);
+    tft.setTextSize(1);
+    tft.setTextWrap(false);
+    return tft.textWidth(item.value) > menu_value_max_width(page);
+}
+
+struct DetailTextLayout {
+    const DetailLayout* layout = nullptr;
+    String lines[DETAIL_MAX_LINES];
+    uint8_t line_count = 0;
+    bool truncated = false;
+};
+
+DetailTextLayout build_detail_text_layout(const String& text)
+{
+    DetailTextLayout result{};
+
+    tft.setFont(&g_font_cjk);
+    tft.setTextSize(1);
+    tft.setTextWrap(false);
+
+    for (uint8_t candidate = 1; candidate <= DETAIL_MAX_LINES; ++candidate) {
+        const DetailLayout& layout = DETAIL_LAYOUTS[candidate - 1];
+        String candidate_lines[DETAIL_MAX_LINES];
+        bool truncated = false;
+        const uint8_t line_count = wrap_utf8_for_tft(text,
+                                                      layout.line_w,
+                                                      candidate_lines,
+                                                      candidate,
+                                                      false,
+                                                      &truncated);
+        if (!truncated) {
+            result.layout = &layout;
+            result.line_count = line_count;
+            result.truncated = false;
+            for (uint8_t i = 0; i < line_count; ++i) {
+                result.lines[i] = candidate_lines[i];
+            }
+            return result;
+        }
+    }
+
+    // 极端超长内容最多展开四行，最后一行显示省略号。
+    const DetailLayout& max_layout = DETAIL_LAYOUTS[DETAIL_MAX_LINES - 1];
+    result.layout = &max_layout;
+    result.line_count = wrap_utf8_for_tft(text,
+                                           max_layout.line_w,
+                                           result.lines,
+                                           DETAIL_MAX_LINES,
+                                           true,
+                                           &result.truncated);
+    return result;
+}
+
+void draw_selected_detail_or_footer(bool force)
+{
+    const QuickMenuPage page = quick_menu_get_page();
+    const int selected = quick_menu_get_selected_index();
+
+    QuickMenuItemView item;
+    const bool has_item = quick_menu_get_item_view(static_cast<uint8_t>(selected), item);
+    // 只有菜单行中的值确实被省略时，才展开底部完整信息。
+    const bool show_detail = has_item && menu_item_value_is_truncated(item, page);
+
+    String signature;
+    signature.reserve(192);
+    signature += show_detail ? "detail|" : "footer|";
+    signature += static_cast<int>(quick_menu_get_page_depth());
+    if (show_detail) {
+        signature += '|';
+        signature += item.value ? item.value : "";
+    }
+
+    if (!force && signature == s_last_footer_signature) {
+        return;
+    }
+    s_last_footer_signature = signature;
+
+    if (!show_detail) {
+        draw_footer();
+        return;
+    }
+
+    const String detail = item.value ? String(item.value) : String("");
+    const DetailTextLayout text_layout = build_detail_text_layout(detail);
+    if (!text_layout.layout || text_layout.line_count == 0) {
+        draw_footer();
+        return;
+    }
+
+    const DetailLayout& layout = *text_layout.layout;
+    const MenuPalette& palette = current_menu_palette();
+    clear_footer_area();
+    tft.fillRoundRect(DETAIL_X,
+                      layout.panel_y,
+                      DETAIL_W,
+                      layout.panel_h,
+                      DETAIL_R,
+                      palette.selected_background);
+    tft.drawRoundRect(DETAIL_X,
+                      layout.panel_y,
+                      DETAIL_W,
+                      layout.panel_h,
+                      DETAIL_R,
+                      palette.accent);
+
+    tft.setFont(&g_font_cjk);
+    tft.setTextSize(1);
+    tft.setTextWrap(false);
+    tft.setTextDatum(middle_center);
+    tft.setTextColor(COLOR_TEXT, palette.selected_background);
+
+    for (uint8_t i = 0; i < text_layout.line_count; ++i) {
+        tft.drawString(text_layout.lines[i], 120, layout.line_y[i]);
     }
 
     tft.setTextDatum(top_left);
@@ -411,6 +671,7 @@ void ui_quick_menu_view_reset()
     s_last_total = -1;
     s_last_revision = 0;
     s_last_full_refresh_seq = 0;
+    s_last_footer_signature = "";
     reset_row_cache();
 }
 
@@ -483,6 +744,14 @@ void ui_draw_quick_menu()
     else if (content_changed) {
         draw_visible_rows(start_idx, total, false);
     }
+
+    // 长信息选中时在底部显示完整内容；普通项目继续显示操作提示。
+    // 动态页面每秒刷新时，如果底部内容没有变化则不重画，避免闪烁。
+    const bool footer_force = s_first_draw ||
+                              page_changed ||
+                              start_changed ||
+                              full_refresh_requested;
+    draw_selected_detail_or_footer(footer_force);
 
     s_first_draw = false;
     s_last_page = page;

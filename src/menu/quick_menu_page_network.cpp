@@ -77,7 +77,7 @@ const char* value_current_ip()
 
 const char* value_wifi_name()
 {
-    static char buf[40];
+    static char buf[64];
 
     if (!web_wifi_is_enabled()) {
         return "-";

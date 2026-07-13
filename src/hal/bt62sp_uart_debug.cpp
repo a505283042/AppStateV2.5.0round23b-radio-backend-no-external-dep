@@ -403,17 +403,25 @@ void flush_bt_rx_line(bool partial)
 
 void append_bt_rx_char(char c)
 {
-    if (c == '\0' || c == '\r') {
+    const uint8_t byte = static_cast<uint8_t>(c);
+    if (byte == 0 || byte == '\r') {
         return;
     }
-    if (c == '\n') {
+    if (byte == '\n') {
         flush_bt_rx_line(false);
         return;
     }
+
+    // BT62SP AT 协议只使用可打印 ASCII。丢弃上电瞬态产生的乱码字节，
+    // 避免类似“[BT62SP RX*] �z”的无效日志进入响应解析器。
+    if (byte < 0x20 || byte > 0x7E) {
+        return;
+    }
+
     if (s_bt_rx_len + 1 >= BT_RX_LINE_MAX) {
         flush_bt_rx_line(true);
     }
-    s_bt_rx_line[s_bt_rx_len++] = c;
+    s_bt_rx_line[s_bt_rx_len++] = static_cast<char>(byte);
     s_bt_rx_last_ms = millis();
 }
 

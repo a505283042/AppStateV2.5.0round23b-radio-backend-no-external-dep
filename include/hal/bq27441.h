@@ -15,6 +15,13 @@ struct Bq27441Sample {
     uint16_t state_of_health_percent = 0;
 };
 
+// 续航估算使用的轻量采样，只读取剩余容量和平均电流。
+struct Bq27441RuntimeSample {
+    bool valid = false;
+    int16_t average_current_ma = 0;
+    uint16_t remaining_capacity_mah = 0;
+};
+
 static constexpr uint16_t BQ27441_FLAG_FC = (1u << 9);
 static constexpr uint16_t BQ27441_FLAG_CHG = (1u << 8);
 static constexpr uint16_t BQ27441_FLAG_OCVTAKEN = (1u << 7);
@@ -28,6 +35,7 @@ static constexpr uint16_t BQ27441_FLAG_DSG = (1u << 0);
 bool bq27441_begin();
 bool bq27441_is_ready();
 bool bq27441_read(Bq27441Sample* out);
+bool bq27441_read_runtime(Bq27441RuntimeSample* out);
 uint8_t bq27441_last_i2c_error();
 
 uint16_t bq27441_design_capacity_mah();
