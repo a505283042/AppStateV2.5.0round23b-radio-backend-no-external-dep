@@ -126,8 +126,80 @@ String web_make_radio_cover_rev(int radio_idx, const String& logo) {
   snprintf(buf, sizeof(buf), "radio-%08lx", (unsigned long)h);
   return String(buf);
 }
-WebPlayerSnapshot web_snapshot_capture() {
-  WebPlayerSnapshot snap{};
+static void web_snapshot_reset_for_capture(WebPlayerSnapshot& snap) {
+  snap.ok = false;
+  snap.app_state = "unknown";
+  snap.app_state_label = "未知";
+  snap.rescanning = false;
+  snap.is_playing = false;
+  snap.is_paused = false;
+  snap.track_idx = -1;
+  snap.title.remove(0);
+  snap.artist.remove(0);
+  snap.album.remove(0);
+  snap.play_ms = 0;
+  snap.total_ms = 0;
+  snap.volume = 0;
+  snap.mode = "unknown";
+  snap.mode_label = "未知";
+  snap.view = "unknown";
+  snap.view_label = "未知视图";
+  snap.display_pos = -1;
+  snap.display_total = 0;
+  snap.current_group_idx = -1;
+  snap.net_mode.remove(0);
+  snap.ip.remove(0);
+  snap.wifi_name.remove(0);
+  snap.hostname.remove(0);
+  snap.wifi_source.remove(0);
+  snap.can_cancel_scan = false;
+  snap.scan_action_label = "开始重扫";
+
+  snap.has_lyrics = false;
+  snap.lyrics_loading = false;
+  snap.current_lyric.remove(0);
+  snap.next_lyric.remove(0);
+  snap.following_lyric.remove(0);
+  snap.show_next_lyric = true;
+  snap.show_cover = true;
+  snap.web_cover_spin = true;
+  snap.current_lyric_start_ms = 0;
+  snap.next_lyric_start_ms = 0;
+  snap.following_lyric_start_ms = 0;
+  snap.has_cover = false;
+  snap.cover_loading = false;
+  snap.cover_ready_for_web = false;
+  snap.cover_rev.remove(0);
+  snap.cover_url.remove(0);
+
+  snap.source_type = "none";
+  snap.radio_active = false;
+  snap.radio_idx = -1;
+  snap.radio_name.remove(0);
+  snap.radio_format.remove(0);
+  snap.radio_region.remove(0);
+  snap.radio_state.remove(0);
+  snap.radio_error.remove(0);
+  snap.radio_stream_title.remove(0);
+  snap.radio_backend.remove(0);
+  snap.radio_bitrate = 0;
+
+  snap.net_track_active = false;
+  snap.net_track_idx = -1;
+  snap.net_track_title.remove(0);
+  snap.net_track_url.remove(0);
+  snap.net_track_format.remove(0);
+  snap.net_track_artist.remove(0);
+  snap.net_track_album.remove(0);
+  snap.net_track_duration_ms = 0;
+  snap.net_track_state.remove(0);
+  snap.net_track_error.remove(0);
+  snap.next_poll_ms = 0;
+}
+
+void web_snapshot_capture_into(WebPlayerSnapshot& snap) {
+  // 只清空长度，不释放 String 容量；网页高频轮询会复用历史缓冲区。
+  web_snapshot_reset_for_capture(snap);
   snap.ok = true;
   snap.app_state = web_app_state_to_key(g_app_state, g_rescanning);
   snap.app_state_label = web_app_state_to_label(g_app_state, g_rescanning);
@@ -328,5 +400,10 @@ WebPlayerSnapshot web_snapshot_capture() {
     snap.display_total = (int)net_music_catalog_count();
   }
 
+}
+
+WebPlayerSnapshot web_snapshot_capture() {
+  WebPlayerSnapshot snap{};
+  web_snapshot_capture_into(snap);
   return snap;
 }

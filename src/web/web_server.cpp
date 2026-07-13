@@ -4,6 +4,7 @@
 #include <WebServer.h>
 #include <SdFat.h>
 #include <vector>
+#include <cstring>
 
 #include "app_state.h"
 #include "app_power.h"
@@ -278,6 +279,185 @@ static bool web_flush_chunk_buffer(String& buf) {
   buf = "";
   return ok;
 }
+
+
+static void web_send_no_cache_headers();
+
+// /api/status 是网页最高频的接口。旧实现每次创建约 3KB String，
+// 并通过大量 String 临时对象拼接，长时间轮询会增加内部堆碎片。
+// 这里使用一个常驻的 1KB 缓冲区分块输出，响应大小不再决定临时堆峰值。
+static constexpr size_t kWebStatusJsonChunkReserve = 1024;
+static constexpr size_t kWebStatusJsonFlushAt = 768;
+static String s_web_status_json_chunk;
+static WebPlayerSnapshot s_web_status_snapshot;
+static uint32_t s_web_status_stream_requests = 0;
+static size_t s_web_status_stream_max_bytes = 0;
+static uint16_t s_web_status_stream_max_chunks = 0;
+
+class WebStatusJsonWriter {
+ public:
+  explicit WebStatusJsonWriter(String& buffer) : buffer_(buffer) {}
+
+  bool prepare() {
+    buffer_.remove(0);
+    ok_ = buffer_.reserve(kWebStatusJsonChunkReserve);
+    first_field_ = true;
+    started_ = false;
+    total_bytes_ = 1;  // 起始的“{”由 WebServer 首包发送。
+    chunk_count_ = 1;
+    return ok_;
+  }
+
+  bool begin() {
+    if (!ok_) return false;
+    web_send_no_cache_headers();
+    s_server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+    s_server.send(200, "application/json; charset=utf-8", "{");
+    started_ = web_client_alive();
+    ok_ = started_;
+    return ok_;
+  }
+
+  void field_bool(const char* key, bool value) {
+    if (!field_prefix(key)) return;
+    append_literal(value ? "true" : "false");
+  }
+
+  void field_int(const char* key, int32_t value) {
+    if (!field_prefix(key)) return;
+    char buf[24];
+    snprintf(buf, sizeof(buf), "%ld", static_cast<long>(value));
+    append_literal(buf);
+  }
+
+  void field_uint(const char* key, uint32_t value) {
+    if (!field_prefix(key)) return;
+    char buf[24];
+    snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(value));
+    append_literal(buf);
+  }
+
+  void field_string(const char* key, const String& value) {
+    field_string(key, value.c_str());
+  }
+
+  void field_string(const char* key, const char* value) {
+    if (!field_prefix(key)) return;
+    append_char('"');
+    append_escaped(value ? value : "");
+    append_char('"');
+  }
+
+  bool finish() {
+    if (!ok_ || !started_) return false;
+    append_char('}');
+    if (!flush()) return false;
+    web_end_stream_response();
+
+    ++s_web_status_stream_requests;
+    if (total_bytes_ > s_web_status_stream_max_bytes) {
+      s_web_status_stream_max_bytes = total_bytes_;
+    }
+    if (chunk_count_ > s_web_status_stream_max_chunks) {
+      s_web_status_stream_max_chunks = chunk_count_;
+    }
+
+    if ((s_web_status_stream_requests % 120u) == 0u) {
+      LOGD("[网页] /api/status 流式统计：请求=%lu 最大响应=%uB 最大分块=%u 缓冲=%uB",
+           static_cast<unsigned long>(s_web_status_stream_requests),
+           static_cast<unsigned>(s_web_status_stream_max_bytes),
+           static_cast<unsigned>(s_web_status_stream_max_chunks),
+           static_cast<unsigned>(kWebStatusJsonChunkReserve));
+    }
+    return true;
+  }
+
+ private:
+  bool field_prefix(const char* key) {
+    if (!ok_) return false;
+    if (!first_field_) append_char(',');
+    first_field_ = false;
+    append_char('"');
+    append_literal(key ? key : "");
+    append_literal("\":");
+    return ok_;
+  }
+
+  void append_escaped(const char* value) {
+    if (!value) return;
+    const uint8_t* p = reinterpret_cast<const uint8_t*>(value);
+    while (*p && ok_) {
+      const uint8_t c = *p++;
+      switch (c) {
+        case '\\': append_literal("\\\\"); break;
+        case '"':  append_literal("\\\""); break;
+        case '\b': append_literal("\\b"); break;
+        case '\f': append_literal("\\f"); break;
+        case '\n': append_literal("\\n"); break;
+        case '\r': append_literal("\\r"); break;
+        case '\t': append_literal("\\t"); break;
+        default:
+          if (c < 0x20) {
+            char escaped[7];
+            snprintf(escaped, sizeof(escaped), "\\u%04X", static_cast<unsigned>(c));
+            append_literal(escaped);
+          } else {
+            append_char(static_cast<char>(c));
+          }
+          break;
+      }
+    }
+  }
+
+  void append_literal(const char* text) {
+    if (!text || !ok_) return;
+    while (*text && ok_) {
+      if (buffer_.length() >= kWebStatusJsonFlushAt && !flush()) return;
+      const size_t room = kWebStatusJsonFlushAt - buffer_.length();
+      const size_t remaining = strlen(text);
+      const size_t take = remaining < room ? remaining : room;
+      if (take == 0) {
+        if (!flush()) return;
+        continue;
+      }
+      if (!buffer_.concat(text, static_cast<unsigned int>(take))) {
+        ok_ = false;
+        return;
+      }
+      text += take;
+    }
+  }
+
+  void append_char(char c) {
+    if (!ok_) return;
+    if (buffer_.length() >= kWebStatusJsonFlushAt && !flush()) return;
+    if (!buffer_.concat(c)) {
+      ok_ = false;
+    }
+  }
+
+  bool flush() {
+    if (!ok_) return false;
+    if (!buffer_.length()) return true;
+    const size_t bytes = buffer_.length();
+    if (!web_send_chunk(buffer_)) {
+      ok_ = false;
+      return false;
+    }
+    total_bytes_ += bytes;
+    ++chunk_count_;
+    // remove(0) 清空内容但保留已申请容量，下一次轮询不会重新分配。
+    buffer_.remove(0);
+    return true;
+  }
+
+  String& buffer_;
+  bool ok_ = false;
+  bool first_field_ = true;
+  bool started_ = false;
+  size_t total_bytes_ = 0;
+  uint16_t chunk_count_ = 0;
+};
 
 static bool web_parse_bool(const String& v, bool defv=false) {
   String s = web_trim_copy(v); s.toLowerCase();
@@ -590,10 +770,10 @@ static void web_send_group_list_json(const std::vector<PlaylistGroup>& groups, b
   head += ",\"current_group_idx\":";
   head += String(current_group_idx);
   head += ",\"mode\":\"";
-  head += web_json_escape(snap.mode);
+  head += web_json_escape(String(snap.mode));
   head += "\"";
   head += ",\"mode_label\":\"";
-  head += web_json_escape(snap.mode_label);
+  head += web_json_escape(String(snap.mode_label));
   head += "\"";
   head += ",\"items\":[";
   if (!web_send_chunk(head)) return;
@@ -1269,7 +1449,8 @@ static void web_handle_rtc_alarm_clear() {
 }
 
 static void web_handle_status() {
-  WebPlayerSnapshot snap = web_snapshot_capture();
+  web_snapshot_capture_into(s_web_status_snapshot);
+  WebPlayerSnapshot& snap = s_web_status_snapshot;
   snap.net_mode = web_net_mode_cstr();
   snap.ip = web_ip_string();
   snap.wifi_name = web_wifi_name_string();
@@ -1278,88 +1459,7 @@ static void web_handle_status() {
 
   const auto& ws = web_settings_get();
 
-  String json;
-  json.reserve(3200);
-
-  json += "{\"ok\":";
-  json += (snap.ok ? "true" : "false");
-
-  json += ",\"app_state\":\"" + web_json_escape(snap.app_state) + "\"";
-  json += ",\"app_state_label\":\"" + web_json_escape(snap.app_state_label) + "\"";
-  json += ",\"rescanning\":";
-  json += (snap.rescanning ? "true" : "false");
-
-  json += ",\"is_playing\":";
-  json += (snap.is_playing ? "true" : "false");
-  json += ",\"is_paused\":";
-  json += (snap.is_paused ? "true" : "false");
-
-  json += ",\"track_idx\":" + String(snap.track_idx);
-  json += ",\"title\":\"" + web_json_escape(snap.title) + "\"";
-  json += ",\"artist\":\"" + web_json_escape(snap.artist) + "\"";
-  json += ",\"album\":\"" + web_json_escape(snap.album) + "\"";
-
-  json += ",\"play_ms\":" + String(snap.play_ms);
-  json += ",\"total_ms\":" + String(snap.total_ms);
-  json += ",\"volume\":";
-  json += String(snap.volume);
-
-  json += (s_web_volume_locked ? ",\"volume_locked\":true" : ",\"volume_locked\":false");
-
-  json += ",\"mode\":\"" + web_json_escape(snap.mode) + "\"";
-  json += ",\"mode_label\":\"" + web_json_escape(snap.mode_label) + "\"";
-  json += ",\"view\":\"" + web_json_escape(snap.view) + "\"";
-  json += ",\"view_label\":\"" + web_json_escape(snap.view_label) + "\"";
-
-  json += ",\"display_pos\":" + String(snap.display_pos);
-  json += ",\"display_total\":" + String(snap.display_total);
-  json += ",\"current_group_idx\":" + String(snap.current_group_idx);
-
-  json += ",\"net_mode\":\"" + web_json_escape(snap.net_mode) + "\"";
-  json += ",\"ip\":\"" + web_json_escape(snap.ip) + "\"";
-  json += ",\"wifi_name\":\"" + web_json_escape(snap.wifi_name) + "\"";
-  json += ",\"hostname\":\"" + web_json_escape(snap.hostname) + "\"";
-  json += ",\"wifi_source\":\"" + web_json_escape(snap.wifi_source) + "\"";
-
-  json += ",\"can_cancel_scan\":";
-  json += (snap.can_cancel_scan ? "true" : "false");
-  json += ",\"scan_action_label\":\"" + web_json_escape(snap.scan_action_label) + "\"";
-
-  json += ",\"has_lyrics\":";
-  json += (snap.has_lyrics ? "true" : "false");
-  json += ",\"lyrics_loading\":";
-  json += (snap.lyrics_loading ? "true" : "false");
-  json += ",\"current_lyric\":\"" + web_json_escape(snap.current_lyric) + "\"";
-  json += ",\"next_lyric\":\"" + web_json_escape(snap.next_lyric) + "\"";
-  json += ",\"following_lyric\":\"" + web_json_escape(snap.following_lyric) + "\"";
-
-  json += ",\"show_next_lyric\":";
-  json += (snap.show_next_lyric ? "true" : "false");
-  json += ",\"show_cover\":";
-  json += (snap.show_cover ? "true" : "false");
-  json += ",\"web_cover_spin\":";
-  json += (snap.web_cover_spin ? "true" : "false");
-
-  json += ",\"show_wifi_info\":";
-  json += (ws.show_wifi_info ? "true" : "false");
-
-  json += ",\"lyric_sync_mode\":\"";
-  json += web_lyric_sync_mode_key(ws.lyric_sync_mode);
-  json += "\"";
-
-  json += ",\"lyric_sync_mode_label\":\"";
-  json += web_lyric_sync_mode_label(ws.lyric_sync_mode);
-  json += "\"";
-
-  json += ",\"lyric_wait_poll_threshold_ms\":";
-  json += String((int)web_lyric_sync_mode_threshold_ms(ws.lyric_sync_mode));
-
-  json += ",\"current_lyric_start_ms\":" + String(snap.current_lyric_start_ms);
-  json += ",\"next_lyric_start_ms\":" + String(snap.next_lyric_start_ms);
-  json += ",\"following_lyric_start_ms\":" + String(snap.following_lyric_start_ms);
-  json += ",\"next_poll_ms\":" + String(snap.next_poll_ms);
-
-  const bool is_radio_cover = (snap.source_type == "radio");
+  const bool is_radio_cover = strcmp(snap.source_type, "radio") == 0;
   const bool allow_cover_fetch_now =
       snap.has_cover &&
       (is_radio_cover || !snap.is_playing || snap.cover_ready_for_web);
@@ -1371,75 +1471,103 @@ static void web_handle_status() {
       snap.track_idx >= 0 &&
       !snap.rescanning;
 
-  json += ",\"cover_loading\":";
-  json += (cover_loading ? "true" : "false");
+  WebStatusJsonWriter json(s_web_status_json_chunk);
+  if (!json.prepare()) {
+    LOGW("[网页] /api/status 固定分块缓冲申请失败：需要=%uB",
+         static_cast<unsigned>(kWebStatusJsonChunkReserve));
+    web_send_json_err("状态响应缓冲区不足", 503);
+    return;
+  }
+  if (!json.begin()) return;
 
-  json += ",\"has_cover\":";
-  json += (allow_cover_fetch_now ? "true" : "false");
+  json.field_bool("ok", snap.ok);
+  json.field_string("app_state", snap.app_state);
+  json.field_string("app_state_label", snap.app_state_label);
+  json.field_bool("rescanning", snap.rescanning);
 
-  json += ",\"cover_rev\":\"";
-  json += web_json_escape(allow_cover_fetch_now ? snap.cover_rev : String(""));
-  json += "\"";
+  json.field_bool("is_playing", snap.is_playing);
+  json.field_bool("is_paused", snap.is_paused);
 
-  json += ",\"cover_url\":\"";
-  json += web_json_escape(allow_cover_fetch_now ? snap.cover_url : String(""));
-  json += "\"";
+  json.field_int("track_idx", snap.track_idx);
+  json.field_string("title", snap.title);
+  json.field_string("artist", snap.artist);
+  json.field_string("album", snap.album);
 
-  json += ",\"source_type\":\"" + web_json_escape(snap.source_type) + "\"";
+  json.field_uint("play_ms", snap.play_ms);
+  json.field_uint("total_ms", snap.total_ms);
+  json.field_uint("volume", snap.volume);
+  json.field_bool("volume_locked", s_web_volume_locked);
 
-  json += ",\"radio_active\":";
-  json += (snap.radio_active ? "true" : "false");
-  json += ",\"radio_idx\":" + String(snap.radio_idx);
-  json += ",\"radio_name\":\"" + web_json_escape(snap.radio_name) + "\"";
-  json += ",\"radio_format\":\"" + web_json_escape(snap.radio_format) + "\"";
-  json += ",\"radio_region\":\"" + web_json_escape(snap.radio_region) + "\"";
-  json += ",\"radio_state\":\"" + web_json_escape(snap.radio_state) + "\"";
-  json += ",\"radio_error\":\"" + web_json_escape(snap.radio_error) + "\"";
-  json += ",\"radio_stream_title\":\"" + web_json_escape(snap.radio_stream_title) + "\"";
-  json += ",\"radio_backend\":\"" + web_json_escape(snap.radio_backend) + "\"";
-  json += ",\"radio_bitrate\":" + String(snap.radio_bitrate);
+  json.field_string("mode", snap.mode);
+  json.field_string("mode_label", snap.mode_label);
+  json.field_string("view", snap.view);
+  json.field_string("view_label", snap.view_label);
 
-    json += ",\"net_track_active\":";
-  json += (snap.net_track_active ? "true" : "false");
+  json.field_int("display_pos", snap.display_pos);
+  json.field_int("display_total", snap.display_total);
+  json.field_int("current_group_idx", snap.current_group_idx);
 
-  json += ",\"net_track_idx\":";
-  json += String(snap.net_track_idx);
+  json.field_string("net_mode", snap.net_mode);
+  json.field_string("ip", snap.ip);
+  json.field_string("wifi_name", snap.wifi_name);
+  json.field_string("hostname", snap.hostname);
+  json.field_string("wifi_source", snap.wifi_source);
 
-  json += ",\"net_track_title\":\"";
-  json += web_json_escape(snap.net_track_title);
-  json += "\"";
+  json.field_bool("can_cancel_scan", snap.can_cancel_scan);
+  json.field_string("scan_action_label", snap.scan_action_label);
 
-  json += ",\"net_track_url\":\"";
-  json += web_json_escape(snap.net_track_url);
-  json += "\"";
+  json.field_bool("has_lyrics", snap.has_lyrics);
+  json.field_bool("lyrics_loading", snap.lyrics_loading);
+  json.field_string("current_lyric", snap.current_lyric);
+  json.field_string("next_lyric", snap.next_lyric);
+  json.field_string("following_lyric", snap.following_lyric);
 
-  json += ",\"net_track_format\":\"";
-  json += web_json_escape(snap.net_track_format);
-  json += "\"";
+  json.field_bool("show_next_lyric", snap.show_next_lyric);
+  json.field_bool("show_cover", snap.show_cover);
+  json.field_bool("web_cover_spin", snap.web_cover_spin);
+  json.field_bool("show_wifi_info", ws.show_wifi_info);
 
-  json += ",\"net_track_artist\":\"";
-  json += web_json_escape(snap.net_track_artist);
-  json += "\"";
+  json.field_string("lyric_sync_mode", web_lyric_sync_mode_key(ws.lyric_sync_mode));
+  json.field_string("lyric_sync_mode_label", web_lyric_sync_mode_label(ws.lyric_sync_mode));
+  json.field_uint("lyric_wait_poll_threshold_ms",
+                  web_lyric_sync_mode_threshold_ms(ws.lyric_sync_mode));
 
-  json += ",\"net_track_album\":\"";
-  json += web_json_escape(snap.net_track_album);
-  json += "\"";
+  json.field_uint("current_lyric_start_ms", snap.current_lyric_start_ms);
+  json.field_uint("next_lyric_start_ms", snap.next_lyric_start_ms);
+  json.field_uint("following_lyric_start_ms", snap.following_lyric_start_ms);
+  json.field_uint("next_poll_ms", snap.next_poll_ms);
 
-  json += ",\"net_track_duration_ms\":";
-  json += String((unsigned long)snap.net_track_duration_ms);
+  json.field_bool("cover_loading", cover_loading);
+  json.field_bool("has_cover", allow_cover_fetch_now);
+  json.field_string("cover_rev", allow_cover_fetch_now ? snap.cover_rev.c_str() : "");
+  json.field_string("cover_url", allow_cover_fetch_now ? snap.cover_url.c_str() : "");
 
-  json += ",\"net_track_state\":\"";
-  json += web_json_escape(snap.net_track_state);
-  json += "\"";
+  json.field_string("source_type", snap.source_type);
+  json.field_bool("radio_active", snap.radio_active);
+  json.field_int("radio_idx", snap.radio_idx);
+  json.field_string("radio_name", snap.radio_name);
+  json.field_string("radio_format", snap.radio_format);
+  json.field_string("radio_region", snap.radio_region);
+  json.field_string("radio_state", snap.radio_state);
+  json.field_string("radio_error", snap.radio_error);
+  json.field_string("radio_stream_title", snap.radio_stream_title);
+  json.field_string("radio_backend", snap.radio_backend);
+  json.field_uint("radio_bitrate", snap.radio_bitrate);
 
-  json += ",\"net_track_error\":\"";
-  json += web_json_escape(snap.net_track_error);
-  json += "\"";
+  json.field_bool("net_track_active", snap.net_track_active);
+  json.field_int("net_track_idx", snap.net_track_idx);
+  json.field_string("net_track_title", snap.net_track_title);
+  json.field_string("net_track_url", snap.net_track_url);
+  json.field_string("net_track_format", snap.net_track_format);
+  json.field_string("net_track_artist", snap.net_track_artist);
+  json.field_string("net_track_album", snap.net_track_album);
+  json.field_uint("net_track_duration_ms", snap.net_track_duration_ms);
+  json.field_string("net_track_state", snap.net_track_state);
+  json.field_string("net_track_error", snap.net_track_error);
 
-  json += "}";
-
-  web_send_no_cache_headers();
-  s_server.send(200, "application/json; charset=utf-8", json);  
+  if (!json.finish()) {
+    web_abort_client();
+  }
 }
 
 static bool web_is_remote_image_url(const String& s) {

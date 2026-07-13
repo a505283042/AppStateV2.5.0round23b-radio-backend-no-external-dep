@@ -10,8 +10,8 @@
  */
 struct WebPlayerSnapshot {
   bool ok = false;
-  String app_state;         // 机器可读状态 key，例如 player / rescanning
-  String app_state_label;   // 中文显示文案
+  const char* app_state = "unknown";       // 静态状态 key，避免高频轮询反复分配 String
+  const char* app_state_label = "未知";     // 静态中文文案
   bool rescanning = false;
   bool is_playing = false;
   bool is_paused = false;
@@ -22,10 +22,10 @@ struct WebPlayerSnapshot {
   uint32_t play_ms = 0;
   uint32_t total_ms = 0;
   uint8_t volume = 0;
-  String mode;              // 机器可读模式 key，例如 all_seq / artist_rnd
-  String mode_label;        // 中文显示文案
-  String view;              // 当前网页/设备主视图 key，例如 info / rotate
-  String view_label;        // 当前主视图中文文案
+  const char* mode = "unknown";            // 静态模式 key
+  const char* mode_label = "未知";          // 静态模式文案
+  const char* view = "unknown";            // 静态视图 key
+  const char* view_label = "未知视图";      // 静态视图文案
   int display_pos = -1;
   int display_total = 0;
   int current_group_idx = -1;
@@ -35,7 +35,7 @@ struct WebPlayerSnapshot {
   String hostname;
   String wifi_source;        // 调试字段，当前 Wi‑Fi 来源：config_file / ap_fallback
   bool can_cancel_scan = false;
-  String scan_action_label;
+  const char* scan_action_label = "开始重扫";
 
   // 第二步网页增强：歌词摘要与封面状态
   bool has_lyrics = false;
@@ -56,7 +56,7 @@ struct WebPlayerSnapshot {
   String cover_url;
 
   // 网络电台 / 播放源摘要（round16 scaffold）
-  String source_type;
+  const char* source_type = "none";         // player_source_type_key() 返回静态字符串
   bool radio_active = false;
   int radio_idx = -1;
   String radio_name;
@@ -83,7 +83,14 @@ struct WebPlayerSnapshot {
   uint32_t next_poll_ms = 0;
 };
 
-/** 采样当前播放器状态，供网页 API 返回。 */
+/**
+ * @brief 采样当前播放器状态到调用方提供的对象。
+ *
+ * 高频接口应复用同一个对象，使内部 String 保留容量，避免每次轮询反复申请和释放。
+ */
+void web_snapshot_capture_into(WebPlayerSnapshot& snap);
+
+/** 兼容低频调用：创建并返回一份独立快照。 */
 WebPlayerSnapshot web_snapshot_capture();
 
 /** 生成电台封面的版本标识。 */
