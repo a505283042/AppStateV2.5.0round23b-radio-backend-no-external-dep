@@ -4,6 +4,7 @@
 #include <WiFi.h>
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
 #include <string.h>
@@ -28,8 +29,43 @@ static constexpr uint32_t kCoverJobDelayMs = 600;
 static constexpr uint32_t kHttpTimeoutMs = 5000;
 static constexpr uint16_t kCoverTaskStackBytes = 12288;
 static constexpr UBaseType_t kCoverTaskPrio = 1;
+static constexpr UBaseType_t kCoverTaskCore = 1;
+static constexpr UBaseType_t kCoverQueueLength = 1;
 
-volatile uint32_t s_cover_job_generation = 0;
+static portMUX_TYPE s_cover_generation_mux = portMUX_INITIALIZER_UNLOCKED;
+static uint32_t s_cover_job_generation = 0;
+static QueueHandle_t s_cover_job_queue = nullptr;
+static TaskHandle_t s_cover_task_handle = nullptr;
+static StaticSemaphore_t s_cover_worker_mu_buf;
+static SemaphoreHandle_t s_cover_worker_mu = nullptr;
+
+static SemaphoreHandle_t cover_worker_mutex()
+{
+  if (!s_cover_worker_mu) {
+    s_cover_worker_mu = xSemaphoreCreateMutexStatic(&s_cover_worker_mu_buf);
+  }
+  return s_cover_worker_mu;
+}
+
+static uint32_t current_cover_generation()
+{
+  portENTER_CRITICAL(&s_cover_generation_mux);
+  const uint32_t generation = s_cover_job_generation;
+  portEXIT_CRITICAL(&s_cover_generation_mux);
+  return generation;
+}
+
+static uint32_t advance_cover_generation()
+{
+  portENTER_CRITICAL(&s_cover_generation_mux);
+  ++s_cover_job_generation;
+  if (s_cover_job_generation == 0) {
+    s_cover_job_generation = 1;
+  }
+  const uint32_t generation = s_cover_job_generation;
+  portEXIT_CRITICAL(&s_cover_generation_mux);
+  return generation;
+}
 
 struct NetCoverRuntimeState {
   bool valid = false;
@@ -115,7 +151,7 @@ static void set_runtime_cover_state(int idx, const String& url, uint32_t offset,
 
 static bool is_current_job(uint32_t generation, int idx, const String& url)
 {
-  if (generation != s_cover_job_generation) {
+  if (generation != current_cover_generation()) {
     return false;
   }
 
@@ -178,7 +214,6 @@ static char* alloc_remote_lyrics_buffer(size_t cap)
 
 static bool http_get_lrc_text(const String& lrc_url,
                               uint32_t generation,
-                              int idx,
                               char** out_text,
                               size_t* out_len,
                               int* out_http_code)
@@ -189,7 +224,7 @@ static bool http_get_lrc_text(const String& lrc_url,
 
   if (!out_text || !out_len || lrc_url.length() == 0) return false;
   if (!WiFi.isConnected()) return false;
-  if (generation != s_cover_job_generation) return false;
+  if (generation != current_cover_generation()) return false;
 
   HTTPClient http;
   http.setTimeout(kHttpTimeoutMs);
@@ -227,7 +262,7 @@ static bool http_get_lrc_text(const String& lrc_url,
   uint32_t last_data_ms = millis();
 
   while (http.connected()) {
-    if (generation != s_cover_job_generation) {
+    if (generation != current_cover_generation()) {
       free(buf);
       http.end();
       return false;
@@ -305,7 +340,6 @@ static bool fetch_and_apply_same_dir_lrc(const String& mp3_url, uint32_t generat
     const uint32_t t0 = millis();
     const bool ok = http_get_lrc_text(lrc_url,
                                       generation,
-                                      idx,
                                       &lyrics_text,
                                       &lyrics_len,
                                       &http_code);
@@ -350,13 +384,12 @@ static bool http_range_get_exact(const String& url,
                                  uint32_t len,
                                  uint8_t* dst,
                                  uint32_t* out_got,
-                                 uint32_t generation,
-                                 int idx)
+                                 uint32_t generation)
 {
   if (out_got) *out_got = 0;
   if (!dst || len == 0) return false;
   if (!WiFi.isConnected()) return false;
-  if (generation != s_cover_job_generation) return false;
+  if (generation != current_cover_generation()) return false;
 
   HTTPClient http;
   http.setTimeout(kHttpTimeoutMs);
@@ -386,7 +419,7 @@ static bool http_range_get_exact(const String& url,
   uint32_t last_data_ms = millis();
 
   while (copied < len && http.connected()) {
-    if (generation != s_cover_job_generation) {
+    if (generation != current_cover_generation()) {
       http.end();
       return false;
     }
@@ -422,8 +455,8 @@ static bool http_range_get_exact(const String& url,
 
 class HttpRangeId3Reader final : public Id3ByteReader {
 public:
-  HttpRangeId3Reader(const String& url, uint32_t generation, int idx)
-      : m_url(url), m_generation(generation), m_idx(idx) {}
+  HttpRangeId3Reader(const String& url, uint32_t generation)
+      : m_url(url), m_generation(generation) {}
 
   ~HttpRangeId3Reader() override {
     if (m_buf) {
@@ -481,7 +514,7 @@ private:
       return true;
     }
 
-    if (m_generation != s_cover_job_generation) {
+    if (m_generation != current_cover_generation()) {
       return false;
     }
 
@@ -503,8 +536,7 @@ private:
                               kHttpRangeWindowBytes,
                               m_buf,
                               &got,
-                              m_generation,
-                              m_idx)) {
+                              m_generation)) {
       return false;
     }
 
@@ -515,7 +547,6 @@ private:
 
   String m_url;
   uint32_t m_generation = 0;
-  int m_idx = -1;
   uint32_t m_pos = 0;
   uint8_t* m_buf = nullptr;
   uint32_t m_window_start = 0;
@@ -531,7 +562,6 @@ struct NetCoverJob {
 static bool fetch_remote_cover_image(const String& url,
                                      const Mp3CoverLoc& loc,
                                      uint32_t generation,
-                                     int idx,
                                      uint8_t** out_buf,
                                      size_t* out_len,
                                      bool* out_is_png)
@@ -562,7 +592,7 @@ static bool fetch_remote_cover_image(const String& url,
 
   uint32_t copied = 0;
   while (copied < loc.size) {
-    if (generation != s_cover_job_generation) {
+    if (generation != current_cover_generation()) {
       heap_caps_free(buf);
       return false;
     }
@@ -576,8 +606,7 @@ static bool fetch_remote_cover_image(const String& url,
                               chunk,
                               buf + copied,
                               &got,
-                              generation,
-                              idx) || got != chunk) {
+                              generation) || got != chunk) {
       heap_caps_free(buf);
       return false;
     }
@@ -600,24 +629,12 @@ static bool fetch_remote_cover_image(const String& url,
   return true;
 }
 
-static void net_cover_task_entry(void* arg)
+static void process_net_cover_job(int idx, uint32_t generation, const String& url)
 {
-  NetCoverJob* job = static_cast<NetCoverJob*>(arg);
-  if (!job) {
-    vTaskDelete(nullptr);
-    return;
-  }
-
-  const int idx = job->idx;
-  const uint32_t generation = job->generation;
-  const String url = job->url;
-  delete job;
-
   const uint32_t task_start_ms = millis();
 
   vTaskDelay(pdMS_TO_TICKS(kLyricsJobDelayMs));
   if (!is_current_job(generation, idx, url)) {
-    vTaskDelete(nullptr);
     return;
   }
 
@@ -629,22 +646,19 @@ static void net_cover_task_entry(void* arg)
   }
 
   if (!is_current_job(generation, idx, url)) {
-    vTaskDelete(nullptr);
     return;
   }
 
   const uint32_t t0 = millis();
   Mp3CoverLoc loc;
-  HttpRangeId3Reader reader(url, generation, idx);
+  HttpRangeId3Reader reader(url, generation);
 
   if (!id3_find_apic_from_reader(reader, loc) || !loc.found) {
     LOGD("[网络封面] 未找到 NAS MP3 内嵌 APIC idx=%d", idx);
-    vTaskDelete(nullptr);
     return;
   }
 
   if (!is_current_job(generation, idx, url)) {
-    vTaskDelete(nullptr);
     return;
   }
 
@@ -655,21 +669,20 @@ static void net_cover_task_entry(void* arg)
   if (!fetch_remote_cover_image(url,
                                 loc,
                                 generation,
-                                idx,
                                 &cover_buf,
                                 &cover_len,
                                 &cover_is_png)) {
-    LOGW("[网络封面] 下载 APIC 图片失败 idx=%d off=%lu size=%lu",
-         idx,
-         (unsigned long)loc.offset,
-         (unsigned long)loc.size);
-    vTaskDelete(nullptr);
+    if (is_current_job(generation, idx, url)) {
+      LOGW("[网络封面] 下载 APIC 图片失败 idx=%d off=%lu size=%lu",
+           idx,
+           (unsigned long)loc.offset,
+           (unsigned long)loc.size);
+    }
     return;
   }
 
   if (!is_current_job(generation, idx, url)) {
     heap_caps_free(cover_buf);
-    vTaskDelete(nullptr);
     return;
   }
 
@@ -695,11 +708,123 @@ static void net_cover_task_entry(void* arg)
          cover_is_png ? 1 : 0,
          web_ok ? 1 : 0,
          (unsigned long)(millis() - t0));
-  } else {
+  } else if (is_current_job(generation, idx, url)) {
     LOGW("[网络封面] NAS 内嵌封面缩放失败 idx=%d size=%u", idx, (unsigned)cover_len);
   }
+}
 
-  vTaskDelete(nullptr);
+static void net_cover_task_entry(void*)
+{
+  LOGI("[网络封面] 常驻任务已启动：队列=%u 栈=%u 优先级=%u 核心=%u",
+       (unsigned)kCoverQueueLength,
+       (unsigned)kCoverTaskStackBytes,
+       (unsigned)kCoverTaskPrio,
+       (unsigned)kCoverTaskCore);
+
+  for (;;) {
+    NetCoverJob* job = nullptr;
+    if (!s_cover_job_queue ||
+        xQueueReceive(s_cover_job_queue, &job, portMAX_DELAY) != pdTRUE) {
+      vTaskDelay(pdMS_TO_TICKS(10));
+      continue;
+    }
+
+    if (!job) {
+      continue;
+    }
+
+    const int idx = job->idx;
+    const uint32_t generation = job->generation;
+    const String url = job->url;
+    delete job;
+
+    process_net_cover_job(idx, generation, url);
+  }
+}
+
+static bool ensure_net_cover_worker_started()
+{
+  SemaphoreHandle_t mu = cover_worker_mutex();
+  if (!mu || xSemaphoreTake(mu, pdMS_TO_TICKS(100)) != pdTRUE) {
+    LOGW("[网络封面] 获取常驻任务初始化锁失败");
+    return false;
+  }
+
+  if (s_cover_job_queue && s_cover_task_handle) {
+    xSemaphoreGive(mu);
+    return true;
+  }
+
+  if (!s_cover_job_queue) {
+    s_cover_job_queue = xQueueCreate(kCoverQueueLength, sizeof(NetCoverJob*));
+    if (!s_cover_job_queue) {
+      LOGW("[网络封面] 创建覆盖队列失败");
+      xSemaphoreGive(mu);
+      return false;
+    }
+  }
+
+  if (!s_cover_task_handle) {
+    const BaseType_t ok = xTaskCreatePinnedToCore(net_cover_task_entry,
+                                                  "NetCoverTask",
+                                                  kCoverTaskStackBytes,
+                                                  nullptr,
+                                                  kCoverTaskPrio,
+                                                  &s_cover_task_handle,
+                                                  kCoverTaskCore);
+    if (ok != pdPASS) {
+      LOGW("[网络封面] 创建常驻任务失败");
+      vQueueDelete(s_cover_job_queue);
+      s_cover_job_queue = nullptr;
+      s_cover_task_handle = nullptr;
+      xSemaphoreGive(mu);
+      return false;
+    }
+  }
+
+  xSemaphoreGive(mu);
+  return true;
+}
+
+static void discard_pending_cover_job_locked()
+{
+  if (!s_cover_job_queue) {
+    return;
+  }
+
+  NetCoverJob* pending = nullptr;
+  if (xQueueReceive(s_cover_job_queue, &pending, 0) == pdTRUE && pending) {
+    delete pending;
+  }
+}
+
+static bool submit_latest_cover_job(NetCoverJob* job)
+{
+  if (!job) {
+    return false;
+  }
+
+  SemaphoreHandle_t mu = cover_worker_mutex();
+  if (!mu || xSemaphoreTake(mu, pdMS_TO_TICKS(100)) != pdTRUE) {
+    return false;
+  }
+
+  discard_pending_cover_job_locked();
+  const bool queued = s_cover_job_queue &&
+                      xQueueSend(s_cover_job_queue, &job, 0) == pdTRUE;
+  xSemaphoreGive(mu);
+  return queued;
+}
+
+static void discard_pending_cover_job()
+{
+  SemaphoreHandle_t mu = cover_worker_mutex();
+  if (!mu || xSemaphoreTake(mu, pdMS_TO_TICKS(100)) != pdTRUE) {
+    return;
+  }
+
+  discard_pending_cover_job_locked();
+  xSemaphoreGive(mu);
 }
 
 }  // namespace
@@ -710,12 +835,16 @@ void net_music_embedded_cover_start(int net_track_idx, const String& mp3_url)
     return;
   }
 
-  const uint32_t generation = ++s_cover_job_generation;
+  const uint32_t generation = advance_cover_generation();
   clear_runtime_cover_state();
+
+  if (!ensure_net_cover_worker_started()) {
+    return;
+  }
 
   NetCoverJob* job = new NetCoverJob();
   if (!job) {
-    LOGW("[网络封面] job 分配失败");
+    LOGW("[网络封面] job 分配失败 idx=%d", net_track_idx);
     return;
   }
 
@@ -723,23 +852,26 @@ void net_music_embedded_cover_start(int net_track_idx, const String& mp3_url)
   job->generation = generation;
   job->url = mp3_url;
 
-  BaseType_t ok = xTaskCreatePinnedToCore(net_cover_task_entry,
-                                          "NetMp3Cover",
-                                          kCoverTaskStackBytes,
-                                          job,
-                                          kCoverTaskPrio,
-                                          nullptr,
-                                          1);
-  if (ok != pdPASS) {
-    LOGW("[网络封面] 创建任务失败 idx=%d", net_track_idx);
+  // 队列长度固定为1：新请求先清理尚未开始的旧请求，只保留最新曲目。
+  // 正在执行的旧请求通过 generation 在下一检查点主动退出，不会再创建额外任务。
+  if (!submit_latest_cover_job(job)) {
+    LOGW("[网络封面] 提交最新请求失败 idx=%d", net_track_idx);
     delete job;
+    return;
   }
+
+  LOGD("[网络封面] 最新请求已提交 idx=%d generation=%lu",
+       net_track_idx,
+       (unsigned long)generation);
 }
 
 void net_music_embedded_cover_cancel()
 {
-  ++s_cover_job_generation;
+  advance_cover_generation();
+  discard_pending_cover_job();
   clear_runtime_cover_state();
+  LOGD("[网络封面] 已取消当前与待处理请求 generation=%lu",
+       (unsigned long)current_cover_generation());
 }
 
 bool net_music_embedded_cover_get_current(int net_track_idx,
