@@ -927,7 +927,7 @@ static void draw_alarm_status_overlay(LGFX_Sprite* dst, int box_y = -1)
              static_cast<unsigned>(cfg.minute));
 
     static constexpr int BOX_W = 108;
-    static constexpr int BOX_H = 16;
+    static constexpr int BOX_H = 18;
     static constexpr int BOX_X = (240 - BOX_W) / 2;
     static constexpr int BOX_R = 7;
 
@@ -944,13 +944,14 @@ static void draw_alarm_status_overlay(LGFX_Sprite* dst, int box_y = -1)
     dst->fillRoundRect(BOX_X, box_y, BOX_W, BOX_H, BOX_R, TFT_BLACK);
     dst->drawRoundRect(BOX_X, box_y, BOX_W, BOX_H, BOX_R, border_color);
 
-    // 使用统一的 10x10 闹钟点阵图标。
-    draw_alarm_icon(dst, BOX_X + 8, box_y + 3, text_color);
+    // 图标和文字共用同一个 18px 高底纹；文字使用透明背景，
+    // 避免字体渲染器额外画出一个与图标区域高度不同的矩形底纹。
+    draw_alarm_icon(dst, BOX_X + 8, box_y + 4, text_color);
 
     dst->setFont(&g_font_cjk);
     dst->setTextSize(1);
     dst->setTextWrap(false);
-    dst->setTextColor(text_color, TFT_BLACK);
+    dst->setTextColor(text_color);
     dst->setTextDatum(middle_left);
     dst->drawString(text, BOX_X + 24, box_y + BOX_H / 2);
     dst->setTextDatum(top_left);

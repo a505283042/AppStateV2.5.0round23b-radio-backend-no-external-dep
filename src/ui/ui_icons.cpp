@@ -24,18 +24,20 @@ static const uint16_t kAlarmIconRows[10] = {
   0x037B,
 };
 
-// 睡眠图标原始数据包含第 11 位，按 11x10 绘制，避免左侧像素被截掉。
+// 10x10 睡眠图标。坐标按“第N行.点亮列”逐点核对：
+// 1:4,5,6,8,9,10  2:2,3,5,9  3:2,5,8,9,10  4:1,5
+// 5:1,6,10  6:1,7,8,9,10  7:1,10  8:2,9  9:3,8  10:4,5,6,7
 static const uint16_t kSleepIconRows[10] = {
-  0x01D7,
-  0x0342,
-  0x0277,
-  0x0440,
-  0x0421,
-  0x040F,
-  0x0401,
-  0x0202,
-  0x0104,
-  0x00F8,
+  0x0077,
+  0x01A2,
+  0x0127,
+  0x0220,
+  0x0211,
+  0x020F,
+  0x0201,
+  0x0102,
+  0x0084,
+  0x0078,
 };
 
 // 11x10 NAS 图标数据。
@@ -67,7 +69,7 @@ static const uint16_t kRadioIconRows[10] = {
 };
 
 static const MonoRowIcon kAlarmIcon = {kAlarmIconRows, 10, 10};
-static const MonoRowIcon kSleepIcon = {kSleepIconRows, 11, 10};
+static const MonoRowIcon kSleepIcon = {kSleepIconRows, 10, 10};
 static const MonoRowIcon kNasIcon = {kNasIconRows, 11, 10};
 static const MonoRowIcon kRadioIcon = {kRadioIconRows, 10, 10};
 

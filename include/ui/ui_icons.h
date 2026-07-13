@@ -13,7 +13,7 @@ void draw_album_icon(LGFX_Sprite* dst, int x, int y, uint16_t color);
 
 // 规范化的单色点阵图标（按行位图，1=点亮）
 void draw_alarm_icon(LGFX_Sprite* dst, int x, int y, uint16_t color);   // 10x10
-void draw_sleep_icon(LGFX_Sprite* dst, int x, int y, uint16_t color);   // 11x10（原始数据含第11位）
+void draw_sleep_icon(LGFX_Sprite* dst, int x, int y, uint16_t color);   // 10x10
 void draw_nas_icon(LGFX_Sprite* dst, int x, int y, uint16_t color);     // 11x10
 void draw_radio_icon(LGFX_Sprite* dst, int x, int y, uint16_t color);   // 10x10
 

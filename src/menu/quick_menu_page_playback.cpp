@@ -77,19 +77,64 @@ int& local_browse_category_ref()
     return s_local_browse_category;
 }
 
+const char* label_play_category()
+{
+    switch (player_source_type_get()) {
+        case PlayerSourceType::NET_TRACK:
+            return "NAS播放范围";
+
+        case PlayerSourceType::NET_RADIO:
+            return "电台播放范围";
+
+        case PlayerSourceType::LOCAL_TRACK:
+        default:
+            return "播放大类";
+    }
+}
+
 const char* value_play_category()
 {
-    const PlayerSourceType source_type = player_source_type_get();
-    if (source_type == PlayerSourceType::NET_TRACK ||
-        source_type == PlayerSourceType::NET_RADIO) {
-        return "固定全部";
+    switch (player_source_type_get()) {
+        case PlayerSourceType::NET_TRACK:
+            return "固定全部歌曲";
+
+        case PlayerSourceType::NET_RADIO:
+            return "固定电台列表";
+
+        case PlayerSourceType::LOCAL_TRACK:
+        default:
+            return category_label(mode_category(g_play_mode));
     }
-    return category_label(mode_category(g_play_mode));
+}
+
+const char* label_local_browse_mode()
+{
+    switch (player_source_type_get()) {
+        case PlayerSourceType::NET_TRACK:
+            return "NAS浏览范围";
+
+        case PlayerSourceType::NET_RADIO:
+            return "电台浏览范围";
+
+        case PlayerSourceType::LOCAL_TRACK:
+        default:
+            return "本地浏览方式";
+    }
 }
 
 const char* value_local_browse_mode()
 {
-    return category_label(local_browse_category_ref());
+    switch (player_source_type_get()) {
+        case PlayerSourceType::NET_TRACK:
+            return "固定全部歌曲";
+
+        case PlayerSourceType::NET_RADIO:
+            return "固定电台列表";
+
+        case PlayerSourceType::LOCAL_TRACK:
+        default:
+            return category_label(local_browse_category_ref());
+    }
 }
 
 const char* value_open()
@@ -159,6 +204,13 @@ bool action_cycle_play_category()
 
 bool action_cycle_local_browse_mode()
 {
+    const PlayerSourceType source_type = player_source_type_get();
+    if (source_type == PlayerSourceType::NET_TRACK ||
+        source_type == PlayerSourceType::NET_RADIO) {
+        // 网络音源只有一个线性列表，不允许切换到歌手或专辑分类。
+        return false;
+    }
+
     // 本地浏览方式只影响“当前源列表/本地列表”的浏览入口，
     // 不修改 g_play_mode，也不切换正在播放的播放大类。
     int& browse_category = local_browse_category_ref();
@@ -221,8 +273,8 @@ bool action_start_rescan()
 
 const QuickMenuItem PLAYBACK_ITEMS[] = {
     {"播放顺序", QuickMenuItemType::Toggle, QuickMenuPage::Playback, "", value_play_order, action_toggle_play_order, true, false},
-    {"播放大类", QuickMenuItemType::Toggle, QuickMenuPage::Playback, "", value_play_category, action_cycle_play_category, true, false},
-    {"本地浏览方式", QuickMenuItemType::Toggle, QuickMenuPage::Playback, "", value_local_browse_mode, action_cycle_local_browse_mode, true, false},
+    {"播放大类", QuickMenuItemType::Toggle, QuickMenuPage::Playback, "", value_play_category, action_cycle_play_category, true, false, label_play_category},
+    {"本地浏览方式", QuickMenuItemType::Toggle, QuickMenuPage::Playback, "", value_local_browse_mode, action_cycle_local_browse_mode, true, false, label_local_browse_mode},
     {"当前源列表", QuickMenuItemType::Action, QuickMenuPage::Playback, "", value_open, action_open_current_source_list, true, false},
     {"霍尔控制", QuickMenuItemType::Toggle, QuickMenuPage::Playback, "", value_hall_control_enabled, action_toggle_hall_control, true, false},
     {"电磁铁动作", QuickMenuItemType::Toggle, QuickMenuPage::Playback, "", value_solenoid_enabled, action_toggle_solenoid, true, false},
