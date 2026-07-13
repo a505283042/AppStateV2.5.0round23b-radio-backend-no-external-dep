@@ -1039,6 +1039,18 @@ bool bq27441_read(Bq27441Sample* out)
     uint8_t optional_failed_err = 0;
     auto read_optional = [&](uint8_t cmd, uint16_t* value) -> bool {
         if (read_word(cmd, value)) return true;
+
+        const uint8_t first_error = s_last_i2c_error;
+        // 附加字段不是低电量判断的必要数据。遇到瞬时 NACK 时让出 2ms 后只重试一次，
+        // 避免一次短暂总线忙就污染 UI 缓存或输出告警；连续两次失败才记录。
+        delay(2);
+        if (read_word(cmd, value)) {
+            LOGD("[BQ27441] 附加字段首次读取失败后重试成功：命令=0x%02X 首次err=%u",
+                 cmd,
+                 first_error);
+            return true;
+        }
+
         if (optional_failed_cmd == 0) {
             optional_failed_cmd = cmd;
             optional_failed_err = s_last_i2c_error;
@@ -1055,7 +1067,7 @@ bool bq27441_read(Bq27441Sample* out)
 #endif
 
     if (optional_failed_cmd != 0 && warn_due(s_last_read_warn_ms, BQ27441_WARN_INTERVAL_MS)) {
-        LOGW("[BQ27441] 附加字段读取失败：命令=0x%02X err=%u，核心电量仍有效",
+        LOGW("[BQ27441] 完整采样附加字段连续两次读取失败：命令=0x%02X err=%u，核心电量仍有效",
              optional_failed_cmd,
              optional_failed_err);
     }

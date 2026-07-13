@@ -490,6 +490,19 @@ void board_hw_battery_status_tick()
         return;
     }
 
+    // 续航轻量采样只服务于电池放电估算。充电或外接电源时不读 RM/Current，
+    // 避免无效的续航计算和额外 I2C 负载。完整电池状态仍按原来的慢采样刷新。
+    if (s_battery_ui_status.charging || s_battery_ui_status.external_power_good) {
+        const BatteryRuntimeEstimateState expected = s_battery_ui_status.charging
+            ? BatteryRuntimeEstimateState::Charging
+            : BatteryRuntimeEstimateState::ExternalPower;
+        if (s_battery_ui_status.runtime_estimate_state != expected) {
+            reset_battery_runtime_estimate(expected, now);
+        }
+        s_battery_runtime_last_sample_ms = now;
+        return;
+    }
+
     if (s_battery_runtime_last_sample_ms != 0 &&
         now - s_battery_runtime_last_sample_ms < BATTERY_RUNTIME_SAMPLE_INTERVAL_MS) {
         return;
