@@ -17,7 +17,9 @@ static bool web_settings_equal(const WebRuntimeSettings& a, const WebRuntimeSett
       && a.wifi_enabled == b.wifi_enabled
       && a.show_wifi_info == b.show_wifi_info
       && a.hall_control_enabled == b.hall_control_enabled
-      && a.solenoid_enabled == b.solenoid_enabled;
+      && a.solenoid_enabled == b.solenoid_enabled
+      && a.status_led_enabled == b.status_led_enabled
+      && a.status_led_brightness == b.status_led_brightness;
 }
 
 const WebRuntimeSettings& web_settings_get() { return s_cfg; }
@@ -101,6 +103,33 @@ uint32_t web_lyric_sync_mode_threshold_ms(WebLyricSyncMode m) {
   }
 }
 
+const char* status_led_brightness_key(StatusLedBrightness value) {
+  switch (value) {
+    case StatusLedBrightness::Low:    return "low";
+    case StatusLedBrightness::High:   return "high";
+    case StatusLedBrightness::Medium:
+    default:                          return "medium";
+  }
+}
+
+const char* status_led_brightness_label(StatusLedBrightness value) {
+  switch (value) {
+    case StatusLedBrightness::Low:    return "低";
+    case StatusLedBrightness::High:   return "高";
+    case StatusLedBrightness::Medium:
+    default:                          return "中";
+  }
+}
+
+uint8_t status_led_brightness_value(StatusLedBrightness value) {
+  switch (value) {
+    case StatusLedBrightness::Low:    return 24;
+    case StatusLedBrightness::High:   return 64;
+    case StatusLedBrightness::Medium:
+    default:                          return 40;
+  }
+}
+
 bool web_settings_load() {
   s_cfg = WebRuntimeSettings{};
 
@@ -121,17 +150,22 @@ bool web_settings_load() {
   s_cfg.show_wifi_info = pref.getBool("wifi_info", s_cfg.show_wifi_info);
   s_cfg.hall_control_enabled = pref.getBool("hall_en", s_cfg.hall_control_enabled);
   s_cfg.solenoid_enabled = pref.getBool("sol_en", s_cfg.solenoid_enabled);
+  s_cfg.status_led_enabled = pref.getBool("led_en", s_cfg.status_led_enabled);
+  const uint8_t led_bri = pref.getUChar("led_bri", static_cast<uint8_t>(s_cfg.status_led_brightness));
+  s_cfg.status_led_brightness = led_bri <= static_cast<uint8_t>(StatusLedBrightness::High)
+      ? static_cast<StatusLedBrightness>(led_bri)
+      : StatusLedBrightness::Medium;
   pref.end();
   s_dirty = false;
 
-  LOGD("[网页] 设置已从 NVS 读取：刷新=%s 歌词=%s 显示下一首=%d 显示封面=%d 封面旋转=%d WiFi启用=%d WiFi信息=%d",
+  LOGD("[网页] 设置已从 NVS 读取：刷新=%s 歌词=%s WiFi=%d HALL=%d SOL=%d LED=%d/%s",
        web_refresh_preset_key(s_cfg.refresh_preset),
        web_lyric_sync_mode_key(s_cfg.lyric_sync_mode),
-       (int)s_cfg.show_next_lyric,
-       (int)s_cfg.show_cover,
-       (int)s_cfg.web_cover_spin,
        (int)s_cfg.wifi_enabled,
-       (int)s_cfg.show_wifi_info);
+       (int)s_cfg.hall_control_enabled,
+       (int)s_cfg.solenoid_enabled,
+       (int)s_cfg.status_led_enabled,
+       status_led_brightness_key(s_cfg.status_led_brightness));
   return true;
 }
 
@@ -150,7 +184,9 @@ bool web_settings_save() {
                && pref.putBool("wifi_en", s_cfg.wifi_enabled)
                && pref.putBool("wifi_info", s_cfg.show_wifi_info)
                && pref.putBool("hall_en", s_cfg.hall_control_enabled)
-               && pref.putBool("sol_en", s_cfg.solenoid_enabled);
+               && pref.putBool("sol_en", s_cfg.solenoid_enabled)
+               && pref.putBool("led_en", s_cfg.status_led_enabled)
+               && pref.putUChar("led_bri", static_cast<uint8_t>(s_cfg.status_led_brightness));
   pref.end();
 
   if (!ok) {
@@ -160,13 +196,13 @@ bool web_settings_save() {
 
   s_dirty = false;
 
-  LOGI("[网页] 设置已保存到 NVS：刷新=%s 歌词=%s 显示下一首=%d 显示封面=%d 封面旋转=%d WiFi启用=%d WiFi信息=%d",
+  LOGI("[网页] 设置已保存到 NVS：刷新=%s 歌词=%s WiFi=%d HALL=%d SOL=%d LED=%d/%s",
        web_refresh_preset_key(s_cfg.refresh_preset),
        web_lyric_sync_mode_key(s_cfg.lyric_sync_mode),
-       (int)s_cfg.show_next_lyric,
-       (int)s_cfg.show_cover,
-       (int)s_cfg.web_cover_spin,
        (int)s_cfg.wifi_enabled,
-       (int)s_cfg.show_wifi_info);
+       (int)s_cfg.hall_control_enabled,
+       (int)s_cfg.solenoid_enabled,
+       (int)s_cfg.status_led_enabled,
+       status_led_brightness_key(s_cfg.status_led_brightness));
   return true;
 }

@@ -27,6 +27,8 @@
 #include "player_source.h"
 #include "web/web_server.h"
 #include "hal/board_hw_control.h"
+#include "hal/hall_control.h"
+#include "hal/ws2812_status.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -80,6 +82,8 @@ void app_state_init(void)
 {
     g_app_state = STATE_BOOT;
     keys_init(); /* 初始化按键处理模块 */
+    hall_control_begin();
+    (void)ws2812_status_begin();
     storage_hotplug_init();
 }
 
@@ -217,8 +221,12 @@ void app_state_update(void)
     // 避免多个按键读取连续触发超时并拖慢整个主循环。
     board_hw_i2c_service();
 
-    // 按键处理也需要高频调用，确保响应及时
+    // 按键处理也需要高频调用，确保响应及时。
     keys_update();
+    // 霍尔采用稳定物理状态控制：靠近保持暂停，离开只恢复霍尔造成的暂停。
+    hall_control_tick();
+    // WS2812 根据实际播放状态、音源和顺序/随机模式非阻塞刷新。
+    ws2812_status_tick();
     // TC118S 电磁铁只允许短脉冲输出，tick 到时后自动断电。
     board_hw_solenoid_tick();
     web_server_poll();

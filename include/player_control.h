@@ -73,6 +73,25 @@ enum class PlayerToggleTrigger : uint8_t {
     NfcAdminResume,
 };
 
+/** 当前实际播放状态，供霍尔控制和状态灯统一读取。 */
+enum class PlayerPlaybackState : uint8_t {
+    Stopped = 0,
+    Playing,
+    Paused,
+};
+
+/** 获取当前实际播放状态。 */
+PlayerPlaybackState player_playback_state_get();
+
+/**
+ * @brief 幂等设置播放暂停状态。
+ *
+ * paused=true：已经暂停时不重复发命令；正在播放时执行暂停。
+ * paused=false：已经播放时不重复发命令；暂停时恢复；停止时尝试启动当前音源。
+ */
+bool player_set_paused(bool paused,
+                       PlayerToggleTrigger trigger = PlayerToggleTrigger::Unknown);
+
 /**
  * @brief 切换播放/暂停。
  *

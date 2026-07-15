@@ -23,6 +23,7 @@
 #include "ui/ui.h"
 #include "utils/log.h"
 #include "app_diagnostics.h"
+#include "hal/hall_control.h"
 
 namespace {
 
@@ -1156,7 +1157,7 @@ static bool control_play_net_track_index_impl(int idx, bool reset_shuffle)
     ui_set_track_pos(idx, (int)net_music_catalog_count());
     ui_set_play_mode(g_play_mode);
     audio_output_route_sync_ui_volume();
-    
+
 
     // NAS 播放起播时先显示网络封面加载图，避免继续显示上一首封面。
     // 如果 /System/net_cover_loading.jpg 不存在，则回退默认封面。
@@ -1335,81 +1336,120 @@ static const char* control_toggle_trigger_label(PlayerToggleTrigger trigger)
     }
 }
 
-void player_toggle_play(PlayerToggleTrigger trigger)
+PlayerPlaybackState player_playback_state_get()
+{
+    if (audio_service_is_paused()) {
+        return PlayerPlaybackState::Paused;
+    }
+    if (audio_service_is_playing()) {
+        return PlayerPlaybackState::Playing;
+    }
+    return PlayerPlaybackState::Stopped;
+}
+
+bool player_set_paused(bool paused, PlayerToggleTrigger trigger)
 {
     const PlayerSourceState source = player_source_get();
-    LOGI("[播放器] 播放/暂停请求：来源=%s 音源=%d playing=%d paused=%d",
+    const PlayerPlaybackState current = player_playback_state_get();
+
+    LOGI("[播放器] 设置暂停=%d：来源=%s 音源=%d playing=%d paused=%d",
+         paused ? 1 : 0,
          control_toggle_trigger_label(trigger),
          static_cast<int>(source.type),
-         audio_service_is_playing() ? 1 : 0,
-         audio_service_is_paused() ? 1 : 0);
-    const int track_count = control_track_count();
-    if (track_count <= 0 &&
-        source.type != PlayerSourceType::NET_RADIO &&
-        source.type != PlayerSourceType::NET_TRACK) {
-        return;
-    }
-    if (g_rescanning) return;
+         current == PlayerPlaybackState::Playing ? 1 : 0,
+         current == PlayerPlaybackState::Paused ? 1 : 0);
 
-    if (source.type == PlayerSourceType::NET_RADIO) {
-        if (audio_radio_backend_toggle_pause()) {
-            const bool paused = audio_radio_backend_is_paused();
-            player_source_set_radio_status(true, paused ? String("paused") : String("playing"), String());
-            LOGI("[电台] %s", paused ? "Paused" : "Resumed");
-            return;
-        }
-        if (source.radio_idx >= 0) {
-            (void)player_play_radio_index(source.radio_idx);
-            return;
-        }
+    if (g_rescanning) {
+        return false;
     }
 
-    if (audio_service_is_paused()) {
+    if (paused) {
+        if (current == PlayerPlaybackState::Paused) {
+            return true;
+        }
+        if (current != PlayerPlaybackState::Playing) {
+            return false;
+        }
+
+        if (!audio_service_pause(true)) {
+            LOGW("[播放器] 暂停命令执行失败");
+            return false;
+        }
+
+        s_user_paused = true;
+        s_pause_time_ms = millis();
+
+        if (source.type == PlayerSourceType::NET_RADIO) {
+            player_source_set_radio_status(true, String("paused"), String());
+        } else if (source.type == PlayerSourceType::NET_TRACK) {
+            player_source_set_net_track_status(true, String("paused"), String());
+        }
+
+        LOGI("[播放器] 已暂停于 %u ms", (unsigned)audio_get_play_ms());
+        return true;
+    }
+
+    // 磁铁仍靠近时，所有入口都只能保持暂停；霍尔离开后的恢复请求不会命中此条件。
+    if (hall_control_blocks_resume()) {
+        LOGI("[HALL] 磁铁仍靠近，拒绝恢复请求：来源=%s",
+             control_toggle_trigger_label(trigger));
+        return false;
+    }
+
+    if (current == PlayerPlaybackState::Playing) {
+        return true;
+    }
+
+    if (current == PlayerPlaybackState::Paused) {
         if (!audio_service_resume(true)) {
             LOGW("[播放器] 恢复命令执行失败");
-            return;
+            return false;
         }
+
         s_user_paused = false;
         s_pause_time_ms = 0;
 
-        if (source.type == PlayerSourceType::NET_TRACK) {
+        if (source.type == PlayerSourceType::NET_RADIO) {
+            player_source_set_radio_status(true, String("playing"), String());
+        } else if (source.type == PlayerSourceType::NET_TRACK) {
             player_source_set_net_track_status(true, String("playing"), String());
         }
 
         LOGI("[播放器] 已从暂停恢复");
-        return;
+        return true;
     }
 
-    if (audio_service_is_playing()) {
-        if (!audio_service_pause(true)) {
-            LOGW("[播放器] 暂停命令执行失败");
-            return;
-        }
-        s_user_paused = true;
-        s_pause_time_ms = millis();
-        if (source.type == PlayerSourceType::NET_TRACK) {
-            player_source_set_net_track_status(true, String("paused"), String());
-        }
-        const uint32_t paused_at_ms = audio_get_play_ms();
-        LOGI("[播放器] 暂停于 %u ms", paused_at_ms);
-        return;
-    }
-
+    // 已停止时按当前音源重新起播。网络音源可以没有本地曲库。
     if (source.type == PlayerSourceType::NET_RADIO && source.radio_idx >= 0) {
-        (void)player_play_radio_index(source.radio_idx);
-        return;
+        return player_play_radio_index(source.radio_idx);
     }
 
     if (source.type == PlayerSourceType::NET_TRACK && source.net_track_idx >= 0) {
-        (void)player_play_net_track_index(source.net_track_idx);
-        return;
+        return player_play_net_track_index(source.net_track_idx);
+    }
+
+    if (control_track_count() <= 0) {
+        return false;
     }
 
     const int cur = control_current_track_idx();
-    if (cur >= 0) {
-        LOGI("[播放器] 重新启动 当前 歌曲 #%d", cur);
-        (void)control_play_track_dispatch(cur, false, true);
+    if (cur < 0) {
+        return false;
     }
+
+    LOGI("[播放器] 重新启动当前歌曲 #%d", cur);
+    return control_play_track_dispatch(cur, false, true);
+}
+
+void player_toggle_play(PlayerToggleTrigger trigger)
+{
+    const PlayerPlaybackState current = player_playback_state_get();
+    if (current == PlayerPlaybackState::Playing) {
+        (void)player_set_paused(true, trigger);
+        return;
+    }
+
+    (void)player_set_paused(false, trigger);
 }
 
 void player_volume_step(int delta)

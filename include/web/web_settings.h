@@ -16,6 +16,13 @@ enum class WebLyricSyncMode : uint8_t {
   FOLLOW_POLL = 2,
 };
 
+// WS2812 状态灯亮度档位。
+enum class StatusLedBrightness : uint8_t {
+  Low = 0,
+  Medium = 1,
+  High = 2,
+};
+
 struct WebRuntimeSettings {
   // 只保留两个和轮询/歌词更新直接相关、用户容易理解的设置：
   WebRefreshPreset refresh_preset = WebRefreshPreset::BALANCED;
@@ -42,6 +49,10 @@ struct WebRuntimeSettings {
   // 关闭后播放键不再输出电磁铁短脉冲，驱动层仍保持停止态保护。
   bool solenoid_enabled = true;
 
+  // GPIO3 WS2812 播放状态灯。
+  bool status_led_enabled = true;
+  StatusLedBrightness status_led_brightness = StatusLedBrightness::Medium;
+
 };
 
 // 启动时从 NVS 加载网页运行设置；没有则使用默认值。
@@ -65,3 +76,7 @@ uint32_t web_refresh_preset_poll_ms(WebRefreshPreset p);
 const char* web_lyric_sync_mode_key(WebLyricSyncMode m);
 const char* web_lyric_sync_mode_label(WebLyricSyncMode m);
 uint32_t web_lyric_sync_mode_threshold_ms(WebLyricSyncMode m);
+
+const char* status_led_brightness_key(StatusLedBrightness value);
+const char* status_led_brightness_label(StatusLedBrightness value);
+uint8_t status_led_brightness_value(StatusLedBrightness value);

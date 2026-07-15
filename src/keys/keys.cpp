@@ -47,17 +47,6 @@ static KeyCtx k_ec06e { PIN_KEY_MCP_EC06_E, HIGH, 0, false, 0 };
 static KeyCtx k_voldn { PIN_KEY_VOLDN, HIGH, 0, false, 0 };
 static KeyCtx k_volup { PIN_KEY_VOLUP, HIGH, 0, false, 0 };
 
-// HALL_OUT：GPIO9 霍尔输入，默认按低电平触发一次播放/暂停。
-// 如果后续实测模块为高电平触发，只需要把 HALL_ACTIVE_LEVEL 改为 HIGH。
-static constexpr int HALL_ACTIVE_LEVEL = LOW;
-static constexpr uint32_t HALL_DEBOUNCE_MS = 60;
-static constexpr uint32_t HALL_TRIGGER_GUARD_MS = 800;
-
-static int s_hall_last_raw = HIGH;
-static int s_hall_stable = HIGH;
-static uint32_t s_hall_raw_change_ms = 0;
-static uint32_t s_hall_last_trigger_ms = 0;
-
 // VOLDN 双击检测
 static bool s_voldn_click_pending = false;
 static uint32_t s_voldn_click_deadline = 0;
@@ -487,75 +476,6 @@ static void setup_key_pin(int pin)
     }
 }
 
-static int read_hall_out_level()
-{
-#if defined(PIN_KEY_HALL_OUT)
-    if (PIN_KEY_HALL_OUT < 0) {
-        return HIGH;
-    }
-    return digitalRead(PIN_KEY_HALL_OUT);
-#else
-    return HIGH;
-#endif
-}
-
-static void hall_out_sync_to_hw_state()
-{
-    const int level = read_hall_out_level();
-    const uint32_t now = millis();
-
-    s_hall_last_raw = level;
-    s_hall_stable = level;
-    s_hall_raw_change_ms = now;
-    s_hall_last_trigger_ms = now;
-}
-
-static void handle_hall_out_play_pause()
-{
-#if defined(PIN_KEY_HALL_OUT)
-    if (PIN_KEY_HALL_OUT < 0) {
-        return;
-    }
-
-    // 扫描 / NFC 绑定确认页不处理霍尔输入，避免管理流程中误触发播放状态。
-    if (g_rescanning || g_app_state == STATE_NFC_ADMIN) {
-        return;
-    }
-
-    // 霍尔控制总开关关闭时，仍同步当前电平，避免重新开启后误触发。
-    if (!web_settings_get().hall_control_enabled) {
-        hall_out_sync_to_hw_state();
-        return;
-    }
-
-    const uint32_t now = millis();
-    const int raw = read_hall_out_level();
-
-    if (raw != s_hall_last_raw) {
-        s_hall_last_raw = raw;
-        s_hall_raw_change_ms = now;
-    }
-
-    if (raw == s_hall_stable || (now - s_hall_raw_change_ms) < HALL_DEBOUNCE_MS) {
-        return;
-    }
-
-    const int old_stable = s_hall_stable;
-    s_hall_stable = raw;
-
-    // 只在进入有效电平时触发一次，释放时不触发。
-    if (old_stable != HALL_ACTIVE_LEVEL && s_hall_stable == HALL_ACTIVE_LEVEL) {
-        if (now - s_hall_last_trigger_ms < HALL_TRIGGER_GUARD_MS) {
-            return;
-        }
-
-        s_hall_last_trigger_ms = now;
-        LOGI("[HALL] GPIO%d 触发播放/暂停", PIN_KEY_HALL_OUT);
-        player_toggle_play(PlayerToggleTrigger::Hall);
-    }
-#endif
-}
-
 /* VOLDN 双击提交：切换 WiFi */
 static void voldn_click_commit_double()
 {
@@ -635,9 +555,6 @@ void keys_init()
   setup_key_pin(PIN_KEY_VOLDN);
   setup_key_pin(PIN_KEY_VOLUP);
 
-#if defined(PIN_KEY_HALL_OUT)
-  setup_key_pin(PIN_KEY_HALL_OUT);
-#endif
 
   // EC06 旋钮初始化
   pinMode(PIN_EC06_A, INPUT_PULLUP);
@@ -656,7 +573,6 @@ void keys_init()
 
   // 同步初始电平，避免上电后的误判
   keys_sync_to_hw_state();
-  hall_out_sync_to_hw_state();
 
   // 初始化旋钮状态
   s_enc_last = read_encoder_state();
@@ -690,7 +606,6 @@ void keys_sync_to_hw_state()
   sync_one(k_ec06e);
   sync_one(k_voldn);
   sync_one(k_volup);
-  hall_out_sync_to_hw_state();
 }
 
 /*
@@ -847,10 +762,6 @@ void keys_update()
   (void)refresh_mcp_a_cache(false);
 
   const int8_t encoder_step = read_encoder_step();
-
-  // HALL_OUT 是独立传感器输入，优先处理。
-  // 即使背光熄灭，也允许磁吸触发播放/暂停。
-  handle_hall_out_play_pause();
 
   if (handle_backlight_sleep_mode(encoder_step)) {
     return;

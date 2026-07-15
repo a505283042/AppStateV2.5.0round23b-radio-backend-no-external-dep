@@ -5,6 +5,7 @@
 #include "audio/audio_output_route.h"
 #include "audio/audio_service.h"
 #include "hal/board_hw_control.h"
+#include "hal/ws2812_status.h"
 #include "menu/quick_menu.h"
 #include "nfc/nfc_binding.h"
 #include "player_snapshot.h"
@@ -52,6 +53,9 @@ static uint8_t sleep_preset_index(uint16_t minutes)
 void app_power_save_and_shutdown()
 {
     LOGI("[电源] 保存 and shutdown requested");
+
+    // 关机流程开始即关闭状态灯，避免保存和断电阶段保持最后颜色。
+    ws2812_status_off();
 
     // 已经进入关机流程后，睡眠定时不再重复触发。
     s_sleep_timer_active = false;

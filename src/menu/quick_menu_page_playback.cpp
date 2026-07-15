@@ -8,6 +8,7 @@
 #include "app_power.h"
 #include "app_state.h"
 #include "hal/board_hw_control.h"
+#include "hal/ws2812_status.h"
 #include "player_control.h"
 #include "player_list_select.h"
 #include "player_source.h"
@@ -181,6 +182,16 @@ const char* value_solenoid_enabled()
     return bool_label(web_settings_get().solenoid_enabled);
 }
 
+const char* value_status_led_enabled()
+{
+    return bool_label(web_settings_get().status_led_enabled);
+}
+
+const char* value_status_led_brightness()
+{
+    return status_led_brightness_label(web_settings_get().status_led_brightness);
+}
+
 bool action_toggle_play_order()
 {
     ui_mode_switch_highlight();
@@ -255,6 +266,33 @@ bool action_toggle_solenoid()
     return true;
 }
 
+bool action_toggle_status_led()
+{
+    WebRuntimeSettings ws = web_settings_get();
+    ws.status_led_enabled = !ws.status_led_enabled;
+    web_settings_set(ws);
+
+    if (!ws.status_led_enabled) {
+        ws2812_status_off();
+    } else {
+        ws2812_status_force_refresh();
+    }
+
+    (void)web_settings_save();
+    return true;
+}
+
+bool action_cycle_status_led_brightness()
+{
+    WebRuntimeSettings ws = web_settings_get();
+    const uint8_t current = static_cast<uint8_t>(ws.status_led_brightness);
+    ws.status_led_brightness = static_cast<StatusLedBrightness>((current + 1U) % 3U);
+    web_settings_set(ws);
+    ws2812_status_force_refresh();
+    (void)web_settings_save();
+    return true;
+}
+
 bool action_cycle_sleep_timer()
 {
     // 每次确认切换一个睡眠关机档位：关闭 -> 15 -> 30 -> 60 -> 90 -> 关闭。
@@ -277,6 +315,8 @@ const QuickMenuItem PLAYBACK_ITEMS[] = {
     {"本地浏览方式", QuickMenuItemType::Toggle, QuickMenuPage::Playback, "", value_local_browse_mode, action_cycle_local_browse_mode, true, false, label_local_browse_mode},
     {"当前源列表", QuickMenuItemType::Action, QuickMenuPage::Playback, "", value_open, action_open_current_source_list, true, false},
     {"霍尔控制", QuickMenuItemType::Toggle, QuickMenuPage::Playback, "", value_hall_control_enabled, action_toggle_hall_control, true, false},
+    {"状态灯", QuickMenuItemType::Toggle, QuickMenuPage::Playback, "", value_status_led_enabled, action_toggle_status_led, true, false},
+    {"状态灯亮度", QuickMenuItemType::Toggle, QuickMenuPage::Playback, "", value_status_led_brightness, action_cycle_status_led_brightness, true, false},
     {"电磁铁动作", QuickMenuItemType::Toggle, QuickMenuPage::Playback, "", value_solenoid_enabled, action_toggle_solenoid, true, false},
     {"睡眠关机", QuickMenuItemType::Toggle, QuickMenuPage::Playback, "", value_sleep_timer, action_cycle_sleep_timer, true, false},
     {"重扫曲库", QuickMenuItemType::Action, QuickMenuPage::Playback, "", value_execute, action_start_rescan, true, false},
