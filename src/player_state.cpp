@@ -791,32 +791,28 @@ void player_state_run(void)
 
     if (g_rescanning) return;
 
-    const PlayerSourceState source = player_source_get();
+    // 播放器主循环只读取纯数值运行态，避免每轮复制包含多个 String 的完整音源状态。
+    const PlayerSourceRuntimeState source = player_source_runtime_get();
     if (source.type == PlayerSourceType::NET_RADIO && source.radio_active) {
         audio_radio_backend_loop();
         const RadioBackendStatus rb = audio_radio_backend_get_status();
-        String state = !rb.error.isEmpty()
-            ? String("error")
+        const char* state = !rb.error.isEmpty()
+            ? "error"
             : (rb.paused
-                ? String("paused")
+                ? "paused"
                 : (rb.retrying
-                    ? String("reconnecting")
-                    : (rb.connecting ? String("connecting") : (rb.running ? String("playing") : String("stopped")))));
-        player_source_set_radio_runtime(String(audio_radio_backend_name()), rb.stream_title, rb.bitrate, state, rb.active);
-        if (!rb.station.isEmpty() && rb.station != source.radio_name) {
-            RadioItem item{};
-            item.valid = true;
-            item.name = rb.station;
-            item.url = source.radio_url;
-            item.format = source.radio_format;
-            item.region = source.radio_region;
-            item.logo = source.radio_logo;
-            player_source_set_radio_stub(source.radio_idx, item, state, rb.error);
-            player_source_set_radio_runtime(String(audio_radio_backend_name()), rb.stream_title, rb.bitrate, state, rb.active);
-        }
-        if (!rb.active && !rb.connecting && !rb.running && !rb.paused) {
-            player_source_set_radio_status(false, rb.error.isEmpty() ? String("stopped") : String("error"), rb.error);
-        }
+                    ? "reconnecting"
+                    : (rb.connecting ? "connecting" : (rb.running ? "playing" : "stopped"))));
+
+        // 电台名称和运行态统一在 player_source 内部按变化更新，
+        // 不再为名称比较复制整份 PlayerSourceState，也不再每轮构造临时 String。
+        player_source_set_radio_runtime(audio_radio_backend_name(),
+                                        rb.station,
+                                        rb.stream_title,
+                                        rb.bitrate,
+                                        state,
+                                        rb.active,
+                                        rb.error);
     }
 
     if (!g_rescanning) {

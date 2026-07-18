@@ -246,7 +246,8 @@ void app_state_update(void)
         }
     }
 
-    const PlayerSourceState source = player_source_get();
+    // 高频主循环只读取纯数值运行态，避免每轮复制完整 PlayerSourceState 中的多个 String。
+    const PlayerSourceRuntimeState source = player_source_runtime_get();
 
     const bool local_audio_active =
         source.type == PlayerSourceType::LOCAL_TRACK &&
@@ -269,9 +270,7 @@ void app_state_update(void)
     }
 
     if (s_tf_mount_restore_pending) {
-        const PlayerSourceState restore_source = player_source_get();
-
-        if (restore_source.type == PlayerSourceType::NET_RADIO) {
+        if (player_source_type_get() == PlayerSourceType::NET_RADIO) {
             LOGW("[应用] 取消 本地 snapshot 恢复: 电台 is active");
             s_tf_mount_restore_pending = false;
             return;

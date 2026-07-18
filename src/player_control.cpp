@@ -970,7 +970,7 @@ bool player_play_radio_index(int idx)
     // 保留旧返回上下文作为兼容回退。
     player_save_radio_return_context_if_needed();
 
-    if (player_source_get().type == PlayerSourceType::NET_RADIO) {
+    if (player_source_type_get() == PlayerSourceType::NET_RADIO) {
         audio_radio_backend_stop();
     }
     if (audio_service_is_playing() || audio_service_is_paused()) {
@@ -992,7 +992,13 @@ bool player_play_radio_index(int idx)
     const bool ok = audio_radio_backend_start(*item);
     if (ok) {
         player_source_set_radio_status(true, String("connecting"), String());
-        player_source_set_radio_runtime(String(audio_radio_backend_name()), String(), 0, String("connecting"), true);
+        player_source_set_radio_runtime(audio_radio_backend_name(),
+                                        item->name,
+                                        String(),
+                                        0,
+                                        "connecting",
+                                        true,
+                                        String());
         LOGI("[电台] 播放电台 索引=%d 名称=%s 后端=%s", idx, item->name.c_str(), audio_radio_backend_name());
         return true;
     }
@@ -1143,7 +1149,7 @@ static bool control_play_net_track_index_impl(int idx, bool reset_shuffle)
         }
     }
 
-    if (player_source_get().type == PlayerSourceType::NET_RADIO) {
+    if (player_source_type_get() == PlayerSourceType::NET_RADIO) {
         audio_radio_backend_stop();
     }
 

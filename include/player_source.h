@@ -13,6 +13,13 @@ enum class PlayerSourceType : uint8_t {
   NET_TRACK = 3,
 };
 
+// 高频主循环只关心音源类型和活动标志，使用纯数值快照避免复制完整 String 状态。
+struct PlayerSourceRuntimeState {
+  PlayerSourceType type = PlayerSourceType::NONE;
+  bool radio_active = false;
+  bool net_track_active = false;
+};
+
 struct PlayerSourceState {
   PlayerSourceType type = PlayerSourceType::NONE;
   int track_idx = -1;
@@ -45,7 +52,13 @@ void player_source_reset();
 void player_source_set_local_track(int track_idx);
 void player_source_set_radio_stub(int radio_idx, const RadioItem& item, const String& state, const String& err);
 void player_source_set_radio_status(bool active, const String& state, const String& err = String());
-void player_source_set_radio_runtime(const String& backend, const String& stream_title, uint32_t bitrate, const String& state, bool active);
+void player_source_set_radio_runtime(const char* backend,
+                                     const String& station,
+                                     const String& stream_title,
+                                     uint32_t bitrate,
+                                     const char* state,
+                                     bool active,
+                                     const String& err = String());
 void player_source_clear_radio();
 
 void player_source_set_net_track_stub(int idx,
@@ -59,7 +72,9 @@ void player_source_set_net_track_status(bool active,
 void player_source_clear_net_track();
 
 PlayerSourceState player_source_get();
-// 仅获取当前音源类型，不复制状态中的 String，供高频 UI 绘制使用。
+// 获取高频运行态，不复制状态中的 String。
+PlayerSourceRuntimeState player_source_runtime_get();
+// 仅获取当前音源类型，不复制状态中的 String，供只判断类型的路径使用。
 PlayerSourceType player_source_type_get();
 const char* player_source_type_key(PlayerSourceType type);
 

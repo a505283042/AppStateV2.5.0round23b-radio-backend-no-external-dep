@@ -31,6 +31,19 @@ void unlock_state() {
 void reset_state_locked() {
   s_state = PlayerSourceState{};
 }
+
+void assign_string_if_changed(String& target, const String& value) {
+  if (target != value) {
+    target = value;
+  }
+}
+
+void assign_cstr_if_changed(String& target, const char* value) {
+  const char* safe_value = value ? value : "";
+  if (target != safe_value) {
+    target = safe_value;
+  }
+}
 }
 
 void player_source_reset() {
@@ -99,17 +112,33 @@ void player_source_set_radio_stub(int radio_idx, const RadioItem& item, const St
   unlock_state();
 }
 
-void player_source_set_radio_runtime(const String& backend, const String& stream_title, uint32_t bitrate, const String& state, bool active) {
+void player_source_set_radio_runtime(const char* backend,
+                                     const String& station,
+                                     const String& stream_title,
+                                     uint32_t bitrate,
+                                     const char* state,
+                                     bool active,
+                                     const String& err) {
   lock_state();
   if (s_state.type != PlayerSourceType::NET_RADIO) {
     unlock_state();
     return;
   }
-  s_state.radio_backend = backend;
-  if (stream_title.length()) s_state.radio_stream_title = stream_title;
-  if (bitrate > 0) s_state.radio_bitrate = bitrate;
-  s_state.radio_state = state;
-  s_state.radio_active = active;
+
+  // 运行态每轮都会同步，只有值变化时才写入 String，避免重复释放和重新分配堆内存。
+  assign_cstr_if_changed(s_state.radio_backend, backend);
+  if (station.length() > 0) {
+    assign_string_if_changed(s_state.radio_name, station);
+  }
+  assign_string_if_changed(s_state.radio_stream_title, stream_title);
+  if (s_state.radio_bitrate != bitrate) {
+    s_state.radio_bitrate = bitrate;
+  }
+  assign_cstr_if_changed(s_state.radio_state, state);
+  if (s_state.radio_active != active) {
+    s_state.radio_active = active;
+  }
+  assign_string_if_changed(s_state.radio_error, err);
   unlock_state();
 }
 
@@ -196,6 +225,16 @@ PlayerSourceState player_source_get() {
   PlayerSourceState copy = s_state;
   unlock_state();
   return copy;
+}
+
+PlayerSourceRuntimeState player_source_runtime_get() {
+  lock_state();
+  PlayerSourceRuntimeState runtime{};
+  runtime.type = s_state.type;
+  runtime.radio_active = s_state.radio_active;
+  runtime.net_track_active = s_state.net_track_active;
+  unlock_state();
+  return runtime;
 }
 
 PlayerSourceType player_source_type_get() {
