@@ -3,6 +3,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/queue.h>
+#include <freertos/semphr.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -24,7 +25,8 @@ static constexpr const char* kDefaultCoverPath = "/System/default_cover.jpg";
 
 static QueueHandle_t s_asset_q = nullptr; // 播放器资源任务队列句柄
 static TaskHandle_t s_asset_task = nullptr; // 播放器资源任务句柄
-static volatile uint32_t s_asset_req_id = 0; // 播放器资源任务请求 ID
+static uint32_t s_asset_req_id = 0; // 播放器资源任务请求 ID，由短临界区保护
+static portMUX_TYPE s_asset_req_mux = portMUX_INITIALIZER_UNLOCKED;
 static PlayerAssetsHooks s_hooks{}; // 播放器资源任务钩子函数
 
 static bool s_cover_prefetch_pending = false; // 播放器封面预取任务标志
@@ -50,6 +52,7 @@ struct PrimedCurrentCover {
 };
 static PrimedCurrentCover s_primed_current_cover{};
 static PrimedCurrentCover s_primed_next_cover{};
+static uint32_t s_primed_next_cover_revision = 1;
 // 延迟当前封面应用描述
 struct DeferredCurrentCoverApply {
     bool active = false;
@@ -59,7 +62,104 @@ struct DeferredCurrentCoverApply {
 // 延迟当前封面应用
 static DeferredCurrentCoverApply s_deferred_current_cover_apply{};
 
+// PlayerAssetTask 与主循环会同时访问请求编号、预读封面指针和延迟应用状态。
+// 使用递归互斥量保护这些复合状态，禁止仅依赖 volatile 或裸指针约定。
+static StaticSemaphore_t s_asset_state_mutex_storage{};
+static SemaphoreHandle_t s_asset_state_mutex = nullptr;
+
 static void player_assets_try_scale_primed_next_cover_after_current(const PlayerDeferredAssetJob& owner_job);
+static void player_assets_free_primed_cover(PrimedCurrentCover& c);
+
+static void player_assets_state_init_once()
+{
+    if (!s_asset_state_mutex) {
+        // 该初始化由 player_assets_setup_hooks() 在后台任务启动前完成。
+        s_asset_state_mutex =
+            xSemaphoreCreateRecursiveMutexStatic(&s_asset_state_mutex_storage);
+    }
+
+    if (!s_asset_state_mutex) {
+        LOGE("[播放器] 创建资源状态互斥量失败");
+    }
+}
+
+static bool player_assets_state_lock(TickType_t wait_ticks = portMAX_DELAY)
+{
+    player_assets_state_init_once();
+    return s_asset_state_mutex &&
+           xSemaphoreTakeRecursive(s_asset_state_mutex, wait_ticks) == pdTRUE;
+}
+
+static void player_assets_state_unlock()
+{
+    if (s_asset_state_mutex) {
+        xSemaphoreGiveRecursive(s_asset_state_mutex);
+    }
+}
+
+static uint32_t player_assets_request_id_get()
+{
+    portENTER_CRITICAL(&s_asset_req_mux);
+    const uint32_t request_id = s_asset_req_id;
+    portEXIT_CRITICAL(&s_asset_req_mux);
+    return request_id;
+}
+
+static uint32_t player_assets_request_id_advance()
+{
+    portENTER_CRITICAL(&s_asset_req_mux);
+    ++s_asset_req_id;
+    if (s_asset_req_id == 0) {
+        ++s_asset_req_id;
+    }
+    const uint32_t request_id = s_asset_req_id;
+    portEXIT_CRITICAL(&s_asset_req_mux);
+    return request_id;
+}
+
+static bool player_assets_deferred_apply_matches(int track_idx)
+{
+    if (!player_assets_state_lock()) {
+        return false;
+    }
+
+    const bool matches =
+        s_deferred_current_cover_apply.active &&
+        s_deferred_current_cover_apply.track_idx == track_idx;
+    player_assets_state_unlock();
+    return matches;
+}
+
+static void player_assets_next_cover_revision_advance_locked()
+{
+    ++s_primed_next_cover_revision;
+    if (s_primed_next_cover_revision == 0) {
+        ++s_primed_next_cover_revision;
+    }
+}
+
+static bool player_assets_take_primed_current_cover(int track_idx,
+                                                     PrimedCurrentCover& out)
+{
+    out = PrimedCurrentCover{};
+    if (!player_assets_state_lock()) {
+        return false;
+    }
+
+    const bool matches =
+        s_primed_current_cover.valid &&
+        s_primed_current_cover.track_idx == track_idx &&
+        s_primed_current_cover.buf &&
+        s_primed_current_cover.len > 0;
+
+    if (matches) {
+        out = s_primed_current_cover;
+        s_primed_current_cover = PrimedCurrentCover{};
+    }
+
+    player_assets_state_unlock();
+    return matches;
+}
 
 static bool player_assets_web_cover_enabled()
 {
@@ -135,7 +235,7 @@ static void player_assets_try_store_web_cover_from_ui_cache(int track_idx,
 // 检查播放器资源任务是否当前有效
 static bool player_assets_is_job_current(const PlayerDeferredAssetJob& job)
 {
-    if (job.req_id != s_asset_req_id) return false;
+    if (job.req_id != player_assets_request_id_get()) return false;
     if (s_hooks.get_current_track_idx) {
         return s_hooks.get_current_track_idx() == job.track_idx;
     }
@@ -234,8 +334,7 @@ static void player_asset_task_entry(void*)
         const char* prefetch_reason = "none";
 
         if (job.need_cover) {
-            if (s_deferred_current_cover_apply.active && 
-                s_deferred_current_cover_apply.track_idx == job.track_idx) {
+            if (player_assets_deferred_apply_matches(job.track_idx)) {
                 LOGD("[播放器] defer 当前 封面 apply 歌曲=%d", job.track_idx);
             } else if (ui_cover_apply_cached(job.track_idx)) {
                 current_cover_cache_hit = true;
@@ -292,32 +391,29 @@ static void player_asset_task_entry(void*)
             if (job.cover_source == COVER_NONE) {
                 // 当前歌曲明确没有封面：直接准备并应用默认封面
                 current_cover_cache_hit = player_assets_apply_default_cover_for_current(job);
-            } else if (s_primed_current_cover.valid && 
-                    s_primed_current_cover.track_idx == job.track_idx && 
-                    s_primed_current_cover.buf && 
-                    s_primed_current_cover.len > 0) {
-                cover_buf = s_primed_current_cover.buf;
-                cover_len = s_primed_current_cover.len;
-                cover_is_png = s_primed_current_cover.is_png;
-
-                s_primed_current_cover.buf = nullptr;
-                s_primed_current_cover.valid = false;
-                s_primed_current_cover.track_idx = -1;
-                s_primed_current_cover.len = 0;
-                s_primed_current_cover.is_png = false;
-
-                LOGD("[播放器] 当前封面预读命中 歌曲=%d le数量=%u", 
-                    job.track_idx, (unsigned)cover_len);
             } else {
-                (void)audio_service_fetch_cover(job.cover_source,
-                                                job.audio_path,
-                                                job.cover_path,
-                                                job.cover_offset,
-                                                job.cover_size,
-                                                &cover_buf,
-                                                &cover_len,
-                                                &cover_is_png,
-                                                true);
+                PrimedCurrentCover primed_cover{};
+                if (player_assets_take_primed_current_cover(job.track_idx,
+                                                            primed_cover)) {
+                    cover_buf = primed_cover.buf;
+                    cover_len = primed_cover.len;
+                    cover_is_png = primed_cover.is_png;
+                    primed_cover.buf = nullptr;
+
+                    LOGD("[播放器] 当前封面预读命中 歌曲=%d le数量=%u",
+                         job.track_idx,
+                         (unsigned)cover_len);
+                } else {
+                    (void)audio_service_fetch_cover(job.cover_source,
+                                                    job.audio_path,
+                                                    job.cover_path,
+                                                    job.cover_offset,
+                                                    job.cover_size,
+                                                    &cover_buf,
+                                                    &cover_len,
+                                                    &cover_is_png,
+                                                    true);
+                }
             }
         }
         t_after_fetch_cover = millis();
@@ -339,8 +435,7 @@ static void player_asset_task_entry(void*)
             t_after_cover_scale = millis();
 
             if (scaled_ok && player_assets_is_job_current(job)) {
-                if (s_deferred_current_cover_apply.active && 
-                    s_deferred_current_cover_apply.track_idx == job.track_idx) {
+                if (player_assets_deferred_apply_matches(job.track_idx)) {
                     LOGD("[播放器] defer 当前 封面 apply 歌曲=%d", job.track_idx);
                 } else {
                     (void)ui_cover_apply_cached(job.track_idx);
@@ -518,28 +613,50 @@ static void player_asset_task_entry(void*)
 // 启动播放器资源任务
 static void player_asset_task_start_once()
 {
-    if (s_asset_task) return;
+    if (!player_assets_state_lock()) {
+        return;
+    }
+
+    if (s_asset_task) {
+        player_assets_state_unlock();
+        return;
+    }
 
     if (!s_asset_q) {
         s_asset_q = xQueueCreate(1, sizeof(PlayerDeferredAssetJob));
     }
     if (!s_asset_q) {
-        LOGE("[播放器] 创建 延迟 as设置 队列 失败");
+        player_assets_state_unlock();
+        LOGE("[播放器] 创建延迟资源队列失败");
         return;
     }
 
-    xTaskCreatePinnedToCore(player_asset_task_entry,
-                            "PlayerAssetTask",
-                            kPlayerAssetTaskStackBytes,
-                            nullptr,
-                            PLAYER_ASSET_TASK_PRIO,
-                            &s_asset_task,
-                            1);
+    const BaseType_t task_ok =
+        xTaskCreatePinnedToCore(player_asset_task_entry,
+                                "PlayerAssetTask",
+                                kPlayerAssetTaskStackBytes,
+                                nullptr,
+                                PLAYER_ASSET_TASK_PRIO,
+                                &s_asset_task,
+                                1);
+    if (task_ok != pdPASS) {
+        s_asset_task = nullptr;
+    }
+    player_assets_state_unlock();
+
+    if (task_ok != pdPASS) {
+        LOGE("[播放器] 创建资源任务失败");
+    }
 }
 // 设置播放器资源回调
 void player_assets_setup_hooks(const PlayerAssetsHooks& hooks)
 {
+    player_assets_state_init_once();
+    if (!player_assets_state_lock()) {
+        return;
+    }
     s_hooks = hooks;
+    player_assets_state_unlock();
 }
 // 重置播放器资源请求
 void player_assets_reset_job(PlayerDeferredAssetJob& job)
@@ -618,10 +735,14 @@ bool player_assets_prepare_deferred_request(const TrackInfo& t,
 // 取消待处理的封面预取任务
 void player_assets_cancel_pending_cover_prefetch()
 {
+    if (!player_assets_state_lock()) {
+        return;
+    }
     s_cover_prefetch_pending = false;
     s_cover_prefetch_not_before_ms = 0;
     s_cover_prefetch_track_idx = -1;
     s_cover_prefetch_track = TrackInfo();
+    player_assets_state_unlock();
 }
 
 // 安排播放器资源请求
@@ -633,7 +754,7 @@ void player_assets_schedule(PlayerDeferredAssetJob& job)
         return;
     }
 
-    job.req_id = ++s_asset_req_id;
+    job.req_id = player_assets_request_id_advance();
 
     player_assets_discard_pending_jobs();
     if (xQueueOverwrite(s_asset_q, &job) != pdPASS) {
@@ -646,55 +767,57 @@ void player_assets_schedule(PlayerDeferredAssetJob& job)
 // 使所有待处理的播放器资源请求无效
 void player_assets_invalidate_requests()
 {
-    ++s_asset_req_id;
+    (void)player_assets_request_id_advance();
     player_assets_discard_pending_jobs();
     player_assets_clear_primed_current_cover();
     player_assets_drop_primed_next_cover();
     player_assets_clear_deferred_current_cover_apply();
 }
 
-// 释放当前封面
+// 释放一个已经由当前调用方独占的封面缓冲。
 static void player_assets_free_primed_cover(PrimedCurrentCover& c)
 {
     if (c.buf) {
         ui_cover_free_allocated(c.buf);
         c.buf = nullptr;
     }
-
-    c.valid = false;
-    c.track_idx = -1;
-    c.len = 0;
-    c.is_png = false;
-
-    c.has_meta = false;
-    c.cover_source = COVER_NONE;
-    c.audio_path[0] = '\0';
-    c.cover_path[0] = '\0';
-    c.cover_offset = 0;
-    c.cover_size = 0;
-}
-
-static void player_assets_free_primed_current_cover()
-{
-    player_assets_free_primed_cover(s_primed_current_cover);
+    c = PrimedCurrentCover{};
 }
 
 // 清除当前封面
 void player_assets_clear_primed_current_cover()
 {
-    player_assets_free_primed_current_cover();
+    PrimedCurrentCover old_cover{};
+    if (!player_assets_state_lock()) {
+        return;
+    }
+    old_cover = s_primed_current_cover;
+    s_primed_current_cover = PrimedCurrentCover{};
+    player_assets_state_unlock();
+    player_assets_free_primed_cover(old_cover);
 }
+
 // 设置当前封面
 bool player_assets_prime_current_cover(int track_idx, uint8_t* buf, size_t len, bool is_png)
 {
-    player_assets_free_primed_current_cover();
     if (!buf || len == 0 || track_idx < 0) return false;
 
-    s_primed_current_cover.valid = true;
-    s_primed_current_cover.track_idx = track_idx;
-    s_primed_current_cover.buf = buf;
-    s_primed_current_cover.len = len;
-    s_primed_current_cover.is_png = is_png;
+    PrimedCurrentCover next_cover{};
+    next_cover.valid = true;
+    next_cover.track_idx = track_idx;
+    next_cover.buf = buf;
+    next_cover.len = len;
+    next_cover.is_png = is_png;
+
+    PrimedCurrentCover old_cover{};
+    if (!player_assets_state_lock()) {
+        return false;
+    }
+    old_cover = s_primed_current_cover;
+    s_primed_current_cover = next_cover;
+    player_assets_state_unlock();
+
+    player_assets_free_primed_cover(old_cover);
     return true;
 }
 
@@ -704,33 +827,42 @@ bool player_assets_prime_next_cover(const TrackInfo& t,
                                     size_t len,
                                     bool is_png)
 {
-    player_assets_free_primed_cover(s_primed_next_cover);
-
     if (!buf || len == 0 || track_idx < 0) {
         return false;
     }
 
-    s_primed_next_cover.valid = true;
-    s_primed_next_cover.track_idx = track_idx;
-    s_primed_next_cover.buf = buf;
-    s_primed_next_cover.len = len;
-    s_primed_next_cover.is_png = is_png;
+    PrimedCurrentCover next_cover{};
+    next_cover.valid = true;
+    next_cover.track_idx = track_idx;
+    next_cover.buf = buf;
+    next_cover.len = len;
+    next_cover.is_png = is_png;
+    next_cover.has_meta = true;
+    next_cover.cover_source = t.cover_source;
 
-    s_primed_next_cover.has_meta = true;
-    s_primed_next_cover.cover_source = t.cover_source;
-
-    strncpy(s_primed_next_cover.audio_path,
+    strncpy(next_cover.audio_path,
             t.audio_path.c_str(),
-            sizeof(s_primed_next_cover.audio_path) - 1);
-    s_primed_next_cover.audio_path[sizeof(s_primed_next_cover.audio_path) - 1] = '\0';
+            sizeof(next_cover.audio_path) - 1);
+    next_cover.audio_path[sizeof(next_cover.audio_path) - 1] = '\0';
 
-    strncpy(s_primed_next_cover.cover_path,
+    strncpy(next_cover.cover_path,
             t.cover_path.c_str(),
-            sizeof(s_primed_next_cover.cover_path) - 1);
-    s_primed_next_cover.cover_path[sizeof(s_primed_next_cover.cover_path) - 1] = '\0';
+            sizeof(next_cover.cover_path) - 1);
+    next_cover.cover_path[sizeof(next_cover.cover_path) - 1] = '\0';
 
-    s_primed_next_cover.cover_offset = t.cover_offset;
-    s_primed_next_cover.cover_size = t.cover_size;
+    next_cover.cover_offset = t.cover_offset;
+    next_cover.cover_size = t.cover_size;
+
+    PrimedCurrentCover old_cover{};
+    if (!player_assets_state_lock()) {
+        return false;
+    }
+    old_cover = s_primed_next_cover;
+    s_primed_next_cover = next_cover;
+    player_assets_next_cover_revision_advance_locked();
+    player_assets_state_unlock();
+
+    player_assets_free_primed_cover(old_cover);
 
     LOGD("[播放器] 下一首 封面 primed raw 歌曲=%d le数量=%u 来源=%u 大小=%u",
          track_idx,
@@ -743,33 +875,53 @@ bool player_assets_prime_next_cover(const TrackInfo& t,
 
 bool player_assets_promote_next_cover_to_current(int track_idx)
 {
-    if (!s_primed_next_cover.valid ||
-        s_primed_next_cover.track_idx != track_idx ||
-        !s_primed_next_cover.buf ||
-        s_primed_next_cover.len == 0) {
+    PrimedCurrentCover old_current{};
+    size_t promoted_len = 0;
+    bool promoted = false;
+
+    if (!player_assets_state_lock()) {
         return false;
     }
 
-    player_assets_free_primed_current_cover();
+    // 切歌尝试本身也会使后台缩放中的旧 raw 失去恢复资格。
+    player_assets_next_cover_revision_advance_locked();
 
-    s_primed_current_cover = s_primed_next_cover;
+    if (s_primed_next_cover.valid &&
+        s_primed_next_cover.track_idx == track_idx &&
+        s_primed_next_cover.buf &&
+        s_primed_next_cover.len > 0) {
+        old_current = s_primed_current_cover;
+        s_primed_current_cover = s_primed_next_cover;
+        promoted_len = s_primed_current_cover.len;
+        s_primed_next_cover = PrimedCurrentCover{};
+        promoted = true;
+    }
 
-    s_primed_next_cover.valid = false;
-    s_primed_next_cover.track_idx = -1;
-    s_primed_next_cover.buf = nullptr;
-    s_primed_next_cover.len = 0;
-    s_primed_next_cover.is_png = false;
+    player_assets_state_unlock();
+    player_assets_free_primed_cover(old_current);
 
-    LOGD("[播放器] 下一首 封面 已提升为当前 歌曲=%d le数量=%u",
-         track_idx,
-         (unsigned)s_primed_current_cover.len);
+    if (promoted) {
+        LOGD("[播放器] 下一首 封面 已提升为当前 歌曲=%d le数量=%u",
+             track_idx,
+             (unsigned)promoted_len);
+        return true;
+    }
 
-    return true;
+    // 后台任务可能刚刚完成同一首的缩放并释放 raw；此时 UI cache 已经可直接使用。
+    return ui_cover_cache_is_ready(track_idx);
 }
 
 void player_assets_drop_primed_next_cover()
 {
-    player_assets_free_primed_cover(s_primed_next_cover);
+    PrimedCurrentCover old_cover{};
+    if (!player_assets_state_lock()) {
+        return;
+    }
+    old_cover = s_primed_next_cover;
+    s_primed_next_cover = PrimedCurrentCover{};
+    player_assets_next_cover_revision_advance_locked();
+    player_assets_state_unlock();
+    player_assets_free_primed_cover(old_cover);
 }
 
 static void player_assets_try_scale_primed_next_cover_after_current(const PlayerDeferredAssetJob& owner_job)
@@ -778,66 +930,99 @@ static void player_assets_try_scale_primed_next_cover_after_current(const Player
         return;
     }
 
-    if (!s_primed_next_cover.valid ||
-        !s_primed_next_cover.buf ||
-        s_primed_next_cover.len == 0 ||
-        s_primed_next_cover.track_idx < 0) {
+    int target_idx = -1;
+    size_t target_len = 0;
+    if (!player_assets_state_lock()) {
+        return;
+    }
+    if (s_primed_next_cover.valid &&
+        s_primed_next_cover.buf &&
+        s_primed_next_cover.len > 0 &&
+        s_primed_next_cover.track_idx >= 0) {
+        target_idx = s_primed_next_cover.track_idx;
+        target_len = s_primed_next_cover.len;
+    }
+    player_assets_state_unlock();
+
+    if (target_idx < 0 || target_len == 0) {
         return;
     }
 
-    const int target_idx = s_primed_next_cover.track_idx;
-
     if (ui_cover_cache_is_ready(target_idx)) {
-        LOGD("[播放器] 跳过下一首封面缩放：目标已就绪=%d", target_idx);
+        PrimedCurrentCover completed_cover{};
+        if (!player_assets_state_lock()) {
+            return;
+        }
+        if (s_primed_next_cover.valid &&
+            s_primed_next_cover.track_idx == target_idx) {
+            completed_cover = s_primed_next_cover;
+            s_primed_next_cover = PrimedCurrentCover{};
+        }
+        player_assets_state_unlock();
 
-        if (s_primed_next_cover.has_meta) {
-            player_assets_try_store_web_cover_from_ui_cache(target_idx,
-                                                            s_primed_next_cover.cover_source,
-                                                            s_primed_next_cover.audio_path,
-                                                            s_primed_next_cover.cover_path,
-                                                            s_primed_next_cover.cover_offset,
-                                                            s_primed_next_cover.cover_size);
+        if (!completed_cover.valid) {
+            return;
         }
 
-        player_assets_drop_primed_next_cover();
+        LOGD("[播放器] 跳过下一首封面缩放：目标已就绪=%d", target_idx);
+        if (completed_cover.has_meta) {
+            player_assets_try_store_web_cover_from_ui_cache(
+                target_idx,
+                completed_cover.cover_source,
+                completed_cover.audio_path,
+                completed_cover.cover_path,
+                completed_cover.cover_offset,
+                completed_cover.cover_size);
+        }
+        player_assets_free_primed_cover(completed_cover);
         return;
     }
 
     // 下一首后台缩放 + webcover 都比较吃 CPU/PSRAM，先限制小封面。
-    // 96KB 最大封面大小
-    if (s_primed_next_cover.len > 96 * 1024) {
+    if (target_len > 96 * 1024) {
         LOGD("[播放器] 跳过下一首封面缩放/网页缓存：目标=%d 长度过大=%u",
              target_idx,
-             (unsigned)s_primed_next_cover.len);
+             (unsigned)target_len);
         return;
     }
 
-    // 当前封面和当前 webcover 完成后，再稍微让一让。
+    // 当前封面和当前 webcover 完成后，再稍微让一让；等待期间不占用资源状态锁。
     vTaskDelay(pdMS_TO_TICKS(350));
-
     if (!player_assets_is_job_current(owner_job)) {
         return;
     }
 
-    if (!s_primed_next_cover.valid ||
-        !s_primed_next_cover.buf ||
-        s_primed_next_cover.len == 0 ||
-        s_primed_next_cover.track_idx != target_idx) {
+    // 把 raw 所有权转移到任务局部变量。之后主循环可以立即发布新封面或请求清理，
+    // 不需要等待耗时的图片缩放完成，也不会释放任务正在读取的指针。
+    PrimedCurrentCover processing_cover{};
+    uint32_t take_revision = 0;
+    if (!player_assets_state_lock()) {
+        return;
+    }
+    if (s_primed_next_cover.valid &&
+        s_primed_next_cover.buf &&
+        s_primed_next_cover.len > 0 &&
+        s_primed_next_cover.track_idx == target_idx) {
+        processing_cover = s_primed_next_cover;
+        s_primed_next_cover = PrimedCurrentCover{};
+        take_revision = s_primed_next_cover_revision;
+    }
+    player_assets_state_unlock();
+
+    if (!processing_cover.valid) {
         return;
     }
 
     const uint32_t t0 = millis();
-
     LOGD("[播放器] 开始缩放下一首封面：目标=%d 长度=%u",
          target_idx,
-         (unsigned)s_primed_next_cover.len);
+         (unsigned)processing_cover.len);
 
     const bool scaled_ok =
-        ui_cover_scale_to_cache_from_buffer(s_primed_next_cover.buf,
-                                            s_primed_next_cover.len,
-                                            s_primed_next_cover.is_png,
+        ui_cover_scale_to_cache_from_buffer(processing_cover.buf,
+                                            processing_cover.len,
+                                            processing_cover.is_png,
                                             target_idx);
-
     const uint32_t scale_cost = millis() - t0;
 
     LOGD("[播放器] 下一首封面缩放完成：目标=%d 成功=%d 耗时=%lums",
@@ -845,50 +1030,81 @@ static void player_assets_try_scale_primed_next_cover_after_current(const Player
          scaled_ok ? 1 : 0,
          (unsigned long)scale_cost);
 
-    if (scaled_ok && s_primed_next_cover.has_meta && player_assets_web_cover_enabled()) {
+    if (!scaled_ok) {
+        bool restored = false;
+        if (player_assets_is_job_current(owner_job) &&
+            player_assets_state_lock()) {
+            if (!s_primed_next_cover.valid &&
+                s_primed_next_cover_revision == take_revision) {
+                s_primed_next_cover = processing_cover;
+                processing_cover = PrimedCurrentCover{};
+                restored = true;
+            }
+            player_assets_state_unlock();
+        }
+
+        if (!restored) {
+            player_assets_free_primed_cover(processing_cover);
+        }
+        return;
+    }
+
+    if (processing_cover.has_meta && player_assets_web_cover_enabled()) {
         const uint32_t t_web0 = millis();
-
-        player_assets_try_store_web_cover_from_ui_cache(target_idx,
-                                                        s_primed_next_cover.cover_source,
-                                                        s_primed_next_cover.audio_path,
-                                                        s_primed_next_cover.cover_path,
-                                                        s_primed_next_cover.cover_offset,
-                                                        s_primed_next_cover.cover_size);
-
+        player_assets_try_store_web_cover_from_ui_cache(
+            target_idx,
+            processing_cover.cover_source,
+            processing_cover.audio_path,
+            processing_cover.cover_path,
+            processing_cover.cover_offset,
+            processing_cover.cover_size);
         LOGD("[播放器] 下一首网页封面已预构建：目标=%d 耗时=%lums",
              target_idx,
              (unsigned long)(millis() - t_web0));
     }
 
-    if (scaled_ok) {
-        player_assets_drop_primed_next_cover();
-    }
+    player_assets_free_primed_cover(processing_cover);
 }
 
 // 设置延迟应用当前封面
 void player_assets_set_deferred_current_cover_apply(int track_idx, uint32_t delay_ms)
 {
+    if (!player_assets_state_lock()) {
+        return;
+    }
     s_deferred_current_cover_apply.active = (track_idx >= 0);
     s_deferred_current_cover_apply.track_idx = track_idx;
     s_deferred_current_cover_apply.due_ms = millis() + delay_ms;
+    player_assets_state_unlock();
 }
+
 // 清除延迟应用当前封面
 void player_assets_clear_deferred_current_cover_apply()
 {
-    s_deferred_current_cover_apply.active = false;
-    s_deferred_current_cover_apply.track_idx = -1;
-    s_deferred_current_cover_apply.due_ms = 0;
+    if (!player_assets_state_lock()) {
+        return;
+    }
+    s_deferred_current_cover_apply = DeferredCurrentCoverApply{};
+    player_assets_state_unlock();
 }
+
 // 尝试应用延迟应用当前封面
 void player_assets_try_apply_deferred_current_cover(int current_track_idx)
 {
-    if (!s_deferred_current_cover_apply.active) return;
-    if (current_track_idx != s_deferred_current_cover_apply.track_idx) {
+    DeferredCurrentCoverApply pending{};
+    if (!player_assets_state_lock()) {
+        return;
+    }
+    pending = s_deferred_current_cover_apply;
+    player_assets_state_unlock();
+
+    if (!pending.active) return;
+    if (current_track_idx != pending.track_idx) {
         player_assets_clear_deferred_current_cover_apply();
         return;
     }
 
-    if ((int32_t)(millis() - s_deferred_current_cover_apply.due_ms) < 0) {
+    if ((int32_t)(millis() - pending.due_ms) < 0) {
         return;
     }
 
@@ -897,7 +1113,16 @@ void player_assets_try_apply_deferred_current_cover(int current_track_idx)
             s_hooks.on_current_cover_ready(current_track_idx);
         }
         LOGD("[播放器] 延迟 当前 封面 applied 歌曲=%d", current_track_idx);
-        player_assets_clear_deferred_current_cover_apply();
+
+        // 只清除本次已应用的请求，不能覆盖等待期间新发布的延迟请求。
+        if (player_assets_state_lock()) {
+            if (s_deferred_current_cover_apply.active &&
+                s_deferred_current_cover_apply.track_idx == pending.track_idx &&
+                s_deferred_current_cover_apply.due_ms == pending.due_ms) {
+                s_deferred_current_cover_apply = DeferredCurrentCoverApply{};
+            }
+            player_assets_state_unlock();
+        }
     }
 }
 
