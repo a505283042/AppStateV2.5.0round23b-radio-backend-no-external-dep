@@ -23,7 +23,7 @@ struct PlayerSourceState {
   String radio_region;
   String radio_logo;
   bool radio_active = false;
-  String radio_state;      // idle / selected / unsupported / connecting / playing / paused / error / stopped
+  String radio_state;      // idle / selected / unsupported / connecting / reconnecting / playing / paused / error / stopped
   String radio_error;
   String radio_stream_title;
   String radio_backend;

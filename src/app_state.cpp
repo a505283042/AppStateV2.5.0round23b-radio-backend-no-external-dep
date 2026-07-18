@@ -146,7 +146,7 @@ static void app_handle_tf_mounted()
 
     const bool radio_active =
         source_before_mount.type == PlayerSourceType::NET_RADIO &&
-        (audio_service_is_playing() || audio_service_is_paused());
+        source_before_mount.radio_active;
 
     audio_file_prepare_music_root_cache();
 

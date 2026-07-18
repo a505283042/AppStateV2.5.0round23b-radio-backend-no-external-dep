@@ -799,7 +799,9 @@ void player_state_run(void)
             ? String("error")
             : (rb.paused
                 ? String("paused")
-                : (rb.connecting ? String("connecting") : (rb.running ? String("playing") : String("stopped"))));
+                : (rb.retrying
+                    ? String("reconnecting")
+                    : (rb.connecting ? String("connecting") : (rb.running ? String("playing") : String("stopped")))));
         player_source_set_radio_runtime(String(audio_radio_backend_name()), rb.stream_title, rb.bitrate, state, rb.active);
         if (!rb.station.isEmpty() && rb.station != source.radio_name) {
             RadioItem item{};

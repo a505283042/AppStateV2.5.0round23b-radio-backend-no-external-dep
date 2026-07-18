@@ -997,8 +997,15 @@ bool player_play_radio_index(int idx)
         return true;
     }
 
-    player_source_set_radio_status(false, String("error"), String("backend_start_failed"));
-    LOGW("[电台] 播放失败：索引=%d 名称=%s", idx, item->name.c_str());
+    const RadioBackendStatus backend_status = audio_radio_backend_get_status();
+    const String error = backend_status.error.length()
+        ? backend_status.error
+        : String("backend_start_failed");
+    player_source_set_radio_status(false, String("error"), error);
+    LOGW("[电台] 播放失败：索引=%d 名称=%s 原因=%s",
+         idx,
+         item->name.c_str(),
+         error.c_str());
     return false;
 }
 
