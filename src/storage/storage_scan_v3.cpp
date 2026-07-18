@@ -4,6 +4,8 @@
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <algorithm>
+#include <cstring>
 
 #include "utils/log.h"
 #include "storage/storage_io.h"
@@ -442,6 +444,740 @@ static bool scan_dir_recursive_v3(const String& dir_path,
 
     dir.close();
     return !app_rescan_should_abort();
+}
+
+
+/* =========================
+ * 增量扫描与 Manifest
+ * ========================= */
+
+namespace {
+
+static constexpr size_t kFingerprintSampleBytes = 512;
+
+struct CachedFingerprintV1 {
+    String path;
+    StorageFileFingerprintV1 fingerprint;
+    bool ok = false;
+};
+
+struct IncrementalScanContextV3 {
+    const char* music_root = "/Music";
+    const StorageMusicManifestV1* old_manifest = nullptr;
+    const MusicCatalogV3* reuse_catalog = nullptr;
+    const std::vector<uint32_t>* catalog_path_order = nullptr;
+    std::vector<uint8_t>* old_seen = nullptr;
+    std::vector<TrackBuildTempV3>* out_tracks = nullptr;
+    StorageMusicManifestV1* out_manifest = nullptr;
+    StorageIncrementalScanStatsV3* stats = nullptr;
+    std::vector<CachedFingerprintV1> cover_fingerprint_cache;
+};
+
+static bool is_audio_filename_v3(const String& filename)
+{
+    String lower = filename;
+    lower.toLowerCase();
+    return lower.endsWith(".mp3") || lower.endsWith(".flac");
+}
+
+static uint32_t fingerprint_crc32_update_v1(uint32_t crc,
+                                             const uint8_t* data,
+                                             size_t size)
+{
+    if (!data || size == 0) return crc;
+
+    for (size_t i = 0; i < size; ++i) {
+        crc ^= data[i];
+        for (uint8_t bit = 0; bit < 8; ++bit) {
+            const uint32_t mask = (uint32_t)-(int32_t)(crc & 1u);
+            crc = (crc >> 1) ^ (0xEDB88320u & mask);
+        }
+    }
+    return crc;
+}
+
+static bool fingerprint_sample_crc_v1(File32& file,
+                                      uint32_t position,
+                                      uint32_t size,
+                                      uint32_t& out_crc)
+{
+    out_crc = 0;
+    if (size == 0) return true;
+    if (!file.seekSet(position)) return false;
+
+    static uint8_t sample[kFingerprintSampleBytes];
+    uint32_t crc = 0xFFFFFFFFu;
+    uint32_t remaining = size;
+
+    while (remaining > 0) {
+        scan_v3_cooperate_wdt();
+        const uint32_t chunk = remaining > sizeof(sample)
+            ? (uint32_t)sizeof(sample)
+            : remaining;
+        const int read_count = file.read(sample, chunk);
+        if (read_count != (int)chunk) {
+            return false;
+        }
+        crc = fingerprint_crc32_update_v1(crc, sample, chunk);
+        remaining -= chunk;
+    }
+
+    out_crc = ~crc;
+    return true;
+}
+
+static bool fingerprint_file_v1(const String& path,
+                                StorageFileFingerprintV1& out)
+{
+    out = StorageFileFingerprintV1{};
+    if (path.isEmpty()) return true;
+
+    File32 file = sd.open(path.c_str(), O_RDONLY);
+    if (!file || file.isDir()) {
+        if (file) file.close();
+        return false;
+    }
+
+    const uint64_t size64 = file.fileSize();
+    if (size64 > UINT32_MAX) {
+        file.close();
+        return false;
+    }
+
+    const uint32_t size = (uint32_t)size64;
+    const uint32_t sample_size = size > kFingerprintSampleBytes
+        ? (uint32_t)kFingerprintSampleBytes
+        : size;
+    const uint32_t middle_position = size > sample_size
+        ? (size / 2u) - (sample_size / 2u)
+        : 0u;
+    const uint32_t tail_position = size > sample_size
+        ? size - sample_size
+        : 0u;
+
+    bool ok = fingerprint_sample_crc_v1(
+        file, 0, sample_size, out.head_crc);
+    ok = ok && fingerprint_sample_crc_v1(
+        file, middle_position, sample_size, out.middle_crc);
+    ok = ok && fingerprint_sample_crc_v1(
+        file, tail_position, sample_size, out.tail_crc);
+    file.close();
+
+    if (!ok) {
+        out = StorageFileFingerprintV1{};
+        return false;
+    }
+
+    out.present = true;
+    out.size = size;
+    return true;
+}
+
+static bool fingerprints_equal_v1(const StorageFileFingerprintV1& a,
+                                  const StorageFileFingerprintV1& b)
+{
+    return a.present == b.present &&
+           a.size == b.size &&
+           a.head_crc == b.head_crc &&
+           a.middle_crc == b.middle_crc &&
+           a.tail_crc == b.tail_crc;
+}
+
+static String music_absolute_path_v3(const char* music_root,
+                                     const String& relative_path)
+{
+    if (relative_path.isEmpty()) return String();
+    if (relative_path.startsWith("/")) return relative_path;
+
+    String root = music_root ? String(music_root) : String("/Music");
+    if (!root.endsWith("/")) root += "/";
+    return root + relative_path;
+}
+
+static String find_lrc_path_for_audio_v3(const String& full_path,
+                                         const String& filename)
+{
+    const String parent_dir = parent_dir_of_v3(full_path);
+    const String base_no_ext = basename_no_ext_v3(filename);
+    const char* const lrc_exts[] = {".lrc", ".LRC", ".Lrc"};
+
+    for (const char* extension : lrc_exts) {
+        const String candidate =
+            parent_dir + "/" + base_no_ext + extension;
+        if (file_exists_v3(candidate)) {
+            return candidate;
+        }
+    }
+    return String();
+}
+
+static bool fingerprint_cached_v1(
+    const String& path,
+    std::vector<CachedFingerprintV1>& cache,
+    StorageFileFingerprintV1& out)
+{
+    if (path.isEmpty()) {
+        out = StorageFileFingerprintV1{};
+        return true;
+    }
+
+    for (const auto& item : cache) {
+        if (item.path == path) {
+            out = item.fingerprint;
+            return item.ok;
+        }
+    }
+
+    CachedFingerprintV1 item{};
+    item.path = path;
+    item.ok = fingerprint_file_v1(path, item.fingerprint);
+    out = item.fingerprint;
+    cache.push_back(std::move(item));
+    return cache.back().ok;
+}
+
+static int find_manifest_entry_v1(const StorageMusicManifestV1& manifest,
+                                  const String& audio_rel)
+{
+    size_t low = 0;
+    size_t high = manifest.entries.size();
+
+    while (low < high) {
+        const size_t middle = low + (high - low) / 2;
+        const int compare =
+            manifest.entries[middle].audio_rel.compareTo(audio_rel);
+        if (compare < 0) {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+
+    if (low < manifest.entries.size() &&
+        manifest.entries[low].audio_rel == audio_rel) {
+        return (int)low;
+    }
+    return -1;
+}
+
+static StorageManifestEntryV1 manifest_entry_from_temp_v1(
+    const TrackBuildTempV3& track,
+    const StorageFileFingerprintV1& audio_fingerprint,
+    const StorageFileFingerprintV1& lrc_fingerprint,
+    const StorageFileFingerprintV1& cover_fingerprint)
+{
+    StorageManifestEntryV1 entry{};
+    entry.audio_rel = track.audio_rel;
+    entry.audio_fingerprint = audio_fingerprint;
+    entry.lrc_fingerprint = lrc_fingerprint;
+
+    if (track.cover_source == COVER_FILE_FALLBACK &&
+        !track.cover_path_rel.isEmpty()) {
+        entry.cover_fingerprint = cover_fingerprint;
+    }
+    return entry;
+}
+
+static const char* catalog_track_audio_rel_v3(
+    const MusicCatalogV3& catalog,
+    uint32_t track_index)
+{
+    if (!catalog.tracks || track_index >= catalog.track_count) return "";
+    return pool_str_v3(
+        catalog.pool,
+        catalog.tracks[track_index].audio_rel_off);
+}
+
+static bool build_catalog_path_order_v3(
+    const MusicCatalogV3& catalog,
+    std::vector<uint32_t>& out_order)
+{
+    out_order.clear();
+    if (!catalog.tracks || catalog.track_count == 0) return false;
+
+    out_order.reserve(catalog.track_count);
+    for (uint32_t i = 0; i < catalog.track_count; ++i) {
+        const char* path = catalog_track_audio_rel_v3(catalog, i);
+        if (!path || path[0] == '\0') {
+            out_order.clear();
+            return false;
+        }
+        out_order.push_back(i);
+    }
+
+    std::sort(out_order.begin(),
+              out_order.end(),
+              [&](uint32_t left, uint32_t right) {
+                return strcmp(
+                    catalog_track_audio_rel_v3(catalog, left),
+                    catalog_track_audio_rel_v3(catalog, right)) < 0;
+              });
+
+    for (size_t i = 1; i < out_order.size(); ++i) {
+        if (strcmp(catalog_track_audio_rel_v3(catalog, out_order[i - 1]),
+                   catalog_track_audio_rel_v3(catalog, out_order[i])) == 0) {
+            out_order.clear();
+            return false;
+        }
+    }
+    return true;
+}
+
+static int find_catalog_track_v3(
+    const MusicCatalogV3& catalog,
+    const std::vector<uint32_t>& order,
+    const String& audio_rel)
+{
+    size_t low = 0;
+    size_t high = order.size();
+
+    while (low < high) {
+        const size_t middle = low + (high - low) / 2;
+        const char* path = catalog_track_audio_rel_v3(
+            catalog, order[middle]);
+        const int compare = strcmp(path ? path : "", audio_rel.c_str());
+        if (compare < 0) {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+
+    if (low < order.size()) {
+        const char* path = catalog_track_audio_rel_v3(catalog, order[low]);
+        if (path && strcmp(path, audio_rel.c_str()) == 0) {
+            return (int)order[low];
+        }
+    }
+    return -1;
+}
+
+static bool temp_from_catalog_track_v3(
+    const MusicCatalogV3& catalog,
+    uint32_t track_index,
+    TrackBuildTempV3& out)
+{
+    out = TrackBuildTempV3{};
+    if (!catalog.tracks || track_index >= catalog.track_count) return false;
+
+    const TrackRowV3& row = catalog.tracks[track_index];
+    out.title = pool_str_v3(catalog.pool, row.title_off);
+    out.artist = pool_str_v3(catalog.pool, row.artist_off);
+    out.audio_rel = pool_str_v3(catalog.pool, row.audio_rel_off);
+    out.lrc_rel = pool_str_v3(catalog.pool, row.lrc_rel_off);
+    out.cover_path_rel = pool_str_v3(catalog.pool, row.cover_path_off);
+    out.cover_mime = pool_str_v3(catalog.pool, row.mime_off);
+    out.cover_offset = row.cover_offset;
+    out.cover_size = row.cover_size;
+    out.cover_source = row.cover_source;
+    out.ext_code = row.ext_code;
+    out.flags = row.flags;
+
+    if (row.album_id != INVALID_ID32 &&
+        catalog.albums &&
+        row.album_id < catalog.album_count) {
+        out.album = pool_str_v3(
+            catalog.pool,
+            catalog.albums[row.album_id].name_off);
+    }
+    return !out.audio_rel.isEmpty();
+}
+
+static bool manifest_matches_catalog_v3(
+    const StorageMusicManifestV1& manifest,
+    const MusicCatalogV3& catalog,
+    const std::vector<uint32_t>& order)
+{
+    if (manifest.entries.size() != catalog.track_count ||
+        order.size() != catalog.track_count) {
+        return false;
+    }
+
+    for (const auto& entry : manifest.entries) {
+        if (find_catalog_track_v3(catalog, order, entry.audio_rel) < 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool manifest_entry_unchanged_v1(
+    const StorageManifestEntryV1& old_entry,
+    const MusicCatalogV3& catalog,
+    uint32_t track_index,
+    const StorageFileFingerprintV1& audio_fingerprint,
+    const String& current_lrc_rel,
+    const StorageFileFingerprintV1& lrc_fingerprint,
+    const String& current_cover_rel,
+    const StorageFileFingerprintV1& cover_fingerprint)
+{
+    if (!catalog.tracks || track_index >= catalog.track_count) return false;
+    const TrackRowV3& row = catalog.tracks[track_index];
+
+    if (!fingerprints_equal_v1(
+            old_entry.audio_fingerprint,
+            audio_fingerprint)) {
+        return false;
+    }
+
+    const char* catalog_lrc_rel = pool_str_v3(
+        catalog.pool, row.lrc_rel_off);
+    if (current_lrc_rel != (catalog_lrc_rel ? catalog_lrc_rel : "") ||
+        !fingerprints_equal_v1(
+            old_entry.lrc_fingerprint,
+            lrc_fingerprint)) {
+        return false;
+    }
+
+    if (row.cover_source == COVER_MP3_APIC ||
+        row.cover_source == COVER_FLAC_PICTURE) {
+        // 内嵌封面已经包含在音频文件指纹中，目录封面变化与本曲无关。
+        return true;
+    }
+
+    if (row.cover_source == COVER_FILE_FALLBACK) {
+        const char* catalog_cover_rel = pool_str_v3(
+            catalog.pool, row.cover_path_off);
+        return current_cover_rel ==
+                   (catalog_cover_rel ? catalog_cover_rel : "") &&
+               fingerprints_equal_v1(
+                   old_entry.cover_fingerprint,
+                   cover_fingerprint);
+    }
+
+    // 旧索引没有封面时，如果目录中新出现了封面，需要重新解析并更新索引。
+    return current_cover_rel.isEmpty();
+}
+
+static bool scan_incremental_audio_file_v3(
+    const String& full_path,
+    const String& filename,
+    const String& fallback_artist,
+    const String& fallback_album,
+    const String& effective_cover_path,
+    IncrementalScanContextV3& context)
+{
+    if (!is_audio_filename_v3(filename)) return true;
+
+    const String audio_rel = to_music_relative_path_v3(full_path);
+    const String lrc_abs = find_lrc_path_for_audio_v3(full_path, filename);
+    const String lrc_rel = to_music_relative_path_v3(lrc_abs);
+    const String cover_rel = to_music_relative_path_v3(effective_cover_path);
+
+    StorageFileFingerprintV1 audio_fingerprint{};
+    StorageFileFingerprintV1 lrc_fingerprint{};
+    StorageFileFingerprintV1 cover_fingerprint{};
+
+    if (!fingerprint_file_v1(full_path, audio_fingerprint)) {
+        LOGE("[增量扫描] 音频指纹读取失败：%s", full_path.c_str());
+        return false;
+    }
+    if (!fingerprint_file_v1(lrc_abs, lrc_fingerprint)) {
+        LOGE("[增量扫描] 歌词指纹读取失败：%s", lrc_abs.c_str());
+        return false;
+    }
+    if (!fingerprint_cached_v1(effective_cover_path,
+                               context.cover_fingerprint_cache,
+                               cover_fingerprint)) {
+        LOGE("[增量扫描] 封面指纹读取失败：%s",
+             effective_cover_path.c_str());
+        return false;
+    }
+
+    int old_index = -1;
+    if (context.old_manifest) {
+        old_index = find_manifest_entry_v1(
+            *context.old_manifest, audio_rel);
+    }
+
+    TrackBuildTempV3 track{};
+    StorageManifestEntryV1 next_entry{};
+    bool reused = false;
+
+    if (old_index >= 0) {
+        const StorageManifestEntryV1& old_entry =
+            context.old_manifest->entries[(size_t)old_index];
+        const int catalog_track_index = find_catalog_track_v3(
+            *context.reuse_catalog,
+            *context.catalog_path_order,
+            audio_rel);
+
+        if (catalog_track_index >= 0 &&
+            manifest_entry_unchanged_v1(
+                old_entry,
+                *context.reuse_catalog,
+                (uint32_t)catalog_track_index,
+                audio_fingerprint,
+                lrc_rel,
+                lrc_fingerprint,
+                cover_rel,
+                cover_fingerprint) &&
+            temp_from_catalog_track_v3(
+                *context.reuse_catalog,
+                (uint32_t)catalog_track_index,
+                track)) {
+            next_entry = old_entry;
+            reused = true;
+            (*context.old_seen)[(size_t)old_index] = 1;
+            ++context.stats->reused;
+        }
+    }
+
+    if (!reused) {
+        if (!storage_scan_one_audio_file_v3(full_path,
+                                            fallback_artist,
+                                            fallback_album,
+                                            effective_cover_path,
+                                            track)) {
+            LOGE("[增量扫描] 音频完整解析失败：%s", full_path.c_str());
+            return false;
+        }
+
+        StorageFileFingerprintV1 parsed_lrc_fingerprint = lrc_fingerprint;
+        if (track.lrc_rel != lrc_rel) {
+            const String parsed_lrc_abs = music_absolute_path_v3(
+                context.music_root, track.lrc_rel);
+            if (!fingerprint_file_v1(parsed_lrc_abs,
+                                     parsed_lrc_fingerprint)) {
+                LOGE("[增量扫描] 解析后歌词指纹读取失败：%s",
+                     parsed_lrc_abs.c_str());
+                return false;
+            }
+        }
+
+        StorageFileFingerprintV1 parsed_cover_fingerprint{};
+        if (track.cover_source == COVER_FILE_FALLBACK &&
+            !track.cover_path_rel.isEmpty()) {
+            const String parsed_cover_abs = music_absolute_path_v3(
+                context.music_root, track.cover_path_rel);
+            if (!fingerprint_cached_v1(parsed_cover_abs,
+                                       context.cover_fingerprint_cache,
+                                       parsed_cover_fingerprint)) {
+                LOGE("[增量扫描] 解析后封面指纹读取失败：%s",
+                     parsed_cover_abs.c_str());
+                return false;
+            }
+        }
+
+        next_entry = manifest_entry_from_temp_v1(
+            track,
+            audio_fingerprint,
+            parsed_lrc_fingerprint,
+            parsed_cover_fingerprint);
+
+        if (old_index >= 0) {
+            (*context.old_seen)[(size_t)old_index] = 1;
+            ++context.stats->modified;
+        } else {
+            ++context.stats->added;
+        }
+    }
+
+    context.out_tracks->push_back(std::move(track));
+    context.out_manifest->entries.push_back(std::move(next_entry));
+    ++context.stats->discovered;
+    ui_scan_tick((int)context.stats->discovered);
+    return true;
+}
+
+static bool scan_dir_incremental_v3(
+    const String& dir_path,
+    const String& inherited_cover_path,
+    IncrementalScanContextV3& context)
+{
+    scan_v3_cooperate_wdt();
+
+    SdFile dir;
+    if (!dir.open(dir_path.c_str(), O_RDONLY) || !dir.isDir()) {
+        LOGE("[增量扫描] 打开目录失败：%s", dir_path.c_str());
+        dir.close();
+        return false;
+    }
+
+    const String local_cover = pick_cover_in_folder_v3(dir_path);
+    const String effective_cover = local_cover.isEmpty()
+        ? inherited_cover_path
+        : local_cover;
+
+    String fallback_artist;
+    String fallback_album;
+    derive_dir_hints_v3(dir_path,
+                        context.music_root,
+                        fallback_artist,
+                        fallback_album);
+
+    SdFile file;
+    while (file.openNext(&dir, O_RDONLY)) {
+        scan_v3_cooperate_wdt();
+
+        if (app_rescan_should_abort()) {
+            file.close();
+            dir.close();
+            return false;
+        }
+
+        scan_v3_maybe_log_progress(
+            (int)context.stats->discovered,
+            dir_path);
+
+        char name[256];
+        file.getName(name, sizeof(name));
+        const String entry_name(name);
+
+        if (file.isDir()) {
+            const String child_dir = dir_path + "/" + entry_name;
+            file.close();
+
+            if (should_skip_dir_v3(entry_name)) {
+                continue;
+            }
+
+            if (!scan_dir_incremental_v3(
+                    child_dir,
+                    effective_cover,
+                    context)) {
+                dir.close();
+                return false;
+            }
+            continue;
+        }
+
+        const String full_path = dir_path + "/" + entry_name;
+        file.close();
+
+        if (!scan_incremental_audio_file_v3(
+                full_path,
+                entry_name,
+                fallback_artist,
+                fallback_album,
+                effective_cover,
+                context)) {
+            dir.close();
+            return false;
+        }
+
+        delay(0);
+    }
+
+    dir.close();
+    return !app_rescan_should_abort();
+}
+
+}  // namespace
+
+bool storage_scan_music_incremental_v3(
+    std::vector<TrackBuildTempV3>& out_tracks,
+    StorageMusicManifestV1& out_manifest,
+    StorageIncrementalScanStatsV3& out_stats,
+    const MusicCatalogV3* reuse_catalog,
+    const char* music_root,
+    const char* manifest_path)
+{
+    StorageSdLockGuard sd_lock(2000);
+    if (!sd_lock) {
+        LOGE("[增量扫描] SD 锁超时");
+        return false;
+    }
+
+    scan_v3_reset_coop_state();
+    ui_scan_begin();
+
+    out_tracks.clear();
+    out_manifest.clear();
+    out_stats = StorageIncrementalScanStatsV3{};
+
+    StorageMusicManifestV1 old_manifest;
+    std::vector<uint32_t> catalog_path_order;
+
+    const bool manifest_file_loaded =
+        storage_manifest_load_v1(old_manifest, manifest_path);
+    const bool catalog_ready = reuse_catalog &&
+        reuse_catalog->tracks &&
+        reuse_catalog->track_count > 0 &&
+        build_catalog_path_order_v3(
+            *reuse_catalog, catalog_path_order);
+
+    out_stats.manifest_loaded = manifest_file_loaded &&
+        catalog_ready &&
+        manifest_matches_catalog_v3(
+            old_manifest,
+            *reuse_catalog,
+            catalog_path_order);
+    out_stats.full_scan = !out_stats.manifest_loaded;
+
+    if (manifest_file_loaded && !out_stats.manifest_loaded) {
+        LOGW("[增量扫描] 清单与当前 V3 Catalog 不匹配，本轮回退全量解析");
+        old_manifest.clear();
+        catalog_path_order.clear();
+    }
+
+    std::vector<uint8_t> old_seen;
+    if (out_stats.manifest_loaded) {
+        old_seen.assign(old_manifest.entries.size(), 0);
+        out_tracks.reserve(old_manifest.entries.size() + 8);
+        out_manifest.entries.reserve(old_manifest.entries.size() + 8);
+        LOGI("[增量扫描] 使用旧清单和当前 Catalog：条目=%u",
+             (unsigned)old_manifest.entries.size());
+    } else {
+        LOGI("[增量扫描] 首次、清单无效或 Catalog 不匹配，本轮执行全量解析");
+    }
+
+    IncrementalScanContextV3 context{};
+    context.music_root = music_root;
+    context.old_manifest = out_stats.manifest_loaded
+        ? &old_manifest
+        : nullptr;
+    context.reuse_catalog = out_stats.manifest_loaded
+        ? reuse_catalog
+        : nullptr;
+    context.catalog_path_order = out_stats.manifest_loaded
+        ? &catalog_path_order
+        : nullptr;
+    context.old_seen = &old_seen;
+    context.out_tracks = &out_tracks;
+    context.out_manifest = &out_manifest;
+    context.stats = &out_stats;
+
+    const bool scan_ok = scan_dir_incremental_v3(
+        String(music_root),
+        String(),
+        context);
+
+    if (!scan_ok || app_rescan_should_abort()) {
+        out_tracks.clear();
+        out_manifest.clear();
+        if (app_rescan_should_abort()) {
+            ui_scan_abort();
+        } else {
+            ui_scan_end();
+        }
+        return false;
+    }
+
+    if (out_stats.manifest_loaded) {
+        for (uint8_t seen : old_seen) {
+            if (!seen) ++out_stats.deleted;
+        }
+    }
+
+    std::sort(out_manifest.entries.begin(),
+              out_manifest.entries.end(),
+              [](const StorageManifestEntryV1& a,
+                 const StorageManifestEntryV1& b) {
+                return a.audio_rel.compareTo(b.audio_rel) < 0;
+              });
+
+    ui_scan_end();
+
+    LOGI("[增量扫描] 完成：模式=%s 发现=%lu 复用=%lu 新增=%lu 修改=%lu 删除=%lu",
+         out_stats.full_scan ? "全量" : "增量",
+         (unsigned long)out_stats.discovered,
+         (unsigned long)out_stats.reused,
+         (unsigned long)out_stats.added,
+         (unsigned long)out_stats.modified,
+         (unsigned long)out_stats.deleted);
+
+    return !out_tracks.empty();
 }
 
 bool storage_scan_music_v3(std::vector<TrackBuildTempV3>& out_tracks,

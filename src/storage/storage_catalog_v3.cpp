@@ -102,12 +102,25 @@ static bool try_load_v3(const char* v3_index_path)
 static bool rebuild_v3_native(const char* music_root,
                               const char* v3_index_path)
 {
+    static constexpr const char* kManifestPath =
+        "/System/music_manifest_v1.bin";
+
     std::vector<TrackBuildTempV3> tmp_tracks;
+    StorageMusicManifestV1 next_manifest;
+    StorageIncrementalScanStatsV3 scan_stats{};
 
-    LOGI("[曲库] 开始重建本地索引...");
+    LOGI("[曲库] 开始增量重建本地索引...");
 
-    if (!storage_scan_music_v3(tmp_tracks, music_root)) {
-        LOGE("[曲库] native scan 失败");
+    const MusicCatalogV3* reuse_catalog =
+        storage_catalog_v3_ready() ? &s_catalog_v3 : nullptr;
+
+    if (!storage_scan_music_incremental_v3(tmp_tracks,
+                                           next_manifest,
+                                           scan_stats,
+                                           reuse_catalog,
+                                           music_root,
+                                           kManifestPath)) {
+        LOGE("[曲库] 增量/native scan 失败");
         return false;
     }
 
@@ -128,11 +141,22 @@ static bool rebuild_v3_native(const char* music_root,
     s_catalog_v3.generation = ++s_catalog_generation_seq;
     s_v3_ready = true;
 
-    if (!storage_index_save_v3(s_catalog_v3, v3_index_path)) {
+    const bool index_saved =
+        storage_index_save_v3(s_catalog_v3, v3_index_path);
+    if (!index_saved) {
         LOGE("[曲库] 保存 v3 失败: %s", v3_index_path);
+        LOGW("[曲库] 索引未落盘，本轮不更新增量清单");
+    } else if (!storage_manifest_save_v1(next_manifest, kManifestPath)) {
+        // 内存曲库和正式索引已经可用；清单失败只会使下一轮回退全量解析。
+        LOGW("[曲库] 增量清单保存失败，下次重扫将自动回退全量解析");
     }
 
-    LOGI("[曲库] 本地索引重建完成：歌曲=%lu 专辑=%lu 歌手=%lu 字符池=%lu 歌手分组=%d 专辑分组=%d",
+    LOGI("[曲库] 本地索引重建完成：扫描模式=%s 复用=%lu 新增=%lu 修改=%lu 删除=%lu 歌曲=%lu 专辑=%lu 歌手=%lu 字符池=%lu 歌手分组=%d 专辑分组=%d",
+         scan_stats.full_scan ? "全量" : "增量",
+         (unsigned long)scan_stats.reused,
+         (unsigned long)scan_stats.added,
+         (unsigned long)scan_stats.modified,
+         (unsigned long)scan_stats.deleted,
          (unsigned long)s_catalog_v3.track_count,
          (unsigned long)s_catalog_v3.album_count,
          (unsigned long)s_catalog_v3.artist_count,

@@ -1,0 +1,1214 @@
+diff --git a/include/storage/storage_builder_v3.h b/include/storage/storage_builder_v3.h
+index f1b0e95..02037bf 100644
+--- a/include/storage/storage_builder_v3.h
++++ b/include/storage/storage_builder_v3.h
+@@ -1,8 +1,7 @@
+ #pragma once
+-#include <vector>
+ #include "storage/storage_types_v3.h"
+ #include "storage/storage_scan_v3.h"
+ 
+ /* 从 V3 扫描临时结构直接构建 V3 Catalog */
+-bool storage_build_catalog_v3_from_temp(const std::vector<TrackBuildTempV3>& tracks,
++bool storage_build_catalog_v3_from_temp(StorageTrackBuildListV3& tracks,
+                                         MusicCatalogV3& out_cat);
+\ No newline at end of file
+diff --git a/include/storage/storage_manifest_v1.h b/include/storage/storage_manifest_v1.h
+index 33823da..87fc4fe 100644
+--- a/include/storage/storage_manifest_v1.h
++++ b/include/storage/storage_manifest_v1.h
+@@ -1,9 +1,8 @@
+ #pragma once
+ 
+ #include <Arduino.h>
+-#include <vector>
+-
+ #include "storage/storage_types_v3.h"
++#include "utils/psram_containers.h"
+ 
+ /**
+  * @brief 单个文件的轻量内容指纹。
+@@ -26,7 +25,7 @@ struct StorageFileFingerprintV1 {
+  * 都从当前已加载的 V3 Catalog 复用，尽量减少扫描期间的 String 数量和内部堆压力。
+  */
+ struct StorageManifestEntryV1 {
+-  String audio_rel;
++  PsramString audio_rel;
+ 
+   StorageFileFingerprintV1 audio_fingerprint;
+   StorageFileFingerprintV1 lrc_fingerprint;
+@@ -34,7 +33,7 @@ struct StorageManifestEntryV1 {
+ };
+ 
+ struct StorageMusicManifestV1 {
+-  std::vector<StorageManifestEntryV1> entries;
++  PsramVector<StorageManifestEntryV1> entries;
+ 
+   void clear() {
+     entries.clear();
+diff --git a/include/storage/storage_scan_v3.h b/include/storage/storage_scan_v3.h
+index 1463934..169fac2 100644
+--- a/include/storage/storage_scan_v3.h
++++ b/include/storage/storage_scan_v3.h
+@@ -1,7 +1,7 @@
+ #pragma once
+ #include <Arduino.h>
+-#include <vector>
+ #include "storage/storage_types_v3.h"
++#include "utils/psram_containers.h"
+ #include "storage/storage_manifest_v1.h"
+ 
+ /**
+@@ -24,14 +24,14 @@ struct StorageIncrementalScanStatsV3 {
+ };
+ 
+ struct TrackBuildTempV3 {
+-  String title;
+-  String artist;
+-  String album;
++  PsramString title;
++  PsramString artist;
++  PsramString album;
+ 
+-  String audio_rel;       // 相对 /Music 的路径
+-  String lrc_rel;         // 相对 /Music 的路径，无则空
+-  String cover_path_rel;  // fallback 相对路径，无则空
+-  String cover_mime;
++  PsramString audio_rel;       // 相对 /Music 的路径
++  PsramString lrc_rel;         // 相对 /Music 的路径，无则空
++  PsramString cover_path_rel;  // fallback 相对路径，无则空
++  PsramString cover_mime;
+ 
+   uint32_t cover_offset = 0;
+   uint32_t cover_size = 0;
+@@ -41,6 +41,10 @@ struct TrackBuildTempV3 {
+   uint16_t flags = TF_NONE;
+ };
+ 
++using StorageTrackBuildListV3 = PsramVector<TrackBuildTempV3>;
++using StorageTrackIndexListV3 = PsramVector<uint32_t>;
++using StorageTrackSeenListV3 = PsramVector<uint8_t>;
++
+ /**
+  * @brief 扫描单个音频文件并提取元数据 / 歌词 / 封面信息。
+  * @param fallback_* 来自目录层级或文件系统推导的兜底信息。
+@@ -59,7 +63,7 @@ bool storage_scan_one_audio_file_v3(const String& full_path,
+  * - 封面优先候选名搜索
+  * - 周期性让出 CPU，避免 rescan_v3 扫描时触发 WDT
+  */
+-bool storage_scan_music_v3(std::vector<TrackBuildTempV3>& out_tracks,
++bool storage_scan_music_v3(StorageTrackBuildListV3& out_tracks,
+                            const char* music_root = "/Music");
+ 
+ /**
+@@ -69,7 +73,7 @@ bool storage_scan_music_v3(std::vector<TrackBuildTempV3>& out_tracks,
+  * 后续扫描仍遍历目录，但未变化歌曲只读取轻量指纹并复用旧元数据。
+  */
+ bool storage_scan_music_incremental_v3(
+-    std::vector<TrackBuildTempV3>& out_tracks,
++    StorageTrackBuildListV3& out_tracks,
+     StorageMusicManifestV1& out_manifest,
+     StorageIncrementalScanStatsV3& out_stats,
+     const MusicCatalogV3* reuse_catalog,
+diff --git a/include/utils/psram_containers.h b/include/utils/psram_containers.h
+new file mode 100644
+index 0000000..ab22b8d
+--- /dev/null
++++ b/include/utils/psram_containers.h
+@@ -0,0 +1,351 @@
++#pragma once
++
++#include <Arduino.h>
++
++#include <cstddef>
++#include <cstdlib>
++#include <cstring>
++#include <functional>
++#include <limits>
++#include <map>
++#include <utility>
++#include <vector>
++
++#include <esp_heap_caps.h>
++
++/**
++ * @brief 优先从 PSRAM 分配的 STL allocator。
++ *
++ * 扫描临时容器允许在 PSRAM 不可用时回落内部 8-bit heap，避免因为单次外部内存
++ * 分配失败直接破坏 STL 容器。运行时可通过容器 data() 指针归属日志确认实际位置。
++ */
++template <typename T>
++class PsramAllocator {
++public:
++  using value_type = T;
++  using pointer = T*;
++  using const_pointer = const T*;
++  using reference = T&;
++  using const_reference = const T&;
++  using size_type = std::size_t;
++  using difference_type = std::ptrdiff_t;
++
++  template <typename U>
++  struct rebind {
++    using other = PsramAllocator<U>;
++  };
++
++  PsramAllocator() noexcept = default;
++
++  template <typename U>
++  PsramAllocator(const PsramAllocator<U>&) noexcept {}
++
++  T* allocate(size_type count)
++  {
++    if (count == 0) return nullptr;
++    if (count > max_size()) std::abort();
++
++    const size_type bytes = count * sizeof(T);
++    void* memory = heap_caps_malloc(
++        bytes,
++        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
++
++    if (!memory) {
++      memory = heap_caps_malloc(bytes, MALLOC_CAP_8BIT);
++    }
++
++    if (!memory) std::abort();
++    return static_cast<T*>(memory);
++  }
++
++  void deallocate(T* pointer, size_type) noexcept
++  {
++    heap_caps_free(pointer);
++  }
++
++  size_type max_size() const noexcept
++  {
++    return std::numeric_limits<size_type>::max() / sizeof(T);
++  }
++};
++
++template <typename T, typename U>
++inline bool operator==(const PsramAllocator<T>&,
++                       const PsramAllocator<U>&) noexcept
++{
++  return true;
++}
++
++template <typename T, typename U>
++inline bool operator!=(const PsramAllocator<T>&,
++                       const PsramAllocator<U>&) noexcept
++{
++  return false;
++}
++
++template <typename T>
++using PsramVector = std::vector<T, PsramAllocator<T>>;
++
++template <typename Key,
++          typename Value,
++          typename Compare = std::less<Key>>
++using PsramMap = std::map<
++    Key,
++    Value,
++    Compare,
++    PsramAllocator<std::pair<const Key, Value>>>;
++
++/**
++ * @brief 扫描阶段使用的 PSRAM 文本。
++ *
++ * Arduino String 的字符缓冲走默认 heap；仅把外层 vector 放入 PSRAM 仍会让标题、路径、
++ * 歌手和专辑长期占用内部 RAM。本类型把字符缓冲本身也优先放入 PSRAM，并提供扫描与
++ * builder 当前需要的最小 String 兼容接口。
++ */
++class PsramString {
++public:
++  PsramString() noexcept = default;
++
++  PsramString(const char* text)
++  {
++    assign_or_abort(text, text ? std::strlen(text) : 0);
++  }
++
++  PsramString(const String& text)
++  {
++    assign_or_abort(text.c_str(), text.length());
++  }
++
++  PsramString(const PsramString& other)
++  {
++    assign_or_abort(other.c_str(), other.length());
++  }
++
++  PsramString(PsramString&& other) noexcept
++      : data_(other.data_), length_(other.length_)
++  {
++    other.data_ = nullptr;
++    other.length_ = 0;
++  }
++
++  ~PsramString()
++  {
++    release();
++  }
++
++  PsramString& operator=(const PsramString& other)
++  {
++    if (this != &other) {
++      assign_or_abort(other.c_str(), other.length());
++    }
++    return *this;
++  }
++
++  PsramString& operator=(PsramString&& other) noexcept
++  {
++    if (this != &other) {
++      release();
++      data_ = other.data_;
++      length_ = other.length_;
++      other.data_ = nullptr;
++      other.length_ = 0;
++    }
++    return *this;
++  }
++
++  PsramString& operator=(const String& text)
++  {
++    assign_or_abort(text.c_str(), text.length());
++    return *this;
++  }
++
++  PsramString& operator=(const char* text)
++  {
++    assign_or_abort(text, text ? std::strlen(text) : 0);
++    return *this;
++  }
++
++  bool assign(const char* text, size_t length)
++  {
++    if (!text || length == 0) {
++      clear();
++      return true;
++    }
++
++    char* next = allocate_chars(length + 1);
++    if (!next) return false;
++
++    std::memcpy(next, text, length);
++    next[length] = '\0';
++
++    release();
++    data_ = next;
++    length_ = length;
++    return true;
++  }
++
++  bool resize_for_write(size_t length)
++  {
++    if (length == 0) {
++      clear();
++      return true;
++    }
++
++    char* next = allocate_chars(length + 1);
++    if (!next) return false;
++    next[length] = '\0';
++
++    release();
++    data_ = next;
++    length_ = length;
++    return true;
++  }
++
++  void clear() noexcept
++  {
++    release();
++  }
++
++  bool isEmpty() const noexcept
++  {
++    return length_ == 0;
++  }
++
++  size_t length() const noexcept
++  {
++    return length_;
++  }
++
++  const char* c_str() const noexcept
++  {
++    return data_ ? data_ : "";
++  }
++
++  char* data() noexcept
++  {
++    return data_;
++  }
++
++  const char* data() const noexcept
++  {
++    return c_str();
++  }
++
++  bool isExternal() const noexcept
++  {
++    return !data_ || esp_ptr_external_ram(data_);
++  }
++
++  int compareTo(const PsramString& other) const noexcept
++  {
++    return std::strcmp(c_str(), other.c_str());
++  }
++
++  int compareTo(const String& other) const noexcept
++  {
++    return std::strcmp(c_str(), other.c_str());
++  }
++
++  int compareTo(const char* other) const noexcept
++  {
++    return std::strcmp(c_str(), other ? other : "");
++  }
++
++  void swap(PsramString& other) noexcept
++  {
++    std::swap(data_, other.data_);
++    std::swap(length_, other.length_);
++  }
++
++private:
++  static char* allocate_chars(size_t bytes)
++  {
++    if (bytes == 0) return nullptr;
++
++    void* memory = heap_caps_malloc(
++        bytes,
++        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
++
++    if (!memory) {
++      memory = heap_caps_malloc(bytes, MALLOC_CAP_8BIT);
++    }
++
++    return static_cast<char*>(memory);
++  }
++
++  void assign_or_abort(const char* text, size_t length)
++  {
++    if (!assign(text, length)) std::abort();
++  }
++
++  void release() noexcept
++  {
++    if (data_) {
++      heap_caps_free(data_);
++      data_ = nullptr;
++    }
++    length_ = 0;
++  }
++
++  char* data_ = nullptr;
++  size_t length_ = 0;
++};
++
++inline bool operator==(const PsramString& left,
++                       const PsramString& right) noexcept
++{
++  return left.compareTo(right) == 0;
++}
++
++inline bool operator!=(const PsramString& left,
++                       const PsramString& right) noexcept
++{
++  return !(left == right);
++}
++
++inline bool operator<(const PsramString& left,
++                      const PsramString& right) noexcept
++{
++  return left.compareTo(right) < 0;
++}
++
++inline bool operator==(const PsramString& left,
++                       const String& right) noexcept
++{
++  return left.compareTo(right) == 0;
++}
++
++inline bool operator!=(const PsramString& left,
++                       const String& right) noexcept
++{
++  return !(left == right);
++}
++
++inline bool operator==(const String& left,
++                       const PsramString& right) noexcept
++{
++  return right == left;
++}
++
++inline bool operator!=(const String& left,
++                       const PsramString& right) noexcept
++{
++  return !(right == left);
++}
++
++inline bool operator==(const PsramString& left,
++                       const char* right) noexcept
++{
++  return left.compareTo(right) == 0;
++}
++
++inline bool operator!=(const PsramString& left,
++                       const char* right) noexcept
++{
++  return !(left == right);
++}
++
++inline void swap(PsramString& left, PsramString& right) noexcept
++{
++  left.swap(right);
++}
+diff --git a/src/storage/storage_builder_v3.cpp b/src/storage/storage_builder_v3.cpp
+index adb441a..883da30 100644
+--- a/src/storage/storage_builder_v3.cpp
++++ b/src/storage/storage_builder_v3.cpp
+@@ -15,8 +15,8 @@ static constexpr size_t kInternalFallbackMaxBytes = 32 * 1024;
+  * ========================= */
+ 
+ struct StringPoolBuilder {
+-  std::vector<uint8_t> blob;
+-  std::map<String, uint32_t> str_to_off;
++  PsramVector<uint8_t> blob;
++  PsramMap<PsramString, uint32_t> str_to_off;
+ 
+   StringPoolBuilder() {
+     clear();
+@@ -30,7 +30,7 @@ struct StringPoolBuilder {
+     blob.push_back(0);
+   }
+ 
+-  uint32_t intern(const String& s) {
++  uint32_t intern(const PsramString& s) {
+     if (s.isEmpty()) return INVALID_OFF32;
+ 
+     auto it = str_to_off.find(s);
+@@ -44,15 +44,20 @@ struct StringPoolBuilder {
+     blob.insert(blob.end(), (const uint8_t*)s.c_str(), (const uint8_t*)s.c_str() + n);
+     blob.push_back(0);  // '\0'
+ 
+-    str_to_off[s] = off;
++    str_to_off.emplace(s, off);
+     return off;
+   }
++
++  uint32_t intern(const String& s) {
++    const PsramString psram_text(s);
++    return intern(psram_text);
++  }
+ };
+ 
+ struct AlbumKeyV3 {
+-  String album_name;
+-  String primary_artist;
+-  String folder_cover;
++  PsramString album_name;
++  PsramString primary_artist;
++  PsramString folder_cover;
+ 
+   bool operator<(const AlbumKeyV3& other) const {
+     if (album_name != other.album_name) return album_name < other.album_name;
+@@ -65,85 +70,170 @@ struct AlbumKeyV3 {
+  * 工具函数
+  * ========================= */
+ 
+-static String split_primary_artist(const String& artist)
+-{
+-  if (artist.isEmpty()) return "未知歌手";
++struct TextSliceV3 {
++  const char* data = "";
++  size_t length = 0;
+ 
+-  int p = artist.indexOf('/');
+-  if (p < 0) {
+-    String s = artist;
+-    s.trim();
+-    return s.isEmpty() ? String("未知歌手") : s;
++  TextSliceV3() = default;
++  TextSliceV3(const char* text, size_t text_length)
++      : data(text ? text : ""), length(text_length) {}
++};
++
++static TextSliceV3 trim_ascii_space_v3(TextSliceV3 slice)
++{
++  while (slice.length > 0 &&
++         (slice.data[0] == ' ' || slice.data[0] == '\t')) {
++    ++slice.data;
++    --slice.length;
+   }
+ 
+-  String s = artist.substring(0, p);
+-  s.trim();
+-  return s.isEmpty() ? String("未知歌手") : s;
++  while (slice.length > 0) {
++    const char c = slice.data[slice.length - 1];
++    if (c != ' ' && c != '\t') break;
++    --slice.length;
++  }
++  return slice;
+ }
+ 
+-static String normalized_sort_key(String s)
++static TextSliceV3 text_slice_v3(const PsramString& text)
+ {
+-  s.trim();
+-  s.toLowerCase();
+-  return s;
++  TextSliceV3 slice{text.c_str(), text.length()};
++  return trim_ascii_space_v3(slice);
+ }
+ 
+-static String basename_no_ext_from_rel_path(const String& rel_path)
++static TextSliceV3 primary_artist_slice_v3(const PsramString& artist)
+ {
+-  int slash = rel_path.lastIndexOf('/');
+-  String name = (slash >= 0) ? rel_path.substring(slash + 1) : rel_path;
+-  int dot = name.lastIndexOf('.');
+-  if (dot > 0) {
+-    name = name.substring(0, dot);
++  TextSliceV3 slice{text_slice_v3(artist)};
++  for (size_t i = 0; i < slice.length; ++i) {
++    if (slice.data[i] == '/') {
++      slice.length = i;
++      break;
++    }
+   }
+-  name.trim();
+-  return name;
++  return trim_ascii_space_v3(slice);
+ }
+ 
+-static int extract_track_no_hint(const TrackBuildTempV3& t)
++static unsigned char ascii_fold_v3(unsigned char value)
+ {
+-  String s = basename_no_ext_from_rel_path(t.audio_rel);
+-  int i = 0;
+-  while (i < s.length() && (s[i] == ' ' || s[i] == '	')) ++i;
++  if (value >= 'A' && value <= 'Z') {
++    return (unsigned char)(value + ('a' - 'A'));
++  }
++  return value;
++}
+ 
+-  int num = 0;
+-  bool has_digits = false;
+-  while (i < s.length() && s[i] >= '0' && s[i] <= '9') {
+-    has_digits = true;
+-    num = num * 10 + (s[i] - '0');
+-    ++i;
++static int compare_text_slice_v3(TextSliceV3 left, TextSliceV3 right)
++{
++  const size_t common = left.length < right.length
++      ? left.length
++      : right.length;
++
++  for (size_t i = 0; i < common; ++i) {
++    const unsigned char a = ascii_fold_v3(
++        (unsigned char)left.data[i]);
++    const unsigned char b = ascii_fold_v3(
++        (unsigned char)right.data[i]);
++    if (a < b) return -1;
++    if (a > b) return 1;
+   }
+ 
+-  if (!has_digits) return 0x7fffffff;
++  if (left.length < right.length) return -1;
++  if (left.length > right.length) return 1;
++  return 0;
++}
++
++static TextSliceV3 unknown_artist_slice_v3()
++{
++  static const char kUnknownArtist[] = "未知歌手";
++  return TextSliceV3{kUnknownArtist, sizeof(kUnknownArtist) - 1};
++}
++
++static TextSliceV3 unknown_album_slice_v3()
++{
++  static const char kUnknownAlbum[] = "未知专辑";
++  return TextSliceV3{kUnknownAlbum, sizeof(kUnknownAlbum) - 1};
++}
+ 
+-  while (i < s.length() && (s[i] == ' ' || s[i] == '	' || s[i] == '.' || s[i] == '-' || s[i] == '_')) {
+-    ++i;
++static PsramString split_primary_artist(const PsramString& artist)
++{
++  TextSliceV3 slice = primary_artist_slice_v3(artist);
++  if (slice.length == 0) {
++    return PsramString("未知歌手");
+   }
+ 
+-  return num;
++  PsramString result;
++  if (!result.assign(slice.data, slice.length)) std::abort();
++  return result;
+ }
+ 
+-static bool track_build_temp_less_v3(const TrackBuildTempV3& a, const TrackBuildTempV3& b)
++static int extract_track_no_hint(const TrackBuildTempV3& track)
+ {
+-  String a_artist = normalized_sort_key(split_primary_artist(a.artist));
+-  String b_artist = normalized_sort_key(split_primary_artist(b.artist));
+-  if (a_artist != b_artist) return a_artist < b_artist;
++  const char* path = track.audio_rel.c_str();
++  const size_t path_length = track.audio_rel.length();
+ 
+-  String a_album = normalized_sort_key(a.album.isEmpty() ? String("未知专辑") : a.album);
+-  String b_album = normalized_sort_key(b.album.isEmpty() ? String("未知专辑") : b.album);
+-  if (a_album != b_album) return a_album < b_album;
++  size_t name_start = 0;
++  for (size_t i = 0; i < path_length; ++i) {
++    if (path[i] == '/') name_start = i + 1;
++  }
+ 
+-  int a_track_no = extract_track_no_hint(a);
+-  int b_track_no = extract_track_no_hint(b);
+-  if (a_track_no != b_track_no) return a_track_no < b_track_no;
++  size_t name_end = path_length;
++  for (size_t i = path_length; i > name_start; --i) {
++    if (path[i - 1] == '.') {
++      name_end = i - 1;
++      break;
++    }
++  }
+ 
+-  String a_title = normalized_sort_key(a.title);
+-  String b_title = normalized_sort_key(b.title);
+-  if (a_title != b_title) return a_title < b_title;
++  size_t cursor = name_start;
++  while (cursor < name_end &&
++         (path[cursor] == ' ' || path[cursor] == '\t')) {
++    ++cursor;
++  }
+ 
+-  String a_path = normalized_sort_key(a.audio_rel);
+-  String b_path = normalized_sort_key(b.audio_rel);
+-  return a_path < b_path;
++  int number = 0;
++  bool has_digits = false;
++  while (cursor < name_end &&
++         path[cursor] >= '0' && path[cursor] <= '9') {
++    has_digits = true;
++    number = number * 10 + (path[cursor] - '0');
++    ++cursor;
++  }
++
++  return has_digits ? number : 0x7fffffff;
++}
++
++static bool track_build_temp_less_v3(const TrackBuildTempV3& left,
++                                     const TrackBuildTempV3& right)
++{
++  TextSliceV3 left_artist = primary_artist_slice_v3(left.artist);
++  TextSliceV3 right_artist = primary_artist_slice_v3(right.artist);
++  if (left_artist.length == 0) left_artist = unknown_artist_slice_v3();
++  if (right_artist.length == 0) right_artist = unknown_artist_slice_v3();
++
++  int compare = compare_text_slice_v3(left_artist, right_artist);
++  if (compare != 0) return compare < 0;
++
++  TextSliceV3 left_album = text_slice_v3(left.album);
++  TextSliceV3 right_album = text_slice_v3(right.album);
++  if (left.album.isEmpty()) left_album = unknown_album_slice_v3();
++  if (right.album.isEmpty()) right_album = unknown_album_slice_v3();
++
++  compare = compare_text_slice_v3(left_album, right_album);
++  if (compare != 0) return compare < 0;
++
++  const int left_track_no = extract_track_no_hint(left);
++  const int right_track_no = extract_track_no_hint(right);
++  if (left_track_no != right_track_no) {
++    return left_track_no < right_track_no;
++  }
++
++  compare = compare_text_slice_v3(
++      text_slice_v3(left.title),
++      text_slice_v3(right.title));
++  if (compare != 0) return compare < 0;
++
++  return compare_text_slice_v3(
++      text_slice_v3(left.audio_rel),
++      text_slice_v3(right.audio_rel)) < 0;
+ }
+ 
+ static void* alloc_prefer_psram(size_t n)
+@@ -162,7 +252,7 @@ static void* alloc_prefer_psram(size_t n)
+   return heap_caps_malloc(n, MALLOC_CAP_8BIT);
+ }
+ 
+-static bool copy_blob_to_psram(const std::vector<uint8_t>& src, uint8_t*& out_ptr, uint32_t& out_size)
++static bool copy_blob_to_psram(const PsramVector<uint8_t>& src, uint8_t*& out_ptr, uint32_t& out_size)
+ {
+   out_ptr = nullptr;
+   out_size = 0;
+@@ -182,7 +272,7 @@ static bool copy_blob_to_psram(const std::vector<uint8_t>& src, uint8_t*& out_pt
+  * 主构建流程
+  * ========================= */
+ 
+-bool storage_build_catalog_v3_from_temp(const std::vector<TrackBuildTempV3>& tracks,
++bool storage_build_catalog_v3_from_temp(StorageTrackBuildListV3& tracks,
+                                         MusicCatalogV3& out_cat)
+ {
+   storage_catalog_v3_free(out_cat);
+@@ -192,31 +282,31 @@ bool storage_build_catalog_v3_from_temp(const std::vector<TrackBuildTempV3>& tra
+     return false;
+   }
+ 
+-  std::vector<TrackBuildTempV3> sorted_tracks = tracks;
+-  std::stable_sort(sorted_tracks.begin(), sorted_tracks.end(), track_build_temp_less_v3);
+-  if (sorted_tracks.size() > UINT16_MAX) {
++  // 临时曲目表本身已经位于 PSRAM；直接原地排序，避免再复制一整份字符串对象。
++  std::sort(tracks.begin(), tracks.end(), track_build_temp_less_v3);
++  if (tracks.size() > UINT16_MAX) {
+     LOGW("[曲库构建] 歌曲数量超过 TrackIndex16 上限: 总数=%lu 保留=%u 跳过=%lu",
+-         (unsigned long)sorted_tracks.size(),
++         (unsigned long)tracks.size(),
+          (unsigned)UINT16_MAX,
+-         (unsigned long)(sorted_tracks.size() - UINT16_MAX));
+-    sorted_tracks.resize(UINT16_MAX);
++         (unsigned long)(tracks.size() - UINT16_MAX));
++    tracks.resize(UINT16_MAX);
+   }
+ 
+   StringPoolBuilder pool_builder;
+ 
+   /* album 去重表 */
+-  std::map<AlbumKeyV3, uint32_t> album_map;
+-  std::vector<AlbumRowV3> album_rows;
++  PsramMap<AlbumKeyV3, uint32_t> album_map;
++  PsramVector<AlbumRowV3> album_rows;
+ 
+   /* artist 去重表：先只存 primary artist */
+-  std::map<String, uint32_t> artist_map;
+-  std::vector<ArtistRowV3> artist_rows;
++  PsramMap<PsramString, uint32_t> artist_map;
++  PsramVector<ArtistRowV3> artist_rows;
+ 
+   /* track rows */
+-  std::vector<TrackRowV3> track_rows;
+-  track_rows.reserve(sorted_tracks.size());
++  PsramVector<TrackRowV3> track_rows;
++  track_rows.reserve(tracks.size());
+ 
+-  for (const auto& t : sorted_tracks) {
++  for (const auto& t : tracks) {
+     TrackRowV3 row{};
+ 
+     /* 1) 基本文本 */
+@@ -235,7 +325,7 @@ bool storage_build_catalog_v3_from_temp(const std::vector<TrackBuildTempV3>& tra
+     row.flags = t.flags;
+ 
+     /* 3) artist 表：先仅保存 primary artist */
+-    String primary_artist = split_primary_artist(t.artist);
++    PsramString primary_artist = split_primary_artist(t.artist);
+     auto ait = artist_map.find(primary_artist);
+     if (ait == artist_map.end()) {
+       ArtistRowV3 ar;
+@@ -247,8 +337,10 @@ bool storage_build_catalog_v3_from_temp(const std::vector<TrackBuildTempV3>& tra
+     }
+ 
+     /* 4) album 表：按 (album_name, primary_artist, folder_cover) 去重 */
+-    String album_name = t.album.isEmpty() ? String("未知专辑") : t.album;
+-    String folder_cover = t.cover_path_rel;
++    PsramString album_name = t.album.isEmpty()
++        ? PsramString("未知专辑")
++        : t.album;
++    PsramString folder_cover = t.cover_path_rel;
+ 
+     AlbumKeyV3 ak;
+     ak.album_name = album_name;
+@@ -273,6 +365,19 @@ bool storage_build_catalog_v3_from_temp(const std::vector<TrackBuildTempV3>& tra
+     track_rows.push_back(row);
+   }
+ 
++  LOGI("[曲库构建][PSRAM] pool_blob=%luB ext=%d string_map_node_ext=%d album_rows=%luB ext=%d album_map_node_ext=%d artist_rows=%luB ext=%d artist_map_node_ext=%d track_rows=%luB ext=%d",
++       (unsigned long)(pool_builder.blob.capacity() * sizeof(uint8_t)),
++       (!pool_builder.blob.empty() && esp_ptr_external_ram(pool_builder.blob.data())) ? 1 : 0,
++       (!pool_builder.str_to_off.empty() && esp_ptr_external_ram(&*pool_builder.str_to_off.begin())) ? 1 : 0,
++       (unsigned long)(album_rows.capacity() * sizeof(AlbumRowV3)),
++       (!album_rows.empty() && esp_ptr_external_ram(album_rows.data())) ? 1 : 0,
++       (!album_map.empty() && esp_ptr_external_ram(&*album_map.begin())) ? 1 : 0,
++       (unsigned long)(artist_rows.capacity() * sizeof(ArtistRowV3)),
++       (!artist_rows.empty() && esp_ptr_external_ram(artist_rows.data())) ? 1 : 0,
++       (!artist_map.empty() && esp_ptr_external_ram(&*artist_map.begin())) ? 1 : 0,
++       (unsigned long)(track_rows.capacity() * sizeof(TrackRowV3)),
++       (!track_rows.empty() && esp_ptr_external_ram(track_rows.data())) ? 1 : 0);
++
+   /* 拷贝到最终 catalog */
+ 
+   if (!copy_blob_to_psram(pool_builder.blob, out_cat.pool.data, out_cat.pool.size)) {
+diff --git a/src/storage/storage_catalog_v3.cpp b/src/storage/storage_catalog_v3.cpp
+index 05610e4..0e9869b 100644
+--- a/src/storage/storage_catalog_v3.cpp
++++ b/src/storage/storage_catalog_v3.cpp
+@@ -105,7 +105,7 @@ static bool rebuild_v3_native(const char* music_root,
+     static constexpr const char* kManifestPath =
+         "/System/music_manifest_v1.bin";
+ 
+-    std::vector<TrackBuildTempV3> tmp_tracks;
++    StorageTrackBuildListV3 tmp_tracks;
+     StorageMusicManifestV1 next_manifest;
+     StorageIncrementalScanStatsV3 scan_stats{};
+ 
+@@ -132,6 +132,12 @@ static bool rebuild_v3_native(const char* music_root,
+         return false;
+     }
+ 
++    LOGI("[曲库][扫描内存] 临时曲目容器=%luB ext=%d，Catalog 构建后立即释放",
++         (unsigned long)(tmp_tracks.capacity() * sizeof(TrackBuildTempV3)),
++         (!tmp_tracks.empty() && esp_ptr_external_ram(tmp_tracks.data())) ? 1 : 0);
++    StorageTrackBuildListV3 empty_tracks;
++    tmp_tracks.swap(empty_tracks);
++
+     if (!storage_build_groups_v3(s_catalog_v3)) {
+         LOGE("[曲库] 分组构建失败");
+         storage_catalog_v3_clear();
+diff --git a/src/storage/storage_manifest_v1.cpp b/src/storage/storage_manifest_v1.cpp
+index 4213286..7fd3a6f 100644
+--- a/src/storage/storage_manifest_v1.cpp
++++ b/src/storage/storage_manifest_v1.cpp
+@@ -125,7 +125,7 @@ static bool read_header(File32& file, ManifestHeaderV1& header)
+          read_u32(file, header.crc32);
+ }
+ 
+-static bool string_size_valid(const String& value)
++static bool string_size_valid(const PsramString& value)
+ {
+   return value.length() <= kManifestMaxStringBytes;
+ }
+@@ -159,7 +159,7 @@ static bool calculate_payload_layout(const StorageMusicManifestV1& manifest,
+     payload_size += size;
+   };
+ 
+-  auto add_string = [&](const String& value) {
++  auto add_string = [&](const PsramString& value) {
+     const uint16_t length = (uint16_t)value.length();
+     add_crc(&length, sizeof(length));
+     if (length > 0) {
+@@ -201,7 +201,7 @@ static bool calculate_payload_layout(const StorageMusicManifestV1& manifest,
+   return true;
+ }
+ 
+-static bool write_string(File32& file, const String& value)
++static bool write_string(File32& file, const PsramString& value)
+ {
+   const uint16_t length = (uint16_t)value.length();
+   return write_u16(file, length) &&
+@@ -209,7 +209,7 @@ static bool write_string(File32& file, const String& value)
+ }
+ 
+ static bool read_string_crc(File32& file,
+-                            String& out,
++                            PsramString& out,
+                             uint32_t& crc,
+                             uint32_t& remaining)
+ {
+@@ -226,26 +226,23 @@ static bool read_string_crc(File32& file,
+     return false;
+   }
+ 
+-  out = String();
++  out.clear();
+   if (length == 0) return true;
+-  if (!out.reserve(length)) return false;
+-
+-  char buffer[128];
+-  uint16_t left = length;
+-  while (left > 0) {
+-    const uint16_t chunk = left > sizeof(buffer)
+-        ? (uint16_t)sizeof(buffer)
+-        : left;
+-    if (file.read(reinterpret_cast<uint8_t*>(buffer), chunk) != chunk) {
++  if (!out.resize_for_write(length)) return false;
++
++  uint16_t copied = 0;
++  while (copied < length) {
++    const uint16_t left = length - copied;
++    const uint16_t chunk = left > 128u ? 128u : left;
++    char* destination = out.data() + copied;
++    if (file.read(reinterpret_cast<uint8_t*>(destination), chunk) != chunk) {
++      out.clear();
+       return false;
+     }
+     crc = crc32_update(crc,
+-                       reinterpret_cast<const uint8_t*>(buffer),
++                       reinterpret_cast<const uint8_t*>(destination),
+                        chunk);
+-    if (!out.concat(buffer, chunk)) {
+-      return false;
+-    }
+-    left -= chunk;
++    copied += chunk;
+     remaining -= chunk;
+   }
+   return true;
+diff --git a/src/storage/storage_scan_v3.cpp b/src/storage/storage_scan_v3.cpp
+index b0daeb0..b5ef69d 100644
+--- a/src/storage/storage_scan_v3.cpp
++++ b/src/storage/storage_scan_v3.cpp
+@@ -6,6 +6,7 @@
+ #include <freertos/task.h>
+ #include <algorithm>
+ #include <cstring>
++#include <esp_heap_caps.h>
+ 
+ #include "utils/log.h"
+ #include "storage/storage_io.h"
+@@ -375,7 +376,7 @@ bool storage_scan_one_audio_file_v3(const String& full_path,
+ static bool scan_dir_recursive_v3(const String& dir_path,
+                                   const char* music_root,
+                                   const String& inherited_cover_path,
+-                                  std::vector<TrackBuildTempV3>& out_tracks,
++                                  StorageTrackBuildListV3& out_tracks,
+                                   int& scanned)
+ {
+     scan_v3_cooperate_wdt();
+@@ -456,7 +457,7 @@ namespace {
+ static constexpr size_t kFingerprintSampleBytes = 512;
+ 
+ struct CachedFingerprintV1 {
+-    String path;
++    PsramString path;
+     StorageFileFingerprintV1 fingerprint;
+     bool ok = false;
+ };
+@@ -465,14 +466,111 @@ struct IncrementalScanContextV3 {
+     const char* music_root = "/Music";
+     const StorageMusicManifestV1* old_manifest = nullptr;
+     const MusicCatalogV3* reuse_catalog = nullptr;
+-    const std::vector<uint32_t>* catalog_path_order = nullptr;
+-    std::vector<uint8_t>* old_seen = nullptr;
+-    std::vector<TrackBuildTempV3>* out_tracks = nullptr;
++    const StorageTrackIndexListV3* catalog_path_order = nullptr;
++    StorageTrackSeenListV3* old_seen = nullptr;
++    StorageTrackBuildListV3* out_tracks = nullptr;
+     StorageMusicManifestV1* out_manifest = nullptr;
+     StorageIncrementalScanStatsV3* stats = nullptr;
+-    std::vector<CachedFingerprintV1> cover_fingerprint_cache;
++    PsramVector<CachedFingerprintV1> cover_fingerprint_cache;
+ };
+ 
++struct ScanHeapSnapshotV3 {
++    uint32_t internal_free = 0;
++    uint32_t psram_free = 0;
++};
++
++static ScanHeapSnapshotV3 scan_heap_snapshot_v3()
++{
++    ScanHeapSnapshotV3 snapshot{};
++    snapshot.internal_free = (uint32_t)heap_caps_get_free_size(
++        MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
++    snapshot.psram_free = (uint32_t)heap_caps_get_free_size(
++        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
++    return snapshot;
++}
++
++static long signed_heap_delta_v3(uint32_t before, uint32_t after)
++{
++    return (long)after - (long)before;
++}
++
++static void count_psram_text_v3(const PsramString& text,
++                                uint32_t& total,
++                                uint32_t& external,
++                                uint32_t& internal_fallback)
++{
++    if (text.isEmpty()) return;
++    ++total;
++    if (text.isExternal()) {
++        ++external;
++    } else {
++        ++internal_fallback;
++    }
++}
++
++static void log_incremental_scan_memory_v3(
++    const char* phase,
++    const ScanHeapSnapshotV3& start,
++    const StorageTrackBuildListV3& tracks,
++    const StorageMusicManifestV1& old_manifest,
++    const StorageMusicManifestV1& next_manifest,
++    const StorageTrackIndexListV3& path_order,
++    const StorageTrackSeenListV3& old_seen,
++    const PsramVector<CachedFingerprintV1>& cover_cache)
++{
++    const ScanHeapSnapshotV3 current = scan_heap_snapshot_v3();
++
++    LOGI("[增量扫描][内存] %s 内部空闲=%luB 变化=%ldB PSRAM空闲=%luB 变化=%ldB",
++         phase ? phase : "?",
++         (unsigned long)current.internal_free,
++         signed_heap_delta_v3(start.internal_free, current.internal_free),
++         (unsigned long)current.psram_free,
++         signed_heap_delta_v3(start.psram_free, current.psram_free));
++
++    LOGI("[增量扫描][PSRAM] tracks=%luB ext=%d old_manifest=%luB ext=%d next_manifest=%luB ext=%d order=%luB ext=%d seen=%luB ext=%d cover_cache=%luB ext=%d",
++         (unsigned long)(tracks.capacity() * sizeof(TrackBuildTempV3)),
++         (!tracks.empty() && esp_ptr_external_ram(tracks.data())) ? 1 : 0,
++         (unsigned long)(old_manifest.entries.capacity() * sizeof(StorageManifestEntryV1)),
++         (!old_manifest.entries.empty() && esp_ptr_external_ram(old_manifest.entries.data())) ? 1 : 0,
++         (unsigned long)(next_manifest.entries.capacity() * sizeof(StorageManifestEntryV1)),
++         (!next_manifest.entries.empty() && esp_ptr_external_ram(next_manifest.entries.data())) ? 1 : 0,
++         (unsigned long)(path_order.capacity() * sizeof(uint32_t)),
++         (!path_order.empty() && esp_ptr_external_ram(path_order.data())) ? 1 : 0,
++         (unsigned long)(old_seen.capacity() * sizeof(uint8_t)),
++         (!old_seen.empty() && esp_ptr_external_ram(old_seen.data())) ? 1 : 0,
++         (unsigned long)(cover_cache.capacity() * sizeof(CachedFingerprintV1)),
++         (!cover_cache.empty() && esp_ptr_external_ram(cover_cache.data())) ? 1 : 0);
++
++    uint32_t text_total = 0;
++    uint32_t text_external = 0;
++    uint32_t text_internal_fallback = 0;
++
++    for (const auto& track : tracks) {
++        count_psram_text_v3(track.title, text_total, text_external, text_internal_fallback);
++        count_psram_text_v3(track.artist, text_total, text_external, text_internal_fallback);
++        count_psram_text_v3(track.album, text_total, text_external, text_internal_fallback);
++        count_psram_text_v3(track.audio_rel, text_total, text_external, text_internal_fallback);
++        count_psram_text_v3(track.lrc_rel, text_total, text_external, text_internal_fallback);
++        count_psram_text_v3(track.cover_path_rel, text_total, text_external, text_internal_fallback);
++        count_psram_text_v3(track.cover_mime, text_total, text_external, text_internal_fallback);
++    }
++
++    for (const auto& entry : old_manifest.entries) {
++        count_psram_text_v3(entry.audio_rel, text_total, text_external, text_internal_fallback);
++    }
++    for (const auto& entry : next_manifest.entries) {
++        count_psram_text_v3(entry.audio_rel, text_total, text_external, text_internal_fallback);
++    }
++    for (const auto& item : cover_cache) {
++        count_psram_text_v3(item.path, text_total, text_external, text_internal_fallback);
++    }
++
++    LOGI("[增量扫描][文本] 非空=%lu PSRAM=%lu 内部回落=%lu",
++         (unsigned long)text_total,
++         (unsigned long)text_external,
++         (unsigned long)text_internal_fallback);
++}
++
+ static bool is_audio_filename_v3(const String& filename)
+ {
+     String lower = filename;
+@@ -594,6 +692,14 @@ static String music_absolute_path_v3(const char* music_root,
+     return root + relative_path;
+ }
+ 
++static String music_absolute_path_v3(const char* music_root,
++                                     const PsramString& relative_path)
++{
++    return music_absolute_path_v3(
++        music_root,
++        String(relative_path.c_str()));
++}
++
+ static String find_lrc_path_for_audio_v3(const String& full_path,
+                                          const String& filename)
+ {
+@@ -613,7 +719,7 @@ static String find_lrc_path_for_audio_v3(const String& full_path,
+ 
+ static bool fingerprint_cached_v1(
+     const String& path,
+-    std::vector<CachedFingerprintV1>& cache,
++    PsramVector<CachedFingerprintV1>& cache,
+     StorageFileFingerprintV1& out)
+ {
+     if (path.isEmpty()) {
+@@ -690,7 +796,7 @@ static const char* catalog_track_audio_rel_v3(
+ 
+ static bool build_catalog_path_order_v3(
+     const MusicCatalogV3& catalog,
+-    std::vector<uint32_t>& out_order)
++    StorageTrackIndexListV3& out_order)
+ {
+     out_order.clear();
+     if (!catalog.tracks || catalog.track_count == 0) return false;
+@@ -723,10 +829,11 @@ static bool build_catalog_path_order_v3(
+     return true;
+ }
+ 
++template <typename TextType>
+ static int find_catalog_track_v3(
+     const MusicCatalogV3& catalog,
+-    const std::vector<uint32_t>& order,
+-    const String& audio_rel)
++    const StorageTrackIndexListV3& order,
++    const TextType& audio_rel)
+ {
+     size_t low = 0;
+     size_t high = order.size();
+@@ -786,7 +893,7 @@ static bool temp_from_catalog_track_v3(
+ static bool manifest_matches_catalog_v3(
+     const StorageMusicManifestV1& manifest,
+     const MusicCatalogV3& catalog,
+-    const std::vector<uint32_t>& order)
++    const StorageTrackIndexListV3& order)
+ {
+     if (manifest.entries.size() != catalog.track_count ||
+         order.size() != catalog.track_count) {
+@@ -1066,7 +1173,7 @@ static bool scan_dir_incremental_v3(
+ }  // namespace
+ 
+ bool storage_scan_music_incremental_v3(
+-    std::vector<TrackBuildTempV3>& out_tracks,
++    StorageTrackBuildListV3& out_tracks,
+     StorageMusicManifestV1& out_manifest,
+     StorageIncrementalScanStatsV3& out_stats,
+     const MusicCatalogV3* reuse_catalog,
+@@ -1082,12 +1189,14 @@ bool storage_scan_music_incremental_v3(
+     scan_v3_reset_coop_state();
+     ui_scan_begin();
+ 
++    const ScanHeapSnapshotV3 heap_start = scan_heap_snapshot_v3();
++
+     out_tracks.clear();
+     out_manifest.clear();
+     out_stats = StorageIncrementalScanStatsV3{};
+ 
+     StorageMusicManifestV1 old_manifest;
+-    std::vector<uint32_t> catalog_path_order;
++    StorageTrackIndexListV3 catalog_path_order;
+ 
+     const bool manifest_file_loaded =
+         storage_manifest_load_v1(old_manifest, manifest_path);
+@@ -1111,7 +1220,7 @@ bool storage_scan_music_incremental_v3(
+         catalog_path_order.clear();
+     }
+ 
+-    std::vector<uint8_t> old_seen;
++    StorageTrackSeenListV3 old_seen;
+     if (out_stats.manifest_loaded) {
+         old_seen.assign(old_manifest.entries.size(), 0);
+         out_tracks.reserve(old_manifest.entries.size() + 8);
+@@ -1167,6 +1276,16 @@ bool storage_scan_music_incremental_v3(
+                 return a.audio_rel.compareTo(b.audio_rel) < 0;
+               });
+ 
++    log_incremental_scan_memory_v3(
++        "扫描完成",
++        heap_start,
++        out_tracks,
++        old_manifest,
++        out_manifest,
++        catalog_path_order,
++        old_seen,
++        context.cover_fingerprint_cache);
++
+     ui_scan_end();
+ 
+     LOGI("[增量扫描] 完成：模式=%s 发现=%lu 复用=%lu 新增=%lu 修改=%lu 删除=%lu",
+@@ -1180,7 +1299,7 @@ bool storage_scan_music_incremental_v3(
+     return !out_tracks.empty();
+ }
+ 
+-bool storage_scan_music_v3(std::vector<TrackBuildTempV3>& out_tracks,
++bool storage_scan_music_v3(StorageTrackBuildListV3& out_tracks,
+                            const char* music_root)
+ {
+     StorageSdLockGuard sd_lock(2000);

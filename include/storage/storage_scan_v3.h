@@ -2,12 +2,27 @@
 #include <Arduino.h>
 #include <vector>
 #include "storage/storage_types_v3.h"
+#include "storage/storage_manifest_v1.h"
 
 /**
  * @brief V3 扫描阶段的临时曲目结构。
  *
  * 只在扫描 / builder 阶段存在；后续会被压缩为 TrackRowV3 + StringPool。
  */
+
+/**
+ * @brief 增量扫描统计。
+ */
+struct StorageIncrementalScanStatsV3 {
+  bool manifest_loaded = false;
+  bool full_scan = true;
+  uint32_t discovered = 0;
+  uint32_t reused = 0;
+  uint32_t added = 0;
+  uint32_t modified = 0;
+  uint32_t deleted = 0;
+};
+
 struct TrackBuildTempV3 {
   String title;
   String artist;
@@ -46,3 +61,17 @@ bool storage_scan_one_audio_file_v3(const String& full_path,
  */
 bool storage_scan_music_v3(std::vector<TrackBuildTempV3>& out_tracks,
                            const char* music_root = "/Music");
+
+/**
+ * @brief 使用 Manifest 执行增量扫描。
+ *
+ * 首次没有有效 Manifest 时自动执行全量解析，并生成下一份 Manifest。
+ * 后续扫描仍遍历目录，但未变化歌曲只读取轻量指纹并复用旧元数据。
+ */
+bool storage_scan_music_incremental_v3(
+    std::vector<TrackBuildTempV3>& out_tracks,
+    StorageMusicManifestV1& out_manifest,
+    StorageIncrementalScanStatsV3& out_stats,
+    const MusicCatalogV3* reuse_catalog,
+    const char* music_root = "/Music",
+    const char* manifest_path = "/System/music_manifest_v1.bin");
