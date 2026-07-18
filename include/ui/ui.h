@@ -87,9 +87,34 @@ bool ui_cover_load_allocated(const TrackInfo& t, uint8_t*& out_buf, size_t& out_
 void ui_cover_free_allocated(uint8_t* p);
 
 /* -------- 扫描页 -------- */
-void ui_scan_begin();
+struct UiScanProgress {
+  bool full_scan = false;
+  bool forced_full_scan = false;
+  uint32_t discovered = 0;
+  uint32_t reused = 0;
+  uint32_t added = 0;
+  uint32_t modified = 0;
+  uint32_t deleted = 0;
+  const char* current_path = nullptr;
+};
+
+struct UiScanSummary {
+  bool full_scan = false;
+  bool forced_full_scan = false;
+  uint32_t discovered = 0;
+  uint32_t reused = 0;
+  uint32_t added = 0;
+  uint32_t modified = 0;
+  uint32_t deleted = 0;
+  uint32_t elapsed_ms = 0;
+};
+
+void ui_scan_begin(bool full_scan = false, bool forced_full_scan = false);
+void ui_scan_tick(const UiScanProgress& progress);
 void ui_scan_tick(int tracks_count);
 void ui_scan_end();
+void ui_scan_complete(const UiScanSummary& summary);
+void ui_scan_failed(bool full_scan);
 void ui_scan_abort();
 
 /* -------- 播放器视图 / 状态 -------- */

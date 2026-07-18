@@ -2,6 +2,11 @@
 #include <stdbool.h>
 #include "ui/ui.h"
 
+enum class AppRescanMode : uint8_t {
+  Incremental = 0,
+  Full,
+};
+
 // 曲库重扫状态会被主循环、扫描任务、按键和 Web 任务共同访问。
 // 使用值快照和封装接口，避免直接依赖 volatile 造成跨核心数据竞争。
 struct AppRescanState {
@@ -9,13 +14,18 @@ struct AppRescanState {
   bool done = false;
   bool success = false;
   bool abort_requested = false;
+  bool committed = false;
+  AppRescanMode mode = AppRescanMode::Incremental;
 };
 
 // 获取一致的重扫状态快照。
 AppRescanState app_rescan_state_get();
 
 // 开始一次新的重扫会话。已有重扫时返回 false。
-bool app_rescan_begin();
+bool app_rescan_begin(AppRescanMode mode = AppRescanMode::Incremental);
+
+// 索引已经完成构建和落盘后锁定本轮结果，拒绝后续取消请求。
+void app_rescan_mark_committed();
 
 // 扫描任务结束时发布结果；rescanning 会保持到主循环消费结果为止。
 void app_rescan_mark_finished(bool success);

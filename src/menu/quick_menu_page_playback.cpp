@@ -300,9 +300,18 @@ bool action_cycle_sleep_timer()
     return true;
 }
 
-bool action_start_rescan()
+bool action_start_incremental_rescan()
 {
-    const bool ok = app_request_start_rescan();
+    const bool ok = app_request_start_rescan(AppRescanMode::Incremental);
+    if (ok) {
+        quick_menu_exit();
+    }
+    return ok;
+}
+
+bool action_start_full_rescan()
+{
+    const bool ok = app_request_start_rescan(AppRescanMode::Full);
     if (ok) {
         quick_menu_exit();
     }
@@ -319,7 +328,8 @@ const QuickMenuItem PLAYBACK_ITEMS[] = {
     {"状态灯亮度", QuickMenuItemType::Toggle, QuickMenuPage::Playback, "", value_status_led_brightness, action_cycle_status_led_brightness, true, false},
     {"电磁铁动作", QuickMenuItemType::Toggle, QuickMenuPage::Playback, "", value_solenoid_enabled, action_toggle_solenoid, true, false},
     {"睡眠关机", QuickMenuItemType::Toggle, QuickMenuPage::Playback, "", value_sleep_timer, action_cycle_sleep_timer, true, false},
-    {"重扫曲库", QuickMenuItemType::Action, QuickMenuPage::Playback, "", value_execute, action_start_rescan, true, false},
+    {"增量重扫", QuickMenuItemType::Action, QuickMenuPage::Playback, "", value_execute, action_start_incremental_rescan, true, false},
+    {"强制全量重扫", QuickMenuItemType::Action, QuickMenuPage::Playback, "", value_execute, action_start_full_rescan, true, false},
     {"TF卡状态", QuickMenuItemType::Status, QuickMenuPage::Playback, "", value_tf_status, nullptr, true, false},
     {"返回", QuickMenuItemType::Back, QuickMenuPage::Root, "", nullptr, nullptr, true, false},
 };

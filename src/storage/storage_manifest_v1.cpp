@@ -15,7 +15,9 @@ namespace {
 static constexpr uint32_t kManifestMagic = 0x31464E4Du;  // "MNF1"
 static constexpr uint16_t kManifestVersion = 1;
 static constexpr uint16_t kManifestFlagsCrc32 = 1u << 0;
-static constexpr uint32_t kManifestHeaderBytes = 24;
+static constexpr uint16_t kManifestFlagsCatalogCrc32 = 1u << 1;
+static constexpr uint32_t kManifestBaseHeaderBytes = 24;
+static constexpr uint32_t kManifestHeaderBytes = 28;
 static constexpr uint32_t kManifestMaxEntries = UINT16_MAX;
 static constexpr uint32_t kManifestMaxPayloadBytes = 8u * 1024u * 1024u;
 static constexpr uint16_t kManifestMaxStringBytes = 4096;
@@ -23,11 +25,12 @@ static constexpr uint16_t kManifestMaxStringBytes = 4096;
 struct ManifestHeaderV1 {
   uint32_t magic = kManifestMagic;
   uint16_t version = kManifestVersion;
-  uint16_t flags = kManifestFlagsCrc32;
+  uint16_t flags = kManifestFlagsCrc32 | kManifestFlagsCatalogCrc32;
   uint32_t header_size = kManifestHeaderBytes;
   uint32_t entry_count = 0;
   uint32_t payload_size = 0;
   uint32_t crc32 = 0;
+  uint32_t catalog_crc32 = 0;
 };
 
 static_assert(sizeof(ManifestHeaderV1) == kManifestHeaderBytes,
@@ -111,18 +114,27 @@ static bool write_header(File32& file, const ManifestHeaderV1& header)
          write_u32(file, header.header_size) &&
          write_u32(file, header.entry_count) &&
          write_u32(file, header.payload_size) &&
-         write_u32(file, header.crc32);
+         write_u32(file, header.crc32) &&
+         write_u32(file, header.catalog_crc32);
 }
 
 static bool read_header(File32& file, ManifestHeaderV1& header)
 {
-  return read_u32(file, header.magic) &&
-         read_u16(file, header.version) &&
-         read_u16(file, header.flags) &&
-         read_u32(file, header.header_size) &&
-         read_u32(file, header.entry_count) &&
-         read_u32(file, header.payload_size) &&
-         read_u32(file, header.crc32);
+  if (!read_u32(file, header.magic) ||
+      !read_u16(file, header.version) ||
+      !read_u16(file, header.flags) ||
+      !read_u32(file, header.header_size) ||
+      !read_u32(file, header.entry_count) ||
+      !read_u32(file, header.payload_size) ||
+      !read_u32(file, header.crc32)) {
+    return false;
+  }
+
+  header.catalog_crc32 = 0;
+  if (header.header_size >= kManifestHeaderBytes) {
+    return read_u32(file, header.catalog_crc32);
+  }
+  return header.header_size == kManifestBaseHeaderBytes;
 }
 
 static bool string_size_valid(const PsramString& value)
@@ -327,7 +339,8 @@ static bool validate_header(const ManifestHeaderV1& header,
 {
   if (header.magic != kManifestMagic ||
       header.version != kManifestVersion ||
-      header.header_size != kManifestHeaderBytes ||
+      (header.header_size != kManifestBaseHeaderBytes &&
+       header.header_size != kManifestHeaderBytes) ||
       (header.flags & kManifestFlagsCrc32) == 0 ||
       header.entry_count > kManifestMaxEntries ||
       header.payload_size > kManifestMaxPayloadBytes) {
@@ -401,6 +414,11 @@ static bool load_manifest_locked(StorageMusicManifestV1& out_manifest,
     return false;
   }
 
+  out_manifest.catalog_crc_valid =
+      header.header_size >= kManifestHeaderBytes &&
+      (header.flags & kManifestFlagsCatalogCrc32) != 0;
+  out_manifest.catalog_crc32 = header.catalog_crc32;
+
   std::sort(out_manifest.entries.begin(),
             out_manifest.entries.end(),
             [](const StorageManifestEntryV1& a,
@@ -464,6 +482,11 @@ bool storage_manifest_load_v1(StorageMusicManifestV1& out_manifest,
 bool storage_manifest_save_v1(const StorageMusicManifestV1& manifest,
                               const char* manifest_path)
 {
+  if (!manifest.catalog_crc_valid) {
+    LOGE("[曲库清单] 拒绝保存：缺少对应 Catalog 的一致性 CRC");
+    return false;
+  }
+
   uint32_t payload_size = 0;
   uint32_t payload_crc = 0;
   if (!calculate_payload_layout(manifest,
@@ -490,6 +513,7 @@ bool storage_manifest_save_v1(const StorageMusicManifestV1& manifest,
   header.entry_count = (uint32_t)manifest.entries.size();
   header.payload_size = payload_size;
   header.crc32 = payload_crc;
+  header.catalog_crc32 = manifest.catalog_crc32;
 
   File32 file = sd.open(tmp_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC);
   if (!file) {
@@ -513,7 +537,9 @@ bool storage_manifest_save_v1(const StorageMusicManifestV1& manifest,
 
   StorageMusicManifestV1 verify_manifest;
   if (!load_manifest_locked(verify_manifest, tmp_path.c_str(), true) ||
-      verify_manifest.entries.size() != manifest.entries.size()) {
+      verify_manifest.entries.size() != manifest.entries.size() ||
+      !verify_manifest.catalog_crc_valid ||
+      verify_manifest.catalog_crc32 != manifest.catalog_crc32) {
     remove_if_exists_locked(tmp_path.c_str());
     LOGE("[曲库清单] 临时文件落盘校验失败：%s", tmp_path.c_str());
     return false;
@@ -538,7 +564,9 @@ bool storage_manifest_save_v1(const StorageMusicManifestV1& manifest,
 
   StorageMusicManifestV1 final_verify;
   if (!load_manifest_locked(final_verify, final_path.c_str(), true) ||
-      final_verify.entries.size() != manifest.entries.size()) {
+      final_verify.entries.size() != manifest.entries.size() ||
+      !final_verify.catalog_crc_valid ||
+      final_verify.catalog_crc32 != manifest.catalog_crc32) {
     LOGE("[曲库清单] 正式文件替换后校验失败");
     remove_if_exists_locked(final_path.c_str());
     if (had_final) {
@@ -547,11 +575,44 @@ bool storage_manifest_save_v1(const StorageMusicManifestV1& manifest,
     return false;
   }
 
-  LOGI("[曲库清单] 原子保存成功：%s 条目=%u payload=%lu CRC=0x%08lx 备份=%s",
+  LOGI("[曲库清单] 原子保存成功：%s 条目=%u payload=%lu CRC=0x%08lx catalog=0x%08lx 备份=%s",
        manifest_path,
        (unsigned)manifest.entries.size(),
        (unsigned long)payload_size,
        (unsigned long)payload_crc,
+       (unsigned long)manifest.catalog_crc32,
        had_final ? "已保留" : "首次保存无旧版");
   return true;
+}
+
+uint32_t storage_manifest_catalog_crc_v1(const MusicCatalogV3& catalog)
+{
+  uint32_t crc = crc32_begin();
+
+  const uint32_t counts[] = {
+      catalog.track_count,
+      catalog.album_count,
+      catalog.artist_count,
+      catalog.pool.size,
+  };
+  crc = crc32_update(
+      crc,
+      reinterpret_cast<const uint8_t*>(counts),
+      sizeof(counts));
+
+  crc = crc32_update(crc, catalog.pool.data, catalog.pool.size);
+  crc = crc32_update(
+      crc,
+      reinterpret_cast<const uint8_t*>(catalog.tracks),
+      (size_t)catalog.track_count * sizeof(TrackRowV3));
+  crc = crc32_update(
+      crc,
+      reinterpret_cast<const uint8_t*>(catalog.albums),
+      (size_t)catalog.album_count * sizeof(AlbumRowV3));
+  crc = crc32_update(
+      crc,
+      reinterpret_cast<const uint8_t*>(catalog.artists),
+      (size_t)catalog.artist_count * sizeof(ArtistRowV3));
+
+  return crc32_finish(crc);
 }

@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <cstring>
 #include "ui/ui_internal.h"
 #include "ui/ui_text_utils.h"
 #include "utils/log.h"
@@ -318,91 +319,224 @@ void ui_nfc_admin_show_done()
 
 void ui_show_scanning()
 {
-  ui_scan_begin();
+  ui_scan_begin(false, false);
 }
 
 // =============================================================================
-// 扫描 UI（由 storage_music.cpp / keys.cpp 使用）
+// 扫描 UI
 // =============================================================================
 
-void ui_scan_begin()
+static const char* scan_mode_label(bool full_scan, bool forced_full_scan)
+{
+  if (!full_scan) return "增量扫描";
+  return forced_full_scan ? "强制全量扫描" : "自动全量扫描";
+}
+
+static void scan_current_name(const char* current_path,
+                              char* out,
+                              size_t out_size)
+{
+  if (!out || out_size == 0) return;
+  out[0] = '\0';
+
+  if (!current_path || !current_path[0]) {
+    snprintf(out, out_size, "扫描目录中");
+    return;
+  }
+
+  const char* name = strrchr(current_path, '/');
+  name = name ? name + 1 : current_path;
+  const size_t length = strlen(name);
+
+  if (length < out_size) {
+    snprintf(out, out_size, "%s", name);
+    return;
+  }
+
+  const size_t keep = out_size > 5 ? out_size - 5 : 0;
+  if (keep == 0) {
+    snprintf(out, out_size, "%s", name);
+    return;
+  }
+  snprintf(out, out_size, "...%s", name + length - keep);
+}
+
+void ui_scan_begin(bool full_scan, bool forced_full_scan)
 {
   ui_draw_lock();
   ui_set_screen(UI_SCREEN_BOOT);
 
   tft.fillScreen(TFT_BLACK);
+  tft.setFont(&g_font_cjk);
+  tft.setTextWrap(false);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
 
   tft.setTextSize(2);
-  draw_center_text("正在扫描", 60);
+  draw_center_text("曲库重扫", 20);
 
   tft.setTextSize(1);
-  draw_center_text("请稍候", 100);
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  draw_center_text(scan_mode_label(full_scan, forced_full_scan), 50);
 
-  // 清除动画和计数区域
-  tft.fillRect(0, 130, 240, 110, TFT_BLACK);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  draw_center_text("正在准备...", 98);
+  draw_center_text("按 MODE 键可取消", 222);
 
   s_scan_last_ms = 0;
   s_scan_phase = 0;
-  // 离开播放器界面，复位清屏标志
   s_screen_cleared = false;
   ui_draw_unlock();
   ui_request_refresh();
 }
 
-// 绘制扫描动画的点
-// 参数: phase - 当前动画阶段 (0, 1, 2)
-// 功能: 绘制三个点，根据 phase 参数高亮显示其中一个点，形成动画效果
 static void draw_scan_dots(int phase)
 {
-  // 计算点的中心位置和间距
-  int cx = 120;
-  int y  = 155;
-  int dx = 18;
+  const int cx = 120;
+  const int y = 151;
+  const int dx = 18;
 
-  // 清除点区域
   tft.fillRect(cx - 40, y - 12, 80, 24, TFT_BLACK);
-
-  // 绘制三个点
-  for (int i = 0; i < 3; i++) {
-    int x = cx + (i - 1) * dx;
-    // 当前阶段填充圆点，其他阶段绘制空心圆点
+  for (int i = 0; i < 3; ++i) {
+    const int x = cx + (i - 1) * dx;
     if (i == phase) tft.fillCircle(x, y, 5, TFT_WHITE);
-    else            tft.drawCircle(x, y, 5, TFT_WHITE);
+    else tft.drawCircle(x, y, 5, TFT_WHITE);
   }
+}
+
+void ui_scan_tick(const UiScanProgress& progress)
+{
+  const uint32_t now = millis();
+  if (now - s_scan_last_ms < 150) return;
+  s_scan_last_ms = now;
+  s_scan_phase = (s_scan_phase + 1) % 3;
+
+  char line[64];
+  char current[34];
+  scan_current_name(progress.current_path, current, sizeof(current));
+
+  ui_draw_lock();
+  tft.setFont(&g_font_cjk);
+  tft.setTextWrap(false);
+  tft.setTextSize(1);
+
+  tft.fillRect(0, 39, 240, 177, TFT_BLACK);
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  draw_center_text(
+      scan_mode_label(progress.full_scan, progress.forced_full_scan),
+      50);
+
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  snprintf(line, sizeof(line), "发现 %lu  复用 %lu",
+           (unsigned long)progress.discovered,
+           (unsigned long)progress.reused);
+  draw_center_text(line, 78);
+
+  snprintf(line, sizeof(line), "新增 %lu  修改 %lu",
+           (unsigned long)progress.added,
+           (unsigned long)progress.modified);
+  draw_center_text(line, 100);
+
+  if (progress.full_scan) {
+    snprintf(line, sizeof(line), "全量解析进行中");
+  } else {
+    snprintf(line, sizeof(line), "删除将在完成后统计");
+  }
+  draw_center_text(line, 122);
+
+  draw_scan_dots(s_scan_phase);
+
+  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+  draw_center_text("当前文件", 178);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  draw_center_text(current, 198);
+
+  ui_draw_unlock();
 }
 
 void ui_scan_tick(int tracks_count)
 {
-  uint32_t now = millis();
-  if (now - s_scan_last_ms < 150) return;
-  s_scan_last_ms = now;
-
-  s_scan_phase = (s_scan_phase + 1) % 3;
-
-  ui_draw_lock();
-  draw_scan_dots(s_scan_phase);
-
-  // 更新曲目计数
-  tft.setTextSize(1);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.fillRect(0, 185, 240, 30, TFT_BLACK);
-  draw_center_text(String("已扫描 " + String(tracks_count) + " 首歌曲").c_str(), 190);
-  ui_draw_unlock();
+  UiScanProgress progress{};
+  progress.full_scan = true;
+  progress.forced_full_scan = true;
+  progress.discovered = tracks_count > 0 ? (uint32_t)tracks_count : 0;
+  ui_scan_tick(progress);
 }
 
 void ui_scan_end()
 {
-  // 无操作
+  // 扫描完成后仍需构建和保存索引，最终结果由 ui_scan_complete() 显示。
+}
+
+void ui_scan_complete(const UiScanSummary& summary)
+{
+  char line[64];
+
+  ui_draw_lock();
+  tft.fillScreen(TFT_BLACK);
+  tft.setFont(&g_font_cjk);
+  tft.setTextWrap(false);
+
+  tft.setTextSize(2);
+  tft.setTextColor(TFT_GREEN, TFT_BLACK);
+  draw_center_text("扫描完成", 24);
+
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  draw_center_text(
+      scan_mode_label(summary.full_scan, summary.forced_full_scan),
+      55);
+
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  snprintf(line, sizeof(line), "发现 %lu  复用 %lu",
+           (unsigned long)summary.discovered,
+           (unsigned long)summary.reused);
+  draw_center_text(line, 88);
+
+  snprintf(line, sizeof(line), "新增 %lu  修改 %lu",
+           (unsigned long)summary.added,
+           (unsigned long)summary.modified);
+  draw_center_text(line, 112);
+
+  snprintf(line, sizeof(line), "删除 %lu  用时 %lu.%lu秒",
+           (unsigned long)summary.deleted,
+           (unsigned long)(summary.elapsed_ms / 1000u),
+           (unsigned long)((summary.elapsed_ms % 1000u) / 100u));
+  draw_center_text(line, 136);
+
+  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+  draw_center_text("即将返回播放器", 196);
+  s_screen_cleared = false;
+  ui_draw_unlock();
+
+  delay(1600);
+}
+
+void ui_scan_failed(bool full_scan)
+{
+  ui_draw_lock();
+  tft.fillScreen(TFT_BLACK);
+  tft.setFont(&g_font_cjk);
+  tft.setTextWrap(false);
+  tft.setTextSize(2);
+  tft.setTextColor(TFT_RED, TFT_BLACK);
+  draw_center_text("扫描失败", 78);
+
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  draw_center_text(full_scan ? "强制全量扫描未完成" : "曲库重扫未完成", 122);
+  draw_center_text("请查看串口错误日志", 150);
+  s_screen_cleared = false;
+  ui_draw_unlock();
+
+  delay(1500);
 }
 
 void ui_scan_abort()
 {
   ui_draw_lock();
-
-  // 显示"已取消"提示
   tft.fillScreen(TFT_BLACK);
-  // 离开播放器界面，复位清屏标志
+  tft.setFont(&g_font_cjk);
+  tft.setTextWrap(false);
   s_screen_cleared = false;
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
 
@@ -413,7 +547,6 @@ void ui_scan_abort()
   draw_center_text("扫描已中断", 140);
 
   ui_draw_unlock();
-  // 延迟一段时间让用户看到提示，但不要长时间占着 UI/SPI 锁
   delay(1500);
 }
 

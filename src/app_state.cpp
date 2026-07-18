@@ -42,6 +42,12 @@ static void app_handle_tf_mounted();
 static void app_rescan_task_entry(void* )
 {
     bool success = false;
+    StorageCatalogRebuildSummary summary{};
+    const AppRescanState rescan = app_rescan_state_get();
+    const StorageCatalogRebuildMode rebuild_mode =
+        rescan.mode == AppRescanMode::Full
+            ? StorageCatalogRebuildMode::Full
+            : StorageCatalogRebuildMode::Incremental;
 
     player_control_mark_manual_stop();
     audio_service_stop(true);
@@ -53,10 +59,31 @@ static void app_rescan_task_entry(void* )
 
     audio_file_invalidate_dir_cache();
     if (storage_is_ready()) {
-        success = storage_catalog_v3_rebuild("/Music", "/System/music_index_v3.bin");
+        success = storage_catalog_v3_rebuild(
+            "/Music",
+            "/System/music_index_v3.bin",
+            rebuild_mode,
+            &summary);
     } else {
         LOGW("[应用] rescan 已跳过: storage 未就绪");
         success = false;
+    }
+
+    if (success) {
+        // Catalog 已经提交，结果页显示期间不再接受取消，避免“已保存却按取消处理”。
+        app_rescan_mark_committed();
+        UiScanSummary ui_summary{};
+        ui_summary.full_scan = summary.full_scan;
+        ui_summary.forced_full_scan = summary.forced_full_scan;
+        ui_summary.discovered = summary.discovered;
+        ui_summary.reused = summary.reused;
+        ui_summary.added = summary.added;
+        ui_summary.modified = summary.modified;
+        ui_summary.deleted = summary.deleted;
+        ui_summary.elapsed_ms = summary.elapsed_ms;
+        ui_scan_complete(ui_summary);
+    } else if (!app_rescan_should_abort()) {
+        ui_scan_failed(rebuild_mode == StorageCatalogRebuildMode::Full);
     }
 
     app_rescan_mark_finished(success);
@@ -364,7 +391,7 @@ void app_request_exit_nfc_admin()
 }
 
 // 请求启动扫描
-bool app_request_start_rescan()
+bool app_request_start_rescan(AppRescanMode mode)
 {
     if (g_app_state != STATE_PLAYER) {
         LOGD("[应用] 启动 rescan 被拒绝: not in player 状态");
@@ -384,7 +411,7 @@ bool app_request_start_rescan()
     }
 
     player_recover_prepare_rescan_restore_current();
-    if (!app_rescan_begin()) {
+    if (!app_rescan_begin(mode)) {
         LOGD("[应用] 拒绝开始重扫：状态已被其它任务占用");
         return false;
     }
@@ -403,6 +430,8 @@ bool app_request_start_rescan()
         return false;
     }
 
+    LOGI("[应用] 已启动曲库重扫：模式=%s",
+         mode == AppRescanMode::Full ? "强制全量" : "增量优先");
     return true;
 }
 

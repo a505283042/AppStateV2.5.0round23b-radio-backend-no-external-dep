@@ -43,7 +43,7 @@ AppRescanState app_rescan_state_get()
   return snapshot;
 }
 
-bool app_rescan_begin()
+bool app_rescan_begin(AppRescanMode mode)
 {
   portENTER_CRITICAL(&s_rescan_mux);
   if (s_rescan_state.rescanning) {
@@ -55,14 +55,28 @@ bool app_rescan_begin()
   s_rescan_state.done = false;
   s_rescan_state.success = false;
   s_rescan_state.abort_requested = false;
+  s_rescan_state.committed = false;
+  s_rescan_state.mode = mode;
   portEXIT_CRITICAL(&s_rescan_mux);
   return true;
+}
+
+void app_rescan_mark_committed()
+{
+  portENTER_CRITICAL(&s_rescan_mux);
+  if (s_rescan_state.rescanning && !s_rescan_state.done) {
+    // Catalog 已经完成提交；清除构建阶段可能迟到的取消请求。
+    s_rescan_state.committed = true;
+    s_rescan_state.abort_requested = false;
+  }
+  portEXIT_CRITICAL(&s_rescan_mux);
 }
 
 void app_rescan_mark_finished(bool success)
 {
   portENTER_CRITICAL(&s_rescan_mux);
   s_rescan_state.success = success;
+  s_rescan_state.committed = success || s_rescan_state.committed;
   s_rescan_state.done = true;
   portEXIT_CRITICAL(&s_rescan_mux);
 }
@@ -70,7 +84,9 @@ void app_rescan_mark_finished(bool success)
 bool app_rescan_request_abort()
 {
   portENTER_CRITICAL(&s_rescan_mux);
-  if (!s_rescan_state.rescanning || s_rescan_state.done) {
+  if (!s_rescan_state.rescanning ||
+      s_rescan_state.done ||
+      s_rescan_state.committed) {
     portEXIT_CRITICAL(&s_rescan_mux);
     return false;
   }

@@ -6,6 +6,24 @@
 #include "storage/storage_view_v3.h"
 #include "storage/storage_groups_v3.h"
 
+// 曲库重建模式：普通重扫优先复用 Manifest，强制全量会忽略旧清单。
+enum class StorageCatalogRebuildMode : uint8_t {
+  Incremental = 0,
+  Full,
+};
+
+struct StorageCatalogRebuildSummary {
+  bool success = false;
+  bool full_scan = true;
+  bool forced_full_scan = false;
+  uint32_t discovered = 0;
+  uint32_t reused = 0;
+  uint32_t added = 0;
+  uint32_t modified = 0;
+  uint32_t deleted = 0;
+  uint32_t elapsed_ms = 0;
+};
+
 /**
  * @brief 全局 V3 catalog 访问入口。
  *
@@ -38,8 +56,11 @@ bool storage_catalog_v3_load_or_rebuild(const char* music_root = "/Music",
                                         const char* v3_index_path = "/System/music_index_v3.bin");
 
 /* 遍历曲库并重建 V3：有有效 Manifest 时增量复用，否则自动全量解析。 */
-bool storage_catalog_v3_rebuild(const char* music_root = "/Music",
-                                const char* v3_index_path = "/System/music_index_v3.bin");
+bool storage_catalog_v3_rebuild(
+    const char* music_root = "/Music",
+    const char* v3_index_path = "/System/music_index_v3.bin",
+    StorageCatalogRebuildMode mode = StorageCatalogRebuildMode::Incremental,
+    StorageCatalogRebuildSummary* out_summary = nullptr);
 
 /* 基本访问 */
 bool storage_catalog_v3_ready(void);

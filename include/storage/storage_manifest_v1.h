@@ -34,9 +34,13 @@ struct StorageManifestEntryV1 {
 
 struct StorageMusicManifestV1 {
   PsramVector<StorageManifestEntryV1> entries;
+  uint32_t catalog_crc32 = 0;
+  bool catalog_crc_valid = false;
 
   void clear() {
     entries.clear();
+    catalog_crc32 = 0;
+    catalog_crc_valid = false;
   }
 
   bool empty() const {
@@ -57,3 +61,6 @@ bool storage_manifest_load_v1(
 bool storage_manifest_save_v1(
     const StorageMusicManifestV1& manifest,
     const char* manifest_path = "/System/music_manifest_v1.bin");
+
+/** 计算当前 Catalog 的稳定一致性标识，供 Manifest 与索引配对校验。 */
+uint32_t storage_manifest_catalog_crc_v1(const MusicCatalogV3& catalog);

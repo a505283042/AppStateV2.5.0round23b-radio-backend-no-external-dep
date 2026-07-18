@@ -455,6 +455,7 @@ static bool scan_dir_recursive_v3(const String& dir_path,
 namespace {
 
 static constexpr size_t kFingerprintSampleBytes = 512;
+static constexpr uint32_t kFingerprintFullCrcMaxBytes = 16u * 1024u;
 
 struct CachedFingerprintV1 {
     PsramString path;
@@ -643,22 +644,25 @@ static bool fingerprint_file_v1(const String& path,
     }
 
     const uint32_t size = (uint32_t)size64;
-    const uint32_t sample_size = size > kFingerprintSampleBytes
-        ? (uint32_t)kFingerprintSampleBytes
-        : size;
-    const uint32_t middle_position = size > sample_size
-        ? (size / 2u) - (sample_size / 2u)
-        : 0u;
-    const uint32_t tail_position = size > sample_size
-        ? size - sample_size
-        : 0u;
+    bool ok = true;
+    if (size <= kFingerprintFullCrcMaxBytes) {
+        // 歌词和小封面完整计算 CRC，避免等长修改刚好落在采样区之外。
+        ok = fingerprint_sample_crc_v1(file, 0, size, out.head_crc);
+        out.middle_crc = out.head_crc;
+        out.tail_crc = out.head_crc;
+    } else {
+        const uint32_t sample_size = (uint32_t)kFingerprintSampleBytes;
+        const uint32_t middle_position =
+            (size / 2u) - (sample_size / 2u);
+        const uint32_t tail_position = size - sample_size;
 
-    bool ok = fingerprint_sample_crc_v1(
-        file, 0, sample_size, out.head_crc);
-    ok = ok && fingerprint_sample_crc_v1(
-        file, middle_position, sample_size, out.middle_crc);
-    ok = ok && fingerprint_sample_crc_v1(
-        file, tail_position, sample_size, out.tail_crc);
+        ok = fingerprint_sample_crc_v1(
+            file, 0, sample_size, out.head_crc);
+        ok = ok && fingerprint_sample_crc_v1(
+            file, middle_position, sample_size, out.middle_crc);
+        ok = ok && fingerprint_sample_crc_v1(
+            file, tail_position, sample_size, out.tail_crc);
+    }
     file.close();
 
     if (!ok) {
@@ -895,7 +899,10 @@ static bool manifest_matches_catalog_v3(
     const MusicCatalogV3& catalog,
     const StorageTrackIndexListV3& order)
 {
-    if (manifest.entries.size() != catalog.track_count ||
+    if (!manifest.catalog_crc_valid ||
+        manifest.catalog_crc32 !=
+            storage_manifest_catalog_crc_v1(catalog) ||
+        manifest.entries.size() != catalog.track_count ||
         order.size() != catalog.track_count) {
         return false;
     }
@@ -1083,7 +1090,17 @@ static bool scan_incremental_audio_file_v3(
     context.out_tracks->push_back(std::move(track));
     context.out_manifest->entries.push_back(std::move(next_entry));
     ++context.stats->discovered;
-    ui_scan_tick((int)context.stats->discovered);
+
+    UiScanProgress progress{};
+    progress.full_scan = context.stats->full_scan;
+    progress.forced_full_scan = context.stats->forced_full_scan;
+    progress.discovered = context.stats->discovered;
+    progress.reused = context.stats->reused;
+    progress.added = context.stats->added;
+    progress.modified = context.stats->modified;
+    progress.deleted = context.stats->deleted;
+    progress.current_path = audio_rel.c_str();
+    ui_scan_tick(progress);
     return true;
 }
 
@@ -1178,7 +1195,8 @@ bool storage_scan_music_incremental_v3(
     StorageIncrementalScanStatsV3& out_stats,
     const MusicCatalogV3* reuse_catalog,
     const char* music_root,
-    const char* manifest_path)
+    const char* manifest_path,
+    bool force_full_scan)
 {
     StorageSdLockGuard sd_lock(2000);
     if (!sd_lock) {
@@ -1187,7 +1205,7 @@ bool storage_scan_music_incremental_v3(
     }
 
     scan_v3_reset_coop_state();
-    ui_scan_begin();
+    const uint32_t scan_started_ms = millis();
 
     const ScanHeapSnapshotV3 heap_start = scan_heap_snapshot_v3();
 
@@ -1198,9 +1216,9 @@ bool storage_scan_music_incremental_v3(
     StorageMusicManifestV1 old_manifest;
     StorageTrackIndexListV3 catalog_path_order;
 
-    const bool manifest_file_loaded =
+    const bool manifest_file_loaded = !force_full_scan &&
         storage_manifest_load_v1(old_manifest, manifest_path);
-    const bool catalog_ready = reuse_catalog &&
+    const bool catalog_ready = !force_full_scan && reuse_catalog &&
         reuse_catalog->tracks &&
         reuse_catalog->track_count > 0 &&
         build_catalog_path_order_v3(
@@ -1212,9 +1230,13 @@ bool storage_scan_music_incremental_v3(
             old_manifest,
             *reuse_catalog,
             catalog_path_order);
-    out_stats.full_scan = !out_stats.manifest_loaded;
+    out_stats.full_scan = force_full_scan || !out_stats.manifest_loaded;
+    out_stats.forced_full_scan = force_full_scan;
+    ui_scan_begin(out_stats.full_scan, out_stats.forced_full_scan);
 
-    if (manifest_file_loaded && !out_stats.manifest_loaded) {
+    if (force_full_scan) {
+        LOGI("[增量扫描] 用户请求强制全量解析，本轮忽略现有清单");
+    } else if (manifest_file_loaded && !out_stats.manifest_loaded) {
         LOGW("[增量扫描] 清单与当前 V3 Catalog 不匹配，本轮回退全量解析");
         old_manifest.clear();
         catalog_path_order.clear();
@@ -1228,7 +1250,10 @@ bool storage_scan_music_incremental_v3(
         LOGI("[增量扫描] 使用旧清单和当前 Catalog：条目=%u",
              (unsigned)old_manifest.entries.size());
     } else {
-        LOGI("[增量扫描] 首次、清单无效或 Catalog 不匹配，本轮执行全量解析");
+        LOGI("[增量扫描] %s，本轮执行全量解析",
+             force_full_scan
+                 ? "已选择强制全量"
+                 : "首次、清单无效或 Catalog 不匹配");
     }
 
     IncrementalScanContextV3 context{};
@@ -1255,6 +1280,7 @@ bool storage_scan_music_incremental_v3(
     if (!scan_ok || app_rescan_should_abort()) {
         out_tracks.clear();
         out_manifest.clear();
+        out_stats.elapsed_ms = millis() - scan_started_ms;
         if (app_rescan_should_abort()) {
             ui_scan_abort();
         } else {
@@ -1286,15 +1312,18 @@ bool storage_scan_music_incremental_v3(
         old_seen,
         context.cover_fingerprint_cache);
 
+    out_stats.elapsed_ms = millis() - scan_started_ms;
     ui_scan_end();
 
-    LOGI("[增量扫描] 完成：模式=%s 发现=%lu 复用=%lu 新增=%lu 修改=%lu 删除=%lu",
+    LOGI("[增量扫描] 完成：模式=%s 强制=%d 发现=%lu 复用=%lu 新增=%lu 修改=%lu 删除=%lu 用时=%lums",
          out_stats.full_scan ? "全量" : "增量",
+         out_stats.forced_full_scan ? 1 : 0,
          (unsigned long)out_stats.discovered,
          (unsigned long)out_stats.reused,
          (unsigned long)out_stats.added,
          (unsigned long)out_stats.modified,
-         (unsigned long)out_stats.deleted);
+         (unsigned long)out_stats.deleted,
+         (unsigned long)out_stats.elapsed_ms);
 
     return !out_tracks.empty();
 }
@@ -1311,7 +1340,7 @@ bool storage_scan_music_v3(StorageTrackBuildListV3& out_tracks,
     // 取消标志只在 app_request_start_rescan() 中初始化。
     // 这里不能再次清零，否则扫描任务刚启动时可能吞掉用户的快速取消请求。
     scan_v3_reset_coop_state();
-    ui_scan_begin();
+    ui_scan_begin(true, true);
 
     out_tracks.clear();
     int scanned = 0;

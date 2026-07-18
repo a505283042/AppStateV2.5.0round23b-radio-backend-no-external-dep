@@ -2652,6 +2652,10 @@ static void web_handle_state_save() {
 static void web_handle_scan() {
   const AppRescanState rescan = app_rescan_state_get();
   if (rescan.rescanning) {
+    if (rescan.committed) {
+      web_send_json_ok_simple("rescan_finishing");
+      return;
+    }
     if (!app_request_cancel_rescan()) {
       web_send_json_err("当前没有正在进行的重扫");
       return;
