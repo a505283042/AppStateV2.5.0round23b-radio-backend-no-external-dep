@@ -37,12 +37,11 @@ TaskHandle_t s_ui_task = nullptr;
 SemaphoreHandle_t s_ui_mtx = nullptr;
 bool s_rotate_wait_prefetch_done = false;
 
-ui_screen_t s_screen = UI_SCREEN_BOOT;
 LGFX tft;
 bool s_screen_cleared = false;
 uint32_t s_player_enter_time = 0;
 
-volatile enum ui_player_view_t s_view = UI_VIEW_INFO;
+static UiPlayerRuntimeSnapshot s_ui_runtime{};
 String s_np_title;
 String s_np_artist;
 String s_np_album;
@@ -50,14 +49,6 @@ int s_title_scroll_x = 0;
 int s_artist_scroll_x = 0;
 int s_album_scroll_x = 0;
 uint32_t s_scroll_last_ms = 0;
-
-volatile uint8_t s_ui_volume = 100;
-volatile bool s_ui_volume_known = true;
-volatile play_mode_t s_ui_play_mode = PLAY_MODE_ALL_SEQ;
-volatile int s_ui_track_idx = 0;
-volatile int s_ui_track_total = 0;
-volatile uint32_t s_ui_volume_active_time = UINT32_MAX;
-volatile uint32_t s_ui_mode_switch_time = 0;
 
 LGFX_Sprite s_coverSpr(&tft);
 LGFX_Sprite s_coverMasked(&tft);
@@ -122,7 +113,6 @@ int s_rotate_probe_frames_left = 0;
 
 uint32_t s_scan_last_ms = 0;
 int s_scan_phase = 0;
-volatile bool s_ui_hold = false;
 static constexpr uint32_t kUiDiagQuickMenuDrawMs = 60;
 static constexpr uint32_t kUiDiagQuickMenuLogIntervalMs = 5000;
 static uint32_t s_ui_diag_last_quick_menu_log_ms = 0;
@@ -135,6 +125,14 @@ void ui_lock()
 void ui_unlock()
 {
   if (s_ui_mtx) xSemaphoreGiveRecursive(s_ui_mtx);
+}
+
+UiPlayerRuntimeSnapshot ui_player_runtime_snapshot_get()
+{
+  ui_lock();
+  const UiPlayerRuntimeSnapshot snapshot = s_ui_runtime;
+  ui_unlock();
+  return snapshot;
 }
 
 void ui_draw_lock()
@@ -171,14 +169,14 @@ void ui_set_rotate_wait_prefetch(bool wait)
 
 void ui_hold_render(bool hold)
 {
-  s_ui_hold = hold;
-  if (hold) {
-    s_rot_last_ms = millis();
-  } else {
-    s_rot_last_ms = millis();
-    if (s_ui_task) {
-      xTaskNotifyGive(s_ui_task);
-    }
+  const uint32_t now_ms = millis();
+  ui_lock();
+  s_ui_runtime.hold = hold;
+  s_rot_last_ms = now_ms;
+  ui_unlock();
+
+  if (!hold) {
+    ui_request_refresh();
   }
 }
 
@@ -204,8 +202,10 @@ static float ui_cover_draw_angle_or_zero()
 
 static inline TickType_t ui_period_ticks()
 {
+  const UiPlayerRuntimeSnapshot runtime = ui_player_runtime_snapshot_get();
+
   // hold 期间：不画，但要"醒得勤快一点"，保证解除 hold 后立刻恢复（这里按旋转帧率）
-  if (s_ui_hold) return pdMS_TO_TICKS(1000 / UI_FPS_ROTATE);
+  if (runtime.hold) return pdMS_TO_TICKS(1000 / UI_FPS_ROTATE);
 
 
   // 列表选择模式优先于快捷菜单。
@@ -220,19 +220,19 @@ static inline TickType_t ui_period_ticks()
 
   // PLAYER 界面：按视图区分帧率。
   // 封面旋转关闭后降低刷新压力，但面板视图仍保留歌词/进度刷新。
-  if (s_screen == UI_SCREEN_PLAYER) {
+  if (runtime.screen == UI_SCREEN_PLAYER) {
     const bool cover_spin_enabled = web_settings_get().web_cover_spin;
     const bool player_active = ui_player_audio_active_for_cover_spin();
     const bool cover_should_spin = cover_spin_enabled && player_active;
 
-    if (s_view == UI_VIEW_ROTATE) {
+    if (runtime.view == UI_VIEW_ROTATE) {
       const uint32_t fps = cover_should_spin
           ? UI_FPS_ROTATE
           : UI_FPS_ROTATE_STATIC;
       return pdMS_TO_TICKS(1000 / fps);
     }
 
-    if (s_view == UI_VIEW_COVER_PANEL) {
+    if (runtime.view == UI_VIEW_COVER_PANEL) {
       const uint32_t fps = cover_should_spin
           ? UI_FPS_COVER_PANEL
           : (player_active ? UI_FPS_COVER_PANEL_STATIC_ACTIVE : UI_FPS_COVER_PANEL_STATIC_IDLE);
@@ -261,10 +261,11 @@ static void ui_task_entry(void*)
     // 正常情况下等待 period 时长，但收到通知时立即唤醒
     ulTaskNotifyTake(pdTRUE, period);
     const uint32_t now_ms = millis();
+    const UiPlayerRuntimeSnapshot runtime = ui_player_runtime_snapshot_get();
 
     // hold：不渲染，但刷新 rot 时钟，避免解除 hold 后 dt 巨大导致角度跳变
-    if (s_ui_hold) {
-      s_rot_last_ms = millis();
+    if (runtime.hold) {
+      s_rot_last_ms = now_ms;
       continue;
     }
 
@@ -389,7 +390,7 @@ static void ui_task_entry(void*)
     }
 
     // 没有菜单/列表覆盖时，正常绘制播放器页面。
-    if (s_screen == UI_SCREEN_PLAYER && s_coverSprReady && s_framesInited) {
+    if (runtime.screen == UI_SCREEN_PLAYER && s_coverSprReady && s_framesInited) {
       ui_draw_lock();
 
       // 第一次渲染时清屏，避免启动界面残留
@@ -402,7 +403,7 @@ static void ui_task_entry(void*)
       uint32_t play_ms = audio_get_play_ms();
       g_lyricsDisplay.updateTime(play_ms);
 
-      if ((s_view == UI_VIEW_ROTATE || s_view == UI_VIEW_COVER_PANEL) && s_src) {
+      if ((runtime.view == UI_VIEW_ROTATE || runtime.view == UI_VIEW_COVER_PANEL) && s_src) {
         if (s_rot_last_ms == 0) s_rot_last_ms = now_ms;
 
         if (s_rotate_wait_audio_start || s_rotate_wait_prefetch_done) {
@@ -419,7 +420,7 @@ static void ui_task_entry(void*)
           } else {
             s_rot_last_ms = now_ms;
             const float draw_angle_deg = ui_cover_draw_angle_or_zero();
-            if (s_view == UI_VIEW_COVER_PANEL) {
+            if (runtime.view == UI_VIEW_COVER_PANEL) {
               cover_panel_draw(draw_angle_deg);
             } else {
               // 旋转视图等待音频/封面预取期间也必须走完整绘制路径，
@@ -448,7 +449,7 @@ static void ui_task_entry(void*)
         const float draw_angle_deg = ui_cover_draw_angle_or_zero();
 
         const uint32_t rotate_frame_begin = millis();
-        if (s_view == UI_VIEW_COVER_PANEL) {
+        if (runtime.view == UI_VIEW_COVER_PANEL) {
           cover_panel_draw(draw_angle_deg);
         } else {
           cover_rotate_draw(draw_angle_deg);
@@ -467,7 +468,7 @@ static void ui_task_entry(void*)
       }
 
       ui_draw_unlock();
-      } else if (s_screen == UI_SCREEN_PLAYER) {
+      } else if (runtime.screen == UI_SCREEN_PLAYER) {
       // 播放器页但封面/帧缓冲还没 ready 时，会停留在启动或占位画面。
       // NFC 弹窗必须在这种“未开播/无封面”状态下也能显示，所以这里额外处理一次。
       const bool nfc_bind_popup_visible = ui_nfc_bind_target_popup_is_visible();
@@ -520,15 +521,31 @@ static void ui_task_entry(void*)
 
 static constexpr uint32_t kUiTaskStackBytes = 4096; // UI 任务栈大小
 
-static void ui_task_start_once()
+static bool ui_sync_init_once()
 {
+  if (s_ui_mtx) {
+    return true;
+  }
 
-  if (s_ui_task) return;
+  s_ui_mtx = xSemaphoreCreateRecursiveMutex();
+  if (!s_ui_mtx) {
+    LOGE("[界面] 创建 UI 递归互斥量失败");
+    return false;
+  }
+  return true;
+}
 
-  if (!s_ui_mtx) s_ui_mtx = xSemaphoreCreateRecursiveMutex();
+static bool ui_task_start_once()
+{
+  if (s_ui_task) {
+    return true;
+  }
+  if (!ui_sync_init_once()) {
+    return false;
+  }
 
-  // UiTask 固定 core1，低优先级（比音频低很多）
-  xTaskCreatePinnedToCore(
+  // UiTask 固定 core1，低优先级（比音频低很多）。
+  const BaseType_t task_ok = xTaskCreatePinnedToCore(
     ui_task_entry,
     "UiTask",
     kUiTaskStackBytes,
@@ -537,11 +554,22 @@ static void ui_task_start_once()
     &s_ui_task,
     1       // core1
   );
+
+  if (task_ok != pdPASS) {
+    s_ui_task = nullptr;
+    LOGE("[界面] 创建 UiTask 失败");
+    return false;
+  }
+  return true;
 }
 
 void ui_init(void)
 {
   LOGI("[界面] 初始化屏幕（LGFX GC9A01）");
+
+  if (!ui_sync_init_once()) {
+    return;
+  }
 
   ui_draw_lock();
   tft.init();
@@ -554,10 +582,8 @@ void ui_init(void)
   cover_cache_sprite_init_once();
   cover_frames_init_once();
 
-  ui_task_start_once();
-  
-  // 确保 UI 任务创建完成后再开启渲染开关
-  s_ui_hold = false;
+  // 先完成启动首帧和运行态初始化，再创建 UiTask，避免任务与屏幕初始化并发。
+  s_ui_runtime.hold = false;
 
   tft.fillScreen(TFT_BLACK);
   tft.setTextSize(2);
@@ -566,8 +592,10 @@ void ui_init(void)
   tft.setTextSize(1);
   draw_center_text("启动中...", 130);
 
-  s_screen = UI_SCREEN_BOOT;
+  s_ui_runtime.screen = UI_SCREEN_BOOT;
   ui_draw_unlock();
+
+  (void)ui_task_start_once();
 
   // 屏幕控制器初始化和黑色启动首帧都已完成，现在再开启背光。
   if (!board_hw_set_backlight(true)) {
@@ -577,8 +605,103 @@ void ui_init(void)
 
 void ui_set_screen(ui_screen_t screen)
 {
-  s_screen = screen;
+  ui_lock();
+  s_ui_runtime.screen = screen;
+  ui_unlock();
   LOGD("[界面] 切换屏幕 -> %d", (int)screen);
+}
+
+enum ui_player_view_t ui_get_view()
+{
+  return ui_player_runtime_snapshot_get().view;
+}
+
+void ui_set_view(ui_player_view_t new_view)
+{
+  const uint32_t now_ms = millis();
+  ui_lock();
+  s_ui_runtime.view = new_view;
+  s_rot_last_ms = now_ms;
+  s_rotate_wait_audio_start = false;
+  s_rotate_wait_prefetch_done = false;
+  ui_unlock();
+  ui_request_refresh();
+}
+
+void ui_toggle_view()
+{
+  const ui_player_view_t current = ui_get_view();
+  ui_player_view_t next = UI_VIEW_INFO;
+
+  switch (current) {
+    case UI_VIEW_INFO:
+      next = UI_VIEW_ROTATE;
+      break;
+    case UI_VIEW_ROTATE:
+      next = UI_VIEW_COVER_PANEL;
+      break;
+    case UI_VIEW_COVER_PANEL:
+    default:
+      next = UI_VIEW_INFO;
+      break;
+  }
+
+  LOGD("[界面] 切换视图：%d -> %d", (int)current, (int)next);
+  ui_set_view(next);
+}
+
+void ui_set_volume(uint8_t vol)
+{
+  if (vol > 100) vol = 100;
+  ui_lock();
+  s_ui_runtime.volume = vol;
+  s_ui_runtime.volume_known = true;
+  ui_unlock();
+  ui_request_refresh();
+}
+
+void ui_set_volume_unknown()
+{
+  ui_lock();
+  s_ui_runtime.volume_known = false;
+  ui_unlock();
+  ui_request_refresh();
+}
+
+void ui_volume_key_pressed()
+{
+  ui_lock();
+  s_ui_runtime.volume_active_time = millis();
+  ui_unlock();
+  ui_request_refresh();
+}
+
+void ui_set_play_mode(play_mode_t mode)
+{
+  ui_lock();
+  s_ui_runtime.play_mode = mode;
+  ui_unlock();
+  ui_request_refresh();
+}
+
+void ui_mode_switch_highlight()
+{
+  ui_lock();
+  s_ui_runtime.mode_switch_time = millis();
+  ui_unlock();
+  ui_request_refresh();
+}
+
+void ui_set_track_pos(int idx, int total)
+{
+  if (total < 0) total = 0;
+  if (idx < 0) idx = 0;
+
+  ui_lock();
+  s_ui_runtime.track_idx = idx;
+  s_ui_runtime.track_total = total;
+  ui_unlock();
+  ui_request_refresh();
 }
 
 TaskHandle_t ui_get_task_handle(void)

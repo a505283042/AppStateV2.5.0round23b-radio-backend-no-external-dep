@@ -240,7 +240,8 @@ static bool cover_blit_scaled_to_240(const uint8_t* ptr, size_t len, bool is_png
 
 static void ui_arm_rotate_start_after_audio_if_needed()
 {
-  if (s_view == UI_VIEW_ROTATE || s_view == UI_VIEW_COVER_PANEL) {
+  const ui_player_view_t view = ui_player_runtime_snapshot_get().view;
+  if (view == UI_VIEW_ROTATE || view == UI_VIEW_COVER_PANEL) {
     const uint32_t now_ms = millis();
     s_rot_last_ms = now_ms;
     s_angle_deg = 0.0f;
@@ -269,7 +270,7 @@ static int ui_cover_cache_choose_store_slot(int track_idx)
     if (!s_coverCacheReady[i]) return i;
   }
 
-  const int current_track_idx = s_ui_track_idx;
+  const int current_track_idx = ui_player_runtime_snapshot_get().track_idx;
   const int current_slot = ui_cover_cache_find_slot(current_track_idx);
   if (current_slot >= 0) {
     return (current_slot == 0) ? 1 : 0;

@@ -46,12 +46,26 @@ extern TaskHandle_t s_ui_task;
 extern SemaphoreHandle_t s_ui_mtx;
 extern bool s_rotate_wait_prefetch_done;
 
-extern ui_screen_t s_screen;
 extern LGFX tft;
 extern bool s_screen_cleared;
 extern uint32_t s_player_enter_time;
 
-extern volatile enum ui_player_view_t s_view;
+// 播放器 UI 运行态由多个任务更新，统一通过快照读取，避免读取到不同时间点的复合状态。
+struct UiPlayerRuntimeSnapshot {
+  ui_screen_t screen = UI_SCREEN_BOOT;
+  ui_player_view_t view = UI_VIEW_INFO;
+  uint8_t volume = 100;
+  bool volume_known = true;
+  play_mode_t play_mode = PLAY_MODE_ALL_SEQ;
+  int track_idx = 0;
+  int track_total = 0;
+  uint32_t volume_active_time = UINT32_MAX;
+  uint32_t mode_switch_time = 0;
+  bool hold = false;
+};
+
+UiPlayerRuntimeSnapshot ui_player_runtime_snapshot_get();
+
 extern String s_np_title;
 extern String s_np_artist;
 extern String s_np_album;
@@ -59,14 +73,6 @@ extern int s_title_scroll_x;
 extern int s_artist_scroll_x;
 extern int s_album_scroll_x;
 extern uint32_t s_scroll_last_ms;
-
-extern volatile uint8_t s_ui_volume;
-extern volatile bool s_ui_volume_known;
-extern volatile play_mode_t s_ui_play_mode;
-extern volatile int s_ui_track_idx;
-extern volatile int s_ui_track_total;
-extern volatile uint32_t s_ui_volume_active_time;
-extern volatile uint32_t s_ui_mode_switch_time;
 
 /* 当前封面 + 双槽下一首封面缓存。 */
 extern LGFX_Sprite s_coverSpr;
@@ -109,7 +115,6 @@ extern int s_rotate_probe_frames_left;
 
 extern uint32_t s_scan_last_ms;
 extern int s_scan_phase;
-extern volatile bool s_ui_hold;
 
 /* UiTask / SPI 访问协调。 */
 void ui_lock();

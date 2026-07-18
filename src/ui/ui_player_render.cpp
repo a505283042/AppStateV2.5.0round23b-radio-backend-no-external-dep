@@ -148,7 +148,8 @@ static void draw_volume_step_hint_overlay(LGFX_Sprite* dst)
   }
 
   const uint8_t step = hint.step;
-  const uint8_t volume = s_ui_volume;
+  const UiPlayerRuntimeSnapshot runtime = ui_player_runtime_snapshot_get();
+  const uint8_t volume = runtime.volume;
 
   // 圆屏上中间小弹窗，显示当前音量值和本次旋钮步进。
   // 弹窗宽度收窄，避免在圆屏安全区边缘显得太长。
@@ -170,7 +171,7 @@ static void draw_volume_step_hint_overlay(LGFX_Sprite* dst)
   draw_volume_icon(dst, BOX_X + 9, BOX_Y + 10, icon_color);
 
   char volume_label[8];
-  if (s_ui_volume_known) {
+  if (runtime.volume_known) {
     snprintf(volume_label, sizeof(volume_label), "%u%%", static_cast<unsigned>(volume));
   } else {
     snprintf(volume_label, sizeof(volume_label), "--");
@@ -1178,6 +1179,8 @@ static void draw_cover_panel_status_icons(LGFX_Sprite* dst, int center_y, uint16
 {
   if (!dst) return;
 
+  const UiPlayerRuntimeSnapshot runtime = ui_player_runtime_snapshot_get();
+
   dst->setFont(&g_font_cjk);
   dst->setTextSize(1);
   dst->setTextWrap(false);
@@ -1188,7 +1191,7 @@ static void draw_cover_panel_status_icons(LGFX_Sprite* dst, int center_y, uint16
   const int icon_size = 10;
 
   const bool volume_active =
-      (millis() - s_ui_volume_active_time) < VOLUME_ACTIVE_TIMEOUT_MS;
+      (millis() - runtime.volume_active_time) < VOLUME_ACTIVE_TIMEOUT_MS;
 
   const uint16_t volume_color =
       volume_active ? UI_COLOR_VOLUME_ACTIVE : fg;
@@ -1200,8 +1203,8 @@ static void draw_cover_panel_status_icons(LGFX_Sprite* dst, int center_y, uint16
   draw_volume_icon(dst, vol_icon_x, vol_icon_y, volume_color);
 
   char vol_str[8];
-  if (s_ui_volume_known) {
-    snprintf(vol_str, sizeof(vol_str), "%u%%", (unsigned)s_ui_volume);
+  if (runtime.volume_known) {
+    snprintf(vol_str, sizeof(vol_str), "%u%%", (unsigned)runtime.volume);
   } else {
     snprintf(vol_str, sizeof(vol_str), "--");
   }
@@ -1213,7 +1216,7 @@ static void draw_cover_panel_status_icons(LGFX_Sprite* dst, int center_y, uint16
   // 右侧模式：贴近面板右边
   const uint32_t now = millis();
   const bool mode_highlight =
-      (now - s_ui_mode_switch_time) < MODE_SWITCH_HIGHLIGHT_MS;
+      (now - runtime.mode_switch_time) < MODE_SWITCH_HIGHLIGHT_MS;
 
   const uint16_t mode_color =
       mode_highlight ? UI_COLOR_VOLUME_ACTIVE : fg;
@@ -1243,9 +1246,9 @@ static void draw_cover_panel_status_icons(LGFX_Sprite* dst, int center_y, uint16
     }
 
     const bool random_mode =
-        s_ui_play_mode == PLAY_MODE_ALL_RND ||
-        s_ui_play_mode == PLAY_MODE_ARTIST_RND ||
-        s_ui_play_mode == PLAY_MODE_ALBUM_RND;
+        runtime.play_mode == PLAY_MODE_ALL_RND ||
+        runtime.play_mode == PLAY_MODE_ARTIST_RND ||
+        runtime.play_mode == PLAY_MODE_ALBUM_RND;
     if (random_mode) {
       draw_random_icon(dst, right_icon_x, icon_y, mode_color);
     } else {
@@ -1254,7 +1257,7 @@ static void draw_cover_panel_status_icons(LGFX_Sprite* dst, int center_y, uint16
     return;
   }
 
-  switch (s_ui_play_mode) {
+  switch (runtime.play_mode) {
     case PLAY_MODE_ALL_SEQ:
       draw_tfcard_icon(dst, left_icon_x, icon_y, mode_color);
       draw_repeat_icon(dst, right_icon_x, icon_y, mode_color);
@@ -2788,8 +2791,9 @@ void cover_info_draw()
     memcpy(total_str, "--:--", 6); // 包含 '\0'
   }
 
-  // 检查音量是否处于激活状态
-  bool volume_active = (millis() - s_ui_volume_active_time) < VOLUME_ACTIVE_TIMEOUT_MS;
+  // 检查音量是否处于激活状态。
+  const UiPlayerRuntimeSnapshot runtime = ui_player_runtime_snapshot_get();
+  bool volume_active = (millis() - runtime.volume_active_time) < VOLUME_ACTIVE_TIMEOUT_MS;
   draw_status_row(dst, y_status, safe_pad, c_time_text, volume_active);
 
   draw_time_bar(dst,
@@ -2902,9 +2906,10 @@ bool ui_draw_cover_for_track(const TrackInfo& t, bool force_redraw)
   const bool nfc_overlay_visible =
       ui_nfc_bind_target_popup_is_visible() || ui_nfc_scan_popup_is_visible();
   if (nfc_overlay_visible) {
-    if (s_view == UI_VIEW_COVER_PANEL) {
+    const ui_player_view_t view = ui_get_view();
+    if (view == UI_VIEW_COVER_PANEL) {
       cover_panel_draw(0.0f);
-    } else if (s_view == UI_VIEW_INFO) {
+    } else if (view == UI_VIEW_INFO) {
       cover_info_draw();
     } else {
       cover_rotate_draw(0.0f);
@@ -2919,53 +2924,6 @@ bool ui_draw_cover_for_track(const TrackInfo& t, bool force_redraw)
   ui_request_refresh();
 
   return true;
-}
-
-enum ui_player_view_t ui_get_view() { return s_view; }
-
-// 设置播放器视图（带线程锁保护）
-// 参数: new_view - 新视图类型（ROTATE旋转封面 或 INFO信息详情）
-// 功能: 更新视图状态，重置旋转时间戳防止角度跳变
-void ui_set_view(ui_player_view_t new_view)
-{
-  const uint32_t now_ms = millis();
-  ui_lock();
-  s_view = new_view;
-  s_rot_last_ms = now_ms;   // 防 dt 累积跳角度
-  s_rotate_wait_audio_start = false;
-  s_rotate_wait_prefetch_done = false;
-  ui_unlock();
-  ui_request_refresh();
-}
-
-// 切换播放器视图（长按PLAY键触发）
-// 在旋转视图(ROTATE)和信息视图(INFO)之间切换
-void ui_toggle_view()
-{
-  LOGD("[界面] toggle_视图: 当前=%d", (int)s_view);
-
-  ui_player_view_t next = UI_VIEW_INFO;
-
-  switch (s_view) {
-    case UI_VIEW_INFO:
-      next = UI_VIEW_ROTATE;
-      break;
-
-    case UI_VIEW_ROTATE:
-      next = UI_VIEW_COVER_PANEL;
-      break;
-
-    case UI_VIEW_COVER_PANEL:
-      next = UI_VIEW_INFO;
-      break;
-
-    default:
-      next = UI_VIEW_INFO;
-      break;
-  }
-
-  ui_set_view(next);
-  LOGD("[界面] toggle_视图: new=%d", (int)s_view);
 }
 
 void ui_set_now_playing(const char* title, const char* artist)
@@ -2988,46 +2946,5 @@ void ui_set_album(const String& album)
   ui_unlock();
   // 切歌时重置专辑滚动偏移
   reset_album_scroll();
-  ui_request_refresh();
-}
-
-void ui_set_volume(uint8_t vol)
-{
-  if (vol > 100) vol = 100;
-  s_ui_volume = vol;
-  s_ui_volume_known = true;
-  ui_request_refresh();
-}
-
-void ui_set_volume_unknown()
-{
-  s_ui_volume_known = false;
-  ui_request_refresh();
-}
-
-void ui_volume_key_pressed()
-{
-  s_ui_volume_active_time = millis();  // 更新音量激活时间
-  ui_request_refresh();
-}
-
-void ui_set_play_mode(play_mode_t mode)
-{
-  s_ui_play_mode = mode;
-  ui_request_refresh();
-}
-
-void ui_mode_switch_highlight()
-{
-  s_ui_mode_switch_time = millis();  // 记录模式切换时间，用于高亮显示
-  ui_request_refresh();
-}
-
-void ui_set_track_pos(int idx, int total)
-{
-  if (total < 0) total = 0;
-  if (idx < 0) idx = 0;
-  s_ui_track_idx = idx;
-  s_ui_track_total = total;
   ui_request_refresh();
 }

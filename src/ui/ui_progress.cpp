@@ -2,22 +2,13 @@
 #include "ui/ui_text_utils.h"
 #include "ui/ui_icons.h"
 #include "ui/ui_colors.h"
-#include "ui/ui.h"
+#include "ui/ui_internal.h"
 #include "ui/ui_icon_images.h"
 #include "audio/audio_service.h"
 #include "player_source.h"
 
-// 外部声明全局变量
-extern lgfx::U8g2font g_font_cjk;
-extern volatile uint8_t s_ui_volume;   // 0~100
-extern volatile bool s_ui_volume_known; // 蓝牙音量是否已经从模块查询确认
-extern volatile play_mode_t s_ui_play_mode;  // 播放模式
-extern volatile int     s_ui_track_idx;  // 0-based
-extern volatile int     s_ui_track_total;
-extern String s_np_album;
-
 // 专辑名滚动状态（像素偏移）
-static int s_album_scroll_x = 0;
+// s_album_scroll_x 由 ui.cpp 统一定义，本文件通过 ui_internal.h 引用。
 static uint32_t s_album_scroll_last_ms = 0;
 static constexpr int ALBUM_SCROLL_SPEED = 1;    // 滚动速度（像素/帧）
 static constexpr int ALBUM_SCROLL_GAP = 20;     // 副本间距（像素）
@@ -26,10 +17,6 @@ static constexpr int ALBUM_SCROLL_GAP = 20;     // 副本间距（像素）
 static String s_last_album_name = "";
 static int s_last_album_width = 0;
 
-// 播放模式切换高亮状态
-extern volatile uint32_t s_ui_mode_switch_time;
-#define MODE_SWITCH_HIGHLIGHT_MS 2000  // 模式切换高亮时间（毫秒）
-
 void draw_time_bar(LGFX_Sprite* dst,
                   int y_bar, int y_time,
                   uint32_t el_ms,
@@ -37,6 +24,7 @@ void draw_time_bar(LGFX_Sprite* dst,
                   int safe_pad,
                   uint16_t c_text)
 {
+  const UiPlayerRuntimeSnapshot runtime = ui_player_runtime_snapshot_get();
   const uint16_t c_bar_bg   = UI_COLOR_BAR_BG;     // 未播（森林绿）
   const uint16_t c_bar_play = UI_COLOR_BAR_PLAY;   // 已播（暖阳橙黄）
 
@@ -130,7 +118,7 @@ void draw_time_bar(LGFX_Sprite* dst,
 
   // ===== 时间行中间：曲目位置 idx/total =====
   char mid[16];
-  if (s_ui_track_total > 0) snprintf(mid, sizeof(mid), "%d/%d", s_ui_track_idx + 1, s_ui_track_total);
+  if (runtime.track_total > 0) snprintf(mid, sizeof(mid), "%d/%d", runtime.track_idx + 1, runtime.track_total);
   else                      snprintf(mid, sizeof(mid), "--/--");
 
   {
@@ -156,6 +144,7 @@ void draw_status_row(LGFX_Sprite* dst,
                     uint16_t fg,
                     bool volume_active)
 {
+  const UiPlayerRuntimeSnapshot runtime = ui_player_runtime_snapshot_get();
   dst->setFont(&g_font_cjk);
   dst->setTextSize(1);
 
@@ -172,8 +161,8 @@ void draw_status_row(LGFX_Sprite* dst,
   draw_volume_icon(dst, xL, y + 3, volume_color);  // 上移2像素
   
   char vol_str[8];
-  if (s_ui_volume_known) {
-    snprintf(vol_str, sizeof(vol_str), "%u%%", (unsigned)s_ui_volume);
+  if (runtime.volume_known) {
+    snprintf(vol_str, sizeof(vol_str), "%u%%", (unsigned)runtime.volume);
   } else {
     snprintf(vol_str, sizeof(vol_str), "--");
   }
@@ -192,7 +181,7 @@ void draw_status_row(LGFX_Sprite* dst,
 
   // 检查是否处于模式切换高亮状态（2秒内）
   uint32_t now = millis();
-  bool mode_highlight = (now - s_ui_mode_switch_time < MODE_SWITCH_HIGHLIGHT_MS);
+  bool mode_highlight = (now - runtime.mode_switch_time < MODE_SWITCH_HIGHLIGHT_MS);
   uint16_t mode_color = mode_highlight ? UI_COLOR_VOLUME_ACTIVE : fg;
 
   // 根据当前音源和播放模式显示对应图标。
@@ -214,16 +203,16 @@ void draw_status_row(LGFX_Sprite* dst,
     }
 
     const bool random_mode =
-        s_ui_play_mode == PLAY_MODE_ALL_RND ||
-        s_ui_play_mode == PLAY_MODE_ARTIST_RND ||
-        s_ui_play_mode == PLAY_MODE_ALBUM_RND;
+        runtime.play_mode == PLAY_MODE_ALL_RND ||
+        runtime.play_mode == PLAY_MODE_ARTIST_RND ||
+        runtime.play_mode == PLAY_MODE_ALBUM_RND;
     if (random_mode) {
       draw_random_icon(dst, xR_icon, icon_y, mode_color);
     } else {
       draw_repeat_icon(dst, xR_icon, icon_y, mode_color);
     }
   } else {
-    switch (s_ui_play_mode) {
+    switch (runtime.play_mode) {
     case PLAY_MODE_ALL_SEQ:
       // 全部顺序：TF卡图标 + 顺序图标
       draw_tfcard_icon(dst, xL_icon, icon_y, mode_color);
