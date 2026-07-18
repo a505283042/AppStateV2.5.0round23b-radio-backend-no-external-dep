@@ -4,6 +4,7 @@
 
 #include "audio/audio_output_route.h"
 #include "audio/audio_service.h"
+#include "hal/bluetooth_restart_controller.h"
 #include "hal/board_hw_control.h"
 #include "hal/ws2812_status.h"
 #include "menu/quick_menu.h"
@@ -53,6 +54,9 @@ static uint8_t sleep_preset_index(uint16_t minutes)
 void app_power_save_and_shutdown()
 {
     LOGI("[电源] 保存 and shutdown requested");
+
+    // 如果蓝牙正在重启，先禁止任务在断电等待结束后重新上电。
+    (void)bluetooth_restart_cancel();
 
     // 关机流程开始即关闭状态灯，避免保存和断电阶段保持最后颜色。
     ws2812_status_off();

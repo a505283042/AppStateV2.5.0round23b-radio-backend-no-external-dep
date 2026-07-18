@@ -3,6 +3,7 @@
 #include <Arduino.h>
 
 #include "board/board_pins_pcb1_mcp23017.h"
+#include "hal/bluetooth_restart_controller.h"
 #include "hal/board_hw_control.h"
 
 namespace {
@@ -300,6 +301,11 @@ void handle_bt62_command(const String& line)
     }
 
     if (upper == "BT62 PAIR" || upper == "BTPAIR") {
+        if (bluetooth_restart_is_in_progress()) {
+            Serial.println("[BT62SP] 蓝牙正在重启，PAIR 命令已忽略");
+            return;
+        }
+
         const bool ok = board_hw_pulse_bt_switch(200);
         Serial.printf("[BT62SP] PAIR/SW 脉冲 %s\n", ok ? "OK" : "FAIL");
         return;
@@ -313,6 +319,11 @@ void handle_bt62_command(const String& line)
     }
 
     if (upper.startsWith("BT62 PWR") || upper.startsWith("BTPWR")) {
+        if (bluetooth_restart_is_in_progress()) {
+            Serial.println("[BT62SP] 蓝牙正在重启，电源命令已忽略");
+            return;
+        }
+
         bool enabled = false;
         if (!parse_on_off(upper, &enabled)) {
             Serial.println("[BT62SP] 用法：BT62 PWR ON 或 BT62 PWR OFF");
@@ -324,6 +335,11 @@ void handle_bt62_command(const String& line)
     }
 
     if (upper.startsWith("BT62 MODE") || upper.startsWith("BTMODE")) {
+        if (bluetooth_restart_is_in_progress()) {
+            Serial.println("[BT62SP] 蓝牙正在重启，模式命令已忽略");
+            return;
+        }
+
         bool tx = false;
         if (upper.endsWith(" TX") || upper.endsWith("=TX") || upper.endsWith(" TRANSMIT")) {
             tx = true;

@@ -1,22 +1,17 @@
 #include "menu/quick_menu_page_audio_output.h"
 
 #include "audio/audio_output_route.h"
+#include "hal/bluetooth_restart_controller.h"
 #include "hal/board_hw_control.h"
 #include "utils/log.h"
-
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
 
 namespace {
 
 #define MENU_COUNT(arr) static_cast<uint8_t>(sizeof(arr) / sizeof((arr)[0]))
 
-volatile bool s_bt_reboot_in_progress = false;
-bool s_bt_reboot_restore_mode = false;
-
 bool bt_route_ready()
 {
-    return audio_output_route_is_bluetooth_tx() && board_hw_get_bt_power() && !s_bt_reboot_in_progress;
+    return audio_output_route_is_bluetooth_tx() && board_hw_get_bt_power() && !bluetooth_restart_is_in_progress();
 }
 
 const char* value_output_path()
@@ -26,7 +21,7 @@ const char* value_output_path()
 
 const char* value_switch_route()
 {
-    return s_bt_reboot_in_progress ? "重启中" : "执行";
+    return bluetooth_restart_is_in_progress() ? "重启中" : "执行";
 }
 
 const char* value_amp_power()
@@ -43,12 +38,12 @@ const char* value_amp_mute()
 
 const char* value_bt_pair()
 {
-    return s_bt_reboot_in_progress ? "重启中" : "按一下";
+    return bluetooth_restart_is_in_progress() ? "重启中" : "按一下";
 }
 
 const char* value_bt_mode()
 {
-    if (s_bt_reboot_in_progress) {
+    if (bluetooth_restart_is_in_progress()) {
         return "重启中";
     }
 
@@ -57,6 +52,10 @@ const char* value_bt_mode()
 
 const char* value_bt_link()
 {
+    if (bluetooth_restart_is_in_progress()) {
+        return "重启中";
+    }
+
     if (!board_hw_get_bt_power()) {
         return "未上电";
     }
@@ -71,13 +70,13 @@ const char* value_bt_link()
 
 const char* value_bt_reboot()
 {
-    return s_bt_reboot_in_progress ? "重启中" : "执行";
+    return bluetooth_restart_is_in_progress() ? "重启中" : "执行";
 }
 
 bool action_select_headphone_only()
 {
-    if (s_bt_reboot_in_progress) {
-        LOGW("[音频输出] select headphone 已忽略: bt 正在重启");
+    if (bluetooth_restart_is_in_progress()) {
+        LOGW("[音频输出] 切换到耳机已忽略：蓝牙正在重启");
         return false;
     }
 
@@ -86,8 +85,8 @@ bool action_select_headphone_only()
 
 bool action_select_speaker()
 {
-    if (s_bt_reboot_in_progress) {
-        LOGW("[音频输出] select speaker 已忽略: bt 正在重启");
+    if (bluetooth_restart_is_in_progress()) {
+        LOGW("[音频输出] 切换到功放已忽略：蓝牙正在重启");
         return false;
     }
 
@@ -96,8 +95,8 @@ bool action_select_speaker()
 
 bool action_select_bluetooth()
 {
-    if (s_bt_reboot_in_progress) {
-        LOGW("[音频输出] select bluetooth 已忽略: bt 正在重启");
+    if (bluetooth_restart_is_in_progress()) {
+        LOGW("[音频输出] 切换到蓝牙已忽略：蓝牙正在重启");
         return false;
     }
 
@@ -107,7 +106,7 @@ bool action_select_bluetooth()
 bool action_toggle_amp_mute()
 {
     if (!audio_output_route_is_speaker()) {
-        LOGW("[音频输出] amp mute 已忽略: 路线 is bluetooth tx");
+        LOGW("[音频输出] 功放静音操作已忽略：当前不是功放路线");
         return false;
     }
 
@@ -118,7 +117,7 @@ bool action_toggle_amp_mute()
 bool action_pulse_bt_switch()
 {
     if (!bt_route_ready()) {
-        LOGW("[音频输出] bt pair 已忽略: 路线 not bluetooth or 正在重启");
+        LOGW("[音频输出] 蓝牙配对已忽略：路线不匹配或正在重启");
         return false;
     }
 
@@ -129,7 +128,7 @@ bool action_pulse_bt_switch()
 bool action_toggle_bt_mode()
 {
     if (!bt_route_ready()) {
-        LOGW("[音频输出] bt mode 已忽略: 路线 not bluetooth or 正在重启");
+        LOGW("[音频输出] 蓝牙模式切换已忽略：路线不匹配或正在重启");
         return false;
     }
 
@@ -139,66 +138,12 @@ bool action_toggle_bt_mode()
     return board_hw_set_bt_mode(next_enabled);
 }
 
-void bt_reboot_task(void*)
-{
-    // 蓝牙重启需要等待断电保持时间，放到独立任务里，避免阻塞菜单/按键任务。
-    LOGI("[音频输出] bt reboot 启动");
-    const bool power_off_ok = board_hw_set_bt_power(false);
-
-    vTaskDelay(pdMS_TO_TICKS(300));
-
-    if (power_off_ok && audio_output_route_is_bluetooth_tx()) {
-        const bool mode_ok = board_hw_set_bt_mode(s_bt_reboot_restore_mode);
-        const bool power_on_ok = board_hw_set_bt_power(true);
-        (void)audio_output_route_enforce();
-        LOGI("[音频输出] 蓝牙重启完成：电源开启=%d 模式恢复=%d", power_on_ok ? 1 : 0, mode_ok ? 1 : 0);
-    } else if (!audio_output_route_is_bluetooth_tx()) {
-        LOGW("[音频输出] bt reboot 已跳过 power on: 路线 changed");
-    } else {
-        LOGW("[音频输出] bt reboot 失败: power off step 失败");
-    }
-
-    s_bt_reboot_in_progress = false;
-    vTaskDelete(nullptr);
-}
-
 bool action_reboot_bt_module()
 {
-    if (!audio_output_route_is_bluetooth_tx()) {
-        LOGW("[音频输出] bt reboot 已忽略: 路线 not bluetooth tx");
-        return false;
-    }
-
-    if (!board_hw_get_bt_power()) {
-        LOGW("[音频输出] bt reboot 已忽略: power off");
-        return false;
-    }
-
-    if (s_bt_reboot_in_progress) {
-        LOGW("[音频输出] bt reboot 已忽略: al就绪 in progress");
-        return false;
-    }
-
-    s_bt_reboot_restore_mode = board_hw_get_bt_mode();
-    s_bt_reboot_in_progress = true;
-
-    const BaseType_t created = xTaskCreate(
-        bt_reboot_task,
-        "bt_reboot",
-        2048,
-        nullptr,
-        1,
-        nullptr
-    );
-
-    if (created != pdPASS) {
-        s_bt_reboot_in_progress = false;
-        LOGW("[音频输出] bt reboot task 创建 失败");
-        return false;
-    }
-
-    return true;
+    return bluetooth_restart_request(
+        BluetoothRestartPolicy::RequireBluetoothTxRoute);
 }
+
 const QuickMenuItem HEADPHONE_ITEMS[] = {
     {"输出路径", QuickMenuItemType::Status, QuickMenuPage::AudioOutput, "", value_output_path, nullptr, true, false},
     {"切到功放", QuickMenuItemType::Action, QuickMenuPage::AudioOutput, "", value_switch_route, action_select_speaker, true, false},
