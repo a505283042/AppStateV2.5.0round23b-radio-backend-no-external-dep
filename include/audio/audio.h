@@ -20,6 +20,14 @@ struct AudioPlaybackEndState {
   uint32_t ended_at_ms = 0;
 };
 
+// 音频核心运行态由多个任务读取，使用纯数值快照保证总时长、音量和增益来自同一版本。
+struct AudioRuntimeSnapshot {
+  uint32_t total_ms = 0;
+  uint8_t volume_percent = 80;
+  uint16_t gain_q15 = 26214;
+  uint32_t revision = 0;
+};
+
 bool audio_init();
 void audio_stop();
 bool audio_play(const char* path); // 自动识别 .mp3 / .flac
@@ -35,6 +43,7 @@ uint8_t  audio_get_volume(void);
 uint16_t audio_get_gain_q15(void);           // 0~32768 (Q15)
 
 uint32_t audio_get_play_ms();
+AudioRuntimeSnapshot audio_runtime_snapshot_get();
 uint32_t audio_get_total_ms();   // 0 = unknown
 void     audio_set_total_ms(uint32_t ms);
 uint32_t audio_probe_total_ms(const char* path);

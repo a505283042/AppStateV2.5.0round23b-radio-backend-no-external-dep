@@ -22,15 +22,44 @@ static enum { DEC_NONE, DEC_MP3, DEC_FLAC } g_dec = DEC_NONE;
 #ifndef AUDIO_SYNC_SNIFF_ON_PLAY
 #define AUDIO_SYNC_SNIFF_ON_PLAY 0
 #endif
-// --- Total duration (ms), 0 = unknown ---
-static volatile uint32_t s_total_ms = 0;
+// 音频运行态由 AudioTask、资源任务、UI 和 Web 共同访问，统一通过短临界区发布。
+static portMUX_TYPE s_runtime_state_mux = portMUX_INITIALIZER_UNLOCKED;
+static AudioRuntimeSnapshot s_runtime_state{};
 static StaticSemaphore_t s_probe_buf_mutex_storage{};
 static SemaphoreHandle_t s_probe_buf_mutex = nullptr;
 static portMUX_TYPE s_end_state_mux = portMUX_INITIALIZER_UNLOCKED;
 static AudioPlaybackEndState s_end_state;
 
-uint32_t audio_get_total_ms() { return s_total_ms; }
-void audio_set_total_ms(uint32_t ms) { s_total_ms = ms; }
+static void audio_runtime_revision_advance_locked()
+{
+  ++s_runtime_state.revision;
+  if (s_runtime_state.revision == 0) {
+    ++s_runtime_state.revision;
+  }
+}
+
+AudioRuntimeSnapshot audio_runtime_snapshot_get()
+{
+  portENTER_CRITICAL(&s_runtime_state_mux);
+  const AudioRuntimeSnapshot snapshot = s_runtime_state;
+  portEXIT_CRITICAL(&s_runtime_state_mux);
+  return snapshot;
+}
+
+uint32_t audio_get_total_ms()
+{
+  return audio_runtime_snapshot_get().total_ms;
+}
+
+void audio_set_total_ms(uint32_t ms)
+{
+  portENTER_CRITICAL(&s_runtime_state_mux);
+  if (s_runtime_state.total_ms != ms) {
+    s_runtime_state.total_ms = ms;
+    audio_runtime_revision_advance_locked();
+  }
+  portEXIT_CRITICAL(&s_runtime_state_mux);
+}
 
 const char* audio_playback_end_reason_label(AudioPlaybackEndReason reason)
 {
@@ -67,7 +96,7 @@ static void audio_publish_end_state(AudioPlaybackEndReason reason)
   portEXIT_CRITICAL(&s_end_state_mux);
   next.reason = reason;
   next.play_ms = audio_i2s_get_play_ms();
-  next.total_ms = s_total_ms;
+  next.total_ms = audio_get_total_ms();
   next.ended_at_ms = millis();
 
   portENTER_CRITICAL(&s_end_state_mux);
@@ -400,7 +429,7 @@ void audio_stop()
   audio_mp3_stop();
   audio_flac_stop();
   g_dec = DEC_NONE;
-  s_total_ms = 0;
+  audio_set_total_ms(0);
 }
 
 bool audio_play(const char* path)
@@ -408,7 +437,7 @@ bool audio_play(const char* path)
   audio_stop();
   audio_clear_end_state_for_new_play();
   audio_reset_play_pos();
-  s_total_ms = 0; // round13: 首播路径不再同步探测总时长，优先尽快出声。
+  audio_set_total_ms(0); // 首播路径不再同步探测总时长，优先尽快出声。
 
   const uint32_t t0 = millis();
   uint32_t t_after_sniff = t0;
@@ -419,10 +448,11 @@ bool audio_play(const char* path)
 
 #if AUDIO_SYNC_SNIFF_ON_PLAY
   sniff_ran = true;
-  s_total_ms = sniff_total_ms(sd, path);
+  const uint32_t probed_total_ms = sniff_total_ms(sd, path);
+  audio_set_total_ms(probed_total_ms);
   t_after_sniff = millis();
-  if (s_total_ms) {
-    LOGD("[音频] 总计_ms=%u", (unsigned)s_total_ms);
+  if (probed_total_ms) {
+    LOGD("[音频] 总计_ms=%u", (unsigned)probed_total_ms);
   }
 #else
   t_after_sniff = millis();
@@ -459,7 +489,7 @@ bool audio_play_stream_mp3(const char* url, uint32_t operation_id)
   audio_stop();
   audio_clear_end_state_for_new_play();
   audio_reset_play_pos();
-  s_total_ms = 0;
+  audio_set_total_ms(0);
   if (!url) return false;
   LOGD("[音频] 播放 MP3 流: %s", url);
   bool ok = audio_mp3_start_url(url, operation_id);
@@ -476,7 +506,7 @@ bool audio_play_stream_mp3_from_offset(const char* url, uint32_t start_offset, u
   audio_stop();
   audio_clear_end_state_for_new_play();
   audio_reset_play_pos();
-  s_total_ms = 0;
+  audio_set_total_ms(0);
   if (!url) return false;
   LOGD("[音频] 播放 MP3 Range 流: offset=%lu URL=%s", (unsigned long)start_offset, url);
   bool ok = audio_mp3_start_url_from_offset(url, start_offset, operation_id);
@@ -507,26 +537,36 @@ void audio_loop()
 bool audio_is_playing() { return g_dec != DEC_NONE; }
 
 // ===================== 软件音量（0~100%） =====================
-static volatile uint8_t  s_vol_percent = 80;     // 默认 80%
-static volatile uint16_t s_gain_q15    = 26214;  // 80% * 32768 / 100 ≈ 26214
-
 void audio_set_volume(uint8_t percent)
 {
   if (percent > 100) percent = 100;
-  s_vol_percent = percent;
-  s_gain_q15 = (uint16_t)((uint32_t)percent * 32768u / 100u); // 0..32768
+  const uint16_t gain_q15 =
+      (uint16_t)((uint32_t)percent * 32768u / 100u);
+
+  // 百分比和 Q15 增益必须一次发布，避免 I2S 与 UI 读取到不同版本。
+  portENTER_CRITICAL(&s_runtime_state_mux);
+  if (s_runtime_state.volume_percent != percent ||
+      s_runtime_state.gain_q15 != gain_q15) {
+    s_runtime_state.volume_percent = percent;
+    s_runtime_state.gain_q15 = gain_q15;
+    audio_runtime_revision_advance_locked();
+  }
+  portEXIT_CRITICAL(&s_runtime_state_mux);
 }
 
 uint8_t audio_get_volume(void)
 {
-  return s_vol_percent;
+  return audio_runtime_snapshot_get().volume_percent;
 }
 
 uint16_t audio_get_gain_q15(void)
 {
-  // 应用淡入淡出增益
-  float fade_gain = audio_service_get_fade_gain();
-  uint32_t gain = (uint32_t)(s_gain_q15 * fade_gain);
+  const uint16_t base_gain_q15 =
+      audio_runtime_snapshot_get().gain_q15;
+
+  // 淡入淡出状态由 AudioService 管理，不在音频核心状态锁内执行浮点计算。
+  const float fade_gain = audio_service_get_fade_gain();
+  uint32_t gain = (uint32_t)(base_gain_q15 * fade_gain);
   if (gain > 32768) gain = 32768;
   return (uint16_t)gain;
 }
