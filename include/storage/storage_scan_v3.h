@@ -1,7 +1,7 @@
 #pragma once
 #include <Arduino.h>
-#include <vector>
 #include "storage/storage_types_v3.h"
+#include "utils/psram_containers.h"
 #include "storage/storage_manifest_v1.h"
 
 /**
@@ -24,14 +24,14 @@ struct StorageIncrementalScanStatsV3 {
 };
 
 struct TrackBuildTempV3 {
-  String title;
-  String artist;
-  String album;
+  PsramString title;
+  PsramString artist;
+  PsramString album;
 
-  String audio_rel;       // 相对 /Music 的路径
-  String lrc_rel;         // 相对 /Music 的路径，无则空
-  String cover_path_rel;  // fallback 相对路径，无则空
-  String cover_mime;
+  PsramString audio_rel;       // 相对 /Music 的路径
+  PsramString lrc_rel;         // 相对 /Music 的路径，无则空
+  PsramString cover_path_rel;  // fallback 相对路径，无则空
+  PsramString cover_mime;
 
   uint32_t cover_offset = 0;
   uint32_t cover_size = 0;
@@ -40,6 +40,10 @@ struct TrackBuildTempV3 {
   uint8_t ext_code = EXT_UNKNOWN;
   uint16_t flags = TF_NONE;
 };
+
+using StorageTrackBuildListV3 = PsramVector<TrackBuildTempV3>;
+using StorageTrackIndexListV3 = PsramVector<uint32_t>;
+using StorageTrackSeenListV3 = PsramVector<uint8_t>;
 
 /**
  * @brief 扫描单个音频文件并提取元数据 / 歌词 / 封面信息。
@@ -59,7 +63,7 @@ bool storage_scan_one_audio_file_v3(const String& full_path,
  * - 封面优先候选名搜索
  * - 周期性让出 CPU，避免 rescan_v3 扫描时触发 WDT
  */
-bool storage_scan_music_v3(std::vector<TrackBuildTempV3>& out_tracks,
+bool storage_scan_music_v3(StorageTrackBuildListV3& out_tracks,
                            const char* music_root = "/Music");
 
 /**
@@ -69,7 +73,7 @@ bool storage_scan_music_v3(std::vector<TrackBuildTempV3>& out_tracks,
  * 后续扫描仍遍历目录，但未变化歌曲只读取轻量指纹并复用旧元数据。
  */
 bool storage_scan_music_incremental_v3(
-    std::vector<TrackBuildTempV3>& out_tracks,
+    StorageTrackBuildListV3& out_tracks,
     StorageMusicManifestV1& out_manifest,
     StorageIncrementalScanStatsV3& out_stats,
     const MusicCatalogV3* reuse_catalog,

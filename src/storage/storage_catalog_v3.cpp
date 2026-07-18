@@ -105,7 +105,7 @@ static bool rebuild_v3_native(const char* music_root,
     static constexpr const char* kManifestPath =
         "/System/music_manifest_v1.bin";
 
-    std::vector<TrackBuildTempV3> tmp_tracks;
+    StorageTrackBuildListV3 tmp_tracks;
     StorageMusicManifestV1 next_manifest;
     StorageIncrementalScanStatsV3 scan_stats{};
 
@@ -131,6 +131,12 @@ static bool rebuild_v3_native(const char* music_root,
         storage_catalog_v3_clear();
         return false;
     }
+
+    LOGI("[曲库][扫描内存] 临时曲目容器=%luB ext=%d，Catalog 构建后立即释放",
+         (unsigned long)(tmp_tracks.capacity() * sizeof(TrackBuildTempV3)),
+         (!tmp_tracks.empty() && esp_ptr_external_ram(tmp_tracks.data())) ? 1 : 0);
+    StorageTrackBuildListV3 empty_tracks;
+    tmp_tracks.swap(empty_tracks);
 
     if (!storage_build_groups_v3(s_catalog_v3)) {
         LOGE("[曲库] 分组构建失败");

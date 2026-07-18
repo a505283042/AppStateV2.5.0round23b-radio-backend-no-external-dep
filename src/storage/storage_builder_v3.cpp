@@ -15,8 +15,8 @@ static constexpr size_t kInternalFallbackMaxBytes = 32 * 1024;
  * ========================= */
 
 struct StringPoolBuilder {
-  std::vector<uint8_t> blob;
-  std::map<String, uint32_t> str_to_off;
+  PsramVector<uint8_t> blob;
+  PsramMap<PsramString, uint32_t> str_to_off;
 
   StringPoolBuilder() {
     clear();
@@ -30,7 +30,7 @@ struct StringPoolBuilder {
     blob.push_back(0);
   }
 
-  uint32_t intern(const String& s) {
+  uint32_t intern(const PsramString& s) {
     if (s.isEmpty()) return INVALID_OFF32;
 
     auto it = str_to_off.find(s);
@@ -44,15 +44,20 @@ struct StringPoolBuilder {
     blob.insert(blob.end(), (const uint8_t*)s.c_str(), (const uint8_t*)s.c_str() + n);
     blob.push_back(0);  // '\0'
 
-    str_to_off[s] = off;
+    str_to_off.emplace(s, off);
     return off;
+  }
+
+  uint32_t intern(const String& s) {
+    const PsramString psram_text(s);
+    return intern(psram_text);
   }
 };
 
 struct AlbumKeyV3 {
-  String album_name;
-  String primary_artist;
-  String folder_cover;
+  PsramString album_name;
+  PsramString primary_artist;
+  PsramString folder_cover;
 
   bool operator<(const AlbumKeyV3& other) const {
     if (album_name != other.album_name) return album_name < other.album_name;
@@ -65,85 +70,170 @@ struct AlbumKeyV3 {
  * 工具函数
  * ========================= */
 
-static String split_primary_artist(const String& artist)
-{
-  if (artist.isEmpty()) return "未知歌手";
+struct TextSliceV3 {
+  const char* data = "";
+  size_t length = 0;
 
-  int p = artist.indexOf('/');
-  if (p < 0) {
-    String s = artist;
-    s.trim();
-    return s.isEmpty() ? String("未知歌手") : s;
+  TextSliceV3() = default;
+  TextSliceV3(const char* text, size_t text_length)
+      : data(text ? text : ""), length(text_length) {}
+};
+
+static TextSliceV3 trim_ascii_space_v3(TextSliceV3 slice)
+{
+  while (slice.length > 0 &&
+         (slice.data[0] == ' ' || slice.data[0] == '\t')) {
+    ++slice.data;
+    --slice.length;
   }
 
-  String s = artist.substring(0, p);
-  s.trim();
-  return s.isEmpty() ? String("未知歌手") : s;
-}
-
-static String normalized_sort_key(String s)
-{
-  s.trim();
-  s.toLowerCase();
-  return s;
-}
-
-static String basename_no_ext_from_rel_path(const String& rel_path)
-{
-  int slash = rel_path.lastIndexOf('/');
-  String name = (slash >= 0) ? rel_path.substring(slash + 1) : rel_path;
-  int dot = name.lastIndexOf('.');
-  if (dot > 0) {
-    name = name.substring(0, dot);
+  while (slice.length > 0) {
+    const char c = slice.data[slice.length - 1];
+    if (c != ' ' && c != '\t') break;
+    --slice.length;
   }
-  name.trim();
-  return name;
+  return slice;
 }
 
-static int extract_track_no_hint(const TrackBuildTempV3& t)
+static TextSliceV3 text_slice_v3(const PsramString& text)
 {
-  String s = basename_no_ext_from_rel_path(t.audio_rel);
-  int i = 0;
-  while (i < s.length() && (s[i] == ' ' || s[i] == '	')) ++i;
+  TextSliceV3 slice{text.c_str(), text.length()};
+  return trim_ascii_space_v3(slice);
+}
 
-  int num = 0;
+static TextSliceV3 primary_artist_slice_v3(const PsramString& artist)
+{
+  TextSliceV3 slice{text_slice_v3(artist)};
+  for (size_t i = 0; i < slice.length; ++i) {
+    if (slice.data[i] == '/') {
+      slice.length = i;
+      break;
+    }
+  }
+  return trim_ascii_space_v3(slice);
+}
+
+static unsigned char ascii_fold_v3(unsigned char value)
+{
+  if (value >= 'A' && value <= 'Z') {
+    return (unsigned char)(value + ('a' - 'A'));
+  }
+  return value;
+}
+
+static int compare_text_slice_v3(TextSliceV3 left, TextSliceV3 right)
+{
+  const size_t common = left.length < right.length
+      ? left.length
+      : right.length;
+
+  for (size_t i = 0; i < common; ++i) {
+    const unsigned char a = ascii_fold_v3(
+        (unsigned char)left.data[i]);
+    const unsigned char b = ascii_fold_v3(
+        (unsigned char)right.data[i]);
+    if (a < b) return -1;
+    if (a > b) return 1;
+  }
+
+  if (left.length < right.length) return -1;
+  if (left.length > right.length) return 1;
+  return 0;
+}
+
+static TextSliceV3 unknown_artist_slice_v3()
+{
+  static const char kUnknownArtist[] = "未知歌手";
+  return TextSliceV3{kUnknownArtist, sizeof(kUnknownArtist) - 1};
+}
+
+static TextSliceV3 unknown_album_slice_v3()
+{
+  static const char kUnknownAlbum[] = "未知专辑";
+  return TextSliceV3{kUnknownAlbum, sizeof(kUnknownAlbum) - 1};
+}
+
+static PsramString split_primary_artist(const PsramString& artist)
+{
+  TextSliceV3 slice = primary_artist_slice_v3(artist);
+  if (slice.length == 0) {
+    return PsramString("未知歌手");
+  }
+
+  PsramString result;
+  if (!result.assign(slice.data, slice.length)) std::abort();
+  return result;
+}
+
+static int extract_track_no_hint(const TrackBuildTempV3& track)
+{
+  const char* path = track.audio_rel.c_str();
+  const size_t path_length = track.audio_rel.length();
+
+  size_t name_start = 0;
+  for (size_t i = 0; i < path_length; ++i) {
+    if (path[i] == '/') name_start = i + 1;
+  }
+
+  size_t name_end = path_length;
+  for (size_t i = path_length; i > name_start; --i) {
+    if (path[i - 1] == '.') {
+      name_end = i - 1;
+      break;
+    }
+  }
+
+  size_t cursor = name_start;
+  while (cursor < name_end &&
+         (path[cursor] == ' ' || path[cursor] == '\t')) {
+    ++cursor;
+  }
+
+  int number = 0;
   bool has_digits = false;
-  while (i < s.length() && s[i] >= '0' && s[i] <= '9') {
+  while (cursor < name_end &&
+         path[cursor] >= '0' && path[cursor] <= '9') {
     has_digits = true;
-    num = num * 10 + (s[i] - '0');
-    ++i;
+    number = number * 10 + (path[cursor] - '0');
+    ++cursor;
   }
 
-  if (!has_digits) return 0x7fffffff;
-
-  while (i < s.length() && (s[i] == ' ' || s[i] == '	' || s[i] == '.' || s[i] == '-' || s[i] == '_')) {
-    ++i;
-  }
-
-  return num;
+  return has_digits ? number : 0x7fffffff;
 }
 
-static bool track_build_temp_less_v3(const TrackBuildTempV3& a, const TrackBuildTempV3& b)
+static bool track_build_temp_less_v3(const TrackBuildTempV3& left,
+                                     const TrackBuildTempV3& right)
 {
-  String a_artist = normalized_sort_key(split_primary_artist(a.artist));
-  String b_artist = normalized_sort_key(split_primary_artist(b.artist));
-  if (a_artist != b_artist) return a_artist < b_artist;
+  TextSliceV3 left_artist = primary_artist_slice_v3(left.artist);
+  TextSliceV3 right_artist = primary_artist_slice_v3(right.artist);
+  if (left_artist.length == 0) left_artist = unknown_artist_slice_v3();
+  if (right_artist.length == 0) right_artist = unknown_artist_slice_v3();
 
-  String a_album = normalized_sort_key(a.album.isEmpty() ? String("未知专辑") : a.album);
-  String b_album = normalized_sort_key(b.album.isEmpty() ? String("未知专辑") : b.album);
-  if (a_album != b_album) return a_album < b_album;
+  int compare = compare_text_slice_v3(left_artist, right_artist);
+  if (compare != 0) return compare < 0;
 
-  int a_track_no = extract_track_no_hint(a);
-  int b_track_no = extract_track_no_hint(b);
-  if (a_track_no != b_track_no) return a_track_no < b_track_no;
+  TextSliceV3 left_album = text_slice_v3(left.album);
+  TextSliceV3 right_album = text_slice_v3(right.album);
+  if (left.album.isEmpty()) left_album = unknown_album_slice_v3();
+  if (right.album.isEmpty()) right_album = unknown_album_slice_v3();
 
-  String a_title = normalized_sort_key(a.title);
-  String b_title = normalized_sort_key(b.title);
-  if (a_title != b_title) return a_title < b_title;
+  compare = compare_text_slice_v3(left_album, right_album);
+  if (compare != 0) return compare < 0;
 
-  String a_path = normalized_sort_key(a.audio_rel);
-  String b_path = normalized_sort_key(b.audio_rel);
-  return a_path < b_path;
+  const int left_track_no = extract_track_no_hint(left);
+  const int right_track_no = extract_track_no_hint(right);
+  if (left_track_no != right_track_no) {
+    return left_track_no < right_track_no;
+  }
+
+  compare = compare_text_slice_v3(
+      text_slice_v3(left.title),
+      text_slice_v3(right.title));
+  if (compare != 0) return compare < 0;
+
+  return compare_text_slice_v3(
+      text_slice_v3(left.audio_rel),
+      text_slice_v3(right.audio_rel)) < 0;
 }
 
 static void* alloc_prefer_psram(size_t n)
@@ -162,7 +252,7 @@ static void* alloc_prefer_psram(size_t n)
   return heap_caps_malloc(n, MALLOC_CAP_8BIT);
 }
 
-static bool copy_blob_to_psram(const std::vector<uint8_t>& src, uint8_t*& out_ptr, uint32_t& out_size)
+static bool copy_blob_to_psram(const PsramVector<uint8_t>& src, uint8_t*& out_ptr, uint32_t& out_size)
 {
   out_ptr = nullptr;
   out_size = 0;
@@ -182,7 +272,7 @@ static bool copy_blob_to_psram(const std::vector<uint8_t>& src, uint8_t*& out_pt
  * 主构建流程
  * ========================= */
 
-bool storage_build_catalog_v3_from_temp(const std::vector<TrackBuildTempV3>& tracks,
+bool storage_build_catalog_v3_from_temp(StorageTrackBuildListV3& tracks,
                                         MusicCatalogV3& out_cat)
 {
   storage_catalog_v3_free(out_cat);
@@ -192,31 +282,31 @@ bool storage_build_catalog_v3_from_temp(const std::vector<TrackBuildTempV3>& tra
     return false;
   }
 
-  std::vector<TrackBuildTempV3> sorted_tracks = tracks;
-  std::stable_sort(sorted_tracks.begin(), sorted_tracks.end(), track_build_temp_less_v3);
-  if (sorted_tracks.size() > UINT16_MAX) {
+  // 临时曲目表本身已经位于 PSRAM；直接原地排序，避免再复制一整份字符串对象。
+  std::sort(tracks.begin(), tracks.end(), track_build_temp_less_v3);
+  if (tracks.size() > UINT16_MAX) {
     LOGW("[曲库构建] 歌曲数量超过 TrackIndex16 上限: 总数=%lu 保留=%u 跳过=%lu",
-         (unsigned long)sorted_tracks.size(),
+         (unsigned long)tracks.size(),
          (unsigned)UINT16_MAX,
-         (unsigned long)(sorted_tracks.size() - UINT16_MAX));
-    sorted_tracks.resize(UINT16_MAX);
+         (unsigned long)(tracks.size() - UINT16_MAX));
+    tracks.resize(UINT16_MAX);
   }
 
   StringPoolBuilder pool_builder;
 
   /* album 去重表 */
-  std::map<AlbumKeyV3, uint32_t> album_map;
-  std::vector<AlbumRowV3> album_rows;
+  PsramMap<AlbumKeyV3, uint32_t> album_map;
+  PsramVector<AlbumRowV3> album_rows;
 
   /* artist 去重表：先只存 primary artist */
-  std::map<String, uint32_t> artist_map;
-  std::vector<ArtistRowV3> artist_rows;
+  PsramMap<PsramString, uint32_t> artist_map;
+  PsramVector<ArtistRowV3> artist_rows;
 
   /* track rows */
-  std::vector<TrackRowV3> track_rows;
-  track_rows.reserve(sorted_tracks.size());
+  PsramVector<TrackRowV3> track_rows;
+  track_rows.reserve(tracks.size());
 
-  for (const auto& t : sorted_tracks) {
+  for (const auto& t : tracks) {
     TrackRowV3 row{};
 
     /* 1) 基本文本 */
@@ -235,7 +325,7 @@ bool storage_build_catalog_v3_from_temp(const std::vector<TrackBuildTempV3>& tra
     row.flags = t.flags;
 
     /* 3) artist 表：先仅保存 primary artist */
-    String primary_artist = split_primary_artist(t.artist);
+    PsramString primary_artist = split_primary_artist(t.artist);
     auto ait = artist_map.find(primary_artist);
     if (ait == artist_map.end()) {
       ArtistRowV3 ar;
@@ -247,8 +337,10 @@ bool storage_build_catalog_v3_from_temp(const std::vector<TrackBuildTempV3>& tra
     }
 
     /* 4) album 表：按 (album_name, primary_artist, folder_cover) 去重 */
-    String album_name = t.album.isEmpty() ? String("未知专辑") : t.album;
-    String folder_cover = t.cover_path_rel;
+    PsramString album_name = t.album.isEmpty()
+        ? PsramString("未知专辑")
+        : t.album;
+    PsramString folder_cover = t.cover_path_rel;
 
     AlbumKeyV3 ak;
     ak.album_name = album_name;
@@ -272,6 +364,19 @@ bool storage_build_catalog_v3_from_temp(const std::vector<TrackBuildTempV3>& tra
 
     track_rows.push_back(row);
   }
+
+  LOGI("[曲库构建][PSRAM] pool_blob=%luB ext=%d string_map_node_ext=%d album_rows=%luB ext=%d album_map_node_ext=%d artist_rows=%luB ext=%d artist_map_node_ext=%d track_rows=%luB ext=%d",
+       (unsigned long)(pool_builder.blob.capacity() * sizeof(uint8_t)),
+       (!pool_builder.blob.empty() && esp_ptr_external_ram(pool_builder.blob.data())) ? 1 : 0,
+       (!pool_builder.str_to_off.empty() && esp_ptr_external_ram(&*pool_builder.str_to_off.begin())) ? 1 : 0,
+       (unsigned long)(album_rows.capacity() * sizeof(AlbumRowV3)),
+       (!album_rows.empty() && esp_ptr_external_ram(album_rows.data())) ? 1 : 0,
+       (!album_map.empty() && esp_ptr_external_ram(&*album_map.begin())) ? 1 : 0,
+       (unsigned long)(artist_rows.capacity() * sizeof(ArtistRowV3)),
+       (!artist_rows.empty() && esp_ptr_external_ram(artist_rows.data())) ? 1 : 0,
+       (!artist_map.empty() && esp_ptr_external_ram(&*artist_map.begin())) ? 1 : 0,
+       (unsigned long)(track_rows.capacity() * sizeof(TrackRowV3)),
+       (!track_rows.empty() && esp_ptr_external_ram(track_rows.data())) ? 1 : 0);
 
   /* 拷贝到最终 catalog */
 

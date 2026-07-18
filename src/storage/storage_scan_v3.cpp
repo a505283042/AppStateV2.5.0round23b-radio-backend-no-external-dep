@@ -6,6 +6,7 @@
 #include <freertos/task.h>
 #include <algorithm>
 #include <cstring>
+#include <esp_heap_caps.h>
 
 #include "utils/log.h"
 #include "storage/storage_io.h"
@@ -375,7 +376,7 @@ bool storage_scan_one_audio_file_v3(const String& full_path,
 static bool scan_dir_recursive_v3(const String& dir_path,
                                   const char* music_root,
                                   const String& inherited_cover_path,
-                                  std::vector<TrackBuildTempV3>& out_tracks,
+                                  StorageTrackBuildListV3& out_tracks,
                                   int& scanned)
 {
     scan_v3_cooperate_wdt();
@@ -456,7 +457,7 @@ namespace {
 static constexpr size_t kFingerprintSampleBytes = 512;
 
 struct CachedFingerprintV1 {
-    String path;
+    PsramString path;
     StorageFileFingerprintV1 fingerprint;
     bool ok = false;
 };
@@ -465,13 +466,110 @@ struct IncrementalScanContextV3 {
     const char* music_root = "/Music";
     const StorageMusicManifestV1* old_manifest = nullptr;
     const MusicCatalogV3* reuse_catalog = nullptr;
-    const std::vector<uint32_t>* catalog_path_order = nullptr;
-    std::vector<uint8_t>* old_seen = nullptr;
-    std::vector<TrackBuildTempV3>* out_tracks = nullptr;
+    const StorageTrackIndexListV3* catalog_path_order = nullptr;
+    StorageTrackSeenListV3* old_seen = nullptr;
+    StorageTrackBuildListV3* out_tracks = nullptr;
     StorageMusicManifestV1* out_manifest = nullptr;
     StorageIncrementalScanStatsV3* stats = nullptr;
-    std::vector<CachedFingerprintV1> cover_fingerprint_cache;
+    PsramVector<CachedFingerprintV1> cover_fingerprint_cache;
 };
+
+struct ScanHeapSnapshotV3 {
+    uint32_t internal_free = 0;
+    uint32_t psram_free = 0;
+};
+
+static ScanHeapSnapshotV3 scan_heap_snapshot_v3()
+{
+    ScanHeapSnapshotV3 snapshot{};
+    snapshot.internal_free = (uint32_t)heap_caps_get_free_size(
+        MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    snapshot.psram_free = (uint32_t)heap_caps_get_free_size(
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    return snapshot;
+}
+
+static long signed_heap_delta_v3(uint32_t before, uint32_t after)
+{
+    return (long)after - (long)before;
+}
+
+static void count_psram_text_v3(const PsramString& text,
+                                uint32_t& total,
+                                uint32_t& external,
+                                uint32_t& internal_fallback)
+{
+    if (text.isEmpty()) return;
+    ++total;
+    if (text.isExternal()) {
+        ++external;
+    } else {
+        ++internal_fallback;
+    }
+}
+
+static void log_incremental_scan_memory_v3(
+    const char* phase,
+    const ScanHeapSnapshotV3& start,
+    const StorageTrackBuildListV3& tracks,
+    const StorageMusicManifestV1& old_manifest,
+    const StorageMusicManifestV1& next_manifest,
+    const StorageTrackIndexListV3& path_order,
+    const StorageTrackSeenListV3& old_seen,
+    const PsramVector<CachedFingerprintV1>& cover_cache)
+{
+    const ScanHeapSnapshotV3 current = scan_heap_snapshot_v3();
+
+    LOGI("[增量扫描][内存] %s 内部空闲=%luB 变化=%ldB PSRAM空闲=%luB 变化=%ldB",
+         phase ? phase : "?",
+         (unsigned long)current.internal_free,
+         signed_heap_delta_v3(start.internal_free, current.internal_free),
+         (unsigned long)current.psram_free,
+         signed_heap_delta_v3(start.psram_free, current.psram_free));
+
+    LOGI("[增量扫描][PSRAM] tracks=%luB ext=%d old_manifest=%luB ext=%d next_manifest=%luB ext=%d order=%luB ext=%d seen=%luB ext=%d cover_cache=%luB ext=%d",
+         (unsigned long)(tracks.capacity() * sizeof(TrackBuildTempV3)),
+         (!tracks.empty() && esp_ptr_external_ram(tracks.data())) ? 1 : 0,
+         (unsigned long)(old_manifest.entries.capacity() * sizeof(StorageManifestEntryV1)),
+         (!old_manifest.entries.empty() && esp_ptr_external_ram(old_manifest.entries.data())) ? 1 : 0,
+         (unsigned long)(next_manifest.entries.capacity() * sizeof(StorageManifestEntryV1)),
+         (!next_manifest.entries.empty() && esp_ptr_external_ram(next_manifest.entries.data())) ? 1 : 0,
+         (unsigned long)(path_order.capacity() * sizeof(uint32_t)),
+         (!path_order.empty() && esp_ptr_external_ram(path_order.data())) ? 1 : 0,
+         (unsigned long)(old_seen.capacity() * sizeof(uint8_t)),
+         (!old_seen.empty() && esp_ptr_external_ram(old_seen.data())) ? 1 : 0,
+         (unsigned long)(cover_cache.capacity() * sizeof(CachedFingerprintV1)),
+         (!cover_cache.empty() && esp_ptr_external_ram(cover_cache.data())) ? 1 : 0);
+
+    uint32_t text_total = 0;
+    uint32_t text_external = 0;
+    uint32_t text_internal_fallback = 0;
+
+    for (const auto& track : tracks) {
+        count_psram_text_v3(track.title, text_total, text_external, text_internal_fallback);
+        count_psram_text_v3(track.artist, text_total, text_external, text_internal_fallback);
+        count_psram_text_v3(track.album, text_total, text_external, text_internal_fallback);
+        count_psram_text_v3(track.audio_rel, text_total, text_external, text_internal_fallback);
+        count_psram_text_v3(track.lrc_rel, text_total, text_external, text_internal_fallback);
+        count_psram_text_v3(track.cover_path_rel, text_total, text_external, text_internal_fallback);
+        count_psram_text_v3(track.cover_mime, text_total, text_external, text_internal_fallback);
+    }
+
+    for (const auto& entry : old_manifest.entries) {
+        count_psram_text_v3(entry.audio_rel, text_total, text_external, text_internal_fallback);
+    }
+    for (const auto& entry : next_manifest.entries) {
+        count_psram_text_v3(entry.audio_rel, text_total, text_external, text_internal_fallback);
+    }
+    for (const auto& item : cover_cache) {
+        count_psram_text_v3(item.path, text_total, text_external, text_internal_fallback);
+    }
+
+    LOGI("[增量扫描][文本] 非空=%lu PSRAM=%lu 内部回落=%lu",
+         (unsigned long)text_total,
+         (unsigned long)text_external,
+         (unsigned long)text_internal_fallback);
+}
 
 static bool is_audio_filename_v3(const String& filename)
 {
@@ -594,6 +692,14 @@ static String music_absolute_path_v3(const char* music_root,
     return root + relative_path;
 }
 
+static String music_absolute_path_v3(const char* music_root,
+                                     const PsramString& relative_path)
+{
+    return music_absolute_path_v3(
+        music_root,
+        String(relative_path.c_str()));
+}
+
 static String find_lrc_path_for_audio_v3(const String& full_path,
                                          const String& filename)
 {
@@ -613,7 +719,7 @@ static String find_lrc_path_for_audio_v3(const String& full_path,
 
 static bool fingerprint_cached_v1(
     const String& path,
-    std::vector<CachedFingerprintV1>& cache,
+    PsramVector<CachedFingerprintV1>& cache,
     StorageFileFingerprintV1& out)
 {
     if (path.isEmpty()) {
@@ -690,7 +796,7 @@ static const char* catalog_track_audio_rel_v3(
 
 static bool build_catalog_path_order_v3(
     const MusicCatalogV3& catalog,
-    std::vector<uint32_t>& out_order)
+    StorageTrackIndexListV3& out_order)
 {
     out_order.clear();
     if (!catalog.tracks || catalog.track_count == 0) return false;
@@ -723,10 +829,11 @@ static bool build_catalog_path_order_v3(
     return true;
 }
 
+template <typename TextType>
 static int find_catalog_track_v3(
     const MusicCatalogV3& catalog,
-    const std::vector<uint32_t>& order,
-    const String& audio_rel)
+    const StorageTrackIndexListV3& order,
+    const TextType& audio_rel)
 {
     size_t low = 0;
     size_t high = order.size();
@@ -786,7 +893,7 @@ static bool temp_from_catalog_track_v3(
 static bool manifest_matches_catalog_v3(
     const StorageMusicManifestV1& manifest,
     const MusicCatalogV3& catalog,
-    const std::vector<uint32_t>& order)
+    const StorageTrackIndexListV3& order)
 {
     if (manifest.entries.size() != catalog.track_count ||
         order.size() != catalog.track_count) {
@@ -1066,7 +1173,7 @@ static bool scan_dir_incremental_v3(
 }  // namespace
 
 bool storage_scan_music_incremental_v3(
-    std::vector<TrackBuildTempV3>& out_tracks,
+    StorageTrackBuildListV3& out_tracks,
     StorageMusicManifestV1& out_manifest,
     StorageIncrementalScanStatsV3& out_stats,
     const MusicCatalogV3* reuse_catalog,
@@ -1082,12 +1189,14 @@ bool storage_scan_music_incremental_v3(
     scan_v3_reset_coop_state();
     ui_scan_begin();
 
+    const ScanHeapSnapshotV3 heap_start = scan_heap_snapshot_v3();
+
     out_tracks.clear();
     out_manifest.clear();
     out_stats = StorageIncrementalScanStatsV3{};
 
     StorageMusicManifestV1 old_manifest;
-    std::vector<uint32_t> catalog_path_order;
+    StorageTrackIndexListV3 catalog_path_order;
 
     const bool manifest_file_loaded =
         storage_manifest_load_v1(old_manifest, manifest_path);
@@ -1111,7 +1220,7 @@ bool storage_scan_music_incremental_v3(
         catalog_path_order.clear();
     }
 
-    std::vector<uint8_t> old_seen;
+    StorageTrackSeenListV3 old_seen;
     if (out_stats.manifest_loaded) {
         old_seen.assign(old_manifest.entries.size(), 0);
         out_tracks.reserve(old_manifest.entries.size() + 8);
@@ -1167,6 +1276,16 @@ bool storage_scan_music_incremental_v3(
                 return a.audio_rel.compareTo(b.audio_rel) < 0;
               });
 
+    log_incremental_scan_memory_v3(
+        "扫描完成",
+        heap_start,
+        out_tracks,
+        old_manifest,
+        out_manifest,
+        catalog_path_order,
+        old_seen,
+        context.cover_fingerprint_cache);
+
     ui_scan_end();
 
     LOGI("[增量扫描] 完成：模式=%s 发现=%lu 复用=%lu 新增=%lu 修改=%lu 删除=%lu",
@@ -1180,7 +1299,7 @@ bool storage_scan_music_incremental_v3(
     return !out_tracks.empty();
 }
 
-bool storage_scan_music_v3(std::vector<TrackBuildTempV3>& out_tracks,
+bool storage_scan_music_v3(StorageTrackBuildListV3& out_tracks,
                            const char* music_root)
 {
     StorageSdLockGuard sd_lock(2000);

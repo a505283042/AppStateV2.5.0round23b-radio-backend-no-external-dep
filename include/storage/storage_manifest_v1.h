@@ -1,9 +1,8 @@
 #pragma once
 
 #include <Arduino.h>
-#include <vector>
-
 #include "storage/storage_types_v3.h"
+#include "utils/psram_containers.h"
 
 /**
  * @brief 单个文件的轻量内容指纹。
@@ -26,7 +25,7 @@ struct StorageFileFingerprintV1 {
  * 都从当前已加载的 V3 Catalog 复用，尽量减少扫描期间的 String 数量和内部堆压力。
  */
 struct StorageManifestEntryV1 {
-  String audio_rel;
+  PsramString audio_rel;
 
   StorageFileFingerprintV1 audio_fingerprint;
   StorageFileFingerprintV1 lrc_fingerprint;
@@ -34,7 +33,7 @@ struct StorageManifestEntryV1 {
 };
 
 struct StorageMusicManifestV1 {
-  std::vector<StorageManifestEntryV1> entries;
+  PsramVector<StorageManifestEntryV1> entries;
 
   void clear() {
     entries.clear();

@@ -125,7 +125,7 @@ static bool read_header(File32& file, ManifestHeaderV1& header)
          read_u32(file, header.crc32);
 }
 
-static bool string_size_valid(const String& value)
+static bool string_size_valid(const PsramString& value)
 {
   return value.length() <= kManifestMaxStringBytes;
 }
@@ -159,7 +159,7 @@ static bool calculate_payload_layout(const StorageMusicManifestV1& manifest,
     payload_size += size;
   };
 
-  auto add_string = [&](const String& value) {
+  auto add_string = [&](const PsramString& value) {
     const uint16_t length = (uint16_t)value.length();
     add_crc(&length, sizeof(length));
     if (length > 0) {
@@ -201,7 +201,7 @@ static bool calculate_payload_layout(const StorageMusicManifestV1& manifest,
   return true;
 }
 
-static bool write_string(File32& file, const String& value)
+static bool write_string(File32& file, const PsramString& value)
 {
   const uint16_t length = (uint16_t)value.length();
   return write_u16(file, length) &&
@@ -209,7 +209,7 @@ static bool write_string(File32& file, const String& value)
 }
 
 static bool read_string_crc(File32& file,
-                            String& out,
+                            PsramString& out,
                             uint32_t& crc,
                             uint32_t& remaining)
 {
@@ -226,26 +226,23 @@ static bool read_string_crc(File32& file,
     return false;
   }
 
-  out = String();
+  out.clear();
   if (length == 0) return true;
-  if (!out.reserve(length)) return false;
+  if (!out.resize_for_write(length)) return false;
 
-  char buffer[128];
-  uint16_t left = length;
-  while (left > 0) {
-    const uint16_t chunk = left > sizeof(buffer)
-        ? (uint16_t)sizeof(buffer)
-        : left;
-    if (file.read(reinterpret_cast<uint8_t*>(buffer), chunk) != chunk) {
+  uint16_t copied = 0;
+  while (copied < length) {
+    const uint16_t left = length - copied;
+    const uint16_t chunk = left > 128u ? 128u : left;
+    char* destination = out.data() + copied;
+    if (file.read(reinterpret_cast<uint8_t*>(destination), chunk) != chunk) {
+      out.clear();
       return false;
     }
     crc = crc32_update(crc,
-                       reinterpret_cast<const uint8_t*>(buffer),
+                       reinterpret_cast<const uint8_t*>(destination),
                        chunk);
-    if (!out.concat(buffer, chunk)) {
-      return false;
-    }
-    left -= chunk;
+    copied += chunk;
     remaining -= chunk;
   }
   return true;
