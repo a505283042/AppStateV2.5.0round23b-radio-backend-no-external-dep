@@ -90,6 +90,7 @@ void ui_cover_free_allocated(uint8_t* p);
 struct UiScanProgress {
   bool full_scan = false;
   bool forced_full_scan = false;
+  bool strict_incremental = false;
   uint32_t discovered = 0;
   uint32_t reused = 0;
   uint32_t added = 0;
@@ -101,6 +102,7 @@ struct UiScanProgress {
 struct UiScanSummary {
   bool full_scan = false;
   bool forced_full_scan = false;
+  bool strict_incremental = false;
   uint32_t discovered = 0;
   uint32_t reused = 0;
   uint32_t added = 0;
@@ -109,7 +111,9 @@ struct UiScanSummary {
   uint32_t elapsed_ms = 0;
 };
 
-void ui_scan_begin(bool full_scan = false, bool forced_full_scan = false);
+void ui_scan_begin(bool full_scan = false,
+                   bool forced_full_scan = false,
+                   bool strict_incremental = false);
 void ui_scan_tick(const UiScanProgress& progress);
 void ui_scan_tick(int tracks_count);
 void ui_scan_end();

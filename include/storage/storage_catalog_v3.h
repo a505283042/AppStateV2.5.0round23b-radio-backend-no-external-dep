@@ -8,7 +8,8 @@
 
 // 曲库重建模式：普通重扫优先复用 Manifest，强制全量会忽略旧清单。
 enum class StorageCatalogRebuildMode : uint8_t {
-  Incremental = 0,
+  FastIncremental = 0,
+  StrictIncremental,
   Full,
 };
 
@@ -16,6 +17,7 @@ struct StorageCatalogRebuildSummary {
   bool success = false;
   bool full_scan = true;
   bool forced_full_scan = false;
+  bool strict_incremental = false;
   uint32_t discovered = 0;
   uint32_t reused = 0;
   uint32_t added = 0;
@@ -59,7 +61,7 @@ bool storage_catalog_v3_load_or_rebuild(const char* music_root = "/Music",
 bool storage_catalog_v3_rebuild(
     const char* music_root = "/Music",
     const char* v3_index_path = "/System/music_index_v3.bin",
-    StorageCatalogRebuildMode mode = StorageCatalogRebuildMode::Incremental,
+    StorageCatalogRebuildMode mode = StorageCatalogRebuildMode::FastIncremental,
     StorageCatalogRebuildSummary* out_summary = nullptr);
 
 /* 基本访问 */

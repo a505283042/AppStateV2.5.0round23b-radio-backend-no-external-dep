@@ -109,18 +109,27 @@ static bool rebuild_v3_native(
         "/System/music_manifest_v1.bin";
 
     const uint32_t rebuild_started_ms = millis();
+    const uint32_t rebuild_internal_start = (uint32_t)heap_caps_get_free_size(
+        MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    const uint32_t rebuild_psram_start = (uint32_t)heap_caps_get_free_size(
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     const bool force_full_scan =
         mode == StorageCatalogRebuildMode::Full;
+    const bool strict_verify =
+        mode == StorageCatalogRebuildMode::StrictIncremental;
 
     StorageCatalogRebuildSummary summary{};
     summary.forced_full_scan = force_full_scan;
+    summary.strict_incremental = strict_verify;
 
     StorageTrackBuildListV3 tmp_tracks;
     StorageMusicManifestV1 next_manifest;
     StorageIncrementalScanStatsV3 scan_stats{};
 
     LOGI("[曲库] 开始重建本地索引：请求模式=%s",
-         force_full_scan ? "强制全量" : "增量优先");
+         force_full_scan
+             ? "强制全量"
+             : (strict_verify ? "严格增量" : "快速增量"));
 
     const MusicCatalogV3* reuse_catalog =
         (!force_full_scan && storage_catalog_v3_ready())
@@ -133,7 +142,8 @@ static bool rebuild_v3_native(
                                            reuse_catalog,
                                            music_root,
                                            kManifestPath,
-                                           force_full_scan)) {
+                                           force_full_scan,
+                                           strict_verify)) {
         summary.full_scan = scan_stats.full_scan;
         summary.discovered = scan_stats.discovered;
         summary.reused = scan_stats.reused;
@@ -161,8 +171,11 @@ static bool rebuild_v3_native(
     LOGI("[曲库][扫描内存] 临时曲目容器=%luB ext=%d，Catalog 构建后立即释放",
          (unsigned long)(tmp_tracks.capacity() * sizeof(TrackBuildTempV3)),
          (!tmp_tracks.empty() && esp_ptr_external_ram(tmp_tracks.data())) ? 1 : 0);
-    StorageTrackBuildListV3 empty_tracks;
-    tmp_tracks.swap(empty_tracks);
+    {
+        // 用块作用域让接收旧缓冲区的容器立即析构，而不是拖到函数返回。
+        StorageTrackBuildListV3 released_tracks;
+        tmp_tracks.swap(released_tracks);
+    }
 
     if (!storage_build_groups_v3(s_catalog_v3)) {
         LOGE("[曲库] 分组构建失败");
@@ -192,12 +205,34 @@ static bool rebuild_v3_native(
         LOGW("[曲库] 增量清单保存失败，下次重扫将自动回退全量解析");
     }
 
+    {
+        // Manifest 已经落盘，立即归还扫描期路径和指纹缓冲。
+        PsramVector<StorageManifestEntryV1> released_entries;
+        next_manifest.entries.swap(released_entries);
+    }
+    next_manifest.clear();
+
+    const uint32_t rebuild_internal_end = (uint32_t)heap_caps_get_free_size(
+        MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    const uint32_t rebuild_psram_end = (uint32_t)heap_caps_get_free_size(
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    LOGI("[曲库][内存] 重建提交后 内部空闲=%luB 变化=%ldB PSRAM空闲=%luB 变化=%ldB",
+         (unsigned long)rebuild_internal_end,
+         (long)rebuild_internal_end - (long)rebuild_internal_start,
+         (unsigned long)rebuild_psram_end,
+         (long)rebuild_psram_end - (long)rebuild_psram_start);
+
     scan_stats.elapsed_ms = millis() - rebuild_started_ms;
 
-    LOGI("[曲库] 本地索引重建完成：扫描模式=%s 强制=%d 复用=%lu 新增=%lu 修改=%lu 删除=%lu 用时=%lums 歌曲=%lu 专辑=%lu 歌手=%lu 字符池=%lu 歌手分组=%d 专辑分组=%d",
+    LOGI("[曲库] 本地索引重建完成：扫描模式=%s 校验=%s 强制=%d 复用=%lu 属性直复用=%lu CRC确认=%lu 新增=%lu 修改=%lu 删除=%lu 用时=%lums 歌曲=%lu 专辑=%lu 歌手=%lu 字符池=%lu 歌手分组=%d 专辑分组=%d",
          scan_stats.full_scan ? "全量" : "增量",
+         scan_stats.full_scan
+             ? "完整解析"
+             : (scan_stats.strict_incremental ? "严格内容" : "快速属性"),
          force_full_scan ? 1 : 0,
          (unsigned long)scan_stats.reused,
+         (unsigned long)scan_stats.attribute_reused,
+         (unsigned long)scan_stats.content_verified,
          (unsigned long)scan_stats.added,
          (unsigned long)scan_stats.modified,
          (unsigned long)scan_stats.deleted,
@@ -214,6 +249,7 @@ static bool rebuild_v3_native(
     summary.success = true;
     summary.full_scan = scan_stats.full_scan;
     summary.forced_full_scan = force_full_scan;
+    summary.strict_incremental = scan_stats.strict_incremental;
     summary.discovered = scan_stats.discovered;
     summary.reused = scan_stats.reused;
     summary.added = scan_stats.added;
@@ -234,7 +270,7 @@ bool storage_catalog_v3_load_or_rebuild(const char* music_root,
 
     LOGW("[曲库] 加载 v3 失败, 回退 native 重建");
     return rebuild_v3_native(music_root, v3_index_path,
-                             StorageCatalogRebuildMode::Incremental, nullptr);
+                             StorageCatalogRebuildMode::FastIncremental, nullptr);
 }
 
 bool storage_catalog_v3_get_track_view(uint32_t track_index,

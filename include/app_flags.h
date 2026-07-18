@@ -3,7 +3,8 @@
 #include "ui/ui.h"
 
 enum class AppRescanMode : uint8_t {
-  Incremental = 0,
+  FastIncremental = 0,
+  StrictIncremental,
   Full,
 };
 
@@ -15,14 +16,14 @@ struct AppRescanState {
   bool success = false;
   bool abort_requested = false;
   bool committed = false;
-  AppRescanMode mode = AppRescanMode::Incremental;
+  AppRescanMode mode = AppRescanMode::FastIncremental;
 };
 
 // 获取一致的重扫状态快照。
 AppRescanState app_rescan_state_get();
 
 // 开始一次新的重扫会话。已有重扫时返回 false。
-bool app_rescan_begin(AppRescanMode mode = AppRescanMode::Incremental);
+bool app_rescan_begin(AppRescanMode mode = AppRescanMode::FastIncremental);
 
 // 索引已经完成构建和落盘后锁定本轮结果，拒绝后续取消请求。
 void app_rescan_mark_committed();

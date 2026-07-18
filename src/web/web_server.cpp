@@ -2665,11 +2665,32 @@ static void web_handle_scan() {
         : "rescan_cancel_requested");
     return;
   }
-  if (!app_request_start_rescan()) {
+  AppRescanMode requested_mode = AppRescanMode::FastIncremental;
+  if (s_server.hasArg("mode")) {
+    String mode = s_server.arg("mode");
+    mode.trim();
+    mode.toLowerCase();
+    if (mode == "strict") {
+      requested_mode = AppRescanMode::StrictIncremental;
+    } else if (mode == "full") {
+      requested_mode = AppRescanMode::Full;
+    } else if (mode != "fast" && mode != "incremental") {
+      web_send_json_err("重扫模式无效：fast/strict/full");
+      return;
+    }
+  }
+
+  if (!app_request_start_rescan(requested_mode)) {
     web_send_json_err("当前状态不允许开始重扫");
     return;
   }
-  web_send_json_ok_simple("rescan_started");
+
+  web_send_json_ok_simple(
+      requested_mode == AppRescanMode::Full
+          ? "rescan_full_started"
+          : (requested_mode == AppRescanMode::StrictIncremental
+                 ? "rescan_strict_started"
+                 : "rescan_fast_started"));
 }
 
 static void web_handle_wifiinfo_toggle() {

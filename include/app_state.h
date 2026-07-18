@@ -24,7 +24,7 @@ void app_request_exit_nfc_admin();   /* 请求退出 NFC 管理状态 */
 
 bool app_request_enter_nfc_admin_with_target(const NfcAdminTarget& target); /* 请求进入 NFC 管理状态并指定目标 */
 
-bool app_request_start_rescan(AppRescanMode mode = AppRescanMode::Incremental); /* 请求开始重扫 */
+bool app_request_start_rescan(AppRescanMode mode = AppRescanMode::FastIncremental); /* 请求开始重扫 */
 bool app_request_cancel_rescan();     /* 请求取消重扫（供按键 / 网页统一调用） */
 
 #endif

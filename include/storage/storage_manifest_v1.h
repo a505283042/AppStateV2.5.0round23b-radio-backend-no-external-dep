@@ -7,12 +7,15 @@
 /**
  * @brief 单个文件的轻量内容指纹。
  *
- * 不依赖 FAT 修改时间，使用文件大小以及头部、中部、尾部采样 CRC。
- * 这样复制工具保留时间戳、或文件内容等长替换时仍有较高概率检测到变化。
+ * 快速增量优先比较 FAT 修改日期、时间和文件大小；严格增量再比较
+ * 文件头部、中部、尾部采样 CRC。旧版清单没有 FAT 属性时会自动做一次 CRC 升级。
  */
 struct StorageFileFingerprintV1 {
   bool present = false;
+  bool attributes_valid = false;
   uint32_t size = 0;
+  uint16_t modify_date = 0;
+  uint16_t modify_time = 0;
   uint32_t head_crc = 0;
   uint32_t middle_crc = 0;
   uint32_t tail_crc = 0;
@@ -36,11 +39,13 @@ struct StorageMusicManifestV1 {
   PsramVector<StorageManifestEntryV1> entries;
   uint32_t catalog_crc32 = 0;
   bool catalog_crc_valid = false;
+  uint16_t format_version = 0;
 
   void clear() {
     entries.clear();
     catalog_crc32 = 0;
     catalog_crc_valid = false;
+    format_version = 0;
   }
 
   bool empty() const {

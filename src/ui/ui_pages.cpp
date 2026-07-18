@@ -319,16 +319,20 @@ void ui_nfc_admin_show_done()
 
 void ui_show_scanning()
 {
-  ui_scan_begin(false, false);
+  ui_scan_begin(false, false, false);
 }
 
 // =============================================================================
 // 扫描 UI
 // =============================================================================
 
-static const char* scan_mode_label(bool full_scan, bool forced_full_scan)
+static const char* scan_mode_label(bool full_scan,
+                                   bool forced_full_scan,
+                                   bool strict_incremental)
 {
-  if (!full_scan) return "增量扫描";
+  if (!full_scan) {
+    return strict_incremental ? "严格增量扫描" : "快速增量扫描";
+  }
   return forced_full_scan ? "强制全量扫描" : "自动全量扫描";
 }
 
@@ -361,7 +365,9 @@ static void scan_current_name(const char* current_path,
   snprintf(out, out_size, "...%s", name + length - keep);
 }
 
-void ui_scan_begin(bool full_scan, bool forced_full_scan)
+void ui_scan_begin(bool full_scan,
+                   bool forced_full_scan,
+                   bool strict_incremental)
 {
   ui_draw_lock();
   ui_set_screen(UI_SCREEN_BOOT);
@@ -376,7 +382,7 @@ void ui_scan_begin(bool full_scan, bool forced_full_scan)
 
   tft.setTextSize(1);
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
-  draw_center_text(scan_mode_label(full_scan, forced_full_scan), 50);
+  draw_center_text(scan_mode_label(full_scan, forced_full_scan, strict_incremental), 50);
 
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   draw_center_text("正在准备...", 98);
@@ -422,7 +428,9 @@ void ui_scan_tick(const UiScanProgress& progress)
   tft.fillRect(0, 39, 240, 177, TFT_BLACK);
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   draw_center_text(
-      scan_mode_label(progress.full_scan, progress.forced_full_scan),
+      scan_mode_label(progress.full_scan,
+                      progress.forced_full_scan,
+                      progress.strict_incremental),
       50);
 
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
@@ -458,6 +466,7 @@ void ui_scan_tick(int tracks_count)
   UiScanProgress progress{};
   progress.full_scan = true;
   progress.forced_full_scan = true;
+  progress.strict_incremental = false;
   progress.discovered = tracks_count > 0 ? (uint32_t)tracks_count : 0;
   ui_scan_tick(progress);
 }
@@ -483,7 +492,9 @@ void ui_scan_complete(const UiScanSummary& summary)
   tft.setTextSize(1);
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   draw_center_text(
-      scan_mode_label(summary.full_scan, summary.forced_full_scan),
+      scan_mode_label(summary.full_scan,
+                      summary.forced_full_scan,
+                      summary.strict_incremental),
       55);
 
   tft.setTextColor(TFT_WHITE, TFT_BLACK);

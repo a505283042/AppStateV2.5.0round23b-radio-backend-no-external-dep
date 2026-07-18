@@ -17,11 +17,14 @@ struct StorageIncrementalScanStatsV3 {
   bool manifest_loaded = false;
   bool full_scan = true;
   bool forced_full_scan = false;
+  bool strict_incremental = false;
   uint32_t discovered = 0;
   uint32_t reused = 0;
   uint32_t added = 0;
   uint32_t modified = 0;
   uint32_t deleted = 0;
+  uint32_t attribute_reused = 0;
+  uint32_t content_verified = 0;
   uint32_t elapsed_ms = 0;
 };
 
@@ -81,4 +84,5 @@ bool storage_scan_music_incremental_v3(
     const MusicCatalogV3* reuse_catalog,
     const char* music_root = "/Music",
     const char* manifest_path = "/System/music_manifest_v1.bin",
-    bool force_full_scan = false);
+    bool force_full_scan = false,
+    bool strict_verify = false);

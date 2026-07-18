@@ -461,6 +461,7 @@ struct CachedFingerprintV1 {
     PsramString path;
     StorageFileFingerprintV1 fingerprint;
     bool ok = false;
+    bool content_complete = false;
 };
 
 struct IncrementalScanContextV3 {
@@ -472,6 +473,7 @@ struct IncrementalScanContextV3 {
     StorageTrackBuildListV3* out_tracks = nullptr;
     StorageMusicManifestV1* out_manifest = nullptr;
     StorageIncrementalScanStatsV3* stats = nullptr;
+    bool strict_verify = false;
     PsramVector<CachedFingerprintV1> cover_fingerprint_cache;
 };
 
@@ -625,7 +627,26 @@ static bool fingerprint_sample_crc_v1(File32& file,
     return true;
 }
 
+template <typename FileType>
+static bool fingerprint_attributes_from_open_file_v1(
+    FileType& file,
+    StorageFileFingerprintV1& out)
+{
+    out = StorageFileFingerprintV1{};
+    if (!file || file.isDir()) return false;
+
+    const uint64_t size64 = file.fileSize();
+    if (size64 > UINT32_MAX) return false;
+
+    out.present = true;
+    out.size = (uint32_t)size64;
+    out.attributes_valid = file.getModifyDateTime(
+        &out.modify_date, &out.modify_time);
+    return true;
+}
+
 static bool fingerprint_file_v1(const String& path,
+                                bool include_content,
                                 StorageFileFingerprintV1& out)
 {
     out = StorageFileFingerprintV1{};
@@ -637,13 +658,17 @@ static bool fingerprint_file_v1(const String& path,
         return false;
     }
 
-    const uint64_t size64 = file.fileSize();
-    if (size64 > UINT32_MAX) {
+    if (!fingerprint_attributes_from_open_file_v1(file, out)) {
         file.close();
         return false;
     }
 
-    const uint32_t size = (uint32_t)size64;
+    if (!include_content) {
+        file.close();
+        return true;
+    }
+
+    const uint32_t size = out.size;
     bool ok = true;
     if (size <= kFingerprintFullCrcMaxBytes) {
         // 歌词和小封面完整计算 CRC，避免等长修改刚好落在采样区之外。
@@ -669,14 +694,26 @@ static bool fingerprint_file_v1(const String& path,
         out = StorageFileFingerprintV1{};
         return false;
     }
-
-    out.present = true;
-    out.size = size;
     return true;
 }
 
-static bool fingerprints_equal_v1(const StorageFileFingerprintV1& a,
-                                  const StorageFileFingerprintV1& b)
+static bool fingerprint_attributes_equal_v1(
+    const StorageFileFingerprintV1& a,
+    const StorageFileFingerprintV1& b)
+{
+    if (a.present != b.present) return false;
+    if (!a.present) return true;
+
+    return a.attributes_valid &&
+           b.attributes_valid &&
+           a.size == b.size &&
+           a.modify_date == b.modify_date &&
+           a.modify_time == b.modify_time;
+}
+
+static bool fingerprint_content_equal_v1(
+    const StorageFileFingerprintV1& a,
+    const StorageFileFingerprintV1& b)
 {
     return a.present == b.present &&
            a.size == b.size &&
@@ -723,6 +760,7 @@ static String find_lrc_path_for_audio_v3(const String& full_path,
 
 static bool fingerprint_cached_v1(
     const String& path,
+    bool include_content,
     PsramVector<CachedFingerprintV1>& cache,
     StorageFileFingerprintV1& out)
 {
@@ -731,16 +769,22 @@ static bool fingerprint_cached_v1(
         return true;
     }
 
-    for (const auto& item : cache) {
-        if (item.path == path) {
-            out = item.fingerprint;
-            return item.ok;
+    for (auto& item : cache) {
+        if (item.path != path) continue;
+
+        if (include_content && !item.content_complete) {
+            item.ok = fingerprint_file_v1(path, true, item.fingerprint);
+            item.content_complete = item.ok;
         }
+        out = item.fingerprint;
+        return item.ok;
     }
 
     CachedFingerprintV1 item{};
     item.path = path;
-    item.ok = fingerprint_file_v1(path, item.fingerprint);
+    item.ok = fingerprint_file_v1(
+        path, include_content, item.fingerprint);
+    item.content_complete = item.ok && include_content;
     out = item.fingerprint;
     cache.push_back(std::move(item));
     return cache.back().ok;
@@ -915,7 +959,7 @@ static bool manifest_matches_catalog_v3(
     return true;
 }
 
-static bool manifest_entry_unchanged_v1(
+static bool manifest_entry_matches_v1(
     const StorageManifestEntryV1& old_entry,
     const MusicCatalogV3& catalog,
     uint32_t track_index,
@@ -923,23 +967,26 @@ static bool manifest_entry_unchanged_v1(
     const String& current_lrc_rel,
     const StorageFileFingerprintV1& lrc_fingerprint,
     const String& current_cover_rel,
-    const StorageFileFingerprintV1& cover_fingerprint)
+    const StorageFileFingerprintV1& cover_fingerprint,
+    bool attributes_only)
 {
     if (!catalog.tracks || track_index >= catalog.track_count) return false;
     const TrackRowV3& row = catalog.tracks[track_index];
 
-    if (!fingerprints_equal_v1(
-            old_entry.audio_fingerprint,
-            audio_fingerprint)) {
-        return false;
-    }
+    const bool audio_matches = attributes_only
+        ? fingerprint_attributes_equal_v1(
+              old_entry.audio_fingerprint, audio_fingerprint)
+        : fingerprint_content_equal_v1(
+              old_entry.audio_fingerprint, audio_fingerprint);
+    if (!audio_matches) return false;
 
     const char* catalog_lrc_rel = pool_str_v3(
         catalog.pool, row.lrc_rel_off);
+    // 歌词通常很小，快速模式也完整校验 CRC，避免 FAT 两秒时间精度漏掉等长修改。
+    const bool lrc_matches = fingerprint_content_equal_v1(
+        old_entry.lrc_fingerprint, lrc_fingerprint);
     if (current_lrc_rel != (catalog_lrc_rel ? catalog_lrc_rel : "") ||
-        !fingerprints_equal_v1(
-            old_entry.lrc_fingerprint,
-            lrc_fingerprint)) {
+        !lrc_matches) {
         return false;
     }
 
@@ -952,15 +999,68 @@ static bool manifest_entry_unchanged_v1(
     if (row.cover_source == COVER_FILE_FALLBACK) {
         const char* catalog_cover_rel = pool_str_v3(
             catalog.pool, row.cover_path_off);
+        // 目录封面按目录缓存，快速模式也只需完整读取每张封面一次。
+        const bool cover_matches = fingerprint_content_equal_v1(
+            old_entry.cover_fingerprint, cover_fingerprint);
         return current_cover_rel ==
                    (catalog_cover_rel ? catalog_cover_rel : "") &&
-               fingerprints_equal_v1(
-                   old_entry.cover_fingerprint,
-                   cover_fingerprint);
+               cover_matches;
     }
 
     // 旧索引没有封面时，如果目录中新出现了封面，需要重新解析并更新索引。
     return current_cover_rel.isEmpty();
+}
+
+static bool load_scan_fingerprints_v1(
+    const String& full_path,
+    const String& lrc_abs,
+    const String& effective_cover_path,
+    const StorageFileFingerprintV1* audio_attributes,
+    bool include_content,
+    IncrementalScanContextV3& context,
+    StorageFileFingerprintV1& audio_fingerprint,
+    StorageFileFingerprintV1& lrc_fingerprint,
+    StorageFileFingerprintV1& cover_fingerprint)
+{
+    if (!include_content && audio_attributes) {
+        audio_fingerprint = *audio_attributes;
+    } else if (!fingerprint_file_v1(
+                   full_path, include_content, audio_fingerprint)) {
+        LOGE("[增量扫描] 音频指纹读取失败：%s", full_path.c_str());
+        return false;
+    }
+    if (!fingerprint_file_v1(
+            lrc_abs, true, lrc_fingerprint)) {
+        LOGE("[增量扫描] 歌词指纹读取失败：%s", lrc_abs.c_str());
+        return false;
+    }
+    if (!fingerprint_cached_v1(
+            effective_cover_path,
+            true,
+            context.cover_fingerprint_cache,
+            cover_fingerprint)) {
+        LOGE("[增量扫描] 封面指纹读取失败：%s",
+             effective_cover_path.c_str());
+        return false;
+    }
+    return true;
+}
+
+static void update_reused_manifest_entry_v1(
+    const TrackBuildTempV3& track,
+    const StorageFileFingerprintV1& audio_fingerprint,
+    const StorageFileFingerprintV1& lrc_fingerprint,
+    const StorageFileFingerprintV1& cover_fingerprint,
+    StorageManifestEntryV1& entry)
+{
+    entry.audio_fingerprint = audio_fingerprint;
+    entry.lrc_fingerprint = lrc_fingerprint;
+    entry.cover_fingerprint = StorageFileFingerprintV1{};
+
+    if (track.cover_source == COVER_FILE_FALLBACK &&
+        !track.cover_path_rel.isEmpty()) {
+        entry.cover_fingerprint = cover_fingerprint;
+    }
 }
 
 static bool scan_incremental_audio_file_v3(
@@ -969,6 +1069,7 @@ static bool scan_incremental_audio_file_v3(
     const String& fallback_artist,
     const String& fallback_album,
     const String& effective_cover_path,
+    const StorageFileFingerprintV1* audio_attributes,
     IncrementalScanContextV3& context)
 {
     if (!is_audio_filename_v3(filename)) return true;
@@ -978,46 +1079,49 @@ static bool scan_incremental_audio_file_v3(
     const String lrc_rel = to_music_relative_path_v3(lrc_abs);
     const String cover_rel = to_music_relative_path_v3(effective_cover_path);
 
+    int old_index = -1;
+    int catalog_track_index = -1;
+    if (context.old_manifest) {
+        old_index = find_manifest_entry_v1(
+            *context.old_manifest, audio_rel);
+        if (old_index >= 0) {
+            catalog_track_index = find_catalog_track_v3(
+                *context.reuse_catalog,
+                *context.catalog_path_order,
+                audio_rel);
+        }
+    }
+
     StorageFileFingerprintV1 audio_fingerprint{};
     StorageFileFingerprintV1 lrc_fingerprint{};
     StorageFileFingerprintV1 cover_fingerprint{};
 
-    if (!fingerprint_file_v1(full_path, audio_fingerprint)) {
-        LOGE("[增量扫描] 音频指纹读取失败：%s", full_path.c_str());
+    bool content_loaded = context.strict_verify || old_index < 0;
+    if (!load_scan_fingerprints_v1(
+            full_path,
+            lrc_abs,
+            effective_cover_path,
+            audio_attributes,
+            content_loaded,
+            context,
+            audio_fingerprint,
+            lrc_fingerprint,
+            cover_fingerprint)) {
         return false;
-    }
-    if (!fingerprint_file_v1(lrc_abs, lrc_fingerprint)) {
-        LOGE("[增量扫描] 歌词指纹读取失败：%s", lrc_abs.c_str());
-        return false;
-    }
-    if (!fingerprint_cached_v1(effective_cover_path,
-                               context.cover_fingerprint_cache,
-                               cover_fingerprint)) {
-        LOGE("[增量扫描] 封面指纹读取失败：%s",
-             effective_cover_path.c_str());
-        return false;
-    }
-
-    int old_index = -1;
-    if (context.old_manifest) {
-        old_index = find_manifest_entry_v1(
-            *context.old_manifest, audio_rel);
     }
 
     TrackBuildTempV3 track{};
     StorageManifestEntryV1 next_entry{};
     bool reused = false;
 
-    if (old_index >= 0) {
+    if (old_index >= 0 && catalog_track_index >= 0) {
         const StorageManifestEntryV1& old_entry =
             context.old_manifest->entries[(size_t)old_index];
-        const int catalog_track_index = find_catalog_track_v3(
-            *context.reuse_catalog,
-            *context.catalog_path_order,
-            audio_rel);
 
-        if (catalog_track_index >= 0 &&
-            manifest_entry_unchanged_v1(
+        bool unchanged = false;
+        if (context.strict_verify) {
+            ++context.stats->content_verified;
+            unchanged = manifest_entry_matches_v1(
                 old_entry,
                 *context.reuse_catalog,
                 (uint32_t)catalog_track_index,
@@ -1025,12 +1129,66 @@ static bool scan_incremental_audio_file_v3(
                 lrc_rel,
                 lrc_fingerprint,
                 cover_rel,
-                cover_fingerprint) &&
+                cover_fingerprint,
+                false);
+        } else {
+            unchanged = manifest_entry_matches_v1(
+                old_entry,
+                *context.reuse_catalog,
+                (uint32_t)catalog_track_index,
+                audio_fingerprint,
+                lrc_rel,
+                lrc_fingerprint,
+                cover_rel,
+                cover_fingerprint,
+                true);
+
+            if (unchanged) {
+                ++context.stats->attribute_reused;
+            } else {
+                // FAT 属性变化或旧版清单没有属性时，再读取内容 CRC 确认。
+                if (!load_scan_fingerprints_v1(
+                        full_path,
+                        lrc_abs,
+                        effective_cover_path,
+                        audio_attributes,
+                        true,
+                        context,
+                        audio_fingerprint,
+                        lrc_fingerprint,
+                        cover_fingerprint)) {
+                    return false;
+                }
+                content_loaded = true;
+                ++context.stats->content_verified;
+                unchanged = manifest_entry_matches_v1(
+                    old_entry,
+                    *context.reuse_catalog,
+                    (uint32_t)catalog_track_index,
+                    audio_fingerprint,
+                    lrc_rel,
+                    lrc_fingerprint,
+                    cover_rel,
+                    cover_fingerprint,
+                    false);
+            }
+        }
+
+        if (unchanged &&
             temp_from_catalog_track_v3(
                 *context.reuse_catalog,
                 (uint32_t)catalog_track_index,
                 track)) {
             next_entry = old_entry;
+            if (content_loaded) {
+                // 严格校验或 v1 清单升级后，将最新 FAT 属性写入下一份清单。
+                update_reused_manifest_entry_v1(
+                    track,
+                    audio_fingerprint,
+                    lrc_fingerprint,
+                    cover_fingerprint,
+                    next_entry);
+            }
             reused = true;
             (*context.old_seen)[(size_t)old_index] = 1;
             ++context.stats->reused;
@@ -1038,6 +1196,20 @@ static bool scan_incremental_audio_file_v3(
     }
 
     if (!reused) {
+        if (!content_loaded &&
+            !load_scan_fingerprints_v1(
+                full_path,
+                lrc_abs,
+                effective_cover_path,
+                audio_attributes,
+                true,
+                context,
+                audio_fingerprint,
+                lrc_fingerprint,
+                cover_fingerprint)) {
+            return false;
+        }
+
         if (!storage_scan_one_audio_file_v3(full_path,
                                             fallback_artist,
                                             fallback_album,
@@ -1051,8 +1223,8 @@ static bool scan_incremental_audio_file_v3(
         if (track.lrc_rel != lrc_rel) {
             const String parsed_lrc_abs = music_absolute_path_v3(
                 context.music_root, track.lrc_rel);
-            if (!fingerprint_file_v1(parsed_lrc_abs,
-                                     parsed_lrc_fingerprint)) {
+            if (!fingerprint_file_v1(
+                    parsed_lrc_abs, true, parsed_lrc_fingerprint)) {
                 LOGE("[增量扫描] 解析后歌词指纹读取失败：%s",
                      parsed_lrc_abs.c_str());
                 return false;
@@ -1064,9 +1236,11 @@ static bool scan_incremental_audio_file_v3(
             !track.cover_path_rel.isEmpty()) {
             const String parsed_cover_abs = music_absolute_path_v3(
                 context.music_root, track.cover_path_rel);
-            if (!fingerprint_cached_v1(parsed_cover_abs,
-                                       context.cover_fingerprint_cache,
-                                       parsed_cover_fingerprint)) {
+            if (!fingerprint_cached_v1(
+                    parsed_cover_abs,
+                    true,
+                    context.cover_fingerprint_cache,
+                    parsed_cover_fingerprint)) {
                 LOGE("[增量扫描] 解析后封面指纹读取失败：%s",
                      parsed_cover_abs.c_str());
                 return false;
@@ -1094,6 +1268,7 @@ static bool scan_incremental_audio_file_v3(
     UiScanProgress progress{};
     progress.full_scan = context.stats->full_scan;
     progress.forced_full_scan = context.stats->forced_full_scan;
+    progress.strict_incremental = context.stats->strict_incremental;
     progress.discovered = context.stats->discovered;
     progress.reused = context.stats->reused;
     progress.added = context.stats->added;
@@ -1166,8 +1341,25 @@ static bool scan_dir_incremental_v3(
             continue;
         }
 
+        const bool is_audio = is_audio_filename_v3(entry_name);
+        StorageFileFingerprintV1 audio_attributes{};
+        if (is_audio &&
+            !fingerprint_attributes_from_open_file_v1(
+                file, audio_attributes)) {
+            LOGE("[增量扫描] 音频目录属性读取失败：%s/%s",
+                 dir_path.c_str(),
+                 entry_name.c_str());
+            file.close();
+            dir.close();
+            return false;
+        }
+
         const String full_path = dir_path + "/" + entry_name;
         file.close();
+
+        if (!is_audio) {
+            continue;
+        }
 
         if (!scan_incremental_audio_file_v3(
                 full_path,
@@ -1175,6 +1367,7 @@ static bool scan_dir_incremental_v3(
                 fallback_artist,
                 fallback_album,
                 effective_cover,
+                &audio_attributes,
                 context)) {
             dir.close();
             return false;
@@ -1196,7 +1389,8 @@ bool storage_scan_music_incremental_v3(
     const MusicCatalogV3* reuse_catalog,
     const char* music_root,
     const char* manifest_path,
-    bool force_full_scan)
+    bool force_full_scan,
+    bool strict_verify)
 {
     StorageSdLockGuard sd_lock(2000);
     if (!sd_lock) {
@@ -1232,7 +1426,10 @@ bool storage_scan_music_incremental_v3(
             catalog_path_order);
     out_stats.full_scan = force_full_scan || !out_stats.manifest_loaded;
     out_stats.forced_full_scan = force_full_scan;
-    ui_scan_begin(out_stats.full_scan, out_stats.forced_full_scan);
+    out_stats.strict_incremental = strict_verify && !out_stats.full_scan;
+    ui_scan_begin(out_stats.full_scan,
+                  out_stats.forced_full_scan,
+                  out_stats.strict_incremental);
 
     if (force_full_scan) {
         LOGI("[增量扫描] 用户请求强制全量解析，本轮忽略现有清单");
@@ -1247,8 +1444,10 @@ bool storage_scan_music_incremental_v3(
         old_seen.assign(old_manifest.entries.size(), 0);
         out_tracks.reserve(old_manifest.entries.size() + 8);
         out_manifest.entries.reserve(old_manifest.entries.size() + 8);
-        LOGI("[增量扫描] 使用旧清单和当前 Catalog：条目=%u",
-             (unsigned)old_manifest.entries.size());
+        LOGI("[增量扫描] 使用旧清单和当前 Catalog：条目=%u 清单版本=%u 校验=%s",
+             (unsigned)old_manifest.entries.size(),
+             (unsigned)old_manifest.format_version,
+             strict_verify ? "严格内容" : "快速属性");
     } else {
         LOGI("[增量扫描] %s，本轮执行全量解析",
              force_full_scan
@@ -1271,6 +1470,7 @@ bool storage_scan_music_incremental_v3(
     context.out_tracks = &out_tracks;
     context.out_manifest = &out_manifest;
     context.stats = &out_stats;
+    context.strict_verify = strict_verify;
 
     const bool scan_ok = scan_dir_incremental_v3(
         String(music_root),
@@ -1315,11 +1515,16 @@ bool storage_scan_music_incremental_v3(
     out_stats.elapsed_ms = millis() - scan_started_ms;
     ui_scan_end();
 
-    LOGI("[增量扫描] 完成：模式=%s 强制=%d 发现=%lu 复用=%lu 新增=%lu 修改=%lu 删除=%lu 用时=%lums",
+    LOGI("[增量扫描] 完成：模式=%s 校验=%s 强制=%d 发现=%lu 复用=%lu 属性直复用=%lu CRC确认=%lu 新增=%lu 修改=%lu 删除=%lu 用时=%lums",
          out_stats.full_scan ? "全量" : "增量",
+         out_stats.full_scan
+             ? "完整解析"
+             : (out_stats.strict_incremental ? "严格内容" : "快速属性"),
          out_stats.forced_full_scan ? 1 : 0,
          (unsigned long)out_stats.discovered,
          (unsigned long)out_stats.reused,
+         (unsigned long)out_stats.attribute_reused,
+         (unsigned long)out_stats.content_verified,
          (unsigned long)out_stats.added,
          (unsigned long)out_stats.modified,
          (unsigned long)out_stats.deleted,
@@ -1340,7 +1545,7 @@ bool storage_scan_music_v3(StorageTrackBuildListV3& out_tracks,
     // 取消标志只在 app_request_start_rescan() 中初始化。
     // 这里不能再次清零，否则扫描任务刚启动时可能吞掉用户的快速取消请求。
     scan_v3_reset_coop_state();
-    ui_scan_begin(true, true);
+    ui_scan_begin(true, true, false);
 
     out_tracks.clear();
     int scanned = 0;

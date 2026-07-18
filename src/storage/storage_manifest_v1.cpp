@@ -13,7 +13,8 @@ extern SdFat sd;
 namespace {
 
 static constexpr uint32_t kManifestMagic = 0x31464E4Du;  // "MNF1"
-static constexpr uint16_t kManifestVersion = 1;
+static constexpr uint16_t kManifestLegacyVersion = 1;
+static constexpr uint16_t kManifestVersion = 2;
 static constexpr uint16_t kManifestFlagsCrc32 = 1u << 0;
 static constexpr uint16_t kManifestFlagsCatalogCrc32 = 1u << 1;
 static constexpr uint32_t kManifestBaseHeaderBytes = 24;
@@ -147,9 +148,16 @@ static bool entry_strings_valid(const StorageManifestEntryV1& entry)
   return string_size_valid(entry.audio_rel);
 }
 
-static uint32_t fingerprint_serialized_size()
+static uint32_t fingerprint_serialized_size(uint16_t version)
 {
-  return sizeof(uint8_t) + 4u * sizeof(uint32_t);
+  if (version <= kManifestLegacyVersion) {
+    return sizeof(uint8_t) + 4u * sizeof(uint32_t);
+  }
+
+  return 2u * sizeof(uint8_t) +
+         sizeof(uint32_t) +
+         2u * sizeof(uint16_t) +
+         3u * sizeof(uint32_t);
 }
 
 static bool calculate_payload_layout(const StorageMusicManifestV1& manifest,
@@ -181,8 +189,12 @@ static bool calculate_payload_layout(const StorageMusicManifestV1& manifest,
 
   auto add_fingerprint = [&](const StorageFileFingerprintV1& fp) {
     const uint8_t present = fp.present ? 1u : 0u;
+    const uint8_t attributes_valid = fp.attributes_valid ? 1u : 0u;
     add_crc(&present, sizeof(present));
+    add_crc(&attributes_valid, sizeof(attributes_valid));
     add_crc(&fp.size, sizeof(fp.size));
+    add_crc(&fp.modify_date, sizeof(fp.modify_date));
+    add_crc(&fp.modify_time, sizeof(fp.modify_time));
     add_crc(&fp.head_crc, sizeof(fp.head_crc));
     add_crc(&fp.middle_crc, sizeof(fp.middle_crc));
     add_crc(&fp.tail_crc, sizeof(fp.tail_crc));
@@ -264,7 +276,10 @@ static bool write_fingerprint(File32& file,
                               const StorageFileFingerprintV1& fp)
 {
   return write_u8(file, fp.present ? 1u : 0u) &&
+         write_u8(file, fp.attributes_valid ? 1u : 0u) &&
          write_u32(file, fp.size) &&
+         write_u16(file, fp.modify_date) &&
+         write_u16(file, fp.modify_time) &&
          write_u32(file, fp.head_crc) &&
          write_u32(file, fp.middle_crc) &&
          write_u32(file, fp.tail_crc);
@@ -273,24 +288,46 @@ static bool write_fingerprint(File32& file,
 static bool read_fingerprint_crc(File32& file,
                                  StorageFileFingerprintV1& fp,
                                  uint32_t& crc,
-                                 uint32_t& remaining)
+                                 uint32_t& remaining,
+                                 uint16_t manifest_version)
 {
-  const uint32_t need = fingerprint_serialized_size();
+  const uint32_t need = fingerprint_serialized_size(manifest_version);
   if (remaining < need) return false;
 
   uint8_t present = 0;
-  if (!read_u8(file, present) ||
-      !read_u32(file, fp.size) ||
-      !read_u32(file, fp.head_crc) ||
+  uint8_t attributes_valid = 0;
+  if (!read_u8(file, present)) return false;
+  crc = crc32_update(crc, &present, sizeof(present));
+
+  if (manifest_version >= kManifestVersion) {
+    if (!read_u8(file, attributes_valid)) return false;
+    crc = crc32_update(crc, &attributes_valid, sizeof(attributes_valid));
+  }
+
+  if (!read_u32(file, fp.size)) return false;
+  crc = crc32_update(crc,
+                     reinterpret_cast<const uint8_t*>(&fp.size),
+                     sizeof(fp.size));
+
+  if (manifest_version >= kManifestVersion) {
+    if (!read_u16(file, fp.modify_date) ||
+        !read_u16(file, fp.modify_time)) {
+      return false;
+    }
+    crc = crc32_update(crc,
+                       reinterpret_cast<const uint8_t*>(&fp.modify_date),
+                       sizeof(fp.modify_date));
+    crc = crc32_update(crc,
+                       reinterpret_cast<const uint8_t*>(&fp.modify_time),
+                       sizeof(fp.modify_time));
+  }
+
+  if (!read_u32(file, fp.head_crc) ||
       !read_u32(file, fp.middle_crc) ||
       !read_u32(file, fp.tail_crc)) {
     return false;
   }
 
-  crc = crc32_update(crc, &present, sizeof(present));
-  crc = crc32_update(crc,
-                     reinterpret_cast<const uint8_t*>(&fp.size),
-                     sizeof(fp.size));
   crc = crc32_update(crc,
                      reinterpret_cast<const uint8_t*>(&fp.head_crc),
                      sizeof(fp.head_crc));
@@ -303,6 +340,8 @@ static bool read_fingerprint_crc(File32& file,
 
   remaining -= need;
   fp.present = present != 0;
+  fp.attributes_valid = manifest_version >= kManifestVersion &&
+                        attributes_valid != 0;
   return true;
 }
 
@@ -317,17 +356,18 @@ static bool write_entry(File32& file, const StorageManifestEntryV1& entry)
 static bool read_entry_crc(File32& file,
                            StorageManifestEntryV1& entry,
                            uint32_t& crc,
-                           uint32_t& remaining)
+                           uint32_t& remaining,
+                           uint16_t manifest_version)
 {
   entry = StorageManifestEntryV1{};
 
   if (!read_string_crc(file, entry.audio_rel, crc, remaining) ||
       !read_fingerprint_crc(file, entry.audio_fingerprint,
-                            crc, remaining) ||
+                            crc, remaining, manifest_version) ||
       !read_fingerprint_crc(file, entry.lrc_fingerprint,
-                            crc, remaining) ||
+                            crc, remaining, manifest_version) ||
       !read_fingerprint_crc(file, entry.cover_fingerprint,
-                            crc, remaining)) {
+                            crc, remaining, manifest_version)) {
     return false;
   }
 
@@ -338,7 +378,8 @@ static bool validate_header(const ManifestHeaderV1& header,
                             uint32_t file_size)
 {
   if (header.magic != kManifestMagic ||
-      header.version != kManifestVersion ||
+      (header.version != kManifestLegacyVersion &&
+       header.version != kManifestVersion) ||
       (header.header_size != kManifestBaseHeaderBytes &&
        header.header_size != kManifestHeaderBytes) ||
       (header.flags & kManifestFlagsCrc32) == 0 ||
@@ -386,7 +427,7 @@ static bool load_manifest_locked(StorageMusicManifestV1& out_manifest,
 
   for (uint32_t i = 0; i < header.entry_count; ++i) {
     StorageManifestEntryV1 entry{};
-    if (!read_entry_crc(file, entry, crc, remaining)) {
+    if (!read_entry_crc(file, entry, crc, remaining, header.version)) {
       file.close();
       out_manifest.clear();
       if (!quiet) {
@@ -418,6 +459,7 @@ static bool load_manifest_locked(StorageMusicManifestV1& out_manifest,
       header.header_size >= kManifestHeaderBytes &&
       (header.flags & kManifestFlagsCatalogCrc32) != 0;
   out_manifest.catalog_crc32 = header.catalog_crc32;
+  out_manifest.format_version = header.version;
 
   std::sort(out_manifest.entries.begin(),
             out_manifest.entries.end(),
@@ -460,17 +502,19 @@ bool storage_manifest_load_v1(StorageMusicManifestV1& out_manifest,
   }
 
   if (load_manifest_locked(out_manifest, manifest_path, true)) {
-    LOGI("[曲库清单] 加载成功：来源=%s 条目=%u",
+    LOGI("[曲库清单] 加载成功：来源=%s 条目=%u 版本=%u",
          manifest_path,
-         (unsigned)out_manifest.entries.size());
+         (unsigned)out_manifest.entries.size(),
+         (unsigned)out_manifest.format_version);
     return true;
   }
 
   const String backup_path = String(manifest_path) + ".bak";
   if (load_manifest_locked(out_manifest, backup_path.c_str(), true)) {
-    LOGW("[曲库清单] 正式文件不可用，已使用备份：%s 条目=%u",
+    LOGW("[曲库清单] 正式文件不可用，已使用备份：%s 条目=%u 版本=%u",
          backup_path.c_str(),
-         (unsigned)out_manifest.entries.size());
+         (unsigned)out_manifest.entries.size(),
+         (unsigned)out_manifest.format_version);
     return true;
   }
 
@@ -575,8 +619,9 @@ bool storage_manifest_save_v1(const StorageMusicManifestV1& manifest,
     return false;
   }
 
-  LOGI("[曲库清单] 原子保存成功：%s 条目=%u payload=%lu CRC=0x%08lx catalog=0x%08lx 备份=%s",
+  LOGI("[曲库清单] 原子保存成功：%s 版本=%u 条目=%u payload=%lu CRC=0x%08lx catalog=0x%08lx 备份=%s",
        manifest_path,
+       (unsigned)kManifestVersion,
        (unsigned)manifest.entries.size(),
        (unsigned long)payload_size,
        (unsigned long)payload_crc,

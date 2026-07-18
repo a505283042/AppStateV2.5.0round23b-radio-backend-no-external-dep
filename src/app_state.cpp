@@ -44,10 +44,13 @@ static void app_rescan_task_entry(void* )
     bool success = false;
     StorageCatalogRebuildSummary summary{};
     const AppRescanState rescan = app_rescan_state_get();
-    const StorageCatalogRebuildMode rebuild_mode =
-        rescan.mode == AppRescanMode::Full
-            ? StorageCatalogRebuildMode::Full
-            : StorageCatalogRebuildMode::Incremental;
+    StorageCatalogRebuildMode rebuild_mode =
+        StorageCatalogRebuildMode::FastIncremental;
+    if (rescan.mode == AppRescanMode::StrictIncremental) {
+        rebuild_mode = StorageCatalogRebuildMode::StrictIncremental;
+    } else if (rescan.mode == AppRescanMode::Full) {
+        rebuild_mode = StorageCatalogRebuildMode::Full;
+    }
 
     player_control_mark_manual_stop();
     audio_service_stop(true);
@@ -75,6 +78,7 @@ static void app_rescan_task_entry(void* )
         UiScanSummary ui_summary{};
         ui_summary.full_scan = summary.full_scan;
         ui_summary.forced_full_scan = summary.forced_full_scan;
+        ui_summary.strict_incremental = summary.strict_incremental;
         ui_summary.discovered = summary.discovered;
         ui_summary.reused = summary.reused;
         ui_summary.added = summary.added;
@@ -430,8 +434,13 @@ bool app_request_start_rescan(AppRescanMode mode)
         return false;
     }
 
-    LOGI("[应用] 已启动曲库重扫：模式=%s",
-         mode == AppRescanMode::Full ? "强制全量" : "增量优先");
+    const char* mode_label = "快速增量";
+    if (mode == AppRescanMode::StrictIncremental) {
+        mode_label = "严格增量";
+    } else if (mode == AppRescanMode::Full) {
+        mode_label = "强制全量";
+    }
+    LOGI("[应用] 已启动曲库重扫：模式=%s", mode_label);
     return true;
 }
 
