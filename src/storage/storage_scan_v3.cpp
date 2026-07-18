@@ -699,6 +699,25 @@ static bool directory_attributes_from_open_file_v3(
     return true;
 }
 
+static bool directory_attributes_from_path_v3(
+    const String& path,
+    StorageFileFingerprintV1& out)
+{
+    out = StorageFileFingerprintV1{};
+
+    SdFile directory;
+    if (!directory.open(path.c_str(), O_RDONLY) ||
+        !directory.isDir()) {
+        directory.close();
+        return false;
+    }
+
+    const bool ok = directory_attributes_from_open_file_v3(
+        directory, out);
+    directory.close();
+    return ok;
+}
+
 static bool fingerprint_file_v1(const String& path,
                                 bool include_content,
                                 StorageFileFingerprintV1& out)
@@ -1334,7 +1353,9 @@ static bool reuse_unchanged_directory_v3(
     progress.added = context.stats->added;
     progress.modified = context.stats->modified;
     progress.deleted = context.stats->deleted;
-    progress.current_path = dir_rel.c_str();
+    progress.current_path = dir_rel.isEmpty()
+        ? context.music_root
+        : dir_rel.c_str();
     ui_scan_tick(progress);
     return true;
 }
@@ -1699,8 +1720,7 @@ static bool scan_dir_incremental_v3(
 
     if (context.ultra_fast &&
         context.old_manifest &&
-        directory_attributes &&
-        !dir_rel.isEmpty()) {
+        directory_attributes) {
         const int old_directory_index = find_directory_snapshot_v1(
             *context.old_manifest, dir_rel);
         if (old_directory_index >= 0) {
@@ -1708,8 +1728,9 @@ static bool scan_dir_incremental_v3(
                 context.old_manifest->directories[
                     (size_t)old_directory_index];
 
-            // 结构目录仍需打开，以便发现新增/删除的下级专辑；
-            // 只跳过 FAT 时间未变化且没有子目录的叶子目录。
+            // 有下级目录的结构目录仍需打开，以便发现新增或删除的目录。
+            // 平铺曲库的 /Music 根目录没有子目录，可与普通叶子目录一样
+            // 依靠目录 FAT 时间整体跳过，避免枚举根目录中的全部歌曲。
             if (!old_directory.has_subdirectories &&
                 fingerprint_attributes_equal_v1(
                     old_directory.directory_attributes,
@@ -1720,6 +1741,10 @@ static bool scan_dir_incremental_v3(
                     inherited_cover_attributes) &&
                 reuse_unchanged_directory_v3(
                     old_directory, context)) {
+                if (dir_rel.isEmpty()) {
+                    LOGI("[超快速扫描] /Music 根目录 FAT 属性未变化，整体跳过全部曲目：%lu",
+                         (unsigned long)old_directory.subtree_track_count);
+                }
                 return true;
             }
         }
@@ -1939,12 +1964,27 @@ bool storage_scan_music_incremental_v3(
     context.strict_verify = strict_verify;
     context.ultra_fast = out_stats.ultra_fast_incremental;
 
+    const String music_root_path = music_root
+        ? String(music_root)
+        : String("/Music");
+    StorageFileFingerprintV1 root_directory_attributes{};
+    const bool root_directory_attributes_ready =
+        directory_attributes_from_path_v3(
+            music_root_path, root_directory_attributes);
+    if (out_stats.ultra_fast_incremental &&
+        (!root_directory_attributes_ready ||
+         !root_directory_attributes.attributes_valid)) {
+        LOGW("[超快速扫描] /Music 根目录 FAT 时间不可用，本轮继续枚举根目录");
+    }
+
     const StorageFileFingerprintV1 empty_attributes{};
     const bool scan_ok = scan_dir_incremental_v3(
-        String(music_root),
+        music_root_path,
         String(),
         empty_attributes,
-        nullptr,
+        root_directory_attributes_ready
+            ? &root_directory_attributes
+            : nullptr,
         context);
 
     if (!scan_ok || app_rescan_should_abort()) {
