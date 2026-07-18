@@ -51,7 +51,7 @@ static inline void scan_v3_maybe_log_progress(int scanned, const String& where)
     uint32_t now = millis();
     if ((uint32_t)(now - s_scan_v3_last_progress_log_ms) >= 1500) {
         s_scan_v3_last_progress_log_ms = now;
-        LOGD("[曲库扫描] progress: 歌曲s=%d 目录=%s", scanned, where.c_str());
+        LOGD("[曲库扫描] 进度：歌曲=%d 目录=%s", scanned, where.c_str());
     }
 }
 
@@ -272,6 +272,7 @@ static bool scan_one_audio_file_core_v3(const String& full_path,
                                         const String& fallback_artist,
                                         const String& fallback_album,
                                         const String& fallback_cover_path,
+                                        const String* known_lrc_abs,
                                         TrackBuildTempV3& out_track)
 {
     String lower = fn;
@@ -293,15 +294,19 @@ static bool scan_one_audio_file_core_v3(const String& full_path,
     out_track.album  = fallback_album;
     out_track.audio_rel = to_music_relative_path_v3(full_path);
 
-    String base_no_ext = basename_no_ext_v3(fn);
-    String parent_dir = parent_dir_of_v3(full_path);
-
-    const char* const lrc_exts[] = {".lrc", ".LRC", ".Lrc"};
-    for (const char* lrc_ext : lrc_exts) {
-        String lrc_abs = parent_dir + "/" + base_no_ext + lrc_ext;
-        if (file_exists_v3(lrc_abs)) {
-            out_track.lrc_rel = to_music_relative_path_v3(lrc_abs);
-            break;
+    if (known_lrc_abs) {
+        out_track.lrc_rel = to_music_relative_path_v3(*known_lrc_abs);
+    } else {
+        const String base_no_ext = basename_no_ext_v3(fn);
+        const String parent_dir = parent_dir_of_v3(full_path);
+        const char* const lrc_exts[] = {".lrc", ".LRC", ".Lrc"};
+        for (const char* lrc_ext : lrc_exts) {
+            const String lrc_abs =
+                parent_dir + "/" + base_no_ext + lrc_ext;
+            if (file_exists_v3(lrc_abs)) {
+                out_track.lrc_rel = to_music_relative_path_v3(lrc_abs);
+                break;
+            }
         }
     }
 
@@ -366,6 +371,7 @@ bool storage_scan_one_audio_file_v3(const String& full_path,
                                        fallback_artist,
                                        fallback_album,
                                        fallback_cover_path,
+                                       nullptr,
                                        out_track);
 }
 
@@ -463,6 +469,26 @@ struct CachedFingerprintV1 {
     bool ok = false;
     bool content_complete = false;
 };
+
+struct DirectoryEntrySnapshotV3 {
+    PsramString name;
+    bool is_dir = false;
+    bool is_audio = false;
+    StorageFileFingerprintV1 audio_attributes;
+};
+
+struct PsramStringLessV3 {
+    bool operator()(const PsramString& left,
+                    const PsramString& right) const noexcept
+    {
+        return left.compareTo(right) < 0;
+    }
+};
+
+using DirectoryEntryListV3 =
+    PsramVector<DirectoryEntrySnapshotV3>;
+using DirectoryLrcMapV3 =
+    PsramMap<PsramString, PsramString, PsramStringLessV3>;
 
 struct IncrementalScanContextV3 {
     const char* music_root = "/Music";
@@ -697,6 +723,120 @@ static bool fingerprint_file_v1(const String& path,
     return true;
 }
 
+static int cover_priority_from_name_v3(const String& filename)
+{
+    String lower = filename;
+    lower.toLowerCase();
+
+    static const char* fixed[] = {
+        "cover.jpg", "cover.jpeg", "cover.png",
+        "folder.jpg", "folder.jpeg", "folder.png",
+        "front.jpg", "front.jpeg", "front.png"
+    };
+
+    for (size_t i = 0; i < sizeof(fixed) / sizeof(fixed[0]); ++i) {
+        if (lower == fixed[i]) return (int)i;
+    }
+
+    const bool is_image = lower.endsWith(".jpg") ||
+                          lower.endsWith(".jpeg") ||
+                          lower.endsWith(".png");
+    if (!is_image) return -1;
+
+    const bool preferred = lower.indexOf("cover") >= 0 ||
+                           lower.indexOf("folder") >= 0 ||
+                           lower.indexOf("front") >= 0 ||
+                           lower.indexOf("album") >= 0 ||
+                           lower.indexOf("art") >= 0;
+    return preferred ? 100 : 200;
+}
+
+static bool inventory_directory_v3(
+    const String& dir_path,
+    DirectoryEntryListV3& out_entries,
+    DirectoryLrcMapV3& out_lrc_by_base,
+    String& out_local_cover)
+{
+    out_entries.clear();
+    out_lrc_by_base.clear();
+    out_local_cover = String();
+
+    SdFile dir;
+    if (!dir.open(dir_path.c_str(), O_RDONLY) || !dir.isDir()) {
+        LOGE("[增量扫描] 打开目录失败：%s", dir_path.c_str());
+        dir.close();
+        return false;
+    }
+
+    int best_cover_priority = 1000;
+    SdFile file;
+    while (file.openNext(&dir, O_RDONLY)) {
+        scan_v3_cooperate_wdt();
+
+        if (app_rescan_should_abort()) {
+            file.close();
+            dir.close();
+            return false;
+        }
+
+        char name[256];
+        file.getName(name, sizeof(name));
+        const String entry_name(name);
+
+        DirectoryEntrySnapshotV3 entry{};
+        entry.name = entry_name;
+        entry.is_dir = file.isDir();
+
+        if (!entry.is_dir) {
+            entry.is_audio = is_audio_filename_v3(entry_name);
+            if (entry.is_audio &&
+                !fingerprint_attributes_from_open_file_v1(
+                    file, entry.audio_attributes)) {
+                LOGE("[增量扫描] 音频目录属性读取失败：%s/%s",
+                     dir_path.c_str(),
+                     entry_name.c_str());
+                file.close();
+                dir.close();
+                return false;
+            }
+
+            String lower = entry_name;
+            lower.toLowerCase();
+            if (lower.endsWith(".lrc")) {
+                const String base = basename_no_ext_v3(lower);
+                const String full_path = dir_path + "/" + entry_name;
+                out_lrc_by_base[PsramString(base)] = full_path;
+            }
+
+            const int cover_priority =
+                cover_priority_from_name_v3(entry_name);
+            if (cover_priority >= 0 &&
+                cover_priority < best_cover_priority) {
+                best_cover_priority = cover_priority;
+                out_local_cover = dir_path + "/" + entry_name;
+            }
+        }
+
+        out_entries.push_back(std::move(entry));
+        file.close();
+    }
+
+    dir.close();
+    return true;
+}
+
+static String find_lrc_path_from_inventory_v3(
+    const String& filename,
+    const DirectoryLrcMapV3& lrc_by_base)
+{
+    String base = basename_no_ext_v3(filename);
+    base.toLowerCase();
+
+    const auto it = lrc_by_base.find(PsramString(base));
+    if (it == lrc_by_base.end()) return String();
+    return String(it->second.c_str());
+}
+
 static bool fingerprint_attributes_equal_v1(
     const StorageFileFingerprintV1& a,
     const StorageFileFingerprintV1& b)
@@ -741,22 +881,7 @@ static String music_absolute_path_v3(const char* music_root,
         String(relative_path.c_str()));
 }
 
-static String find_lrc_path_for_audio_v3(const String& full_path,
-                                         const String& filename)
-{
-    const String parent_dir = parent_dir_of_v3(full_path);
-    const String base_no_ext = basename_no_ext_v3(filename);
-    const char* const lrc_exts[] = {".lrc", ".LRC", ".Lrc"};
 
-    for (const char* extension : lrc_exts) {
-        const String candidate =
-            parent_dir + "/" + base_no_ext + extension;
-        if (file_exists_v3(candidate)) {
-            return candidate;
-        }
-    }
-    return String();
-}
 
 static bool fingerprint_cached_v1(
     const String& path,
@@ -1069,13 +1194,13 @@ static bool scan_incremental_audio_file_v3(
     const String& fallback_artist,
     const String& fallback_album,
     const String& effective_cover_path,
+    const String& lrc_abs,
     const StorageFileFingerprintV1* audio_attributes,
     IncrementalScanContextV3& context)
 {
     if (!is_audio_filename_v3(filename)) return true;
 
     const String audio_rel = to_music_relative_path_v3(full_path);
-    const String lrc_abs = find_lrc_path_for_audio_v3(full_path, filename);
     const String lrc_rel = to_music_relative_path_v3(lrc_abs);
     const String cover_rel = to_music_relative_path_v3(effective_cover_path);
 
@@ -1210,11 +1335,13 @@ static bool scan_incremental_audio_file_v3(
             return false;
         }
 
-        if (!storage_scan_one_audio_file_v3(full_path,
-                                            fallback_artist,
-                                            fallback_album,
-                                            effective_cover_path,
-                                            track)) {
+        if (!scan_one_audio_file_core_v3(full_path,
+                                         filename,
+                                         fallback_artist,
+                                         fallback_album,
+                                         effective_cover_path,
+                                         &lrc_abs,
+                                         track)) {
             LOGE("[增量扫描] 音频完整解析失败：%s", full_path.c_str());
             return false;
         }
@@ -1286,14 +1413,17 @@ static bool scan_dir_incremental_v3(
 {
     scan_v3_cooperate_wdt();
 
-    SdFile dir;
-    if (!dir.open(dir_path.c_str(), O_RDONLY) || !dir.isDir()) {
-        LOGE("[增量扫描] 打开目录失败：%s", dir_path.c_str());
-        dir.close();
+    DirectoryEntryListV3 entries;
+    DirectoryLrcMapV3 lrc_by_base;
+    String local_cover;
+    if (!inventory_directory_v3(
+            dir_path,
+            entries,
+            lrc_by_base,
+            local_cover)) {
         return false;
     }
 
-    const String local_cover = pick_cover_in_folder_v3(dir_path);
     const String effective_cover = local_cover.isEmpty()
         ? inherited_cover_path
         : local_cover;
@@ -1305,13 +1435,10 @@ static bool scan_dir_incremental_v3(
                         fallback_artist,
                         fallback_album);
 
-    SdFile file;
-    while (file.openNext(&dir, O_RDONLY)) {
+    for (const auto& entry : entries) {
         scan_v3_cooperate_wdt();
 
         if (app_rescan_should_abort()) {
-            file.close();
-            dir.close();
             return false;
         }
 
@@ -1319,47 +1446,30 @@ static bool scan_dir_incremental_v3(
             (int)context.stats->discovered,
             dir_path);
 
-        char name[256];
-        file.getName(name, sizeof(name));
-        const String entry_name(name);
-
-        if (file.isDir()) {
-            const String child_dir = dir_path + "/" + entry_name;
-            file.close();
-
+        const String entry_name(entry.name.c_str());
+        if (entry.is_dir) {
             if (should_skip_dir_v3(entry_name)) {
                 continue;
             }
 
+            const String child_dir = dir_path + "/" + entry_name;
             if (!scan_dir_incremental_v3(
                     child_dir,
                     effective_cover,
                     context)) {
-                dir.close();
                 return false;
             }
             continue;
         }
 
-        const bool is_audio = is_audio_filename_v3(entry_name);
-        StorageFileFingerprintV1 audio_attributes{};
-        if (is_audio &&
-            !fingerprint_attributes_from_open_file_v1(
-                file, audio_attributes)) {
-            LOGE("[增量扫描] 音频目录属性读取失败：%s/%s",
-                 dir_path.c_str(),
-                 entry_name.c_str());
-            file.close();
-            dir.close();
-            return false;
+        if (!entry.is_audio) {
+            continue;
         }
 
         const String full_path = dir_path + "/" + entry_name;
-        file.close();
-
-        if (!is_audio) {
-            continue;
-        }
+        const String lrc_abs = find_lrc_path_from_inventory_v3(
+            entry_name,
+            lrc_by_base);
 
         if (!scan_incremental_audio_file_v3(
                 full_path,
@@ -1367,16 +1477,15 @@ static bool scan_dir_incremental_v3(
                 fallback_artist,
                 fallback_album,
                 effective_cover,
-                &audio_attributes,
+                lrc_abs,
+                &entry.audio_attributes,
                 context)) {
-            dir.close();
             return false;
         }
 
         delay(0);
     }
 
-    dir.close();
     return !app_rescan_should_abort();
 }
 
@@ -1448,6 +1557,7 @@ bool storage_scan_music_incremental_v3(
              (unsigned)old_manifest.entries.size(),
              (unsigned)old_manifest.format_version,
              strict_verify ? "严格内容" : "快速属性");
+        LOGI("[增量扫描] 目录优化：每个目录单次枚举，歌词与封面从目录快照匹配");
     } else {
         LOGI("[增量扫描] %s，本轮执行全量解析",
              force_full_scan

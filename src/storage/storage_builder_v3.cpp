@@ -424,7 +424,7 @@ bool storage_build_catalog_v3_from_temp(StorageTrackBuildListV3& tracks,
 
   out_cat.generation = 1;
 
-  LOGI("[曲库构建] 从临时数据构建成功: 歌曲s=%lu 专辑s=%lu 歌手s=%lu pool=%lu",
+  LOGI("[曲库构建] 从临时数据构建成功：歌曲=%lu 专辑=%lu 歌手=%lu 字符池=%lu",
        (unsigned long)out_cat.track_count,
        (unsigned long)out_cat.album_count,
        (unsigned long)out_cat.artist_count,
