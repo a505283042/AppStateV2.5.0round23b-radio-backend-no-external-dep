@@ -27,6 +27,12 @@ static constexpr uint32_t BATTERY_UI_STABLE_SAMPLE_INTERVAL_MS = 60UL * 1000UL;
 static constexpr uint32_t BATTERY_RUNTIME_SAMPLE_INTERVAL_MS = 10UL * 1000UL;
 static constexpr uint32_t BATTERY_RUNTIME_SETTLE_MS = 30UL * 1000UL;
 static constexpr uint32_t BATTERY_SAMPLE_AFTER_LOAD_CHANGE_DELAY_MS = 3000;
+// 蓝牙发射时如果 BQ27441 持续地址 NACK，无法取得实时电流。
+// 使用最后有效容量和可校准的整机发射电流继续估算，避免续航直接变成 ERR。
+static constexpr uint16_t BATTERY_BT_TX_FALLBACK_CURRENT_MA = 110;
+static constexpr uint16_t BATTERY_BT_TX_CURRENT_MIN_MA = 20;
+static constexpr uint16_t BATTERY_BT_TX_CURRENT_MAX_MA = 500;
+static constexpr uint32_t BATTERY_BT_TX_PROBE_INTERVAL_MS = 30UL * 1000UL;
 static constexpr uint16_t BATTERY_RUNTIME_MIN_DISCHARGE_MA = 20;
 static constexpr uint16_t BATTERY_RUNTIME_SHIFT_MIN_MA = 35;
 static constexpr uint8_t BATTERY_RUNTIME_SHIFT_PERCENT = 30;
@@ -53,6 +59,16 @@ static uint8_t s_battery_ui_sample_count = 0;
 static bool s_battery_runtime_filter_ready = false;
 static uint16_t s_battery_runtime_filtered_ma = 0;
 static uint32_t s_battery_runtime_stable_since_ms = 0;
+
+// 蓝牙发射期间的软件续航估算状态。容量锚点使用 uAh，避免短时间更新时整数 mAh 不变化。
+static bool s_battery_bt_tx_estimate_active = false;
+static bool s_battery_bt_tx_current_learned = false;
+static uint16_t s_battery_bt_tx_estimated_current_ma =
+    BATTERY_BT_TX_FALLBACK_CURRENT_MA;
+static uint32_t s_battery_bt_tx_anchor_capacity_uah = 0;
+static uint32_t s_battery_bt_tx_anchor_ms = 0;
+static uint32_t s_battery_bt_tx_last_probe_ms = 0;
+
 static portMUX_TYPE s_battery_runtime_event_mux = portMUX_INITIALIZER_UNLOCKED;
 static bool s_battery_runtime_load_change_pending = false;
 
@@ -77,6 +93,143 @@ static void reset_battery_runtime_estimate(BatteryRuntimeEstimateState state,
     s_battery_ui_status.estimated_runtime_minutes = 0;
     s_battery_ui_status.estimate_stable_ms = 0;
     s_battery_ui_status.estimate_updated_ms = now;
+}
+
+static bool battery_bt_tx_is_active()
+{
+    return board_hw_get_bt_power() && board_hw_get_bt_mode();
+}
+
+static uint16_t battery_cached_capacity_mah()
+{
+    if (s_battery_ui_status.remaining_capacity_mah > 0) {
+        return s_battery_ui_status.remaining_capacity_mah;
+    }
+
+    uint16_t full_capacity = s_battery_ui_status.full_charge_capacity_mah;
+    if (full_capacity == 0) {
+        full_capacity = s_battery_ui_status.design_capacity_mah;
+    }
+    if (full_capacity == 0) {
+        full_capacity = bq27441_design_capacity_mah();
+    }
+    if (full_capacity == 0 || s_battery_ui_status.percent > 100) {
+        return 0;
+    }
+
+    return static_cast<uint16_t>(
+        (static_cast<uint32_t>(full_capacity) *
+         s_battery_ui_status.percent + 50UL) / 100UL);
+}
+
+static void battery_bt_tx_estimate_deactivate()
+{
+    s_battery_bt_tx_estimate_active = false;
+    s_battery_bt_tx_anchor_capacity_uah = 0;
+    s_battery_bt_tx_anchor_ms = 0;
+    s_battery_bt_tx_last_probe_ms = 0;
+}
+
+static uint16_t clamp_bt_tx_estimated_current(uint16_t current_ma)
+{
+    if (current_ma < BATTERY_BT_TX_CURRENT_MIN_MA) {
+        return BATTERY_BT_TX_CURRENT_MIN_MA;
+    }
+    if (current_ma > BATTERY_BT_TX_CURRENT_MAX_MA) {
+        return BATTERY_BT_TX_CURRENT_MAX_MA;
+    }
+    return current_ma;
+}
+
+static void battery_bt_tx_estimate_reanchor(uint16_t remaining_capacity_mah,
+                                            uint16_t discharge_current_ma,
+                                            uint32_t now,
+                                            bool learned_from_bq)
+{
+    if (remaining_capacity_mah == 0) {
+        return;
+    }
+
+    discharge_current_ma = clamp_bt_tx_estimated_current(discharge_current_ma);
+
+    if (learned_from_bq) {
+        if (s_battery_bt_tx_current_learned) {
+            // 偶发成功样本只占 1/4 权重，避免瞬态电流使估算大幅跳变。
+            s_battery_bt_tx_estimated_current_ma = static_cast<uint16_t>(
+                (static_cast<uint32_t>(s_battery_bt_tx_estimated_current_ma) * 3UL +
+                 discharge_current_ma + 2UL) / 4UL);
+        } else {
+            s_battery_bt_tx_estimated_current_ma = discharge_current_ma;
+            s_battery_bt_tx_current_learned = true;
+        }
+    } else if (!s_battery_bt_tx_current_learned) {
+        s_battery_bt_tx_estimated_current_ma = discharge_current_ma;
+    }
+
+    s_battery_bt_tx_anchor_capacity_uah =
+        static_cast<uint32_t>(remaining_capacity_mah) * 1000UL;
+    s_battery_bt_tx_anchor_ms = now;
+    s_battery_bt_tx_estimate_active = true;
+}
+
+static void battery_bt_tx_estimate_update(uint32_t now)
+{
+    if (!s_battery_ui_status.valid ||
+        s_battery_ui_status.charging ||
+        s_battery_ui_status.external_power_good ||
+        !battery_bt_tx_is_active()) {
+        battery_bt_tx_estimate_deactivate();
+        return;
+    }
+
+    if (!s_battery_bt_tx_estimate_active) {
+        const uint16_t capacity_mah = battery_cached_capacity_mah();
+        if (capacity_mah == 0) {
+            reset_battery_runtime_estimate(
+                BatteryRuntimeEstimateState::Unavailable,
+                now);
+            return;
+        }
+        battery_bt_tx_estimate_reanchor(
+            capacity_mah,
+            s_battery_bt_tx_estimated_current_ma,
+            now,
+            false);
+    }
+
+    const uint32_t elapsed_ms = now - s_battery_bt_tx_anchor_ms;
+    const uint64_t consumed_uah =
+        (static_cast<uint64_t>(s_battery_bt_tx_estimated_current_ma) *
+         elapsed_ms) / 3600ULL;
+
+    const uint32_t remaining_uah =
+        consumed_uah >= s_battery_bt_tx_anchor_capacity_uah
+            ? 0
+            : static_cast<uint32_t>(
+                  s_battery_bt_tx_anchor_capacity_uah - consumed_uah);
+
+    const uint16_t remaining_mah = static_cast<uint16_t>(
+        (remaining_uah + 500UL) / 1000UL);
+
+    const uint32_t runtime_minutes =
+        s_battery_bt_tx_estimated_current_ma == 0
+            ? 0
+            : static_cast<uint32_t>(
+                  (static_cast<uint64_t>(remaining_uah) * 60ULL +
+                   static_cast<uint64_t>(s_battery_bt_tx_estimated_current_ma) * 500ULL) /
+                  (static_cast<uint64_t>(s_battery_bt_tx_estimated_current_ma) * 1000ULL));
+
+    s_battery_ui_status.average_current_ma =
+        -static_cast<int16_t>(s_battery_bt_tx_estimated_current_ma);
+    s_battery_ui_status.remaining_capacity_mah = remaining_mah;
+    s_battery_ui_status.runtime_estimate_state =
+        BatteryRuntimeEstimateState::BluetoothEstimated;
+    s_battery_ui_status.estimated_discharge_current_ma =
+        s_battery_bt_tx_estimated_current_ma;
+    s_battery_ui_status.estimated_runtime_minutes = runtime_minutes;
+    s_battery_ui_status.estimate_stable_ms = elapsed_ms;
+    s_battery_ui_status.estimate_updated_ms = now;
+    s_battery_ui_status.updated_ms = now;
 }
 
 static void update_battery_runtime_estimate(int16_t average_current_ma,
@@ -156,17 +309,27 @@ static void update_battery_runtime_estimate(int16_t average_current_ma,
 static void apply_battery_runtime_load_change(uint32_t now)
 {
     if (s_battery_ui_status.charging) {
+        battery_bt_tx_estimate_deactivate();
         reset_battery_runtime_estimate(BatteryRuntimeEstimateState::Charging, now);
     } else if (s_battery_ui_status.external_power_good) {
+        battery_bt_tx_estimate_deactivate();
         reset_battery_runtime_estimate(BatteryRuntimeEstimateState::ExternalPower, now);
     } else if (s_battery_ui_status.valid) {
-        reset_battery_runtime_estimate(BatteryRuntimeEstimateState::Stabilizing, now);
+        if (battery_bt_tx_is_active()) {
+            battery_bt_tx_estimate_update(now);
+            s_battery_bt_tx_last_probe_ms = now;
+        } else {
+            battery_bt_tx_estimate_deactivate();
+            reset_battery_runtime_estimate(BatteryRuntimeEstimateState::Stabilizing, now);
+        }
+
         // 蓝牙上电和功放切换会产生供电瞬态。延迟 BQ27441 采样，避免在电压跌落尖峰期间
         // 立即访问 0x55，导致地址 NACK 并错误进入 ERR。
         s_battery_runtime_last_sample_ms = now;
         s_battery_sample_not_before_ms =
             now + BATTERY_SAMPLE_AFTER_LOAD_CHANGE_DELAY_MS;
     } else {
+        battery_bt_tx_estimate_deactivate();
         reset_battery_runtime_estimate(BatteryRuntimeEstimateState::Unavailable, now);
     }
 }
@@ -450,10 +613,24 @@ static void board_hw_update_battery_status_cache()
     s_battery_runtime_last_sample_ms = out.updated_ms;
 
     if (bat.valid) {
-        update_battery_runtime_estimate(
-            bat.average_current_ma,
-            bat.remaining_capacity_mah,
-            out.updated_ms);
+        if (battery_bt_tx_is_active() &&
+            !out.charging &&
+            !out.external_power_good &&
+            bat.remaining_capacity_mah > 0 &&
+            bat.average_current_ma <= -static_cast<int16_t>(BATTERY_RUNTIME_MIN_DISCHARGE_MA)) {
+            battery_bt_tx_estimate_reanchor(
+                bat.remaining_capacity_mah,
+                static_cast<uint16_t>(-static_cast<int32_t>(bat.average_current_ma)),
+                out.updated_ms,
+                true);
+            battery_bt_tx_estimate_update(out.updated_ms);
+        } else {
+            battery_bt_tx_estimate_deactivate();
+            update_battery_runtime_estimate(
+                bat.average_current_ma,
+                bat.remaining_capacity_mah,
+                out.updated_ms);
+        }
     }
 
     if (s_battery_ui_sample_count < 255) {
@@ -495,10 +672,59 @@ void board_hw_battery_status_tick()
         s_battery_ui_last_sample_ms == 0 ||
         now - s_battery_ui_last_sample_ms >= full_interval_ms;
 
-    if (full_sample_due) {
+    const bool bt_tx_estimate_mode =
+        battery_bt_tx_is_active() &&
+        s_battery_ui_status.valid &&
+        !s_battery_ui_status.charging &&
+        !s_battery_ui_status.external_power_good;
+
+    if (full_sample_due && !bt_tx_estimate_mode) {
         // 第一次立即完整采样；上电前几次快速采样；稳定后每分钟一次。
         board_hw_update_battery_status_cache();
         return;
+    }
+
+    if (bt_tx_estimate_mode) {
+        // 蓝牙发射时 BQ27441 可能持续地址 NACK。续航每次 tick 都由软件模型更新，
+        // BQ 仅每 30 秒低频探测一次；探测失败不清空当前估算，也不执行必要寄存器完整采样。
+        battery_bt_tx_estimate_update(now);
+
+        if (s_battery_bt_tx_last_probe_ms != 0 &&
+            now - s_battery_bt_tx_last_probe_ms < BATTERY_BT_TX_PROBE_INTERVAL_MS) {
+            return;
+        }
+
+        s_battery_bt_tx_last_probe_ms = now;
+        Bq27441RuntimeSample runtime{};
+        if (bq27441_read_runtime(&runtime) && runtime.valid) {
+            uint16_t measured_discharge_ma =
+                s_battery_bt_tx_estimated_current_ma;
+            bool measured_current_valid = false;
+
+            if (runtime.average_current_ma <=
+                -static_cast<int16_t>(BATTERY_RUNTIME_MIN_DISCHARGE_MA)) {
+                measured_discharge_ma = static_cast<uint16_t>(
+                    -static_cast<int32_t>(runtime.average_current_ma));
+                measured_current_valid = true;
+            }
+
+            battery_bt_tx_estimate_reanchor(
+                runtime.remaining_capacity_mah,
+                measured_discharge_ma,
+                now,
+                measured_current_valid);
+            battery_bt_tx_estimate_update(now);
+
+            LOGI("[电池] 蓝牙发射续航探测成功：容量=%umAh 电流=%umA%s",
+                 static_cast<unsigned>(runtime.remaining_capacity_mah),
+                 static_cast<unsigned>(s_battery_bt_tx_estimated_current_ma),
+                 s_battery_bt_tx_current_learned ? " 已学习" : "");
+        }
+        return;
+    }
+
+    if (s_battery_bt_tx_estimate_active) {
+        battery_bt_tx_estimate_deactivate();
     }
 
     // 续航轻量采样只服务于电池放电估算。充电或外接电源时不读 RM/Current，
@@ -555,6 +781,7 @@ const char* board_hw_battery_runtime_state_label(BatteryRuntimeEstimateState sta
         case BatteryRuntimeEstimateState::ExternalPower: return "外接电源";
         case BatteryRuntimeEstimateState::LowCurrent: return "负载过低";
         case BatteryRuntimeEstimateState::Stabilizing: return "计算中";
+        case BatteryRuntimeEstimateState::BluetoothEstimated: return "蓝牙估算";
         case BatteryRuntimeEstimateState::Ready: return "稳定";
         case BatteryRuntimeEstimateState::Unavailable:
         default: return "不可用";

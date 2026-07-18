@@ -1,0 +1,1507 @@
+diff --git a/include/storage/storage_catalog_v3.h b/include/storage/storage_catalog_v3.h
+index 3c98f12..8f46ac5 100644
+--- a/include/storage/storage_catalog_v3.h
++++ b/include/storage/storage_catalog_v3.h
+@@ -37,7 +37,7 @@ void storage_catalog_v3_free(MusicCatalogV3& cat);
+ bool storage_catalog_v3_load_or_rebuild(const char* music_root = "/Music",
+                                         const char* v3_index_path = "/System/music_index_v3.bin");
+ 
+-/* 强制重扫并重建 V3（跳过索引加载） */
++/* 遍历曲库并重建 V3：有有效 Manifest 时增量复用，否则自动全量解析。 */
+ bool storage_catalog_v3_rebuild(const char* music_root = "/Music",
+                                 const char* v3_index_path = "/System/music_index_v3.bin");
+ 
+diff --git a/include/storage/storage_manifest_v1.h b/include/storage/storage_manifest_v1.h
+new file mode 100644
+index 0000000..33823da
+--- /dev/null
++++ b/include/storage/storage_manifest_v1.h
+@@ -0,0 +1,60 @@
++#pragma once
++
++#include <Arduino.h>
++#include <vector>
++
++#include "storage/storage_types_v3.h"
++
++/**
++ * @brief 单个文件的轻量内容指纹。
++ *
++ * 不依赖 FAT 修改时间，使用文件大小以及头部、中部、尾部采样 CRC。
++ * 这样复制工具保留时间戳、或文件内容等长替换时仍有较高概率检测到变化。
++ */
++struct StorageFileFingerprintV1 {
++  bool present = false;
++  uint32_t size = 0;
++  uint32_t head_crc = 0;
++  uint32_t middle_crc = 0;
++  uint32_t tail_crc = 0;
++};
++
++/**
++ * @brief 增量曲库清单中的单曲记录。
++ *
++ * 只保存音频路径和三个文件指纹。歌词路径、封面路径、标题、歌手和专辑等
++ * 都从当前已加载的 V3 Catalog 复用，尽量减少扫描期间的 String 数量和内部堆压力。
++ */
++struct StorageManifestEntryV1 {
++  String audio_rel;
++
++  StorageFileFingerprintV1 audio_fingerprint;
++  StorageFileFingerprintV1 lrc_fingerprint;
++  StorageFileFingerprintV1 cover_fingerprint;
++};
++
++struct StorageMusicManifestV1 {
++  std::vector<StorageManifestEntryV1> entries;
++
++  void clear() {
++    entries.clear();
++  }
++
++  bool empty() const {
++    return entries.empty();
++  }
++};
++
++/**
++ * @brief 从原子清单文件加载。正式文件不可用时会尝试 .bak。
++ */
++bool storage_manifest_load_v1(
++    StorageMusicManifestV1& out_manifest,
++    const char* manifest_path = "/System/music_manifest_v1.bin");
++
++/**
++ * @brief 使用 .tmp + .bak 原子保存清单，并在替换前后执行 CRC 校验。
++ */
++bool storage_manifest_save_v1(
++    const StorageMusicManifestV1& manifest,
++    const char* manifest_path = "/System/music_manifest_v1.bin");
+diff --git a/include/storage/storage_scan_v3.h b/include/storage/storage_scan_v3.h
+index 37eb200..1463934 100644
+--- a/include/storage/storage_scan_v3.h
++++ b/include/storage/storage_scan_v3.h
+@@ -2,12 +2,27 @@
+ #include <Arduino.h>
+ #include <vector>
+ #include "storage/storage_types_v3.h"
++#include "storage/storage_manifest_v1.h"
+ 
+ /**
+  * @brief V3 扫描阶段的临时曲目结构。
+  *
+  * 只在扫描 / builder 阶段存在；后续会被压缩为 TrackRowV3 + StringPool。
+  */
++
++/**
++ * @brief 增量扫描统计。
++ */
++struct StorageIncrementalScanStatsV3 {
++  bool manifest_loaded = false;
++  bool full_scan = true;
++  uint32_t discovered = 0;
++  uint32_t reused = 0;
++  uint32_t added = 0;
++  uint32_t modified = 0;
++  uint32_t deleted = 0;
++};
++
+ struct TrackBuildTempV3 {
+   String title;
+   String artist;
+@@ -46,3 +61,17 @@ bool storage_scan_one_audio_file_v3(const String& full_path,
+  */
+ bool storage_scan_music_v3(std::vector<TrackBuildTempV3>& out_tracks,
+                            const char* music_root = "/Music");
++
++/**
++ * @brief 使用 Manifest 执行增量扫描。
++ *
++ * 首次没有有效 Manifest 时自动执行全量解析，并生成下一份 Manifest。
++ * 后续扫描仍遍历目录，但未变化歌曲只读取轻量指纹并复用旧元数据。
++ */
++bool storage_scan_music_incremental_v3(
++    std::vector<TrackBuildTempV3>& out_tracks,
++    StorageMusicManifestV1& out_manifest,
++    StorageIncrementalScanStatsV3& out_stats,
++    const MusicCatalogV3* reuse_catalog,
++    const char* music_root = "/Music",
++    const char* manifest_path = "/System/music_manifest_v1.bin");
+diff --git a/src/storage/storage_catalog_v3.cpp b/src/storage/storage_catalog_v3.cpp
+index b685a6f..05610e4 100644
+--- a/src/storage/storage_catalog_v3.cpp
++++ b/src/storage/storage_catalog_v3.cpp
+@@ -102,12 +102,25 @@ static bool try_load_v3(const char* v3_index_path)
+ static bool rebuild_v3_native(const char* music_root,
+                               const char* v3_index_path)
+ {
++    static constexpr const char* kManifestPath =
++        "/System/music_manifest_v1.bin";
++
+     std::vector<TrackBuildTempV3> tmp_tracks;
++    StorageMusicManifestV1 next_manifest;
++    StorageIncrementalScanStatsV3 scan_stats{};
++
++    LOGI("[曲库] 开始增量重建本地索引...");
+ 
+-    LOGI("[曲库] 开始重建本地索引...");
++    const MusicCatalogV3* reuse_catalog =
++        storage_catalog_v3_ready() ? &s_catalog_v3 : nullptr;
+ 
+-    if (!storage_scan_music_v3(tmp_tracks, music_root)) {
+-        LOGE("[曲库] native scan 失败");
++    if (!storage_scan_music_incremental_v3(tmp_tracks,
++                                           next_manifest,
++                                           scan_stats,
++                                           reuse_catalog,
++                                           music_root,
++                                           kManifestPath)) {
++        LOGE("[曲库] 增量/native scan 失败");
+         return false;
+     }
+ 
+@@ -128,11 +141,22 @@ static bool rebuild_v3_native(const char* music_root,
+     s_catalog_v3.generation = ++s_catalog_generation_seq;
+     s_v3_ready = true;
+ 
+-    if (!storage_index_save_v3(s_catalog_v3, v3_index_path)) {
++    const bool index_saved =
++        storage_index_save_v3(s_catalog_v3, v3_index_path);
++    if (!index_saved) {
+         LOGE("[曲库] 保存 v3 失败: %s", v3_index_path);
++        LOGW("[曲库] 索引未落盘，本轮不更新增量清单");
++    } else if (!storage_manifest_save_v1(next_manifest, kManifestPath)) {
++        // 内存曲库和正式索引已经可用；清单失败只会使下一轮回退全量解析。
++        LOGW("[曲库] 增量清单保存失败，下次重扫将自动回退全量解析");
+     }
+ 
+-    LOGI("[曲库] 本地索引重建完成：歌曲=%lu 专辑=%lu 歌手=%lu 字符池=%lu 歌手分组=%d 专辑分组=%d",
++    LOGI("[曲库] 本地索引重建完成：扫描模式=%s 复用=%lu 新增=%lu 修改=%lu 删除=%lu 歌曲=%lu 专辑=%lu 歌手=%lu 字符池=%lu 歌手分组=%d 专辑分组=%d",
++         scan_stats.full_scan ? "全量" : "增量",
++         (unsigned long)scan_stats.reused,
++         (unsigned long)scan_stats.added,
++         (unsigned long)scan_stats.modified,
++         (unsigned long)scan_stats.deleted,
+          (unsigned long)s_catalog_v3.track_count,
+          (unsigned long)s_catalog_v3.album_count,
+          (unsigned long)s_catalog_v3.artist_count,
+diff --git a/src/storage/storage_manifest_v1.cpp b/src/storage/storage_manifest_v1.cpp
+new file mode 100644
+index 0000000..4213286
+--- /dev/null
++++ b/src/storage/storage_manifest_v1.cpp
+@@ -0,0 +1,560 @@
++#include "storage/storage_manifest_v1.h"
++
++#include <SdFat.h>
++#include <algorithm>
++#include <cstring>
++#include <utility>
++
++#include "storage/storage_io.h"
++#include "utils/log.h"
++
++extern SdFat sd;
++
++namespace {
++
++static constexpr uint32_t kManifestMagic = 0x31464E4Du;  // "MNF1"
++static constexpr uint16_t kManifestVersion = 1;
++static constexpr uint16_t kManifestFlagsCrc32 = 1u << 0;
++static constexpr uint32_t kManifestHeaderBytes = 24;
++static constexpr uint32_t kManifestMaxEntries = UINT16_MAX;
++static constexpr uint32_t kManifestMaxPayloadBytes = 8u * 1024u * 1024u;
++static constexpr uint16_t kManifestMaxStringBytes = 4096;
++
++struct ManifestHeaderV1 {
++  uint32_t magic = kManifestMagic;
++  uint16_t version = kManifestVersion;
++  uint16_t flags = kManifestFlagsCrc32;
++  uint32_t header_size = kManifestHeaderBytes;
++  uint32_t entry_count = 0;
++  uint32_t payload_size = 0;
++  uint32_t crc32 = 0;
++};
++
++static_assert(sizeof(ManifestHeaderV1) == kManifestHeaderBytes,
++              "ManifestHeaderV1 布局变化会破坏磁盘格式");
++
++static uint32_t crc32_update(uint32_t crc,
++                             const uint8_t* data,
++                             size_t size)
++{
++  if (!data || size == 0) return crc;
++
++  for (size_t i = 0; i < size; ++i) {
++    crc ^= data[i];
++    for (uint8_t bit = 0; bit < 8; ++bit) {
++      const uint32_t mask = (uint32_t)-(int32_t)(crc & 1u);
++      crc = (crc >> 1) ^ (0xEDB88320u & mask);
++    }
++  }
++  return crc;
++}
++
++static uint32_t crc32_begin()
++{
++  return 0xFFFFFFFFu;
++}
++
++static uint32_t crc32_finish(uint32_t crc)
++{
++  return ~crc;
++}
++
++static bool write_bytes(File32& file, const void* data, size_t size)
++{
++  if (size == 0) return true;
++  if (!data) return false;
++  return file.write(reinterpret_cast<const uint8_t*>(data), size) == size;
++}
++
++static bool read_bytes(File32& file, void* data, size_t size)
++{
++  if (size == 0) return true;
++  if (!data) return false;
++  return file.read(reinterpret_cast<uint8_t*>(data), size) == (int)size;
++}
++
++static bool write_u8(File32& file, uint8_t value)
++{
++  return write_bytes(file, &value, sizeof(value));
++}
++
++static bool write_u16(File32& file, uint16_t value)
++{
++  return write_bytes(file, &value, sizeof(value));
++}
++
++static bool write_u32(File32& file, uint32_t value)
++{
++  return write_bytes(file, &value, sizeof(value));
++}
++
++static bool read_u8(File32& file, uint8_t& value)
++{
++  return read_bytes(file, &value, sizeof(value));
++}
++
++static bool read_u16(File32& file, uint16_t& value)
++{
++  return read_bytes(file, &value, sizeof(value));
++}
++
++static bool read_u32(File32& file, uint32_t& value)
++{
++  return read_bytes(file, &value, sizeof(value));
++}
++
++static bool write_header(File32& file, const ManifestHeaderV1& header)
++{
++  return write_u32(file, header.magic) &&
++         write_u16(file, header.version) &&
++         write_u16(file, header.flags) &&
++         write_u32(file, header.header_size) &&
++         write_u32(file, header.entry_count) &&
++         write_u32(file, header.payload_size) &&
++         write_u32(file, header.crc32);
++}
++
++static bool read_header(File32& file, ManifestHeaderV1& header)
++{
++  return read_u32(file, header.magic) &&
++         read_u16(file, header.version) &&
++         read_u16(file, header.flags) &&
++         read_u32(file, header.header_size) &&
++         read_u32(file, header.entry_count) &&
++         read_u32(file, header.payload_size) &&
++         read_u32(file, header.crc32);
++}
++
++static bool string_size_valid(const String& value)
++{
++  return value.length() <= kManifestMaxStringBytes;
++}
++
++static bool entry_strings_valid(const StorageManifestEntryV1& entry)
++{
++  return string_size_valid(entry.audio_rel);
++}
++
++static uint32_t fingerprint_serialized_size()
++{
++  return sizeof(uint8_t) + 4u * sizeof(uint32_t);
++}
++
++static bool calculate_payload_layout(const StorageMusicManifestV1& manifest,
++                                     uint32_t& out_payload_size,
++                                     uint32_t& out_crc)
++{
++  if (manifest.entries.size() > kManifestMaxEntries) {
++    LOGE("[曲库清单] 条目过多：%u", (unsigned)manifest.entries.size());
++    return false;
++  }
++
++  uint64_t payload_size = 0;
++  uint32_t crc = crc32_begin();
++
++  auto add_crc = [&](const void* data, size_t size) {
++    crc = crc32_update(crc,
++                       reinterpret_cast<const uint8_t*>(data),
++                       size);
++    payload_size += size;
++  };
++
++  auto add_string = [&](const String& value) {
++    const uint16_t length = (uint16_t)value.length();
++    add_crc(&length, sizeof(length));
++    if (length > 0) {
++      add_crc(value.c_str(), length);
++    }
++  };
++
++  auto add_fingerprint = [&](const StorageFileFingerprintV1& fp) {
++    const uint8_t present = fp.present ? 1u : 0u;
++    add_crc(&present, sizeof(present));
++    add_crc(&fp.size, sizeof(fp.size));
++    add_crc(&fp.head_crc, sizeof(fp.head_crc));
++    add_crc(&fp.middle_crc, sizeof(fp.middle_crc));
++    add_crc(&fp.tail_crc, sizeof(fp.tail_crc));
++  };
++
++  for (const auto& entry : manifest.entries) {
++    if (entry.audio_rel.isEmpty() || !entry_strings_valid(entry)) {
++      LOGE("[曲库清单] 条目字符串无效：路径=%s",
++           entry.audio_rel.c_str());
++      return false;
++    }
++
++    add_string(entry.audio_rel);
++
++    add_fingerprint(entry.audio_fingerprint);
++    add_fingerprint(entry.lrc_fingerprint);
++    add_fingerprint(entry.cover_fingerprint);
++
++    if (payload_size > kManifestMaxPayloadBytes) {
++      LOGE("[曲库清单] 清单数据过大：%llu",
++           (unsigned long long)payload_size);
++      return false;
++    }
++  }
++
++  out_payload_size = (uint32_t)payload_size;
++  out_crc = crc32_finish(crc);
++  return true;
++}
++
++static bool write_string(File32& file, const String& value)
++{
++  const uint16_t length = (uint16_t)value.length();
++  return write_u16(file, length) &&
++         write_bytes(file, value.c_str(), length);
++}
++
++static bool read_string_crc(File32& file,
++                            String& out,
++                            uint32_t& crc,
++                            uint32_t& remaining)
++{
++  if (remaining < sizeof(uint16_t)) return false;
++
++  uint16_t length = 0;
++  if (!read_u16(file, length)) return false;
++  crc = crc32_update(crc,
++                     reinterpret_cast<const uint8_t*>(&length),
++                     sizeof(length));
++  remaining -= sizeof(uint16_t);
++
++  if (length > kManifestMaxStringBytes || length > remaining) {
++    return false;
++  }
++
++  out = String();
++  if (length == 0) return true;
++  if (!out.reserve(length)) return false;
++
++  char buffer[128];
++  uint16_t left = length;
++  while (left > 0) {
++    const uint16_t chunk = left > sizeof(buffer)
++        ? (uint16_t)sizeof(buffer)
++        : left;
++    if (file.read(reinterpret_cast<uint8_t*>(buffer), chunk) != chunk) {
++      return false;
++    }
++    crc = crc32_update(crc,
++                       reinterpret_cast<const uint8_t*>(buffer),
++                       chunk);
++    if (!out.concat(buffer, chunk)) {
++      return false;
++    }
++    left -= chunk;
++    remaining -= chunk;
++  }
++  return true;
++}
++
++static bool write_fingerprint(File32& file,
++                              const StorageFileFingerprintV1& fp)
++{
++  return write_u8(file, fp.present ? 1u : 0u) &&
++         write_u32(file, fp.size) &&
++         write_u32(file, fp.head_crc) &&
++         write_u32(file, fp.middle_crc) &&
++         write_u32(file, fp.tail_crc);
++}
++
++static bool read_fingerprint_crc(File32& file,
++                                 StorageFileFingerprintV1& fp,
++                                 uint32_t& crc,
++                                 uint32_t& remaining)
++{
++  const uint32_t need = fingerprint_serialized_size();
++  if (remaining < need) return false;
++
++  uint8_t present = 0;
++  if (!read_u8(file, present) ||
++      !read_u32(file, fp.size) ||
++      !read_u32(file, fp.head_crc) ||
++      !read_u32(file, fp.middle_crc) ||
++      !read_u32(file, fp.tail_crc)) {
++    return false;
++  }
++
++  crc = crc32_update(crc, &present, sizeof(present));
++  crc = crc32_update(crc,
++                     reinterpret_cast<const uint8_t*>(&fp.size),
++                     sizeof(fp.size));
++  crc = crc32_update(crc,
++                     reinterpret_cast<const uint8_t*>(&fp.head_crc),
++                     sizeof(fp.head_crc));
++  crc = crc32_update(crc,
++                     reinterpret_cast<const uint8_t*>(&fp.middle_crc),
++                     sizeof(fp.middle_crc));
++  crc = crc32_update(crc,
++                     reinterpret_cast<const uint8_t*>(&fp.tail_crc),
++                     sizeof(fp.tail_crc));
++
++  remaining -= need;
++  fp.present = present != 0;
++  return true;
++}
++
++static bool write_entry(File32& file, const StorageManifestEntryV1& entry)
++{
++  return write_string(file, entry.audio_rel) &&
++         write_fingerprint(file, entry.audio_fingerprint) &&
++         write_fingerprint(file, entry.lrc_fingerprint) &&
++         write_fingerprint(file, entry.cover_fingerprint);
++}
++
++static bool read_entry_crc(File32& file,
++                           StorageManifestEntryV1& entry,
++                           uint32_t& crc,
++                           uint32_t& remaining)
++{
++  entry = StorageManifestEntryV1{};
++
++  if (!read_string_crc(file, entry.audio_rel, crc, remaining) ||
++      !read_fingerprint_crc(file, entry.audio_fingerprint,
++                            crc, remaining) ||
++      !read_fingerprint_crc(file, entry.lrc_fingerprint,
++                            crc, remaining) ||
++      !read_fingerprint_crc(file, entry.cover_fingerprint,
++                            crc, remaining)) {
++    return false;
++  }
++
++  return !entry.audio_rel.isEmpty();
++}
++
++static bool validate_header(const ManifestHeaderV1& header,
++                            uint32_t file_size)
++{
++  if (header.magic != kManifestMagic ||
++      header.version != kManifestVersion ||
++      header.header_size != kManifestHeaderBytes ||
++      (header.flags & kManifestFlagsCrc32) == 0 ||
++      header.entry_count > kManifestMaxEntries ||
++      header.payload_size > kManifestMaxPayloadBytes) {
++    return false;
++  }
++
++  return file_size == header.header_size + header.payload_size;
++}
++
++static bool load_manifest_locked(StorageMusicManifestV1& out_manifest,
++                                 const char* path,
++                                 bool quiet)
++{
++  out_manifest.clear();
++
++  File32 file = sd.open(path, O_RDONLY);
++  if (!file) {
++    if (!quiet) {
++      LOGW("[曲库清单] 文件不存在或无法打开：%s", path);
++    }
++    return false;
++  }
++
++  const uint64_t size64 = file.fileSize();
++  if (size64 > UINT32_MAX) {
++    file.close();
++    return false;
++  }
++
++  ManifestHeaderV1 header{};
++  if (!read_header(file, header) ||
++      !validate_header(header, (uint32_t)size64)) {
++    file.close();
++    if (!quiet) {
++      LOGW("[曲库清单] 文件头或尺寸无效：%s", path);
++    }
++    return false;
++  }
++
++  out_manifest.entries.reserve(header.entry_count);
++  uint32_t remaining = header.payload_size;
++  uint32_t crc = crc32_begin();
++
++  for (uint32_t i = 0; i < header.entry_count; ++i) {
++    StorageManifestEntryV1 entry{};
++    if (!read_entry_crc(file, entry, crc, remaining)) {
++      file.close();
++      out_manifest.clear();
++      if (!quiet) {
++        LOGW("[曲库清单] 条目读取失败：%s index=%lu",
++             path,
++             (unsigned long)i);
++      }
++      return false;
++    }
++    out_manifest.entries.push_back(std::move(entry));
++  }
++
++  file.close();
++  crc = crc32_finish(crc);
++
++  if (remaining != 0 || crc != header.crc32) {
++    out_manifest.clear();
++    if (!quiet) {
++      LOGW("[曲库清单] CRC 或剩余尺寸无效：%s expected=0x%08lx actual=0x%08lx remaining=%lu",
++           path,
++           (unsigned long)header.crc32,
++           (unsigned long)crc,
++           (unsigned long)remaining);
++    }
++    return false;
++  }
++
++  std::sort(out_manifest.entries.begin(),
++            out_manifest.entries.end(),
++            [](const StorageManifestEntryV1& a,
++               const StorageManifestEntryV1& b) {
++              return a.audio_rel.compareTo(b.audio_rel) < 0;
++            });
++
++  for (size_t i = 1; i < out_manifest.entries.size(); ++i) {
++    if (out_manifest.entries[i - 1].audio_rel ==
++        out_manifest.entries[i].audio_rel) {
++      out_manifest.clear();
++      if (!quiet) {
++        LOGW("[曲库清单] 存在重复音频路径：%s",
++             path);
++      }
++      return false;
++    }
++  }
++
++  return true;
++}
++
++static bool remove_if_exists_locked(const char* path)
++{
++  if (!sd.exists(path)) return true;
++  return sd.remove(path);
++}
++
++}  // namespace
++
++bool storage_manifest_load_v1(StorageMusicManifestV1& out_manifest,
++                              const char* manifest_path)
++{
++  StorageSdLockGuard sd_lock(2000);
++  if (!sd_lock) {
++    LOGE("[曲库清单] 加载锁超时");
++    out_manifest.clear();
++    return false;
++  }
++
++  if (load_manifest_locked(out_manifest, manifest_path, true)) {
++    LOGI("[曲库清单] 加载成功：来源=%s 条目=%u",
++         manifest_path,
++         (unsigned)out_manifest.entries.size());
++    return true;
++  }
++
++  const String backup_path = String(manifest_path) + ".bak";
++  if (load_manifest_locked(out_manifest, backup_path.c_str(), true)) {
++    LOGW("[曲库清单] 正式文件不可用，已使用备份：%s 条目=%u",
++         backup_path.c_str(),
++         (unsigned)out_manifest.entries.size());
++    return true;
++  }
++
++  out_manifest.clear();
++  LOGW("[曲库清单] 没有可用清单，将执行全量解析");
++  return false;
++}
++
++bool storage_manifest_save_v1(const StorageMusicManifestV1& manifest,
++                              const char* manifest_path)
++{
++  uint32_t payload_size = 0;
++  uint32_t payload_crc = 0;
++  if (!calculate_payload_layout(manifest,
++                                payload_size,
++                                payload_crc)) {
++    return false;
++  }
++
++  StorageSdLockGuard sd_lock(2000);
++  if (!sd_lock) {
++    LOGE("[曲库清单] 保存锁超时");
++    return false;
++  }
++
++  sd.mkdir("/System");
++
++  const String final_path(manifest_path);
++  const String tmp_path = final_path + ".tmp";
++  const String backup_path = final_path + ".bak";
++
++  remove_if_exists_locked(tmp_path.c_str());
++
++  ManifestHeaderV1 header{};
++  header.entry_count = (uint32_t)manifest.entries.size();
++  header.payload_size = payload_size;
++  header.crc32 = payload_crc;
++
++  File32 file = sd.open(tmp_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC);
++  if (!file) {
++    LOGE("[曲库清单] 无法创建临时文件：%s", tmp_path.c_str());
++    return false;
++  }
++
++  bool ok = write_header(file, header);
++  for (const auto& entry : manifest.entries) {
++    if (!ok) break;
++    ok = write_entry(file, entry);
++  }
++  if (ok) ok = file.sync();
++  file.close();
++
++  if (!ok) {
++    remove_if_exists_locked(tmp_path.c_str());
++    LOGE("[曲库清单] 临时文件写入失败：%s", tmp_path.c_str());
++    return false;
++  }
++
++  StorageMusicManifestV1 verify_manifest;
++  if (!load_manifest_locked(verify_manifest, tmp_path.c_str(), true) ||
++      verify_manifest.entries.size() != manifest.entries.size()) {
++    remove_if_exists_locked(tmp_path.c_str());
++    LOGE("[曲库清单] 临时文件落盘校验失败：%s", tmp_path.c_str());
++    return false;
++  }
++
++  const bool had_final = sd.exists(final_path.c_str());
++  if (had_final) {
++    remove_if_exists_locked(backup_path.c_str());
++  }
++  if (had_final && !sd.rename(final_path.c_str(), backup_path.c_str())) {
++    LOGE("[曲库清单] 无法创建旧清单备份");
++    return false;
++  }
++
++  if (!sd.rename(tmp_path.c_str(), final_path.c_str())) {
++    LOGE("[曲库清单] 临时文件提升失败，尝试恢复备份");
++    if (had_final) {
++      (void)sd.rename(backup_path.c_str(), final_path.c_str());
++    }
++    return false;
++  }
++
++  StorageMusicManifestV1 final_verify;
++  if (!load_manifest_locked(final_verify, final_path.c_str(), true) ||
++      final_verify.entries.size() != manifest.entries.size()) {
++    LOGE("[曲库清单] 正式文件替换后校验失败");
++    remove_if_exists_locked(final_path.c_str());
++    if (had_final) {
++      (void)sd.rename(backup_path.c_str(), final_path.c_str());
++    }
++    return false;
++  }
++
++  LOGI("[曲库清单] 原子保存成功：%s 条目=%u payload=%lu CRC=0x%08lx 备份=%s",
++       manifest_path,
++       (unsigned)manifest.entries.size(),
++       (unsigned long)payload_size,
++       (unsigned long)payload_crc,
++       had_final ? "已保留" : "首次保存无旧版");
++  return true;
++}
+diff --git a/src/storage/storage_scan_v3.cpp b/src/storage/storage_scan_v3.cpp
+index 93a7036..b0daeb0 100644
+--- a/src/storage/storage_scan_v3.cpp
++++ b/src/storage/storage_scan_v3.cpp
+@@ -4,6 +4,8 @@
+ #include <Arduino.h>
+ #include <freertos/FreeRTOS.h>
+ #include <freertos/task.h>
++#include <algorithm>
++#include <cstring>
+ 
+ #include "utils/log.h"
+ #include "storage/storage_io.h"
+@@ -444,6 +446,740 @@ static bool scan_dir_recursive_v3(const String& dir_path,
+     return !app_rescan_should_abort();
+ }
+ 
++
++/* =========================
++ * 增量扫描与 Manifest
++ * ========================= */
++
++namespace {
++
++static constexpr size_t kFingerprintSampleBytes = 512;
++
++struct CachedFingerprintV1 {
++    String path;
++    StorageFileFingerprintV1 fingerprint;
++    bool ok = false;
++};
++
++struct IncrementalScanContextV3 {
++    const char* music_root = "/Music";
++    const StorageMusicManifestV1* old_manifest = nullptr;
++    const MusicCatalogV3* reuse_catalog = nullptr;
++    const std::vector<uint32_t>* catalog_path_order = nullptr;
++    std::vector<uint8_t>* old_seen = nullptr;
++    std::vector<TrackBuildTempV3>* out_tracks = nullptr;
++    StorageMusicManifestV1* out_manifest = nullptr;
++    StorageIncrementalScanStatsV3* stats = nullptr;
++    std::vector<CachedFingerprintV1> cover_fingerprint_cache;
++};
++
++static bool is_audio_filename_v3(const String& filename)
++{
++    String lower = filename;
++    lower.toLowerCase();
++    return lower.endsWith(".mp3") || lower.endsWith(".flac");
++}
++
++static uint32_t fingerprint_crc32_update_v1(uint32_t crc,
++                                             const uint8_t* data,
++                                             size_t size)
++{
++    if (!data || size == 0) return crc;
++
++    for (size_t i = 0; i < size; ++i) {
++        crc ^= data[i];
++        for (uint8_t bit = 0; bit < 8; ++bit) {
++            const uint32_t mask = (uint32_t)-(int32_t)(crc & 1u);
++            crc = (crc >> 1) ^ (0xEDB88320u & mask);
++        }
++    }
++    return crc;
++}
++
++static bool fingerprint_sample_crc_v1(File32& file,
++                                      uint32_t position,
++                                      uint32_t size,
++                                      uint32_t& out_crc)
++{
++    out_crc = 0;
++    if (size == 0) return true;
++    if (!file.seekSet(position)) return false;
++
++    static uint8_t sample[kFingerprintSampleBytes];
++    uint32_t crc = 0xFFFFFFFFu;
++    uint32_t remaining = size;
++
++    while (remaining > 0) {
++        scan_v3_cooperate_wdt();
++        const uint32_t chunk = remaining > sizeof(sample)
++            ? (uint32_t)sizeof(sample)
++            : remaining;
++        const int read_count = file.read(sample, chunk);
++        if (read_count != (int)chunk) {
++            return false;
++        }
++        crc = fingerprint_crc32_update_v1(crc, sample, chunk);
++        remaining -= chunk;
++    }
++
++    out_crc = ~crc;
++    return true;
++}
++
++static bool fingerprint_file_v1(const String& path,
++                                StorageFileFingerprintV1& out)
++{
++    out = StorageFileFingerprintV1{};
++    if (path.isEmpty()) return true;
++
++    File32 file = sd.open(path.c_str(), O_RDONLY);
++    if (!file || file.isDir()) {
++        if (file) file.close();
++        return false;
++    }
++
++    const uint64_t size64 = file.fileSize();
++    if (size64 > UINT32_MAX) {
++        file.close();
++        return false;
++    }
++
++    const uint32_t size = (uint32_t)size64;
++    const uint32_t sample_size = size > kFingerprintSampleBytes
++        ? (uint32_t)kFingerprintSampleBytes
++        : size;
++    const uint32_t middle_position = size > sample_size
++        ? (size / 2u) - (sample_size / 2u)
++        : 0u;
++    const uint32_t tail_position = size > sample_size
++        ? size - sample_size
++        : 0u;
++
++    bool ok = fingerprint_sample_crc_v1(
++        file, 0, sample_size, out.head_crc);
++    ok = ok && fingerprint_sample_crc_v1(
++        file, middle_position, sample_size, out.middle_crc);
++    ok = ok && fingerprint_sample_crc_v1(
++        file, tail_position, sample_size, out.tail_crc);
++    file.close();
++
++    if (!ok) {
++        out = StorageFileFingerprintV1{};
++        return false;
++    }
++
++    out.present = true;
++    out.size = size;
++    return true;
++}
++
++static bool fingerprints_equal_v1(const StorageFileFingerprintV1& a,
++                                  const StorageFileFingerprintV1& b)
++{
++    return a.present == b.present &&
++           a.size == b.size &&
++           a.head_crc == b.head_crc &&
++           a.middle_crc == b.middle_crc &&
++           a.tail_crc == b.tail_crc;
++}
++
++static String music_absolute_path_v3(const char* music_root,
++                                     const String& relative_path)
++{
++    if (relative_path.isEmpty()) return String();
++    if (relative_path.startsWith("/")) return relative_path;
++
++    String root = music_root ? String(music_root) : String("/Music");
++    if (!root.endsWith("/")) root += "/";
++    return root + relative_path;
++}
++
++static String find_lrc_path_for_audio_v3(const String& full_path,
++                                         const String& filename)
++{
++    const String parent_dir = parent_dir_of_v3(full_path);
++    const String base_no_ext = basename_no_ext_v3(filename);
++    const char* const lrc_exts[] = {".lrc", ".LRC", ".Lrc"};
++
++    for (const char* extension : lrc_exts) {
++        const String candidate =
++            parent_dir + "/" + base_no_ext + extension;
++        if (file_exists_v3(candidate)) {
++            return candidate;
++        }
++    }
++    return String();
++}
++
++static bool fingerprint_cached_v1(
++    const String& path,
++    std::vector<CachedFingerprintV1>& cache,
++    StorageFileFingerprintV1& out)
++{
++    if (path.isEmpty()) {
++        out = StorageFileFingerprintV1{};
++        return true;
++    }
++
++    for (const auto& item : cache) {
++        if (item.path == path) {
++            out = item.fingerprint;
++            return item.ok;
++        }
++    }
++
++    CachedFingerprintV1 item{};
++    item.path = path;
++    item.ok = fingerprint_file_v1(path, item.fingerprint);
++    out = item.fingerprint;
++    cache.push_back(std::move(item));
++    return cache.back().ok;
++}
++
++static int find_manifest_entry_v1(const StorageMusicManifestV1& manifest,
++                                  const String& audio_rel)
++{
++    size_t low = 0;
++    size_t high = manifest.entries.size();
++
++    while (low < high) {
++        const size_t middle = low + (high - low) / 2;
++        const int compare =
++            manifest.entries[middle].audio_rel.compareTo(audio_rel);
++        if (compare < 0) {
++            low = middle + 1;
++        } else {
++            high = middle;
++        }
++    }
++
++    if (low < manifest.entries.size() &&
++        manifest.entries[low].audio_rel == audio_rel) {
++        return (int)low;
++    }
++    return -1;
++}
++
++static StorageManifestEntryV1 manifest_entry_from_temp_v1(
++    const TrackBuildTempV3& track,
++    const StorageFileFingerprintV1& audio_fingerprint,
++    const StorageFileFingerprintV1& lrc_fingerprint,
++    const StorageFileFingerprintV1& cover_fingerprint)
++{
++    StorageManifestEntryV1 entry{};
++    entry.audio_rel = track.audio_rel;
++    entry.audio_fingerprint = audio_fingerprint;
++    entry.lrc_fingerprint = lrc_fingerprint;
++
++    if (track.cover_source == COVER_FILE_FALLBACK &&
++        !track.cover_path_rel.isEmpty()) {
++        entry.cover_fingerprint = cover_fingerprint;
++    }
++    return entry;
++}
++
++static const char* catalog_track_audio_rel_v3(
++    const MusicCatalogV3& catalog,
++    uint32_t track_index)
++{
++    if (!catalog.tracks || track_index >= catalog.track_count) return "";
++    return pool_str_v3(
++        catalog.pool,
++        catalog.tracks[track_index].audio_rel_off);
++}
++
++static bool build_catalog_path_order_v3(
++    const MusicCatalogV3& catalog,
++    std::vector<uint32_t>& out_order)
++{
++    out_order.clear();
++    if (!catalog.tracks || catalog.track_count == 0) return false;
++
++    out_order.reserve(catalog.track_count);
++    for (uint32_t i = 0; i < catalog.track_count; ++i) {
++        const char* path = catalog_track_audio_rel_v3(catalog, i);
++        if (!path || path[0] == '\0') {
++            out_order.clear();
++            return false;
++        }
++        out_order.push_back(i);
++    }
++
++    std::sort(out_order.begin(),
++              out_order.end(),
++              [&](uint32_t left, uint32_t right) {
++                return strcmp(
++                    catalog_track_audio_rel_v3(catalog, left),
++                    catalog_track_audio_rel_v3(catalog, right)) < 0;
++              });
++
++    for (size_t i = 1; i < out_order.size(); ++i) {
++        if (strcmp(catalog_track_audio_rel_v3(catalog, out_order[i - 1]),
++                   catalog_track_audio_rel_v3(catalog, out_order[i])) == 0) {
++            out_order.clear();
++            return false;
++        }
++    }
++    return true;
++}
++
++static int find_catalog_track_v3(
++    const MusicCatalogV3& catalog,
++    const std::vector<uint32_t>& order,
++    const String& audio_rel)
++{
++    size_t low = 0;
++    size_t high = order.size();
++
++    while (low < high) {
++        const size_t middle = low + (high - low) / 2;
++        const char* path = catalog_track_audio_rel_v3(
++            catalog, order[middle]);
++        const int compare = strcmp(path ? path : "", audio_rel.c_str());
++        if (compare < 0) {
++            low = middle + 1;
++        } else {
++            high = middle;
++        }
++    }
++
++    if (low < order.size()) {
++        const char* path = catalog_track_audio_rel_v3(catalog, order[low]);
++        if (path && strcmp(path, audio_rel.c_str()) == 0) {
++            return (int)order[low];
++        }
++    }
++    return -1;
++}
++
++static bool temp_from_catalog_track_v3(
++    const MusicCatalogV3& catalog,
++    uint32_t track_index,
++    TrackBuildTempV3& out)
++{
++    out = TrackBuildTempV3{};
++    if (!catalog.tracks || track_index >= catalog.track_count) return false;
++
++    const TrackRowV3& row = catalog.tracks[track_index];
++    out.title = pool_str_v3(catalog.pool, row.title_off);
++    out.artist = pool_str_v3(catalog.pool, row.artist_off);
++    out.audio_rel = pool_str_v3(catalog.pool, row.audio_rel_off);
++    out.lrc_rel = pool_str_v3(catalog.pool, row.lrc_rel_off);
++    out.cover_path_rel = pool_str_v3(catalog.pool, row.cover_path_off);
++    out.cover_mime = pool_str_v3(catalog.pool, row.mime_off);
++    out.cover_offset = row.cover_offset;
++    out.cover_size = row.cover_size;
++    out.cover_source = row.cover_source;
++    out.ext_code = row.ext_code;
++    out.flags = row.flags;
++
++    if (row.album_id != INVALID_ID32 &&
++        catalog.albums &&
++        row.album_id < catalog.album_count) {
++        out.album = pool_str_v3(
++            catalog.pool,
++            catalog.albums[row.album_id].name_off);
++    }
++    return !out.audio_rel.isEmpty();
++}
++
++static bool manifest_matches_catalog_v3(
++    const StorageMusicManifestV1& manifest,
++    const MusicCatalogV3& catalog,
++    const std::vector<uint32_t>& order)
++{
++    if (manifest.entries.size() != catalog.track_count ||
++        order.size() != catalog.track_count) {
++        return false;
++    }
++
++    for (const auto& entry : manifest.entries) {
++        if (find_catalog_track_v3(catalog, order, entry.audio_rel) < 0) {
++            return false;
++        }
++    }
++    return true;
++}
++
++static bool manifest_entry_unchanged_v1(
++    const StorageManifestEntryV1& old_entry,
++    const MusicCatalogV3& catalog,
++    uint32_t track_index,
++    const StorageFileFingerprintV1& audio_fingerprint,
++    const String& current_lrc_rel,
++    const StorageFileFingerprintV1& lrc_fingerprint,
++    const String& current_cover_rel,
++    const StorageFileFingerprintV1& cover_fingerprint)
++{
++    if (!catalog.tracks || track_index >= catalog.track_count) return false;
++    const TrackRowV3& row = catalog.tracks[track_index];
++
++    if (!fingerprints_equal_v1(
++            old_entry.audio_fingerprint,
++            audio_fingerprint)) {
++        return false;
++    }
++
++    const char* catalog_lrc_rel = pool_str_v3(
++        catalog.pool, row.lrc_rel_off);
++    if (current_lrc_rel != (catalog_lrc_rel ? catalog_lrc_rel : "") ||
++        !fingerprints_equal_v1(
++            old_entry.lrc_fingerprint,
++            lrc_fingerprint)) {
++        return false;
++    }
++
++    if (row.cover_source == COVER_MP3_APIC ||
++        row.cover_source == COVER_FLAC_PICTURE) {
++        // 内嵌封面已经包含在音频文件指纹中，目录封面变化与本曲无关。
++        return true;
++    }
++
++    if (row.cover_source == COVER_FILE_FALLBACK) {
++        const char* catalog_cover_rel = pool_str_v3(
++            catalog.pool, row.cover_path_off);
++        return current_cover_rel ==
++                   (catalog_cover_rel ? catalog_cover_rel : "") &&
++               fingerprints_equal_v1(
++                   old_entry.cover_fingerprint,
++                   cover_fingerprint);
++    }
++
++    // 旧索引没有封面时，如果目录中新出现了封面，需要重新解析并更新索引。
++    return current_cover_rel.isEmpty();
++}
++
++static bool scan_incremental_audio_file_v3(
++    const String& full_path,
++    const String& filename,
++    const String& fallback_artist,
++    const String& fallback_album,
++    const String& effective_cover_path,
++    IncrementalScanContextV3& context)
++{
++    if (!is_audio_filename_v3(filename)) return true;
++
++    const String audio_rel = to_music_relative_path_v3(full_path);
++    const String lrc_abs = find_lrc_path_for_audio_v3(full_path, filename);
++    const String lrc_rel = to_music_relative_path_v3(lrc_abs);
++    const String cover_rel = to_music_relative_path_v3(effective_cover_path);
++
++    StorageFileFingerprintV1 audio_fingerprint{};
++    StorageFileFingerprintV1 lrc_fingerprint{};
++    StorageFileFingerprintV1 cover_fingerprint{};
++
++    if (!fingerprint_file_v1(full_path, audio_fingerprint)) {
++        LOGE("[增量扫描] 音频指纹读取失败：%s", full_path.c_str());
++        return false;
++    }
++    if (!fingerprint_file_v1(lrc_abs, lrc_fingerprint)) {
++        LOGE("[增量扫描] 歌词指纹读取失败：%s", lrc_abs.c_str());
++        return false;
++    }
++    if (!fingerprint_cached_v1(effective_cover_path,
++                               context.cover_fingerprint_cache,
++                               cover_fingerprint)) {
++        LOGE("[增量扫描] 封面指纹读取失败：%s",
++             effective_cover_path.c_str());
++        return false;
++    }
++
++    int old_index = -1;
++    if (context.old_manifest) {
++        old_index = find_manifest_entry_v1(
++            *context.old_manifest, audio_rel);
++    }
++
++    TrackBuildTempV3 track{};
++    StorageManifestEntryV1 next_entry{};
++    bool reused = false;
++
++    if (old_index >= 0) {
++        const StorageManifestEntryV1& old_entry =
++            context.old_manifest->entries[(size_t)old_index];
++        const int catalog_track_index = find_catalog_track_v3(
++            *context.reuse_catalog,
++            *context.catalog_path_order,
++            audio_rel);
++
++        if (catalog_track_index >= 0 &&
++            manifest_entry_unchanged_v1(
++                old_entry,
++                *context.reuse_catalog,
++                (uint32_t)catalog_track_index,
++                audio_fingerprint,
++                lrc_rel,
++                lrc_fingerprint,
++                cover_rel,
++                cover_fingerprint) &&
++            temp_from_catalog_track_v3(
++                *context.reuse_catalog,
++                (uint32_t)catalog_track_index,
++                track)) {
++            next_entry = old_entry;
++            reused = true;
++            (*context.old_seen)[(size_t)old_index] = 1;
++            ++context.stats->reused;
++        }
++    }
++
++    if (!reused) {
++        if (!storage_scan_one_audio_file_v3(full_path,
++                                            fallback_artist,
++                                            fallback_album,
++                                            effective_cover_path,
++                                            track)) {
++            LOGE("[增量扫描] 音频完整解析失败：%s", full_path.c_str());
++            return false;
++        }
++
++        StorageFileFingerprintV1 parsed_lrc_fingerprint = lrc_fingerprint;
++        if (track.lrc_rel != lrc_rel) {
++            const String parsed_lrc_abs = music_absolute_path_v3(
++                context.music_root, track.lrc_rel);
++            if (!fingerprint_file_v1(parsed_lrc_abs,
++                                     parsed_lrc_fingerprint)) {
++                LOGE("[增量扫描] 解析后歌词指纹读取失败：%s",
++                     parsed_lrc_abs.c_str());
++                return false;
++            }
++        }
++
++        StorageFileFingerprintV1 parsed_cover_fingerprint{};
++        if (track.cover_source == COVER_FILE_FALLBACK &&
++            !track.cover_path_rel.isEmpty()) {
++            const String parsed_cover_abs = music_absolute_path_v3(
++                context.music_root, track.cover_path_rel);
++            if (!fingerprint_cached_v1(parsed_cover_abs,
++                                       context.cover_fingerprint_cache,
++                                       parsed_cover_fingerprint)) {
++                LOGE("[增量扫描] 解析后封面指纹读取失败：%s",
++                     parsed_cover_abs.c_str());
++                return false;
++            }
++        }
++
++        next_entry = manifest_entry_from_temp_v1(
++            track,
++            audio_fingerprint,
++            parsed_lrc_fingerprint,
++            parsed_cover_fingerprint);
++
++        if (old_index >= 0) {
++            (*context.old_seen)[(size_t)old_index] = 1;
++            ++context.stats->modified;
++        } else {
++            ++context.stats->added;
++        }
++    }
++
++    context.out_tracks->push_back(std::move(track));
++    context.out_manifest->entries.push_back(std::move(next_entry));
++    ++context.stats->discovered;
++    ui_scan_tick((int)context.stats->discovered);
++    return true;
++}
++
++static bool scan_dir_incremental_v3(
++    const String& dir_path,
++    const String& inherited_cover_path,
++    IncrementalScanContextV3& context)
++{
++    scan_v3_cooperate_wdt();
++
++    SdFile dir;
++    if (!dir.open(dir_path.c_str(), O_RDONLY) || !dir.isDir()) {
++        LOGE("[增量扫描] 打开目录失败：%s", dir_path.c_str());
++        dir.close();
++        return false;
++    }
++
++    const String local_cover = pick_cover_in_folder_v3(dir_path);
++    const String effective_cover = local_cover.isEmpty()
++        ? inherited_cover_path
++        : local_cover;
++
++    String fallback_artist;
++    String fallback_album;
++    derive_dir_hints_v3(dir_path,
++                        context.music_root,
++                        fallback_artist,
++                        fallback_album);
++
++    SdFile file;
++    while (file.openNext(&dir, O_RDONLY)) {
++        scan_v3_cooperate_wdt();
++
++        if (app_rescan_should_abort()) {
++            file.close();
++            dir.close();
++            return false;
++        }
++
++        scan_v3_maybe_log_progress(
++            (int)context.stats->discovered,
++            dir_path);
++
++        char name[256];
++        file.getName(name, sizeof(name));
++        const String entry_name(name);
++
++        if (file.isDir()) {
++            const String child_dir = dir_path + "/" + entry_name;
++            file.close();
++
++            if (should_skip_dir_v3(entry_name)) {
++                continue;
++            }
++
++            if (!scan_dir_incremental_v3(
++                    child_dir,
++                    effective_cover,
++                    context)) {
++                dir.close();
++                return false;
++            }
++            continue;
++        }
++
++        const String full_path = dir_path + "/" + entry_name;
++        file.close();
++
++        if (!scan_incremental_audio_file_v3(
++                full_path,
++                entry_name,
++                fallback_artist,
++                fallback_album,
++                effective_cover,
++                context)) {
++            dir.close();
++            return false;
++        }
++
++        delay(0);
++    }
++
++    dir.close();
++    return !app_rescan_should_abort();
++}
++
++}  // namespace
++
++bool storage_scan_music_incremental_v3(
++    std::vector<TrackBuildTempV3>& out_tracks,
++    StorageMusicManifestV1& out_manifest,
++    StorageIncrementalScanStatsV3& out_stats,
++    const MusicCatalogV3* reuse_catalog,
++    const char* music_root,
++    const char* manifest_path)
++{
++    StorageSdLockGuard sd_lock(2000);
++    if (!sd_lock) {
++        LOGE("[增量扫描] SD 锁超时");
++        return false;
++    }
++
++    scan_v3_reset_coop_state();
++    ui_scan_begin();
++
++    out_tracks.clear();
++    out_manifest.clear();
++    out_stats = StorageIncrementalScanStatsV3{};
++
++    StorageMusicManifestV1 old_manifest;
++    std::vector<uint32_t> catalog_path_order;
++
++    const bool manifest_file_loaded =
++        storage_manifest_load_v1(old_manifest, manifest_path);
++    const bool catalog_ready = reuse_catalog &&
++        reuse_catalog->tracks &&
++        reuse_catalog->track_count > 0 &&
++        build_catalog_path_order_v3(
++            *reuse_catalog, catalog_path_order);
++
++    out_stats.manifest_loaded = manifest_file_loaded &&
++        catalog_ready &&
++        manifest_matches_catalog_v3(
++            old_manifest,
++            *reuse_catalog,
++            catalog_path_order);
++    out_stats.full_scan = !out_stats.manifest_loaded;
++
++    if (manifest_file_loaded && !out_stats.manifest_loaded) {
++        LOGW("[增量扫描] 清单与当前 V3 Catalog 不匹配，本轮回退全量解析");
++        old_manifest.clear();
++        catalog_path_order.clear();
++    }
++
++    std::vector<uint8_t> old_seen;
++    if (out_stats.manifest_loaded) {
++        old_seen.assign(old_manifest.entries.size(), 0);
++        out_tracks.reserve(old_manifest.entries.size() + 8);
++        out_manifest.entries.reserve(old_manifest.entries.size() + 8);
++        LOGI("[增量扫描] 使用旧清单和当前 Catalog：条目=%u",
++             (unsigned)old_manifest.entries.size());
++    } else {
++        LOGI("[增量扫描] 首次、清单无效或 Catalog 不匹配，本轮执行全量解析");
++    }
++
++    IncrementalScanContextV3 context{};
++    context.music_root = music_root;
++    context.old_manifest = out_stats.manifest_loaded
++        ? &old_manifest
++        : nullptr;
++    context.reuse_catalog = out_stats.manifest_loaded
++        ? reuse_catalog
++        : nullptr;
++    context.catalog_path_order = out_stats.manifest_loaded
++        ? &catalog_path_order
++        : nullptr;
++    context.old_seen = &old_seen;
++    context.out_tracks = &out_tracks;
++    context.out_manifest = &out_manifest;
++    context.stats = &out_stats;
++
++    const bool scan_ok = scan_dir_incremental_v3(
++        String(music_root),
++        String(),
++        context);
++
++    if (!scan_ok || app_rescan_should_abort()) {
++        out_tracks.clear();
++        out_manifest.clear();
++        if (app_rescan_should_abort()) {
++            ui_scan_abort();
++        } else {
++            ui_scan_end();
++        }
++        return false;
++    }
++
++    if (out_stats.manifest_loaded) {
++        for (uint8_t seen : old_seen) {
++            if (!seen) ++out_stats.deleted;
++        }
++    }
++
++    std::sort(out_manifest.entries.begin(),
++              out_manifest.entries.end(),
++              [](const StorageManifestEntryV1& a,
++                 const StorageManifestEntryV1& b) {
++                return a.audio_rel.compareTo(b.audio_rel) < 0;
++              });
++
++    ui_scan_end();
++
++    LOGI("[增量扫描] 完成：模式=%s 发现=%lu 复用=%lu 新增=%lu 修改=%lu 删除=%lu",
++         out_stats.full_scan ? "全量" : "增量",
++         (unsigned long)out_stats.discovered,
++         (unsigned long)out_stats.reused,
++         (unsigned long)out_stats.added,
++         (unsigned long)out_stats.modified,
++         (unsigned long)out_stats.deleted);
++
++    return !out_tracks.empty();
++}
++
+ bool storage_scan_music_v3(std::vector<TrackBuildTempV3>& out_tracks,
+                            const char* music_root)
+ {

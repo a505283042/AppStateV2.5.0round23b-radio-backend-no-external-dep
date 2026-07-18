@@ -45,12 +45,18 @@ const char* value_i2c_status()
 
 const char* value_bq27441_status()
 {
+    const BatteryUiStatus bat =
+        board_hw_get_battery_status_cached();
+
+    if (bat.runtime_estimate_state ==
+        BatteryRuntimeEstimateState::BluetoothEstimated) {
+        return "TX估算";
+    }
+
     if (bq27441_is_ready()) return "OK";
 
     // 仍有上一份有效电池缓存时表示通信正在恢复，不把瞬时 NACK 直接显示成硬件 ERR。
-    return board_hw_get_battery_status_cached().valid
-        ? "重试"
-        : "ERR";
+    return bat.valid ? "重试" : "ERR";
 }
 
 const char* value_pcf85063_status()
@@ -315,7 +321,15 @@ const char* value_battery_current()
         return "未知";
     }
 
-    snprintf(buf, sizeof(buf), "%dmA", static_cast<int>(bat.average_current_ma));
+    if (bat.runtime_estimate_state ==
+        BatteryRuntimeEstimateState::BluetoothEstimated) {
+        snprintf(buf,
+                 sizeof(buf),
+                 "约%dmA",
+                 static_cast<int>(bat.average_current_ma));
+    } else {
+        snprintf(buf, sizeof(buf), "%dmA", static_cast<int>(bat.average_current_ma));
+    }
     return buf;
 }
 
@@ -324,7 +338,9 @@ const char* value_battery_runtime()
     static char buf[24];
     const BatteryUiStatus& bat = battery_menu_sample();
 
-    if (bat.runtime_estimate_state != BatteryRuntimeEstimateState::Ready) {
+    if (bat.runtime_estimate_state != BatteryRuntimeEstimateState::Ready &&
+        bat.runtime_estimate_state !=
+            BatteryRuntimeEstimateState::BluetoothEstimated) {
         return board_hw_battery_runtime_state_label(bat.runtime_estimate_state);
     }
 
@@ -352,14 +368,19 @@ const char* value_battery_estimate_current()
     const BatteryUiStatus& bat = battery_menu_sample();
 
     if ((bat.runtime_estimate_state != BatteryRuntimeEstimateState::Ready &&
-         bat.runtime_estimate_state != BatteryRuntimeEstimateState::Stabilizing) ||
+         bat.runtime_estimate_state != BatteryRuntimeEstimateState::Stabilizing &&
+         bat.runtime_estimate_state !=
+             BatteryRuntimeEstimateState::BluetoothEstimated) ||
         bat.estimated_discharge_current_ma == 0) {
         return "--";
     }
 
     snprintf(buf,
              sizeof(buf),
-             "-%umA",
+             bat.runtime_estimate_state ==
+                     BatteryRuntimeEstimateState::BluetoothEstimated
+                 ? "约-%umA"
+                 : "-%umA",
              static_cast<unsigned>(bat.estimated_discharge_current_ma));
     return buf;
 }

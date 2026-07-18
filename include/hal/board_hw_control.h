@@ -53,6 +53,7 @@ enum class BatteryRuntimeEstimateState : uint8_t {
     ExternalPower,
     LowCurrent,
     Stabilizing,
+    BluetoothEstimated,
     Ready,
 };
 

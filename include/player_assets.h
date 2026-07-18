@@ -8,6 +8,11 @@
 #define PLAYER_ASSET_PATH_MAX 260
 #endif
 
+#ifndef PLAYER_ASSET_TASK_STACK_BYTES
+// 封面缩放、歌词解析和网页封面生成会叠加使用栈；按实测峰值约 5.1KB 预留到 8KB。
+#define PLAYER_ASSET_TASK_STACK_BYTES 8192
+#endif
+
 /**
  * @brief 播放资源补齐模块（歌词 / 总时长 / 封面 / 下一首封面预读）。
  *

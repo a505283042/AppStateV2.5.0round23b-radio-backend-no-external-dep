@@ -7,6 +7,7 @@
 #include <freertos/task.h>
 
 #include "audio/audio_service.h"
+#include "player_assets.h"
 #include "ui/ui.h"
 #include "utils/log.h"
 
@@ -28,10 +29,6 @@
 
 #ifndef RUNTIME_MONITOR_WARN_DMA_FREE_BYTES
 #define RUNTIME_MONITOR_WARN_DMA_FREE_BYTES 65536 // DMA RAM 低于 64KB 才告警
-#endif
-
-#ifndef PLAYER_ASSET_TASK_STACK_BYTES
-#define PLAYER_ASSET_TASK_STACK_BYTES 6144 // 需要与 player_assets.cpp 里的任务栈保持一致
 #endif
 
 static TaskHandle_t s_runtime_monitor_task = nullptr; // 运行时监控任务句柄

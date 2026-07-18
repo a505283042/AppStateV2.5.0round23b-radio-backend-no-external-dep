@@ -16,7 +16,6 @@
 #include "lyrics/lyrics.h"
 #include "utils/log.h"
 
-static constexpr uint32_t kPlayerAssetTaskStackBytes = 6144; // 播放器资源任务栈大小：封面/歌词处理峰值较高，预留到 6KB
 static constexpr const char* kDefaultCoverPath = "/System/default_cover.jpg";
 
 #ifndef PLAYER_ASSET_TASK_PRIO // 播放器资源任务优先级
@@ -634,7 +633,7 @@ static void player_asset_task_start_once()
     const BaseType_t task_ok =
         xTaskCreatePinnedToCore(player_asset_task_entry,
                                 "PlayerAssetTask",
-                                kPlayerAssetTaskStackBytes,
+                                PLAYER_ASSET_TASK_STACK_BYTES,
                                 nullptr,
                                 PLAYER_ASSET_TASK_PRIO,
                                 &s_asset_task,
