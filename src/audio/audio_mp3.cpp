@@ -42,6 +42,11 @@ static void set_end_reason_if_none(AudioPlaybackEndReason reason)
   }
 }
 
+static void set_last_error(const char* error)
+{
+  s_mp3_last_error = error ? String(error) : String();
+}
+
 static constexpr size_t kMp3FileInputBufferBytes = 8 * 1024;
 // 网络 MP3 流比本地文件更怕 UI/菜单短时间抢 CPU。
 // 这里给网络流单独使用更大的输入缓冲，并优先放到 PSRAM。
@@ -220,11 +225,95 @@ static bool fill_input_buffer(size_t min_fill_target, uint32_t wait_timeout_ms =
     }
 
     set_end_reason_if_none(AudioPlaybackEndReason::SourceIoError);
+    set_last_error(g_source_is_stream ? "stream_read_failed" : "source_read_failed");
     LOGE("[MP3] 音源读取失败：名称=%s 代码=%d", s_debug_name ? s_debug_name : "<null>", n);
     return false;
   }
 
   return true;
+}
+
+static bool prepare_stream_first_frame()
+{
+  while (g_inbuf_filled >= 2) {
+    mp3dec_frame_info_t info{};
+    const int samples = mp3dec_decode_frame(&g_dec,
+                                            g_inbuf,
+                                            g_inbuf_filled,
+                                            g_pcm,
+                                            &info);
+
+    if (info.frame_bytes <= 0) {
+      int sync_pos = -1;
+      for (int i = 1; i < g_inbuf_filled - 1; ++i) {
+        if (g_inbuf[i] == 0xFF && (g_inbuf[i + 1] & 0xE0) == 0xE0) {
+          sync_pos = i;
+          break;
+        }
+      }
+
+      if (sync_pos <= 0) {
+        return false;
+      }
+
+      memmove(g_inbuf, g_inbuf + sync_pos, g_inbuf_filled - sync_pos);
+      g_inbuf_filled -= sync_pos;
+      continue;
+    }
+
+    if (info.frame_bytes > g_inbuf_filled) {
+      set_last_error("stream_invalid_frame_size");
+      return false;
+    }
+
+    memmove(g_inbuf,
+            g_inbuf + info.frame_bytes,
+            g_inbuf_filled - info.frame_bytes);
+    g_inbuf_filled -= info.frame_bytes;
+
+    // minimp3 可能只跳过无效数据而没有输出 PCM，继续寻找下一帧。
+    if (samples <= 0) {
+      continue;
+    }
+
+    if (info.hz <= 0 || (info.channels != 1 && info.channels != 2)) {
+      set_last_error("stream_invalid_audio_format");
+      return false;
+    }
+
+    g_sr = info.hz;
+    s_channels = info.channels;
+    s_mp3_sample_rate = info.hz;
+    s_mp3_channels = info.channels;
+    if (info.bitrate_kbps > 0) {
+      s_mp3_bitrate_kbps = info.bitrate_kbps;
+    }
+
+    // 第一帧已经解码到软件 PCM 缓冲，必须先配置正确采样率，
+    // 否则 audio_mp3_loop() 会在 pending 分支直接按旧采样率写入 I2S。
+    if (g_sr != s_last_sr) {
+      audio_i2s_set_sample_rate(g_sr);
+      s_last_sr = g_sr;
+    }
+
+    if (s_channels == 1) {
+      for (int i = samples - 1; i >= 0; --i) {
+        g_pcm[i * 2] = g_pcm[i];
+        g_pcm[i * 2 + 1] = g_pcm[i];
+      }
+    }
+
+    s_pending_off = 0;
+    s_pending_frames = static_cast<size_t>(samples);
+    LOGD("[MP3] 网络流首帧验证成功：采样率=%d 声道=%d 码率=%dkbps PCM帧=%d",
+         info.hz,
+         info.channels,
+         info.bitrate_kbps,
+         samples);
+    return true;
+  }
+
+  return false;
 }
 }
 
@@ -232,8 +321,13 @@ bool audio_mp3_start_source(const AudioMp3Source& source, const char* debug_name
 {
   audio_mp3_stop();
   s_end_reason = AudioPlaybackEndReason::None;
+  set_last_error(nullptr);
+  s_mp3_sample_rate = 0;
+  s_mp3_channels = 0;
+  s_mp3_bitrate_kbps = 0;
 
   if (!source.read) {
+    set_last_error("invalid_source");
     LOGE("[MP3] 无效音源：缺少读取回调");
     return false;
   }
@@ -254,6 +348,7 @@ bool audio_mp3_start_source(const AudioMp3Source& source, const char* debug_name
   s_debug_name = s_mp3_debug_name.length() ? s_mp3_debug_name.c_str() : nullptr;
 
   if (!select_input_buffer_for_source(g_source_is_stream)) {
+    set_last_error("stream_buffer_alloc_failed");
     audio_mp3_stop();
     return false;
   }
@@ -263,29 +358,45 @@ bool audio_mp3_start_source(const AudioMp3Source& source, const char* debug_name
   const size_t prefill_target = g_source_is_stream ? kMp3StreamStartupPrefillBytes : g_inbuf_capacity;
   const uint32_t prefill_timeout = g_source_is_stream ? kMp3StreamStartupPrefillTimeoutMs : 0;
   if (!fill_input_buffer(prefill_target, prefill_timeout)) {
+    if (s_mp3_last_error.length() == 0) {
+      set_last_error(g_source_is_stream ? "stream_prefill_failed" : "source_prefill_failed");
+    }
     audio_mp3_stop();
     return false;
   }
 
   if (!g_source_is_stream && g_inbuf_filled <= 0) {
+    set_last_error("empty_file");
     audio_mp3_stop();
     return false;
   }
 
   if (g_source_is_stream && g_inbuf_filled <= 0) {
-    if (g_source_eof) {
-      LOGW("[MP3] 网络流在起播前已结束：名称=%s", s_debug_name ? s_debug_name : "<null>");
-      audio_mp3_stop();
-      return false;
+    set_end_reason_if_none(AudioPlaybackEndReason::SourceIoError);
+    set_last_error(g_source_eof ? "stream_ended_before_audio" : "stream_start_no_data");
+    LOGW("[MP3] 网络流起播失败：没有收到音频数据 名称=%s EOF=%d",
+         s_debug_name ? s_debug_name : "<null>",
+         g_source_eof ? 1 : 0);
+    audio_mp3_stop();
+    return false;
+  }
+
+  if (g_source_is_stream && !prepare_stream_first_frame()) {
+    set_end_reason_if_none(AudioPlaybackEndReason::DecodeError);
+    if (s_mp3_last_error.length() == 0) {
+      set_last_error("stream_invalid_mp3");
     }
-    LOGW("[MP3] 网络流以空输入缓冲区启动：名称=%s", s_debug_name ? s_debug_name : "<null>");
+    LOGE("[MP3] 网络流起播失败：预填充数据中未找到有效 MP3 帧 名称=%s 字节=%d",
+         s_debug_name ? s_debug_name : "<null>",
+         g_inbuf_filled);
+    audio_mp3_stop();
+    return false;
   }
 
   g_playing = true;
 
-  // 设置主线状态
+  // 只有已经拿到有效音频帧的网络流，才允许进入 active/playing 状态。
   s_mp3_active = true;
-  s_mp3_last_error = String();
 
   const uint32_t t_after_prefill = millis();
   LOGD("[MP3] 音源启动细节：名称=%s 流=%d 初始化=%lums 预填充=%lums 总计=%lums 预填字节=%d 缓冲=%u PSRAM=%d 目标=%u",
@@ -411,6 +522,7 @@ bool audio_mp3_loop()
     size_t w = audio_i2s_write_frames(g_pcm + s_pending_off * 2, s_pending_frames);
     if (w == SIZE_MAX) {
       set_end_reason_if_none(AudioPlaybackEndReason::OutputError);
+      set_last_error("i2s_write_failed");
       audio_mp3_stop();
       return false;
     }
@@ -513,6 +625,7 @@ bool audio_mp3_loop()
     g_inbuf_filled -= info.frame_bytes;
   } else {
     set_end_reason_if_none(AudioPlaybackEndReason::DecodeError);
+    set_last_error("invalid_mp3_frame_size");
     audio_mp3_stop();
     return false;
   }
@@ -549,6 +662,7 @@ bool audio_mp3_loop()
     size_t w = audio_i2s_write_frames(g_pcm, s_pending_frames);
     if (w == SIZE_MAX) {
       set_end_reason_if_none(AudioPlaybackEndReason::OutputError);
+      set_last_error("i2s_write_failed");
       audio_mp3_stop();
       return false;
     }

@@ -702,9 +702,12 @@ static void audio_task_entry(void*){
                                                  AudioNetworkStartPhase::Failed,
                                                  "wifi_disconnected");
             } else {
+              const char* start_error = audio_mp3_get_last_error();
               audio_task_set_network_start_state(cmd.request_id,
                                                  AudioNetworkStartPhase::Failed,
-                                                 "stream_start_failed");
+                                                 (start_error && *start_error)
+                                                     ? start_error
+                                                     : "stream_start_failed");
             }
           }
         } else {

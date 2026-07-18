@@ -81,12 +81,15 @@ static void web_stop_network_audio_before_wifi_down(const char* reason)
         return;
     }
 
-    if (!audio_service_is_playing() && !audio_service_is_paused()) {
-        return;
-    }
-
+    // 网络音频可能仍处于 DNS、TCP 连接、响应头读取或预缓冲阶段，
+    // 此时 is_playing()/is_paused() 都可能为 false，但 WiFiClient 仍在 AudioTask 中使用。
+    // 因此只要当前来源是网络电台或 NAS，就必须先取消网络操作并等待停止命令完成。
     LOGW("[网页] WiFi 关闭前先停止网络音频：%s", reason ? reason : "未知");
-    audio_service_stop(true);
+    if (!audio_service_stop(true)) {
+        // audio_service_stop() 在入队前已经递增取消编号；即使等待超时，
+        // 正在进行的连接/读取流程也会在下一次取消检查时退出。
+        LOGW("[网页] 等待网络音频停止超时，继续执行 WiFi 切换");
+    }
 }
 
 void web_wifi_set_enabled(bool enabled)
@@ -2797,20 +2800,34 @@ void web_server_start() {
       return;
     }
 
-    if (s_started) return;
+        if (s_started) return;
 
-    s_started = true;
+    // s_started 只表示 WebServer 已经完成 begin()。
+    // 不能在联网成功前提前置 true，否则 STA 和 AP 都启动失败后，后续重试会被永久跳过。
+    s_ready = false;
     WiFi.persistent(false);
     WiFi.setAutoReconnect(false);
     web_settings_load();
-    const bool net_ok = web_try_connect_sta_from_config() || web_start_ap_fallback();
-    if (!net_ok) { LOGE("[网页] 网络启动失败，Web 已禁用"); s_ready = false; return; }
+
+    const bool net_ok =
+        web_try_connect_sta_from_config() ||
+        web_start_ap_fallback();
+
+    if (!net_ok) {
+      LOGE("[网页] 网络启动失败，保留后续重试能力");
+      s_started = false;
+      s_ready = false;
+      s_ap_mode = false;
+      return;
+    }
 
     static const char* kHeaderKeys[] = { "If-None-Match" };
     s_server.collectHeaders(kHeaderKeys, 1);
 
     web_setup_routes();
     s_server.begin();
+
+    s_started = true;
     s_ready = true;
     LOGI("[网页] 服务已启动：http://%s/", web_ip_string().c_str());
   #else

@@ -27,6 +27,8 @@ static AudioMp3HttpSourceSnapshot s_snapshot;
 static portMUX_TYPE s_operation_mux = portMUX_INITIALIZER_UNLOCKED;
 static uint32_t s_operation_generation = 1;
 static uint32_t s_active_operation_id = 0;
+static uint32_t s_stream_opened_ms = 0;
+static uint32_t s_last_body_data_ms = 0;
 
 constexpr uint16_t kDefaultHttpPort = 80;
 constexpr uint32_t kConnectTimeoutMs = 5000;
@@ -34,6 +36,8 @@ constexpr uint32_t kConnectSliceMs = 500;
 constexpr uint32_t kConnectRetryDelayMs = 25;
 constexpr uint32_t kHeaderTimeoutMs = 6000;
 constexpr uint32_t kStartupProbeTimeoutMs = 1500;
+// HTTP 连接仍然存在但响应体长期没有新数据时，主动退出，避免界面永久停在播放中。
+constexpr uint32_t kStreamNoDataTimeoutMs = 12000;
 constexpr uint32_t kMaxStartupSkipBytes = 2 * 1024 * 1024u;
 constexpr int kMaxRedirects = 2;
 
@@ -408,25 +412,53 @@ static int http_source_read(void* ctx, uint8_t* dst, size_t bytes)
     client->stop();
     s_open = false;
     s_active_operation_id = 0;
+    s_stream_opened_ms = 0;
+    s_last_body_data_ms = 0;
     publish_source_snapshot(false, false, false, true, 0);
     return AUDIO_MP3_SOURCE_EOF;
   }
 
-  // WiFi 已关闭时直接结束，避免进入底层 socket read。
-  // 注意：不要在 available() 之前用 client->connected() 判死，
-  // 某些 HTTP/1.0 流在 connected=false 时仍可能有缓冲数据可读。
+  // WiFi 被动断开属于网络读取错误，不能伪装成正常 EOF。
+  // 用户主动停止会先使 operation_id 失效，并走上面的取消分支。
   if (!WiFi.isConnected()) {
+    client->stop();
     s_open = false;
+    s_active_operation_id = 0;
+    s_stream_opened_ms = 0;
+    s_last_body_data_ms = 0;
     publish_source_snapshot(false, false, false, true, 0);
-    return AUDIO_MP3_SOURCE_EOF;
+    return AUDIO_MP3_SOURCE_ERROR;
   }
 
+  const uint32_t now_ms = millis();
   int avail = client->available();
   if (avail <= 0) {
     if (!client->connected()) {
+      // HTTP 文件以关闭连接表示正常结束；这里必须保留 EOF 语义，
+      // 否则 NAS 歌曲播完会被误判为网络错误。电台断流重连由后续状态机单独处理。
       s_open = false;
+      s_active_operation_id = 0;
+      s_stream_opened_ms = 0;
+      s_last_body_data_ms = 0;
       publish_source_snapshot(false, false, false, true, 0);
       return AUDIO_MP3_SOURCE_EOF;
+    }
+
+    const uint32_t activity_base_ms = s_last_body_data_ms != 0
+        ? s_last_body_data_ms
+        : s_stream_opened_ms;
+    if (activity_base_ms != 0 &&
+        (uint32_t)(now_ms - activity_base_ms) >= kStreamNoDataTimeoutMs) {
+      LOGE("[电台] HTTP 流长期无数据，主动断开：等待=%lums URL=%s",
+           (unsigned long)(now_ms - activity_base_ms),
+           s_url.c_str());
+      client->stop();
+      s_open = false;
+      s_active_operation_id = 0;
+      s_stream_opened_ms = 0;
+      s_last_body_data_ms = 0;
+      publish_source_snapshot(false, false, false, true, 0);
+      return AUDIO_MP3_SOURCE_ERROR;
     }
 
     // 网络流暂时没数据时不要在 AudioTask 里紧密轮询 available()。
@@ -441,6 +473,7 @@ static int http_source_read(void* ctx, uint8_t* dst, size_t bytes)
 
   const int n = client->read(dst, want);
   if (n > 0) {
+    s_last_body_data_ms = millis();
     const int remaining = avail > n ? (avail - n) : 0;
     const bool transport_connected = client->connected() || remaining > 0;
     publish_source_snapshot(true,
@@ -452,13 +485,41 @@ static int http_source_read(void* ctx, uint8_t* dst, size_t bytes)
     return n;
   }
 
-  if (!WiFi.isConnected() || !client->connected()) {
+  if (!WiFi.isConnected()) {
+    client->stop();
     s_open = false;
+    s_active_operation_id = 0;
+    s_stream_opened_ms = 0;
+    s_last_body_data_ms = 0;
+    publish_source_snapshot(false, false, false, true, 0);
+    return AUDIO_MP3_SOURCE_ERROR;
+  }
+
+  if (!client->connected()) {
+    s_open = false;
+    s_active_operation_id = 0;
+    s_stream_opened_ms = 0;
+    s_last_body_data_ms = 0;
     publish_source_snapshot(false, false, false, true, 0);
     return AUDIO_MP3_SOURCE_EOF;
   }
 
-  // read() 没拿到数据但连接仍在，给系统一点调度时间。
+  const uint32_t activity_base_ms = s_last_body_data_ms != 0
+      ? s_last_body_data_ms
+      : s_stream_opened_ms;
+  if (activity_base_ms != 0 &&
+      (uint32_t)(millis() - activity_base_ms) >= kStreamNoDataTimeoutMs) {
+    LOGE("[电台] HTTP 流读取长期无进展，主动断开：URL=%s", s_url.c_str());
+    client->stop();
+    s_open = false;
+    s_active_operation_id = 0;
+    s_stream_opened_ms = 0;
+    s_last_body_data_ms = 0;
+    publish_source_snapshot(false, false, false, true, 0);
+    return AUDIO_MP3_SOURCE_ERROR;
+  }
+
+  // read() 没拿到数据但连接仍在，给系统一点调度时间；下一轮继续执行无数据超时检查。
   publish_source_snapshot(true, true, true, false, 0);
   delay(1);
   return AUDIO_MP3_SOURCE_WOULD_BLOCK;
@@ -472,6 +533,8 @@ static void http_source_close_impl(void* ctx)
   }
   s_open = false;
   s_active_operation_id = 0;
+  s_stream_opened_ms = 0;
+  s_last_body_data_ms = 0;
   s_url = String();
   publish_source_snapshot(false, false, false, false, 0);
 }
@@ -609,14 +672,21 @@ bool audio_mp3_audiotools_source_open_from_offset(const char* url, uint32_t star
   s_open = true;
   s_active_operation_id = operation_id;
   s_url = current_url;
+  s_stream_opened_ms = millis();
 
   const int available = g_client.available();
+  if (available > 0) {
+    s_last_body_data_ms = s_stream_opened_ms;
+  } else {
+    s_last_body_data_ms = 0;
+  }
   const bool connected = g_client.connected() || available > 0;
   publish_source_snapshot(true,
                           connected,
                           available <= 0,
                           false,
-                          available > 0 ? static_cast<uint32_t>(available) : 0);
+                          available > 0 ? static_cast<uint32_t>(available) : 0,
+                          available > 0);
 
   out_source = AudioMp3Source{};
   out_source.ctx = &g_client;
@@ -641,6 +711,8 @@ void audio_mp3_audiotools_source_close()
     s_open = false;
   }
   s_active_operation_id = 0;
+  s_stream_opened_ms = 0;
+  s_last_body_data_ms = 0;
   s_url = String();
   publish_source_snapshot(false, false, false, false, 0);
 }
