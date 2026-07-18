@@ -269,6 +269,9 @@ class ScanResult:
     full_scan: bool
     forced_full_scan: bool
     strict_incremental: bool
+    ultra_fast_incremental: bool
+    no_changes: bool
+    skipped_directories: int
     music_root: str
     system_root: str
     discovered: int
@@ -309,6 +312,7 @@ class ParsedCover:
 class LoadedPair:
     catalog: Optional[Catalog] = None
     manifest_entries: dict[str, ManifestEntry] = field(default_factory=dict)
+    directory_snapshots: dict[str, DirectorySnapshot] = field(default_factory=dict)
     valid_for_incremental: bool = False
     source_note: str = ""
 
@@ -1190,10 +1194,9 @@ def _file_fingerprint(
         return base
 
 
-def _directory_attributes(path: Path, *, root: bool = False) -> FileFingerprint:
-    if root:
-        # 与设备端一致：/Music 根目录没有父目录项可复用，不保存目录 FAT 属性。
-        return FileFingerprint()
+def _directory_attributes(path: Path) -> FileFingerprint:
+    # Windows 读取 TF 卡时，目录 stat 的修改时间来自 FAT 目录项。
+    # Manifest v3 同时保存 /Music 根目录属性，供平铺曲库超快速整体跳过。
     stat = path.stat()
     modify_date, modify_time = _fat_datetime(stat.st_mtime)
     return FileFingerprint(
@@ -1242,9 +1245,7 @@ def _build_directory_snapshots(
         snapshots.append(
             DirectorySnapshot(
                 dir_rel=dir_rel,
-                directory_attributes=_directory_attributes(
-                    folder, root=folder == music_root
-                ),
+                directory_attributes=_directory_attributes(folder),
                 effective_cover_rel=cover_rel,
                 effective_cover_attributes=(
                     _file_fingerprint(effective_cover, include_content=False)
@@ -1476,37 +1477,42 @@ def _load_pair(system_root: Path, log: LogCallback) -> LoadedPair:
             log(f"旧索引不可用 {path.name}: {exc}")
 
     entries: list[ManifestEntry] | None = None
+    directories: list[DirectorySnapshot] = []
     manifest_crc = 0
     manifest_source = ""
     for path in manifest_candidates:
         if not path.exists():
             continue
         try:
-            entries, manifest_crc, _ = load_manifest(path)
+            entries, manifest_crc, directories = load_manifest(path)
             manifest_source = path.name
             break
         except Exception as exc:
             log(f"旧清单不可用 {path.name}: {exc}")
 
     if catalog is None or entries is None:
-        return LoadedPair(catalog, {}, False, "缺少可配对的旧索引或清单")
+        return LoadedPair(catalog=catalog, source_note="缺少可配对的旧索引或清单")
 
     actual_crc = catalog_crc32(catalog)
     if actual_crc != manifest_crc:
-        return LoadedPair(catalog, {}, False, "旧索引与清单 Catalog CRC 不一致")
+        return LoadedPair(catalog=catalog, source_note="旧索引与清单 Catalog CRC 不一致")
     if len(entries) != len(catalog.tracks):
-        return LoadedPair(catalog, {}, False, "旧索引与清单条目数不一致")
+        return LoadedPair(catalog=catalog, source_note="旧索引与清单条目数不一致")
 
     track_paths = set(_track_map(catalog))
     manifest_map = {entry.audio_rel: entry for entry in entries}
     if set(manifest_map) != track_paths:
-        return LoadedPair(catalog, {}, False, "旧索引与清单路径集合不一致")
+        return LoadedPair(catalog=catalog, source_note="旧索引与清单路径集合不一致")
 
     return LoadedPair(
-        catalog,
-        manifest_map,
-        True,
-        f"增量基线: {index_source} + {manifest_source}",
+        catalog=catalog,
+        manifest_entries=manifest_map,
+        directory_snapshots={item.dir_rel: item for item in directories},
+        valid_for_incremental=True,
+        source_note=(
+            f"增量基线: {index_source} + {manifest_source} "
+            f"目录快照={len(directories)}"
+        ),
     )
 
 
@@ -1595,11 +1601,113 @@ def _write_report_csv(path: Path, tracks: Iterable[TrackTemp]) -> None:
             )
 
 
+def _root_snapshot_can_skip(
+    pair: LoadedPair,
+    music_root: Path,
+) -> tuple[bool, str]:
+    if not pair.valid_for_incremental or pair.catalog is None:
+        return False, "没有可用增量基线"
+
+    root_snapshot = pair.directory_snapshots.get("")
+    if root_snapshot is None:
+        return False, "Manifest 没有 /Music 根目录快照"
+    if root_snapshot.has_subdirectories:
+        return False, "/Music 含有子目录，不能整体跳过"
+    if root_snapshot.subtree_track_count != len(pair.manifest_entries):
+        return False, "根目录曲目数与 Manifest 不一致"
+    if not root_snapshot.directory_attributes.attributes_valid:
+        return False, "旧根目录快照没有 FAT 属性"
+
+    try:
+        current_attributes = _directory_attributes(music_root)
+    except OSError as exc:
+        return False, f"读取 /Music 根目录属性失败: {exc}"
+
+    if not _fingerprint_attributes_equal(
+        root_snapshot.directory_attributes, current_attributes
+    ):
+        return False, "/Music 根目录 FAT 属性已变化"
+    return True, "/Music 根目录 FAT 属性未变化"
+
+
+def _write_scan_report(path: Path, result: ScanResult) -> None:
+    path.write_text(
+        json.dumps(asdict(result), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _finish_without_catalog_rebuild(
+    *,
+    started: float,
+    music_root: Path,
+    system_root: Path,
+    catalog: Catalog,
+    reused: int,
+    manifest_size: int,
+    ultra_fast: bool,
+    strict_incremental: bool,
+    skipped_directories: int,
+    progress: ProgressCallback,
+    log: LogCallback,
+) -> ScanResult:
+    index_path = system_root / "music_index_v3.bin"
+    manifest_path = system_root / "music_manifest_v1.bin"
+    report_path = system_root / "music_scan_report.json"
+    elapsed = time.monotonic() - started
+    result = ScanResult(
+        success=True,
+        full_scan=False,
+        forced_full_scan=False,
+        strict_incremental=strict_incremental,
+        ultra_fast_incremental=ultra_fast,
+        no_changes=True,
+        skipped_directories=skipped_directories,
+        music_root=str(music_root),
+        system_root=str(system_root),
+        discovered=reused,
+        reused=reused,
+        added=0,
+        modified=0,
+        deleted=0,
+        track_count=len(catalog.tracks),
+        album_count=len(catalog.albums),
+        artist_count=len(catalog.artists),
+        index_size=index_path.stat().st_size if index_path.exists() else 0,
+        manifest_size=manifest_size,
+        elapsed_seconds=elapsed,
+        index_path=str(index_path),
+        manifest_path=str(manifest_path),
+        report_path=str(report_path),
+    )
+    _write_scan_report(report_path, result)
+    progress(
+        ScanProgress(
+            phase="done",
+            message="曲库无变化，已跳过索引重建",
+            processed=reused,
+            total=reused,
+            discovered=reused,
+            reused=reused,
+        )
+    )
+    mode_name = (
+        "超快速目录" if ultra_fast else "严格增量" if strict_incremental else "快速增量"
+    )
+    log(
+        f"完成: 模式={mode_name} 无变化=1 "
+        f"跳过目录={skipped_directories} 复用={reused} "
+        f"歌曲={len(catalog.tracks)} 用时={elapsed:.2f}s"
+    )
+    return result
+
+
 def scan_library(
     selected_root: str | os.PathLike[str],
     *,
     force_full: bool = False,
     strict_verify: bool = False,
+    ultra_fast: bool = False,
     progress: ProgressCallback = _default_progress,
     log: LogCallback = _default_log,
     cancel_event: object | None = None,
@@ -1610,14 +1718,46 @@ def scan_library(
     log(f"TF 根目录: {card_root}")
     log(f"音乐目录: {music_root}")
 
+    if sum(bool(value) for value in (force_full, strict_verify, ultra_fast)) > 1:
+        raise ScanError("超快速、严格和强制全量模式不能同时启用")
+
     pair = _load_pair(system_root, log)
     full_scan = force_full or not pair.valid_for_incremental
     if force_full:
         log("扫描模式: 强制全量")
     elif pair.valid_for_incremental:
-        log(f"扫描模式: {'严格增量' if strict_verify else '快速增量'}；{pair.source_note}")
+        mode_name = (
+            "超快速目录" if ultra_fast else "严格增量" if strict_verify else "快速增量"
+        )
+        log(f"扫描模式: {mode_name}；{pair.source_note}")
     else:
         log(f"扫描模式: 自动全量；原因={pair.source_note}")
+
+    if ultra_fast and not full_scan and pair.catalog is not None:
+        can_skip, reason = _root_snapshot_can_skip(pair, music_root)
+        if can_skip:
+            reused_count = len(pair.catalog.tracks)
+            log(
+                "超快速扫描: /Music 为平铺目录且 FAT 属性未变化，"
+                f"整体跳过全部曲目={reused_count}"
+            )
+            manifest_path = system_root / "music_manifest_v1.bin"
+            return _finish_without_catalog_rebuild(
+                started=started,
+                music_root=music_root,
+                system_root=system_root,
+                catalog=pair.catalog,
+                reused=reused_count,
+                manifest_size=(
+                    manifest_path.stat().st_size if manifest_path.exists() else 0
+                ),
+                ultra_fast=True,
+                strict_incremental=False,
+                skipped_directories=1,
+                progress=progress,
+                log=log,
+            )
+        log(f"超快速扫描不能整体跳过根目录，本轮枚举文件：{reason}")
 
     discovered = discover_audio(music_root, progress, cancel_event)
     if not discovered:
@@ -1752,16 +1892,49 @@ def scan_library(
             deleted=deleted,
         )
     )
+    directory_snapshots = _build_directory_snapshots(music_root, discovered)
+    index_path = system_root / "music_index_v3.bin"
+    manifest_path = system_root / "music_manifest_v1.bin"
+    report_path = system_root / "music_scan_report.json"
+
+    content_unchanged = (
+        not full_scan
+        and pair.catalog is not None
+        and added == 0
+        and modified == 0
+        and deleted == 0
+        and reused == total
+        and total == len(pair.catalog.tracks)
+    )
+    if content_unchanged:
+        old_crc = catalog_crc32(pair.catalog)
+        manifest_data = serialize_manifest(next_manifest, old_crc, directory_snapshots)
+        current_manifest = manifest_path.read_bytes() if manifest_path.exists() else b""
+        manifest_refreshed = manifest_data != current_manifest
+        if manifest_refreshed:
+            _atomic_write(manifest_path, manifest_data, lambda path: load_manifest(path))
+            log("曲库内容无变化：跳过 Catalog/索引重建，仅刷新 Manifest 快照")
+        else:
+            log("曲库完全无变化：跳过 Catalog、索引和 Manifest 写入")
+        return _finish_without_catalog_rebuild(
+            started=started,
+            music_root=music_root,
+            system_root=system_root,
+            catalog=pair.catalog,
+            reused=reused,
+            manifest_size=len(manifest_data),
+            ultra_fast=ultra_fast,
+            strict_incremental=strict_verify,
+            skipped_directories=0,
+            progress=progress,
+            log=log,
+        )
+
     catalog = build_catalog(tracks)
     index_data = serialize_index(catalog)
     cat_crc = catalog_crc32(catalog)
-    directory_snapshots = _build_directory_snapshots(music_root, discovered)
-    manifest_data = serialize_manifest(
-        next_manifest, cat_crc, directory_snapshots
-    )
+    manifest_data = serialize_manifest(next_manifest, cat_crc, directory_snapshots)
 
-    index_path = system_root / "music_index_v3.bin"
-    manifest_path = system_root / "music_manifest_v1.bin"
     _atomic_write(index_path, index_data, lambda path: load_index(path))
     # 索引写成功后再写 Manifest，与设备端保存顺序一致。
     _atomic_write(manifest_path, manifest_data, lambda path: load_manifest(path))
@@ -1769,13 +1942,15 @@ def scan_library(
     report_csv = system_root / "music_scan_tracks.csv"
     _write_report_csv(report_csv, tracks)
     elapsed = time.monotonic() - started
-    report_path = system_root / "music_scan_report.json"
 
     result = ScanResult(
         success=True,
         full_scan=full_scan,
         forced_full_scan=force_full,
         strict_incremental=strict_verify and not full_scan,
+        ultra_fast_incremental=ultra_fast and not full_scan,
+        no_changes=False,
+        skipped_directories=0,
         music_root=str(music_root),
         system_root=str(system_root),
         discovered=total,
@@ -1793,10 +1968,7 @@ def scan_library(
         manifest_path=str(manifest_path),
         report_path=str(report_path),
     )
-    report_path.write_text(
-        json.dumps(asdict(result), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    _write_scan_report(report_path, result)
     progress(
         ScanProgress(
             phase="done",

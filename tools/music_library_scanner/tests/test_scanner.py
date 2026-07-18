@@ -3,8 +3,10 @@ from __future__ import annotations
 import struct
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
+import scanner_core
 from scanner_core import (
     COVER_FILE_FALLBACK,
     COVER_FLAC_PICTURE,
@@ -192,6 +194,53 @@ class ScannerTest(unittest.TestCase):
         self.assertEqual(entries[0].audio_rel, audio_rel.decode("utf-8"))
         self.assertEqual(catalog_crc, 0x12345678)
         self.assertEqual(directories, [])
+
+
+class FlatRootUltraFastTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name) / "TF"
+        self.music = self.root / "Music"
+        self.music.mkdir(parents=True)
+        make_mp3(self.music / "01-flat.mp3", "平铺歌曲一", "歌手甲", "专辑甲", apic=False)
+        make_flac(self.music / "02-flat.flac", "平铺歌曲二", "歌手乙", "专辑乙")
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def test_ultra_fast_skips_unchanged_flat_music_root(self) -> None:
+        first = scan_library(self.root)
+        self.assertTrue(first.full_scan)
+        entries, _, directories = load_manifest(
+            self.root / "System" / "music_manifest_v1.bin"
+        )
+        self.assertEqual(len(entries), 2)
+        root_snapshot = next(item for item in directories if item.dir_rel == "")
+        self.assertTrue(root_snapshot.directory_attributes.attributes_valid)
+        self.assertFalse(root_snapshot.has_subdirectories)
+        self.assertEqual(root_snapshot.subtree_track_count, 2)
+
+        index_path = self.root / "System" / "music_index_v3.bin"
+        manifest_path = self.root / "System" / "music_manifest_v1.bin"
+        old_index = index_path.read_bytes()
+        old_manifest = manifest_path.read_bytes()
+
+        with mock.patch.object(
+            scanner_core,
+            "discover_audio",
+            side_effect=AssertionError("超快速根目录跳过时不应枚举歌曲"),
+        ):
+            second = scan_library(self.root, ultra_fast=True)
+
+        self.assertTrue(second.ultra_fast_incremental)
+        self.assertTrue(second.no_changes)
+        self.assertEqual(second.skipped_directories, 1)
+        self.assertEqual(second.reused, 2)
+        self.assertEqual(second.added, 0)
+        self.assertEqual(second.modified, 0)
+        self.assertEqual(second.deleted, 0)
+        self.assertEqual(index_path.read_bytes(), old_index)
+        self.assertEqual(manifest_path.read_bytes(), old_manifest)
 
 
 if __name__ == "__main__":

@@ -51,6 +51,7 @@
 
 4. 点击：
 
+   - `超快速目录扫描`：平铺 `/Music` 且根目录 FAT 时间未变化时，直接整体跳过。
    - `快速增量扫描`：日常使用；音频优先比较大小和 FAT 时间，歌词与目录封面仍校验内容 CRC。
    - `严格增量扫描`：逐文件校验音频内容 CRC，速度较慢但检测更严格。
    - `强制全量扫描`：忽略旧 Manifest，重新解析全部歌曲。
@@ -59,6 +60,12 @@
 5. 扫描完成后安全弹出 TF 卡，再插回播放器。
 
 ## 命令行运行
+
+超快速目录扫描：
+
+```bat
+py -3 music_library_scanner.py --root E:\ --ultra
+```
 
 快速增量扫描：
 
@@ -138,12 +145,12 @@ TF卡根目录
 
 ## 兼容性范围
 
-当前电脑端程序与固件中的 V3 / Manifest v2 格式保持一致：
+当前电脑端程序与固件中的 V3 / Manifest v3 格式保持一致：
 
 - Index magic：`MIDX`
 - Index version：`3`
 - Manifest magic：`MNF1`
-- Manifest version：`2`（仍可读取 version 1，并在下一次扫描后自动升级）
+- Manifest version：`3`（仍可读取 version 1/2，并在下一次扫描后自动升级）
 - TrackRowV3：44 字节
 - ArtistRowV3：4 字节
 - AlbumRowV3：12 字节
@@ -159,9 +166,22 @@ TF卡根目录
 
 保存时程序先写入 `.tmp` 并完成 CRC 校验，再将原文件保留为 `.bak`。不要在写入过程中拔出 TF 卡。扫描完成后应通过 Windows 的“安全删除硬件”弹出 TF 卡。
 
-## v1.2.0 兼容性
+## v1.3.0 超快速平铺曲库
 
 - 输出设备端兼容的 Manifest v3。
-- Manifest v3 包含目录 FAT 时间、继承封面和子树曲目数快照。
+- Manifest v3 包含 `/Music` 根目录及各子目录的 FAT 时间、继承封面和子树曲目数快照。
 - 可读取旧版 Manifest v1/v2；下一次成功扫描会自动升级为 v3。
-- 电脑端当前仍提供快速、严格和全量扫描；设备端的“超快速目录重扫”可直接使用电脑生成的 v3 清单。
+- 图形界面和命令行都支持超快速、快速、严格和强制全量四种模式。
+- 平铺 `/Music` 且根目录 FAT 时间未变化时，超快速模式不会枚举全部歌曲，也不会重写索引或 Manifest。
+- 增量扫描确认曲库无变化时，跳过 Catalog 与索引重建；目录快照需要升级时只刷新 Manifest。
+
+命令行示例：
+
+```bat
+python music_library_scanner.py --root E:\ --ultra
+python music_library_scanner.py --root E:\
+python music_library_scanner.py --root E:\ --strict
+python music_library_scanner.py --root E:\ --full
+```
+
+超快速模式依赖 FAT 目录时间。修改既有歌曲标签、歌词或封面后，应使用快速或严格增量扫描。
