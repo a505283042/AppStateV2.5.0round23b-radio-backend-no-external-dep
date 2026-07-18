@@ -317,7 +317,7 @@ void rebuild_group_cache_if_needed()
     log_ptr_region_playlist("playlist.album_group_pos", s_album_group_pos_by_track, n * sizeof(CompactIndex));
 }
 
-void rebuild_playlist_pos_cache()
+void rebuild_playlist_pos_cache(play_mode_t mode)
 {
     const MusicCatalogV3& cat = storage_catalog_v3();
     const size_t n = storage_catalog_v3_ready() ? (size_t)cat.track_count : 0u;
@@ -336,7 +336,7 @@ void rebuild_playlist_pos_cache()
     }
 
     s_playlist_pos_generation = storage_catalog_v3_ready() ? cat.generation : 0;
-    s_playlist_pos_mode = g_play_mode;
+    s_playlist_pos_mode = mode;
     s_playlist_pos_group_idx = s_current_group_idx;
     
     LOGD("[播放器][缓存] 播放列表位置：歌曲=%u 字节=%u（PSRAM）",
@@ -383,13 +383,14 @@ void update_playlist_cache_for_track(int current_track_idx)
 {
     bool need_update = false;
 
+    const play_mode_t mode = app_play_mode_get();
     const int total = player_track_count_for_dispatch();
     const bool using_v3 = storage_catalog_v3_ready();
 
-    if (g_play_mode != s_last_play_mode) {
+    if (mode != s_last_play_mode) {
         need_update = true;
-    } else if ((player_playlist_is_artist_mode(g_play_mode) ||
-                player_playlist_is_album_mode(g_play_mode)) &&
+    } else if ((player_playlist_is_artist_mode(mode) ||
+                player_playlist_is_album_mode(mode)) &&
                s_current_group_idx != s_last_group_idx) {
         need_update = true;
     } else if (total != s_last_playlist_track_total) {
@@ -405,7 +406,7 @@ void update_playlist_cache_for_track(int current_track_idx)
         s_current_playlist_pos = -1;
         bool playlist_build_ok = true;
 
-        switch (g_play_mode) {
+        switch (mode) {
             case PLAY_MODE_ALL_SEQ:
             case PLAY_MODE_ALL_RND:
                 playlist_build_ok = build_all_current_playlist(total);
@@ -441,12 +442,12 @@ void update_playlist_cache_for_track(int current_track_idx)
         }
 
         s_original_group_pos = -1;
-        if (player_playlist_is_artist_mode(g_play_mode)) {
+        if (player_playlist_is_artist_mode(mode)) {
             rebuild_group_cache_if_needed();
             if (current_track_idx >= 0 && current_track_idx < (int)s_group_cache_size && s_artist_group_pos_by_track) {
                 s_original_group_pos = (int)s_artist_group_pos_by_track[(size_t)current_track_idx];
             }
-        } else if (player_playlist_is_album_mode(g_play_mode)) {
+        } else if (player_playlist_is_album_mode(mode)) {
             rebuild_group_cache_if_needed();
             if (current_track_idx >= 0 && current_track_idx < (int)s_group_cache_size && s_album_group_pos_by_track) {
                 s_original_group_pos = (int)s_album_group_pos_by_track[(size_t)current_track_idx];
@@ -455,17 +456,17 @@ void update_playlist_cache_for_track(int current_track_idx)
             s_original_group_pos = current_track_idx;
         }
 
-        const bool is_rnd = (g_play_mode == PLAY_MODE_ALL_RND ||
-                             g_play_mode == PLAY_MODE_ARTIST_RND ||
-                             g_play_mode == PLAY_MODE_ALBUM_RND);
+        const bool is_rnd = (mode == PLAY_MODE_ALL_RND ||
+                             mode == PLAY_MODE_ARTIST_RND ||
+                             mode == PLAY_MODE_ALBUM_RND);
         if (is_rnd && !current_playlist_empty()) {
             shuffle_playlist_keep_current_front(s_current_playlist, s_current_playlist_count, current_track_idx);
         }
 
-        rebuild_playlist_pos_cache();
+        rebuild_playlist_pos_cache(mode);
         s_current_playlist_pos = find_pos_in_playlist(current_track_idx);
 
-        if ((player_playlist_is_artist_mode(g_play_mode) || player_playlist_is_album_mode(g_play_mode)) &&
+        if ((player_playlist_is_artist_mode(mode) || player_playlist_is_album_mode(mode)) &&
             !current_playlist_empty() && s_current_playlist_pos < 0) {
             s_current_playlist_pos = 0;
         }
@@ -474,7 +475,7 @@ void update_playlist_cache_for_track(int current_track_idx)
                                 s_current_playlist,
                                 s_current_playlist_cap * sizeof(uint16_t));
 
-        s_last_play_mode = g_play_mode;
+        s_last_play_mode = mode;
         s_last_group_idx = s_current_group_idx;
         s_last_playlist_track_total = total;
         s_last_playlist_use_v3 = using_v3;
@@ -482,9 +483,9 @@ void update_playlist_cache_for_track(int current_track_idx)
         const uint32_t current_gen = using_v3 ? storage_catalog_v3().generation : 0;
         if (s_playlist_pos_size != (size_t)total ||
             s_playlist_pos_generation != current_gen ||
-            s_playlist_pos_mode != g_play_mode ||
+            s_playlist_pos_mode != mode ||
             s_playlist_pos_group_idx != s_current_group_idx) {
-            rebuild_playlist_pos_cache();
+            rebuild_playlist_pos_cache(mode);
         }
     }
 }
@@ -565,8 +566,9 @@ bool player_playlist_align_group_context_for_track(int track_idx, bool verbose)
     }
 
     rebuild_group_cache_if_needed();
+    const play_mode_t mode = app_play_mode_get();
 
-    if (player_playlist_is_artist_mode(g_play_mode)) {
+    if (player_playlist_is_artist_mode(mode)) {
         if (track_idx >= (int)s_group_cache_size || !s_artist_group_index_by_track) return false;
         const int actual_group = (int)s_artist_group_index_by_track[(size_t)track_idx];
         if (actual_group >= 0 && actual_group != s_current_group_idx) {
@@ -580,7 +582,7 @@ bool player_playlist_align_group_context_for_track(int track_idx, bool verbose)
         return false;
     }
 
-    if (player_playlist_is_album_mode(g_play_mode)) {
+    if (player_playlist_is_album_mode(mode)) {
         if (track_idx >= (int)s_group_cache_size || !s_album_group_index_by_track) return false;
         const int actual_group = (int)s_album_group_index_by_track[(size_t)track_idx];
         if (actual_group >= 0 && actual_group != s_current_group_idx) {
@@ -600,10 +602,11 @@ bool player_playlist_align_group_context_for_track(int track_idx, bool verbose)
 void player_playlist_update_for_current_track(int current_track_idx, bool verbose)
 {
     update_playlist_cache_for_track(current_track_idx);
+    const play_mode_t mode = app_play_mode_get();
 
     s_current_playlist_pos = find_pos_in_playlist(current_track_idx);
 
-    if ((player_playlist_is_artist_mode(g_play_mode) || player_playlist_is_album_mode(g_play_mode)) &&
+    if ((player_playlist_is_artist_mode(mode) || player_playlist_is_album_mode(mode)) &&
         s_current_playlist_pos < 0 &&
         player_playlist_align_group_context_for_track(current_track_idx, verbose)) {
         update_playlist_cache_for_track(current_track_idx);
@@ -611,14 +614,14 @@ void player_playlist_update_for_current_track(int current_track_idx, bool verbos
     }
 
     s_original_group_pos = -1;
-    if (player_playlist_is_artist_mode(g_play_mode)) {
+    if (player_playlist_is_artist_mode(mode)) {
         rebuild_group_cache_if_needed();
         if (current_track_idx >= 0 && 
             current_track_idx < (int)s_group_cache_size && 
             s_artist_group_pos_by_track) {
             s_original_group_pos = (int)s_artist_group_pos_by_track[(size_t)current_track_idx];
         }
-    } else if (player_playlist_is_album_mode(g_play_mode)) {
+    } else if (player_playlist_is_album_mode(mode)) {
         rebuild_group_cache_if_needed();
         if (current_track_idx >= 0 && 
             current_track_idx < (int)s_group_cache_size && 
@@ -711,17 +714,18 @@ bool player_playlist_get_next_for_cover_prefetch(int current_idx,
 PlayerPlaylistDisplayInfo player_playlist_get_display_info(int current_track_idx,
                                                            int library_total_hint)
 {
+    const play_mode_t mode = app_play_mode_get();
     PlayerPlaylistDisplayInfo info{};
     info.display_pos = current_track_idx;
     info.display_total = (library_total_hint > 0)
                            ? library_total_hint
                            : (int)storage_catalog_v3_track_count();
 
-    if (player_playlist_is_artist_mode(g_play_mode) || player_playlist_is_album_mode(g_play_mode)) {
+    if (player_playlist_is_artist_mode(mode) || player_playlist_is_album_mode(mode)) {
         player_playlist_ensure_current();
         info.display_total = (int)s_current_playlist_count;
 
-        if (g_play_mode == PLAY_MODE_ARTIST_RND || g_play_mode == PLAY_MODE_ALBUM_RND) {
+        if (mode == PLAY_MODE_ARTIST_RND || mode == PLAY_MODE_ALBUM_RND) {
             info.display_pos = (s_original_group_pos >= 0) ? s_original_group_pos : s_current_playlist_pos;
         } else {
             info.display_pos = s_current_playlist_pos;

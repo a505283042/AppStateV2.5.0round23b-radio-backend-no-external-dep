@@ -713,10 +713,10 @@ static bool web_parse_int_arg(const char* name, int& out) {
   return true;
 }
 static bool web_status_mode_is_artist() {
-  return g_play_mode == PLAY_MODE_ARTIST_SEQ || g_play_mode == PLAY_MODE_ARTIST_RND;
+  return player_playlist_is_artist_mode(app_play_mode_get());
 }
 static bool web_status_mode_is_album() {
-  return g_play_mode == PLAY_MODE_ALBUM_SEQ || g_play_mode == PLAY_MODE_ALBUM_RND;
+  return player_playlist_is_album_mode(app_play_mode_get());
 }
 static bool web_radio_catalog_ensure_loaded() {
   return radio_catalog_is_loaded();
@@ -996,11 +996,12 @@ static bool web_play_group_impl(bool is_album, int group_idx) {
   const auto& groups = is_album ? player_playlist_album_groups() : player_playlist_artist_groups();
   if (group_idx < 0 || group_idx >= (int)groups.size()) return false;
 
-  const bool keep_random = control_mode_is_random(g_play_mode);
-  g_play_mode = is_album
+  const play_mode_t current_mode = app_play_mode_get();
+  const bool keep_random = control_mode_is_random(current_mode);
+  const play_mode_t next_mode = is_album
       ? (keep_random ? PLAY_MODE_ALBUM_RND : PLAY_MODE_ALBUM_SEQ)
       : (keep_random ? PLAY_MODE_ARTIST_RND : PLAY_MODE_ARTIST_SEQ);
-
+  (void)app_play_mode_set(next_mode, AppPlayModeChangeReason::WebControl);
 
   player_playlist_set_current_group_idx(group_idx);
   player_playlist_force_rebuild();
@@ -2106,16 +2107,18 @@ static void web_handle_track_play() {
   web_parse_int_arg("group_idx", group_idx);
 
   if (mode == "artist") {
-    const bool keep_random = control_mode_is_random(g_play_mode);
-    g_play_mode = keep_random ? PLAY_MODE_ARTIST_RND : PLAY_MODE_ARTIST_SEQ;
+    const bool keep_random = control_mode_is_random(app_play_mode_get());
+    const play_mode_t next_mode = keep_random ? PLAY_MODE_ARTIST_RND : PLAY_MODE_ARTIST_SEQ;
+    (void)app_play_mode_set(next_mode, AppPlayModeChangeReason::WebControl);
 
     if (group_idx >= 0) player_playlist_set_current_group_idx(group_idx);
     else (void)player_playlist_align_group_context_for_track(track_idx, false);
 
   } else if (mode == "album") {
-    const bool keep_random = control_mode_is_random(g_play_mode);
-    g_play_mode = keep_random ? PLAY_MODE_ALBUM_RND : PLAY_MODE_ALBUM_SEQ;
-    
+    const bool keep_random = control_mode_is_random(app_play_mode_get());
+    const play_mode_t next_mode = keep_random ? PLAY_MODE_ALBUM_RND : PLAY_MODE_ALBUM_SEQ;
+    (void)app_play_mode_set(next_mode, AppPlayModeChangeReason::WebControl);
+
     if (group_idx >= 0) player_playlist_set_current_group_idx(group_idx);
     else (void)player_playlist_align_group_context_for_track(track_idx, false);
 

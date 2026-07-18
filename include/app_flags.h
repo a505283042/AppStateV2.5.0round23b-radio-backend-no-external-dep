@@ -32,4 +32,28 @@ bool app_rescan_consume_result(bool& success, bool& aborted);
 // 创建扫描任务失败时回滚刚建立的重扫会话。
 void app_rescan_reset();
 
-extern volatile play_mode_t g_play_mode;  // 播放模式
+// 播放模式由菜单、Web、NFC、快照恢复和播放器状态机共同访问，
+// 统一通过快照接口读写，避免各模块直接修改全局变量后遗漏 UI 同步。
+enum class AppPlayModeChangeReason : uint8_t {
+  Internal = 0,
+  PlayerControl,
+  RemoteNormalize,
+  NfcBinding,
+  SnapshotRestore,
+  WebControl,
+};
+
+struct AppPlayModeSnapshot {
+  play_mode_t mode = PLAY_MODE_ALL_SEQ;
+  uint32_t revision = 0;
+};
+
+// 获取播放模式和版本号的一致快照。
+AppPlayModeSnapshot app_play_mode_snapshot_get();
+
+// 获取当前播放模式。
+play_mode_t app_play_mode_get();
+
+// 设置播放模式并同步 UI。非法枚举返回 false；合法值即使与当前相同也会校准 UI。
+bool app_play_mode_set(play_mode_t mode,
+                       AppPlayModeChangeReason reason = AppPlayModeChangeReason::Internal);

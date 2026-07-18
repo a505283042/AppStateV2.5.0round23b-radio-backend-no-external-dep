@@ -233,9 +233,9 @@ static uint32_t s_nfc_bind_popup_last_ms = 0;
 
 static uint8_t nfc_bind_default_selection()
 {
-    // g_play_mode 的 6 个值已经在 ui.h 里定义，这里直接按枚举判断，
+    // 播放模式的 6 个值已经在 ui.h 里定义，这里读取统一快照后按枚举判断，
     // 不依赖 player_playlist.cpp 里的辅助函数，减少按键模块的耦合。
-    switch (g_play_mode) {
+    switch (app_play_mode_get()) {
         case PLAY_MODE_ARTIST_SEQ:
         case PLAY_MODE_ARTIST_RND:
             return 1;

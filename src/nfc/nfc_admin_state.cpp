@@ -1,6 +1,7 @@
 #include "nfc/nfc_admin_state.h"
 
 #include "app_state.h"
+#include "app_flags.h"
 #include "nfc/nfc.h"
 #include "nfc/nfc_binding.h"
 #include "player_control.h"
@@ -12,10 +13,6 @@
 #include "audio/audio_service.h"
 #include "ui/ui.h"
 #include "utils/log.h"
-
-// 外部声明
-extern volatile play_mode_t g_play_mode;
-
 
 namespace {
 enum NfcAdminStep {
@@ -71,7 +68,7 @@ static bool build_current_bind_target(NfcAdminTarget& out)
         return false;
     }
 
-    switch (g_play_mode) {
+    switch (app_play_mode_get()) {
         case PLAY_MODE_ARTIST_SEQ:
         case PLAY_MODE_ARTIST_RND: {
             const auto& groups = player_playlist_artist_groups();

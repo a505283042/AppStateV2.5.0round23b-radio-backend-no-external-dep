@@ -32,8 +32,6 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
-volatile play_mode_t g_play_mode = PLAY_MODE_ALL_SEQ;  // 播放模式
-
 static bool s_tf_mount_restore_pending = false;
 static bool s_low_battery_shutdown_started = false;
 

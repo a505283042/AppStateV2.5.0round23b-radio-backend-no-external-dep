@@ -208,7 +208,7 @@ static bool player_control_hook_play_track_dispatch(int idx, bool verbose, bool 
 static bool player_control_hook_enter_list_select()
 {
     player_list_select_init_once();
-    return player_list_select_enter(g_play_mode);
+    return player_list_select_enter(app_play_mode_get());
 }
 
 static void player_control_init_once()
@@ -344,15 +344,16 @@ static bool player_play_trackinfo_core(const TrackInfo& t,
     int display_pos = s_cur;
     int display_total = (library_total_hint > 0) ? library_total_hint : (int)storage_catalog_v3_track_count();
 
-    if (g_play_mode == PLAY_MODE_ARTIST_SEQ || g_play_mode == PLAY_MODE_ARTIST_RND ||
-        g_play_mode == PLAY_MODE_ALBUM_SEQ || g_play_mode == PLAY_MODE_ALBUM_RND) {
+    const play_mode_t play_mode = app_play_mode_get();
+    if (play_mode == PLAY_MODE_ARTIST_SEQ || play_mode == PLAY_MODE_ARTIST_RND ||
+        play_mode == PLAY_MODE_ALBUM_SEQ || play_mode == PLAY_MODE_ALBUM_RND) {
         const PlayerPlaylistDisplayInfo display = player_playlist_get_display_info(s_cur, library_total_hint);
         display_total = display.display_total;
         display_pos = display.display_pos;
     }
 
     ui_set_track_pos(display_pos, display_total);
-    ui_set_play_mode(g_play_mode);
+    ui_set_play_mode(play_mode);
     audio_output_route_sync_ui_volume();
     t_after_ui_prepare = millis();
 

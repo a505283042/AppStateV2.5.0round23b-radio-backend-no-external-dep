@@ -27,7 +27,7 @@ const char* bool_label(bool enabled)
 
 const char* value_play_order()
 {
-    return control_mode_is_random(g_play_mode) ? "随机" : "顺序";
+    return control_mode_is_random(app_play_mode_get()) ? "随机" : "顺序";
 }
 
 int mode_category(play_mode_t mode)
@@ -73,7 +73,7 @@ int& local_browse_category_ref()
     // -1 表示首次进入前还没有用户选择，默认跟随当前播放大类显示。
     static int s_local_browse_category = -1;
     if (s_local_browse_category < 0) {
-        s_local_browse_category = mode_category(g_play_mode);
+        s_local_browse_category = mode_category(app_play_mode_get());
     }
     return s_local_browse_category;
 }
@@ -104,7 +104,7 @@ const char* value_play_category()
 
         case PlayerSourceType::LOCAL_TRACK:
         default:
-            return category_label(mode_category(g_play_mode));
+            return category_label(mode_category(app_play_mode_get()));
     }
 }
 
@@ -223,7 +223,7 @@ bool action_cycle_local_browse_mode()
     }
 
     // 本地浏览方式只影响“当前源列表/本地列表”的浏览入口，
-    // 不修改 g_play_mode，也不切换正在播放的播放大类。
+    // 不修改当前播放模式，也不切换正在播放的播放大类。
     int& browse_category = local_browse_category_ref();
     browse_category = (browse_category + 1) % 3;
     return true;
@@ -234,7 +234,7 @@ bool action_open_current_source_list()
     const PlayerSourceState source = player_source_get();
     const bool ok = (source.type == PlayerSourceType::LOCAL_TRACK)
         ? player_list_select_enter(browse_mode_for_category(local_browse_category_ref()))
-        : player_list_select_enter(g_play_mode);
+        : player_list_select_enter(app_play_mode_get());
 
     // 从“播放控制”进入列表时保留快捷菜单会话。
     // 这样列表里短按 MODE 只退回"播放控制"菜单，长按 MODE 才退出到播放器界面，

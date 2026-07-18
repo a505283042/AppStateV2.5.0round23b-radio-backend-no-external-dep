@@ -55,9 +55,10 @@ const std::vector<PlaylistGroup>& binding_album_groups()
 // 是否保持随机播放标志
 static bool nfc_binding_keep_random_flag()
 {
-    return g_play_mode == PLAY_MODE_ALL_RND ||
-           g_play_mode == PLAY_MODE_ARTIST_RND ||
-           g_play_mode == PLAY_MODE_ALBUM_RND;
+    const play_mode_t mode = app_play_mode_get();
+    return mode == PLAY_MODE_ALL_RND ||
+           mode == PLAY_MODE_ARTIST_RND ||
+           mode == PLAY_MODE_ALBUM_RND;
 }
 // 获取NFC绑定类型的播放模式
 static play_mode_t nfc_binding_mode_for_type(NfcBindType type)
@@ -78,12 +79,15 @@ static play_mode_t nfc_binding_mode_for_type(NfcBindType type)
 // 应用NFC绑定类型的播放模式
 static void nfc_binding_apply_mode(NfcBindType type)
 {
-    g_play_mode = nfc_binding_mode_for_type(type);
-    const bool is_random = nfc_binding_keep_random_flag();
+    const play_mode_t mode = nfc_binding_mode_for_type(type);
+    (void)app_play_mode_set(mode, AppPlayModeChangeReason::NfcBinding);
+    const bool is_random = mode == PLAY_MODE_ALL_RND ||
+                           mode == PLAY_MODE_ARTIST_RND ||
+                           mode == PLAY_MODE_ALBUM_RND;
 
     LOGD("[NFC] 应用播放模式：类型=%d -> 模式=%d 随机=%d",
          (int)type,
-         (int)g_play_mode,
+         (int)mode,
          is_random ? 1 : 0);
 }
 

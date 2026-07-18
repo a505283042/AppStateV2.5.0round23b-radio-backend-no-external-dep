@@ -210,9 +210,10 @@ void web_snapshot_capture_into(WebPlayerSnapshot& snap) {
   snap.play_ms = audio_get_play_ms();
   snap.total_ms = audio_get_total_ms();
   snap.volume = audio_output_route_get_user_volume();
-  snap.mode = web_mode_to_key(g_play_mode);
+  const play_mode_t play_mode = app_play_mode_get();
+  snap.mode = web_mode_to_key(play_mode);
   snap.current_group_idx = player_playlist_get_current_group_idx();
-  snap.mode_label = web_mode_to_label(g_play_mode);
+  snap.mode_label = web_mode_to_label(play_mode);
   snap.view = web_view_to_key(ui_get_view());
   snap.view_label = web_view_to_label(ui_get_view());
   const WebRuntimeSettings ws = web_settings_get();

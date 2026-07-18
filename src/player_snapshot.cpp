@@ -365,7 +365,7 @@ static bool snapshot_capture_local_state()
     PlayerPersistSnapshot snap{};
     snap.version = kLocalSnapshotVersion;
     snap.volume = s_normal_volume;
-    snap.play_mode = (uint8_t)g_play_mode;
+    snap.play_mode = (uint8_t)app_play_mode_get();
     snap.current_group_idx = player_playlist_get_current_group_idx();
     snap.track_idx = idx;
     snap.ui_view = s_ui_view;
@@ -391,7 +391,7 @@ static bool snapshot_capture_net_state(const PlayerSourceState& source)
 
     PlayerNetPersistSnapshot snap{};
     snap.version = kNetSnapshotVersion;
-    snap.play_mode = (uint8_t)snapshot_sanitize_net_mode((int)g_play_mode);
+    snap.play_mode = (uint8_t)snapshot_sanitize_net_mode((int)app_play_mode_get());
     snap.track_idx = source.net_track_idx;
     snap.total_count = net_music_catalog_is_loaded() ? net_music_catalog_count() : 0;
     snap.duration_ms = source.net_track_duration_ms;
@@ -560,15 +560,14 @@ bool player_snapshot_apply_local_context()
     if (!s_local_valid) return false;
 
     const play_mode_t mode = snapshot_sanitize_local_mode((int)s_local.play_mode);
-    g_play_mode = mode;
+    (void)app_play_mode_set(mode, AppPlayModeChangeReason::SnapshotRestore);
     player_playlist_set_current_group_idx(
         snapshot_sanitize_group_idx(mode, s_local.current_group_idx));
     player_playlist_force_rebuild();
     player_playlist_ensure_current();
-    ui_set_play_mode(g_play_mode);
 
     LOGD("[快照] 已恢复本地上下文：模式=%d 分组=%d 歌曲=%d",
-         (int)g_play_mode,
+         (int)mode,
          player_playlist_get_current_group_idx(),
          player_snapshot_local_track_index());
     return true;
@@ -577,14 +576,14 @@ bool player_snapshot_apply_local_context()
 bool player_snapshot_apply_net_context()
 {
     // NAS 只支持顺序/随机两种模式，不能继承本地的歌手/专辑模式。
-    g_play_mode = s_net_valid
+    const play_mode_t mode = s_net_valid
         ? snapshot_sanitize_net_mode((int)s_net.play_mode)
         : PLAY_MODE_ALL_SEQ;
-    ui_set_play_mode(g_play_mode);
+    (void)app_play_mode_set(mode, AppPlayModeChangeReason::SnapshotRestore);
 
     if (s_net_valid) {
         LOGD("[快照] 已恢复 NAS 上下文：模式=%d 歌曲=%d",
-             (int)g_play_mode,
+             (int)mode,
              s_net.track_idx);
     } else {
         LOGD("[快照] NAS 尚无历史状态，使用默认顺序模式");
@@ -705,7 +704,7 @@ PlayerSnapshotRestorePollResult player_snapshot_poll_restore()
 
     ui_set_now_playing(t.title.c_str(), t.artist.c_str());
     ui_set_album(t.album);
-    ui_set_play_mode(g_play_mode);
+    ui_set_play_mode(app_play_mode_get());
     audio_output_route_sync_ui_volume();
 
     {
@@ -713,8 +712,9 @@ PlayerSnapshotRestorePollResult player_snapshot_poll_restore()
         int display_pos = track_idx;
         int display_total = total;
 
-        if (g_play_mode == PLAY_MODE_ARTIST_SEQ || g_play_mode == PLAY_MODE_ARTIST_RND ||
-            g_play_mode == PLAY_MODE_ALBUM_SEQ || g_play_mode == PLAY_MODE_ALBUM_RND) {
+        const play_mode_t mode = app_play_mode_get();
+        if (mode == PLAY_MODE_ARTIST_SEQ || mode == PLAY_MODE_ARTIST_RND ||
+            mode == PLAY_MODE_ALBUM_SEQ || mode == PLAY_MODE_ALBUM_RND) {
             const PlayerPlaylistDisplayInfo display =
                 player_playlist_get_display_info(track_idx, total);
             display_total = display.display_total;
@@ -766,7 +766,7 @@ PlayerSnapshotRestorePollResult player_snapshot_poll_restore()
     ui_request_refresh_now();
 
     LOGD("[快照] 延迟本地 UI 恢复完成：模式=%d 分组=%d 歌曲=%d 路径=%s 普通音量=%u 视图=%u",
-         (int)g_play_mode,
+         (int)app_play_mode_get(),
          player_playlist_get_current_group_idx(),
          track_idx,
          snap.track_path.c_str(),

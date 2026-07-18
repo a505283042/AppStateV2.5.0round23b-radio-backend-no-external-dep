@@ -90,7 +90,7 @@ static void player_save_radio_return_context_if_needed() {
 
     s_radio_return.valid = true;
     s_radio_return.track_idx = cur;
-    s_radio_return.mode = g_play_mode;
+    s_radio_return.mode = app_play_mode_get();
     s_radio_return.group_idx = player_playlist_get_current_group_idx();
     s_radio_return.volume = audio_get_volume();
 
@@ -132,8 +132,9 @@ bool control_enter_list_select_dispatch()
 
 void control_update_track_pos_for_mode(int current_idx)
 {
-    if (g_play_mode == PLAY_MODE_ARTIST_SEQ || g_play_mode == PLAY_MODE_ARTIST_RND ||
-        g_play_mode == PLAY_MODE_ALBUM_SEQ || g_play_mode == PLAY_MODE_ALBUM_RND) {
+    const play_mode_t mode = app_play_mode_get();
+    if (mode == PLAY_MODE_ARTIST_SEQ || mode == PLAY_MODE_ARTIST_RND ||
+        mode == PLAY_MODE_ALBUM_SEQ || mode == PLAY_MODE_ALBUM_RND) {
         const PlayerPlaylistDisplayInfo display =
             player_playlist_get_display_info(current_idx, (int)storage_catalog_v3_track_count());
         ui_set_track_pos(display.display_pos, display.display_total);
@@ -144,14 +145,14 @@ void control_update_track_pos_for_mode(int current_idx)
 
 void control_normalize_remote_mode_category(const char* source_label)
 {
-    const bool random_mode = control_mode_is_random(g_play_mode);
+    const play_mode_t current_mode = app_play_mode_get();
+    const bool random_mode = control_mode_is_random(current_mode);
     const play_mode_t normalized = random_mode ? PLAY_MODE_ALL_RND : PLAY_MODE_ALL_SEQ;
-    if (g_play_mode == normalized) {
+    if (current_mode == normalized) {
         return;
     }
 
-    g_play_mode = normalized;
-    ui_set_play_mode(g_play_mode);
+    (void)app_play_mode_set(normalized, AppPlayModeChangeReason::RemoteNormalize);
     LOGI("[播放器] %s 仅支持全部列表，播放大类已归一为全部（%s）",
          source_label ? source_label : "网络音源",
          random_mode ? "随机" : "顺序");
@@ -335,9 +336,7 @@ static bool control_net_track_is_near_natural_end(const PlayerSourceState& sourc
 
 static bool control_is_net_track_random_mode()
 {
-    return g_play_mode == PLAY_MODE_ALL_RND ||
-           g_play_mode == PLAY_MODE_ARTIST_RND ||
-           g_play_mode == PLAY_MODE_ALBUM_RND;
+    return control_mode_is_random(app_play_mode_get());
 }
 
 static int control_next_net_track_index_sequential(int current_idx, int step)
@@ -963,7 +962,7 @@ bool player_control_try_auto_next(bool entered, bool started)
 
     if (anchored) {
         LOGW("[播放器] AUTO NEXT 锚定到播放列表开头, 模式=%d 分组=%d cur=%d",
-             (int)g_play_mode,
+             (int)app_play_mode_get(),
              player_playlist_get_current_group_idx(),
              cur);
     }
@@ -1125,15 +1124,12 @@ bool player_net_track_toggle_order_random()
         return false;
     }
 
-    if (control_is_net_track_random_mode()) {
-        g_play_mode = PLAY_MODE_ALL_SEQ;
-        LOGD("[网络歌曲] 模式 -> all_seq");
-    } else {
-        g_play_mode = PLAY_MODE_ALL_RND;
-        LOGD("[网络歌曲] 模式 -> all_rnd");
-    }
-
-    ui_set_play_mode(g_play_mode);
+    const play_mode_t next_mode = control_is_net_track_random_mode()
+        ? PLAY_MODE_ALL_SEQ
+        : PLAY_MODE_ALL_RND;
+    (void)app_play_mode_set(next_mode, AppPlayModeChangeReason::PlayerControl);
+    LOGD("[网络歌曲] 模式 -> %s",
+         next_mode == PLAY_MODE_ALL_RND ? "all_rnd" : "all_seq");
     ui_request_refresh_now();
     return true;
 }
@@ -1182,7 +1178,7 @@ static bool control_play_net_track_index_impl(int idx, bool reset_shuffle)
     ui_set_now_playing(item.title.c_str(), item.artist.c_str());
     ui_set_album(item.album);
     ui_set_track_pos(idx, (int)net_music_catalog_count());
-    ui_set_play_mode(g_play_mode);
+    ui_set_play_mode(app_play_mode_get());
     audio_output_route_sync_ui_volume();
 
 
@@ -1279,7 +1275,7 @@ void player_next_track()
 
     if (anchored) {
         LOGW("[播放器] NEXT 锚定到播放列表开头, 模式=%d 分组=%d cur=%d",
-             (int)g_play_mode, player_playlist_get_current_group_idx(), cur);
+             (int)app_play_mode_get(), player_playlist_get_current_group_idx(), cur);
     }
 
     LOGI("[播放器] 下一首 -> #%d", next);
@@ -1337,7 +1333,7 @@ void player_prev_track()
 
     if (anchored) {
         LOGW("[播放器] PREV 锚定到播放列表末尾, 模式=%d 分组=%d cur=%d",
-             (int)g_play_mode, player_playlist_get_current_group_idx(), cur);
+             (int)app_play_mode_get(), player_playlist_get_current_group_idx(), cur);
     }
 
     LOGI("[播放器] 上一首 -> #%d", prev);
@@ -1512,7 +1508,7 @@ void player_next_group()
         LOGW("[列表] NAS歌曲播放中，但无法进入NAS歌曲列表");
     } else {
         LOGW("[列表] 本地播放中，但无法进入歌曲列表 模式=%d 数量=%d",
-             (int)g_play_mode,
+             (int)app_play_mode_get(),
              control_track_count());
     }
 }
@@ -1545,7 +1541,7 @@ int control_mode_category(play_mode_t mode)
 
 void control_apply_mode_context(play_mode_t new_mode, int current_idx, bool verbose)
 {
-    g_play_mode = new_mode;
+    (void)app_play_mode_set(new_mode, AppPlayModeChangeReason::PlayerControl);
 
     if (current_idx >= 0) {
         (void)player_playlist_align_group_context_for_track(current_idx, verbose);
@@ -1556,7 +1552,6 @@ void control_apply_mode_context(play_mode_t new_mode, int current_idx, bool verb
     }
 
     control_update_track_pos_for_mode(current_idx);
-    ui_set_play_mode(g_play_mode);
 }
 
 } // namespace
@@ -1564,21 +1559,22 @@ void control_apply_mode_context(play_mode_t new_mode, int current_idx, bool verb
 void player_toggle_random()
 {
     const PlayerSourceType source_type = player_source_type_get();
-    const bool next_random = !control_mode_is_random(g_play_mode);
+    const play_mode_t current_mode = app_play_mode_get();
+    const bool next_random = !control_mode_is_random(current_mode);
 
     if (source_type == PlayerSourceType::NET_TRACK ||
         source_type == PlayerSourceType::NET_RADIO) {
         // 网络音源只允许在“全部顺序/全部随机”之间切换，
         // 不触碰本地歌手/专辑播放列表上下文。
-        g_play_mode = next_random ? PLAY_MODE_ALL_RND : PLAY_MODE_ALL_SEQ;
-        ui_set_play_mode(g_play_mode);
+        const play_mode_t new_mode = next_random ? PLAY_MODE_ALL_RND : PLAY_MODE_ALL_SEQ;
+        (void)app_play_mode_set(new_mode, AppPlayModeChangeReason::PlayerControl);
         ui_request_refresh_now();
         LOGI("[播放器] 网络音源播放顺序切换: %s",
              next_random ? "随机" : "顺序");
         return;
     }
 
-    const int category = control_mode_category(g_play_mode);
+    const int category = control_mode_category(current_mode);
     const play_mode_t new_mode = control_make_mode(category, next_random);
 
     control_apply_mode_context(new_mode, control_current_track_idx(), false);
@@ -1599,8 +1595,9 @@ void player_cycle_mode_category()
     }
 
     const int cur = control_current_track_idx();
-    const bool is_random = control_mode_is_random(g_play_mode);
-    const int old_category = control_mode_category(g_play_mode);
+    const play_mode_t current_mode = app_play_mode_get();
+    const bool is_random = control_mode_is_random(current_mode);
+    const int old_category = control_mode_category(current_mode);
     const int new_category = (old_category + 1) % 3;
     const play_mode_t new_mode = control_make_mode(new_category, is_random);
 

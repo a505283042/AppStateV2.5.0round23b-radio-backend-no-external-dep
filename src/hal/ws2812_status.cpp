@@ -281,7 +281,7 @@ void ws2812_status_tick()
 
     const PlayerPlaybackState state = player_playback_state_get();
     const PlayerSourceType source = player_source_type_get();
-    const play_mode_t mode = static_cast<play_mode_t>(g_play_mode);
+    const play_mode_t mode = app_play_mode_get();
     const bool random = control_mode_is_random(mode);
     const LedCategory category = current_category(source, mode);
     const WebRuntimeSettings settings = web_settings_get();

@@ -128,7 +128,7 @@ static bool build_current_artist_target(NfcAdminTarget& target)
 
     const MusicCatalogV3& cat = storage_catalog_v3();
     const auto& groups = player_playlist_artist_groups();
-    const int preferred_idx = player_playlist_is_artist_mode(g_play_mode)
+    const int preferred_idx = player_playlist_is_artist_mode(app_play_mode_get())
         ? player_playlist_get_current_group_idx()
         : -1;
     const int group_idx = find_group_for_track(groups, track_idx, preferred_idx);
@@ -162,7 +162,7 @@ static bool build_current_album_target(NfcAdminTarget& target)
 
     const MusicCatalogV3& cat = storage_catalog_v3();
     const auto& groups = player_playlist_album_groups();
-    const int preferred_idx = player_playlist_is_album_mode(g_play_mode)
+    const int preferred_idx = player_playlist_is_album_mode(app_play_mode_get())
         ? player_playlist_get_current_group_idx()
         : -1;
     const int group_idx = find_group_for_track(groups, track_idx, preferred_idx);
