@@ -14,6 +14,19 @@ enum class AudioOutputRoute : uint8_t {
     BluetoothTx = 2,
 };
 
+// 跨任务读取音频输出状态时使用纯数值快照，避免路由、音量和应用状态来自不同时间点。
+struct AudioOutputRouteSnapshot {
+    AudioOutputRoute route = AudioOutputRoute::Speaker;
+    uint8_t bluetooth_tx_volume = 50;
+    uint8_t normal_volume = 80;
+    bool bluetooth_tx_volume_known = false;
+    bool bluetooth_tx_policy_active = false;
+    bool bluetooth_tx_apply_pending = false;
+    uint32_t revision = 0;
+};
+
+AudioOutputRouteSnapshot audio_output_route_snapshot_get();
+
 AudioOutputRoute audio_output_route_get();
 const char* audio_output_route_label();
 
