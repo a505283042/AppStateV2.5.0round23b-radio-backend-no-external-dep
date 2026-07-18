@@ -201,9 +201,10 @@ void web_snapshot_capture_into(WebPlayerSnapshot& snap) {
   // 只清空长度，不释放 String 容量；网页高频轮询会复用历史缓冲区。
   web_snapshot_reset_for_capture(snap);
   snap.ok = true;
-  snap.app_state = web_app_state_to_key(g_app_state, g_rescanning);
-  snap.app_state_label = web_app_state_to_label(g_app_state, g_rescanning);
-  snap.rescanning = g_rescanning;
+  const AppRescanState rescan = app_rescan_state_get();
+  snap.app_state = web_app_state_to_key(g_app_state, rescan.rescanning);
+  snap.app_state_label = web_app_state_to_label(g_app_state, rescan.rescanning);
+  snap.rescanning = rescan.rescanning;
   snap.is_playing = audio_service_is_playing();
   snap.is_paused = audio_service_is_paused();
   snap.play_ms = audio_get_play_ms();
@@ -214,14 +215,16 @@ void web_snapshot_capture_into(WebPlayerSnapshot& snap) {
   snap.mode_label = web_mode_to_label(g_play_mode);
   snap.view = web_view_to_key(ui_get_view());
   snap.view_label = web_view_to_label(ui_get_view());
-  const WebRuntimeSettings& ws = web_settings_get();
+  const WebRuntimeSettings ws = web_settings_get();
   snap.wifi_name = "-";
   snap.hostname = WEBCTRL_HOSTNAME_DEFAULT;
   snap.show_next_lyric = ws.show_next_lyric;
   snap.show_cover = ws.show_cover;
   snap.web_cover_spin = ws.web_cover_spin;
-  snap.can_cancel_scan = g_rescanning && !g_abort_scan;
-  snap.scan_action_label = g_rescanning ? (g_abort_scan ? "取消中..." : "取消重扫") : "开始重扫";
+  snap.can_cancel_scan = rescan.rescanning && !rescan.abort_requested;
+  snap.scan_action_label = rescan.rescanning
+      ? (rescan.abort_requested ? "取消中..." : "取消重扫")
+      : "开始重扫";
 
   snap.has_lyrics = g_lyricsDisplay.hasLyrics();
   if (snap.has_lyrics) {

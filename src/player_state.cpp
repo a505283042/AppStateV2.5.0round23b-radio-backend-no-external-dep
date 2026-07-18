@@ -781,7 +781,8 @@ void player_state_run(void)
         return;
     }
 
-    if (g_rescan_done) {
+    const AppRescanState rescan = app_rescan_state_get();
+    if (rescan.done) {
         s_cover_idx = -1;
         player_list_select_reset();
     }
@@ -789,7 +790,7 @@ void player_state_run(void)
         return;
     }
 
-    if (g_rescanning) return;
+    if (rescan.rescanning) return;
 
     // 播放器主循环只读取纯数值运行态，避免每轮复制包含多个 String 的完整音源状态。
     const PlayerSourceRuntimeState source = player_source_runtime_get();
@@ -815,7 +816,7 @@ void player_state_run(void)
                                         rb.error);
     }
 
-    if (!g_rescanning) {
+    if (!app_rescan_state_get().rescanning) {
         nfc_poll();
 
         String uid;

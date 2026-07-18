@@ -850,7 +850,8 @@ void keys_update()
   }
 
   // --- 扫描状态下的紧急处理 ---
-  if (g_rescanning) {
+  const AppRescanState rescan = app_rescan_state_get();
+  if (rescan.rescanning) {
     // 扫描时只允许 MODE 取消，但必须用“按下沿”而不是电平。
     // 否则由 MODE 长按启动重扫后，会因为按键仍保持按下而立刻触发取消。
     int s = read_key_pin(k_mode.pin);
@@ -866,9 +867,10 @@ void keys_update()
 
     if (s != k_mode.last) {
       k_mode.last = s;
-      if (pressed(s) && !g_abort_scan) {
-        g_abort_scan = true;
-        LOGI("[按键] 已发送中止信号");
+      if (pressed(s) && !rescan.abort_requested) {
+        if (app_request_cancel_rescan()) {
+          LOGI("[按键] 已发送曲库重扫取消信号");
+        }
       }
     }
 

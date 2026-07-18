@@ -284,7 +284,7 @@ void ws2812_status_tick()
     const play_mode_t mode = static_cast<play_mode_t>(g_play_mode);
     const bool random = control_mode_is_random(mode);
     const LedCategory category = current_category(source, mode);
-    const WebRuntimeSettings& settings = web_settings_get();
+    const WebRuntimeSettings settings = web_settings_get();
 
     uint8_t factor = 0;
     if (state == PlayerPlaybackState::Playing) {

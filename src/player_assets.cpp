@@ -63,7 +63,7 @@ static void player_assets_try_scale_primed_next_cover_after_current(const Player
 
 static bool player_assets_web_cover_enabled()
 {
-    const WebRuntimeSettings& cfg = web_settings_get();
+    const WebRuntimeSettings cfg = web_settings_get();
     return cfg.wifi_enabled && cfg.show_cover;
 }
 

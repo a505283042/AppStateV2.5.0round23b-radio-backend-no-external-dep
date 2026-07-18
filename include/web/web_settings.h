@@ -59,8 +59,8 @@ struct WebRuntimeSettings {
 bool web_settings_load();
 // 将当前网页运行设置保存到 NVS（避免播放中写 SD 导致网页设置保存不稳定）。
 bool web_settings_save();
-// 获取当前网页运行设置快照。
-const WebRuntimeSettings& web_settings_get();
+// 获取当前网页运行设置快照。返回值已在内部加锁复制，可安全跨任务读取。
+WebRuntimeSettings web_settings_get();
 // 更新当前网页运行设置（不自动保存）；内容有变化时只标记为待保存。
 void web_settings_set(const WebRuntimeSettings& s);
 // 当前网页设置是否有待保存改动。

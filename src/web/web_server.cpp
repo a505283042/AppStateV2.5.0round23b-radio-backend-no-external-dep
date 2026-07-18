@@ -564,7 +564,7 @@ static void web_send_json_err(const char* msg, int code = 400) {
 }
 static bool web_require_player_state() {
   if (g_app_state != STATE_PLAYER) { web_send_json_err("当前不在播放器主界面"); return false; }
-  if (g_rescanning) { web_send_json_err("正在扫描音乐库"); return false; }
+  if (app_rescan_state_get().rescanning) { web_send_json_err("正在扫描音乐库"); return false; }
   if (player_list_select_is_active()) { web_send_json_err("当前处于列表选择模式"); return false; }
   return true;
 }
@@ -996,7 +996,7 @@ static void web_handle_settings_page() {
 }
 static void web_handle_favicon() { web_send_no_cache_headers(); s_server.send(404, "text/plain; charset=utf-8", "not_found"); }
 static void web_handle_settings_get() {
-  const auto& ws = web_settings_get();
+  const WebRuntimeSettings ws = web_settings_get();
   String json; json.reserve(420);
   json += "{\"ok\":true";
   json += ",\"refresh_preset\":\"" + String(web_refresh_preset_key(ws.refresh_preset)) + "\"";
@@ -1460,7 +1460,7 @@ static void web_handle_status() {
   snap.hostname = s_hostname_runtime;
   snap.wifi_source = s_wifi_source;
 
-  const auto& ws = web_settings_get();
+  const WebRuntimeSettings ws = web_settings_get();
 
   const bool is_radio_cover = strcmp(snap.source_type, "radio") == 0;
   const bool allow_cover_fetch_now =
@@ -2572,11 +2572,21 @@ static void web_handle_state_save() {
 }
 
 static void web_handle_scan() {
-  if (g_rescanning) {
-    if (!app_request_cancel_rescan()) { web_send_json_err("当前没有正在进行的重扫"); return; }
-    web_send_json_ok_simple(g_abort_scan ? "rescan_cancel_requested" : "rescan_cancel_pending"); return;
+  const AppRescanState rescan = app_rescan_state_get();
+  if (rescan.rescanning) {
+    if (!app_request_cancel_rescan()) {
+      web_send_json_err("当前没有正在进行的重扫");
+      return;
+    }
+    web_send_json_ok_simple(rescan.abort_requested
+        ? "rescan_cancel_pending"
+        : "rescan_cancel_requested");
+    return;
   }
-  if (!app_request_start_rescan()) { web_send_json_err("当前状态不允许开始重扫"); return; }
+  if (!app_request_start_rescan()) {
+    web_send_json_err("当前状态不允许开始重扫");
+    return;
+  }
   web_send_json_ok_simple("rescan_started");
 }
 

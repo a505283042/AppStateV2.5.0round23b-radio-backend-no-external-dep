@@ -26,7 +26,7 @@ bool s_pause_latched = false;
 
 bool hall_actions_allowed()
 {
-    return g_app_state == STATE_PLAYER && !g_rescanning;
+    return g_app_state == STATE_PLAYER && !app_rescan_state_get().rescanning;
 }
 
 void sync_input_level()

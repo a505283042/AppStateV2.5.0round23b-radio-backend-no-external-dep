@@ -32,15 +32,8 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
-volatile bool g_rescan_done = false; // 扫描完成标志
-volatile bool g_rescanning = false; // 扫描中标志
-volatile bool g_rescan_success = false; // 扫描成功标志
-volatile bool g_abort_scan = false; // 扫描中断标志
-
-
 volatile play_mode_t g_play_mode = PLAY_MODE_ALL_SEQ;  // 播放模式
 
-static TaskHandle_t s_rescan_task = nullptr; // 扫描任务句柄
 static bool s_tf_mount_restore_pending = false;
 static bool s_low_battery_shutdown_started = false;
 
@@ -68,9 +61,7 @@ static void app_rescan_task_entry(void* )
         success = false;
     }
 
-    g_rescan_success = success;
-    g_rescan_done = true;
-    s_rescan_task = nullptr;
+    app_rescan_mark_finished(success);
     vTaskDelete(nullptr);
 }
 
@@ -100,7 +91,7 @@ static void app_handle_tf_removed()
     (void)player_snapshot_save_to_nvs();
 
     storage_mark_not_ready();
-    g_abort_scan = true;
+    (void)app_rescan_request_abort();
 
     player_list_select_reset();
 
@@ -246,8 +237,9 @@ void app_state_update(void)
         }
     }
 
-    // 高频主循环只读取纯数值运行态，避免每轮复制完整 PlayerSourceState 中的多个 String。
+    // 高频主循环只读取轻量快照，避免复制 String，也避免直接读取跨任务扫描标志。
     const PlayerSourceRuntimeState source = player_source_runtime_get();
+    const AppRescanState rescan = app_rescan_state_get();
 
     const bool local_audio_active =
         source.type == PlayerSourceType::LOCAL_TRACK &&
@@ -259,7 +251,7 @@ void app_state_update(void)
     const bool storage_suspect = storage_has_recent_io_error();
     const bool allow_sd_probe =
         g_app_state != STATE_BOOT &&
-        !g_rescanning &&
+        !rescan.rescanning &&
         (!local_audio_active || storage_suspect);
 
     const StorageHotplugEvent hotplug_event = storage_hotplug_poll(allow_sd_probe);
@@ -323,8 +315,8 @@ bool app_request_enter_nfc_admin_with_target(const NfcAdminTarget& target)
         return false;
     }
 
-    if (g_rescanning) {
-        LOGD("[应用] 进入 NFC admin 被拒绝: rescanning");
+    if (app_rescan_state_get().rescanning) {
+        LOGD("[应用] 拒绝进入 NFC 管理：曲库正在重扫");
         return false;
     }
 
@@ -380,8 +372,8 @@ bool app_request_start_rescan()
         LOGD("[应用] 启动 rescan 被拒绝: not in player 状态");
         return false;
     }
-    if (g_rescanning || s_rescan_task != nullptr) {
-        LOGD("[应用] 启动 rescan 被拒绝: al就绪 rescanning");
+    if (app_rescan_state_get().rescanning) {
+        LOGD("[应用] 拒绝开始重扫：已有重扫正在进行");
         return false;
     }
     if (player_list_select_is_active()) {
@@ -394,10 +386,10 @@ bool app_request_start_rescan()
     }
 
     player_recover_prepare_rescan_restore_current();
-    g_abort_scan = false;
-    g_rescan_done = false;
-    g_rescan_success = false;
-    g_rescanning = true;
+    if (!app_rescan_begin()) {
+        LOGD("[应用] 拒绝开始重扫：状态已被其它任务占用");
+        return false;
+    }
 
     BaseType_t ok = xTaskCreate(
         app_rescan_task_entry,
@@ -405,12 +397,11 @@ bool app_request_start_rescan()
         8192,
         nullptr,
         1,
-        &s_rescan_task);
+        nullptr);
 
     if (ok != pdPASS) {
-        LOGE("[应用] 失败 to 创建 rescan task");
-        s_rescan_task = nullptr;
-        g_rescanning = false;
+        LOGE("[应用] 创建曲库重扫任务失败");
+        app_rescan_reset();
         return false;
     }
 
@@ -420,13 +411,20 @@ bool app_request_start_rescan()
 // 请求取消扫描
 bool app_request_cancel_rescan()
 {
-    if (!g_rescanning) {
-        LOGD("[应用] 取消 rescan 已忽略: not rescanning");
+    const AppRescanState rescan = app_rescan_state_get();
+    if (!rescan.rescanning || rescan.done) {
+        LOGD("[应用] 忽略取消重扫请求：当前没有可取消的重扫任务");
         return false;
     }
-    if (!g_abort_scan) {
-        g_abort_scan = true;
-        LOGI("[应用] rescan 取消 requested");
+
+    if (rescan.abort_requested) {
+        return true;
     }
+
+    if (!app_rescan_request_abort()) {
+        return false;
+    }
+
+    LOGI("[应用] 已请求取消曲库重扫");
     return true;
 }

@@ -292,16 +292,13 @@ void player_recover_prepare_rescan_restore_current()
  */
 bool player_recover_try_handle_rescan_done()
 {
-    if (!g_rescan_done) return false;
-
-    g_rescan_done = false;
+    bool rescan_success = false;
+    bool rescan_aborted = false;
+    if (!app_rescan_consume_result(rescan_success, rescan_aborted)) {
+        return false;
+    }
 
     const int tl_count = (int)storage_catalog_v3_track_count();
-    const bool rescan_success = g_rescan_success;
-    const bool rescan_aborted = g_abort_scan;
-    g_rescanning = false;
-    g_rescan_success = false;
-    g_abort_scan = false;
 
     // 用户取消扫描时，保留取消瞬间的播放状态。
     // 扫描任务开始时已经安全停止音频，因此这里不重新派发歌曲、

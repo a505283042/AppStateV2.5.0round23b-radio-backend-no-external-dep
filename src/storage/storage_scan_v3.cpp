@@ -154,7 +154,7 @@ static String pick_cover_in_folder_v3(const String& folder)
     while (f.openNext(&dir, O_RDONLY)) {
         scan_v3_cooperate_wdt();
 
-        if (g_abort_scan) {
+        if (app_rescan_should_abort()) {
             LOGD("[曲库扫描] 封面 scan aborted: %s", folder.c_str());
             f.close();
             break;
@@ -396,7 +396,7 @@ static bool scan_dir_recursive_v3(const String& dir_path,
     while (f.openNext(&dir, O_RDONLY)) {
         scan_v3_cooperate_wdt();
 
-        if (g_abort_scan) {
+        if (app_rescan_should_abort()) {
             LOGI("[曲库扫描] scan aborted by user");
             f.close();
             break;
@@ -441,7 +441,7 @@ static bool scan_dir_recursive_v3(const String& dir_path,
     }
 
     dir.close();
-    return !g_abort_scan;
+    return !app_rescan_should_abort();
 }
 
 bool storage_scan_music_v3(std::vector<TrackBuildTempV3>& out_tracks,
@@ -462,7 +462,7 @@ bool storage_scan_music_v3(std::vector<TrackBuildTempV3>& out_tracks,
     int scanned = 0;
 
     if (!scan_dir_recursive_v3(String(music_root), music_root, "", out_tracks, scanned)) {
-        if (g_abort_scan) {
+        if (app_rescan_should_abort()) {
             ui_scan_abort();
         } else {
             ui_scan_end();

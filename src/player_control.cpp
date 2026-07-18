@@ -1372,7 +1372,7 @@ bool player_set_paused(bool paused, PlayerToggleTrigger trigger)
          current == PlayerPlaybackState::Playing ? 1 : 0,
          current == PlayerPlaybackState::Paused ? 1 : 0);
 
-    if (g_rescanning) {
+    if (app_rescan_state_get().rescanning) {
         return false;
     }
 
