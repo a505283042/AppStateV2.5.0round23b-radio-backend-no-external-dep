@@ -27,7 +27,9 @@ StorageHotplugEvent storage_hotplug_poll(bool allow_sd_probe)
 
     const uint32_t now = millis();
 
-    if (!storage_is_ready()) {
+    const StorageRuntimeSnapshot storage = storage_runtime_snapshot_get();
+
+    if (!storage.ready) {
         if ((uint32_t)(now - s_last_probe_ms) < kUnmountedMountIntervalMs) {
             return StorageHotplugEvent::NONE;
         }
@@ -36,7 +38,6 @@ StorageHotplugEvent storage_hotplug_poll(bool allow_sd_probe)
 
         if (storage_mount()) {
             s_fail_count = 0;
-            storage_clear_io_error();
             LOGI("[TF热插拔] 卡片 已挂载");
             return StorageHotplugEvent::CARD_MOUNTED;
         }
@@ -44,7 +45,8 @@ StorageHotplugEvent storage_hotplug_poll(bool allow_sd_probe)
         return StorageHotplugEvent::NONE;
     }
 
-    const bool suspect = storage_has_recent_io_error();
+    const bool suspect = storage.recent_io_error;
+    const uint32_t observed_io_error_generation = storage.io_error_generation;
     const uint32_t interval = suspect ? kSuspectProbeIntervalMs : kMountedProbeIntervalMs;
 
     if ((uint32_t)(now - s_last_probe_ms) < interval) {
@@ -55,7 +57,9 @@ StorageHotplugEvent storage_hotplug_poll(bool allow_sd_probe)
 
     if (storage_probe_alive()) {
         s_fail_count = 0;
-        storage_clear_io_error();
+        // 探测期间如有新的 IO 错误上报，不能被本次旧探测结果清除。
+        (void)storage_clear_io_error_if_generation(
+            observed_io_error_generation);
         return StorageHotplugEvent::NONE;
     }
 

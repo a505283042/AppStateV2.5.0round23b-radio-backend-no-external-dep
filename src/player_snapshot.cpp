@@ -188,7 +188,8 @@ static void snapshot_log_net(const char* prefix, const PlayerNetPersistSnapshot&
 
 static bool snapshot_read_local_blob(Preferences& pref, PlayerPersistSnapshot& out)
 {
-    const char* key = storage_card_snapshot_key();
+    char key[16] = {0};
+    (void)storage_copy_card_snapshot_key(key, sizeof(key));
     if (!pref.isKey(key)) return false;
 
     const size_t len = pref.getBytesLength(key);
@@ -286,7 +287,8 @@ static bool snapshot_write_local_blob(Preferences& pref)
     blob.user_paused = s_local.user_paused ? 1 : 0;
     s_local.track_path.toCharArray(blob.track_path, sizeof(blob.track_path));
 
-    const char* key = storage_card_snapshot_key();
+    char key[16] = {0};
+    (void)storage_copy_card_snapshot_key(key, sizeof(key));
     const size_t written = pref.putBytes(key, &blob, sizeof(blob));
     if (written != sizeof(blob)) {
         LOGE("[快照] 本地保存失败：key=%s 写入=%u 期望=%u",

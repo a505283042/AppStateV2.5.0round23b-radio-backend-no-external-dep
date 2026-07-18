@@ -761,7 +761,8 @@ static bool control_allow_local_auto_next_after_end(const AudioPlaybackEndState&
 
     const bool source_io_error =
         end_state.reason == AudioPlaybackEndReason::SourceIoError;
-    const bool storage_suspect = storage_has_recent_io_error();
+    StorageRuntimeSnapshot storage = storage_runtime_snapshot_get();
+    const bool storage_suspect = storage.recent_io_error;
 
     if (source_io_error || storage_suspect) {
         // 先给 TF 热插拔探测一个短窗口，避免真正拔卡时连续切歌。
@@ -770,23 +771,34 @@ static bool control_allow_local_auto_next_after_end(const AudioPlaybackEndState&
             return false;
         }
 
-        if (!storage_is_ready()) {
+        if (!storage.ready) {
             return false;
         }
 
-        if (storage_has_recent_io_error() &&
+        if (storage.recent_io_error &&
             !s_local_end_recovery.storage_probe_attempted) {
             s_local_end_recovery.storage_probe_attempted = true;
+            const uint32_t observed_generation =
+                storage.io_error_generation;
+
             if (storage_probe_alive()) {
-                storage_clear_io_error();
-                LOGW("[播放器] TF 读取异常后物理探测仍在线，清除瞬时错误并跳过当前歌曲");
+                const bool cleared =
+                    storage_clear_io_error_if_generation(
+                        observed_generation);
+                storage = storage_runtime_snapshot_get();
+
+                if (cleared) {
+                    LOGW("[播放器] TF 读取异常后物理探测仍在线，已清除本次瞬时错误并跳过当前歌曲");
+                } else {
+                    LOGW("[播放器] TF 物理探测仍在线，但探测期间出现了新的 IO 错误，继续等待热插拔流程");
+                }
             } else {
                 LOGW("[播放器] TF 读取异常且物理探测失败，等待热插拔流程处理");
                 return false;
             }
         }
 
-        if (storage_has_recent_io_error()) {
+        if (storage_runtime_snapshot_get().recent_io_error) {
             return false;
         }
     }
@@ -887,7 +899,9 @@ bool player_control_try_auto_next(bool entered, bool started)
             return false;
         }
 
-        if (!storage_is_ready() || storage_has_recent_io_error()) {
+        const StorageRuntimeSnapshot storage =
+            storage_runtime_snapshot_get();
+        if (!storage.ready || storage.recent_io_error) {
             LOGW("[网络歌曲] auto 下一首 被阻止: storage 未就绪 or IO error pending");
             return false;
         }

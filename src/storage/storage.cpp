@@ -8,18 +8,77 @@
 #include <FS.h>
 #include <SdFat.h>
 #include <SPI.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/portmacro.h>
+#include <stdio.h>
+#include <string.h>
 
 // 全局 SD 文件系统对象（SdFat = FAT16/32，足够用）
 SdFat sd;
-static volatile bool storage_ready = false;
-static volatile bool s_recent_io_error = false;
 
-// TF 卡身份标识
-static uint32_t s_card_hash = 0;
-static char s_card_snapshot_key[16] = "snap_default";
+namespace {
+
+struct StorageRuntimeState {
+    bool ready = false;
+    bool recent_io_error = false;
+    uint32_t io_error_generation = 0;
+    uint32_t card_hash = 0;
+    char card_snapshot_key[16] = "snap_default";
+    uint32_t revision = 1;
+};
+
+StorageRuntimeState s_runtime{};
+portMUX_TYPE s_runtime_mux = portMUX_INITIALIZER_UNLOCKED;
+
+// 轻量探测用缓冲区。读 sector 0 可以强制触碰物理卡，
+// 比 root.open("/") 更可靠，避免目录对象缓存导致误判“卡还在”。
+uint8_t s_probe_sector[512];
+
+void storage_revision_advance_locked()
+{
+    ++s_runtime.revision;
+    if (s_runtime.revision == 0) {
+        ++s_runtime.revision;
+    }
+}
+
+void storage_identity_reset_locked()
+{
+    s_runtime.card_hash = 0;
+    strncpy(s_runtime.card_snapshot_key,
+            "snap_default",
+            sizeof(s_runtime.card_snapshot_key) - 1);
+    s_runtime.card_snapshot_key[sizeof(s_runtime.card_snapshot_key) - 1] = '\0';
+}
+
+void storage_publish_not_ready(bool clear_io_error)
+{
+    portENTER_CRITICAL(&s_runtime_mux);
+    s_runtime.ready = false;
+    if (clear_io_error) {
+        s_runtime.recent_io_error = false;
+    }
+    storage_identity_reset_locked();
+    storage_revision_advance_locked();
+    portEXIT_CRITICAL(&s_runtime_mux);
+}
+
+void storage_publish_ready(uint32_t card_hash, const char* snapshot_key)
+{
+    portENTER_CRITICAL(&s_runtime_mux);
+    s_runtime.ready = true;
+    s_runtime.recent_io_error = false;
+    s_runtime.card_hash = card_hash;
+    strncpy(s_runtime.card_snapshot_key,
+            (snapshot_key && *snapshot_key) ? snapshot_key : "snap_default",
+            sizeof(s_runtime.card_snapshot_key) - 1);
+    s_runtime.card_snapshot_key[sizeof(s_runtime.card_snapshot_key) - 1] = '\0';
+    storage_revision_advance_locked();
+    portEXIT_CRITICAL(&s_runtime_mux);
+}
 
 // FNV-1a 32-bit hash
-static uint32_t fnv1a32(const uint8_t* data, size_t len)
+uint32_t fnv1a32(const uint8_t* data, size_t len)
 {
     uint32_t hash = 2166136261UL;
 
@@ -31,16 +90,14 @@ static uint32_t fnv1a32(const uint8_t* data, size_t len)
     return hash;
 }
 
-// 轻量探测用缓冲区。读 sector 0 可以强制触碰物理卡，
-// 比 root.open("/") 更可靠，避免目录对象缓存导致误判"卡还在"。
-static uint8_t s_probe_sector[512];
-
-static void storage_refresh_card_identity_locked()
+void storage_read_card_identity_locked(uint32_t& card_hash,
+                                       char* snapshot_key,
+                                       size_t snapshot_key_size)
 {
-    s_card_hash = 0;
-    snprintf(s_card_snapshot_key,
-             sizeof(s_card_snapshot_key),
-             "snap_default");
+    card_hash = 0;
+    if (snapshot_key && snapshot_key_size > 0) {
+        snprintf(snapshot_key, snapshot_key_size, "snap_default");
+    }
 
     if (!sd.card()) {
         Serial.println("[存储] 跳过卡身份读取：无卡对象");
@@ -57,51 +114,72 @@ static void storage_refresh_card_identity_locked()
         return;
     }
 
-    s_card_hash = fnv1a32(reinterpret_cast<const uint8_t*>(&cid), sizeof(cid));
+    card_hash = fnv1a32(reinterpret_cast<const uint8_t*>(&cid), sizeof(cid));
 
-    snprintf(s_card_snapshot_key,
-             sizeof(s_card_snapshot_key),
-             "snap_%08lX",
-             static_cast<unsigned long>(s_card_hash));
+    if (snapshot_key && snapshot_key_size > 0) {
+        snprintf(snapshot_key,
+                 snapshot_key_size,
+                 "snap_%08lX",
+                 static_cast<unsigned long>(card_hash));
+    }
 
     Serial.printf("[存储] TF 卡标识=%08lX，快照键=%s\n",
-                  static_cast<unsigned long>(s_card_hash),
-                  s_card_snapshot_key);
+                  static_cast<unsigned long>(card_hash),
+                  snapshot_key ? snapshot_key : "snap_default");
+}
+
+} // namespace
+
+StorageRuntimeSnapshot storage_runtime_snapshot_get(void)
+{
+    StorageRuntimeSnapshot snapshot{};
+
+    portENTER_CRITICAL(&s_runtime_mux);
+    snapshot.ready = s_runtime.ready;
+    snapshot.recent_io_error = s_runtime.recent_io_error;
+    snapshot.io_error_generation = s_runtime.io_error_generation;
+    snapshot.card_hash = s_runtime.card_hash;
+    memcpy(snapshot.card_snapshot_key,
+           s_runtime.card_snapshot_key,
+           sizeof(snapshot.card_snapshot_key));
+    snapshot.card_snapshot_key[sizeof(snapshot.card_snapshot_key) - 1] = '\0';
+    snapshot.revision = s_runtime.revision;
+    portEXIT_CRITICAL(&s_runtime_mux);
+
+    return snapshot;
 }
 
 uint32_t storage_card_hash(void)
 {
-    return s_card_hash;
+    return storage_runtime_snapshot_get().card_hash;
 }
 
-const char* storage_card_snapshot_key(void)
+bool storage_copy_card_snapshot_key(char* out, size_t out_size)
 {
-    return s_card_snapshot_key;
-}
+    if (!out || out_size == 0) {
+        return false;
+    }
 
-void storage_clear_card_identity(void)
-{
-    s_card_hash = 0;
-    snprintf(s_card_snapshot_key,
-             sizeof(s_card_snapshot_key),
-             "snap_default");
+    const StorageRuntimeSnapshot snapshot = storage_runtime_snapshot_get();
+    snprintf(out, out_size, "%s", snapshot.card_snapshot_key);
+    return true;
 }
 
 bool storage_mount(void)
 {
     Serial.println("[存储] 挂载 TF 卡（SdFat）");
 
-    // 初始化 SD 卡访问互斥锁，在 sd.begin() 之前
+    // 初始化 SD 卡访问互斥锁，在 sd.begin() 之前。
     if (!storage_sd_init_mutex()) {
         Serial.println("[存储] 创建 SD 互斥锁失败");
-        storage_ready = false;
+        storage_publish_not_ready(true);
         return false;
     }
 
     StorageSdLockGuard sd_lock(2000);
     if (!sd_lock) {
         Serial.println("[存储] 挂载失败：等待 SD 锁超时");
-        storage_ready = false;
+        storage_publish_not_ready(true);
         return false;
     }
 
@@ -118,16 +196,16 @@ bool storage_mount(void)
     // SHARED_SPI 会让每次操作在当前任务内成对 begin/end transaction，更适合当前工程。
     SdSpiConfig cfg(PIN_SD_CS, SHARED_SPI, SD_SCK_MHZ(24), &SPI_SD);
 
-    // 检查是否已经挂载，如果是则先卸载
-    if (storage_ready) {
+    const StorageRuntimeSnapshot before_mount = storage_runtime_snapshot_get();
+    if (before_mount.ready) {
         Serial.println("[存储] 检测到已有挂载，尝试重新挂载");
+        storage_publish_not_ready(true);
         sd.end();
-        storage_ready = false;
     }
 
-    // 检查卡的错误状态
+    // 检查卡的错误状态。
     if (sd.card()) {
-        uint8_t err = sd.card()->errorCode();
+        const uint8_t err = sd.card()->errorCode();
         if (err != 0) {
             Serial.printf("[存储] 卡错误代码：%d\n", err);
         }
@@ -135,16 +213,21 @@ bool storage_mount(void)
 
     if (!sd.begin(cfg)) {
         Serial.println("[存储] TF 卡挂载失败");
-        storage_ready = false;
+        storage_publish_not_ready(true);
         digitalWrite(PIN_SD_CS, HIGH);
         return false;
     }
 
-    Serial.println("[存储] TF 卡挂载成功");
-    storage_ready = true;
-    s_recent_io_error = false;
+    uint32_t card_hash = 0;
+    char snapshot_key[16] = "snap_default";
+    storage_read_card_identity_locked(card_hash,
+                                      snapshot_key,
+                                      sizeof(snapshot_key));
 
-    storage_refresh_card_identity_locked();
+    // 卡身份、就绪状态和 IO 错误状态一次性发布，调用方不会读到新卡配旧身份。
+    storage_publish_ready(card_hash, snapshot_key);
+
+    Serial.println("[存储] TF 卡挂载成功");
 
 #if LOG_LEVEL >= 3
     // 根目录枚举只用于调试；INFO 构建不再额外打开根目录。
@@ -160,7 +243,9 @@ bool storage_init(void)
 
 void storage_mark_not_ready(void)
 {
-    storage_ready = false;
+    // 拔卡确认后立即阻止新文件访问，并同步清除旧卡身份。
+    // 最近 IO 错误保留到真正 unmount 完成，便于故障路径继续识别本次拔卡。
+    storage_publish_not_ready(false);
 }
 
 bool storage_unmount(void)
@@ -174,7 +259,7 @@ bool storage_unmount(void)
     }
 
     sd.end();
-    storage_clear_card_identity();
+    storage_publish_not_ready(true);
 
     pinMode(PIN_SD_CS, OUTPUT);
     digitalWrite(PIN_SD_CS, HIGH);
@@ -183,16 +268,14 @@ bool storage_unmount(void)
     return true;
 }
 
-
-
 bool storage_is_ready(void)
 {
-    return storage_ready;
+    return storage_runtime_snapshot_get().ready;
 }
 
 bool storage_probe_alive(void)
 {
-    if (!storage_ready) {
+    if (!storage_runtime_snapshot_get().ready) {
         return false;
     }
 
@@ -200,6 +283,11 @@ bool storage_probe_alive(void)
     if (!sd_lock) {
         // 锁超时不代表 TF 卡异常，可能只是音频/扫描正在访问 SD。
         return true;
+    }
+
+    // 等待 SD 锁期间可能已确认拔卡；此时不要再触碰 SdFat 卡对象。
+    if (!storage_runtime_snapshot_get().ready) {
+        return false;
     }
 
     if (!sd.card()) {
@@ -220,27 +308,57 @@ bool storage_probe_alive(void)
 
 void storage_report_io_error(const char* where)
 {
-    s_recent_io_error = true;
-    Serial.printf("[存储] 记录 IO 错误：%s\n", where ? where : "(未知)");
+    uint32_t generation = 0;
+
+    portENTER_CRITICAL(&s_runtime_mux);
+    s_runtime.recent_io_error = true;
+    ++s_runtime.io_error_generation;
+    if (s_runtime.io_error_generation == 0) {
+        ++s_runtime.io_error_generation;
+    }
+    generation = s_runtime.io_error_generation;
+    storage_revision_advance_locked();
+    portEXIT_CRITICAL(&s_runtime_mux);
+
+    Serial.printf("[存储] 记录 IO 错误：%s 代次=%lu\n",
+                  where ? where : "(未知)",
+                  static_cast<unsigned long>(generation));
 }
 
 bool storage_has_recent_io_error(void)
 {
-    return s_recent_io_error;
+    return storage_runtime_snapshot_get().recent_io_error;
 }
 
-void storage_clear_io_error(void)
+bool storage_clear_io_error_if_generation(uint32_t observed_generation)
 {
-    s_recent_io_error = false;
+    bool cleared = false;
+
+    portENTER_CRITICAL(&s_runtime_mux);
+    if (s_runtime.recent_io_error &&
+        s_runtime.io_error_generation == observed_generation) {
+        s_runtime.recent_io_error = false;
+        storage_revision_advance_locked();
+        cleared = true;
+    }
+    portEXIT_CRITICAL(&s_runtime_mux);
+
+    return cleared;
 }
 
 void storage_list_root(void)
 {
-    if (!storage_ready) return;
+    if (!storage_runtime_snapshot_get().ready) {
+        return;
+    }
 
     StorageSdLockGuard sd_lock(1000);
     if (!sd_lock) {
         Serial.println("[存储] 无法获取 SD 互斥锁");
+        return;
+    }
+
+    if (!storage_runtime_snapshot_get().ready) {
         return;
     }
 
@@ -267,5 +385,4 @@ void storage_list_root(void)
     }
 #endif
     root.close();
-
 }

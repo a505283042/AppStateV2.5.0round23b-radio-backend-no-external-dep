@@ -120,7 +120,6 @@ static void app_handle_tf_removed()
     nfc_binding_clear();
 
     storage_unmount();
-    storage_clear_io_error();
 
     if (source.type != PlayerSourceType::NET_RADIO) {
         ui_show_player_placeholder("未插入TF卡", "插卡后自动加载");
@@ -248,7 +247,8 @@ void app_state_update(void)
     // 无 CD 脚时，播放中不主动探测，避免干扰正常读卡；
     // 但一旦 AudioFile 上报 IO error，就必须允许热插拔探测抢占，
     // 否则播放器会把“拔卡”误判成“单曲播放失败”并连续 auto next。
-    const bool storage_suspect = storage_has_recent_io_error();
+    const StorageRuntimeSnapshot storage = storage_runtime_snapshot_get();
+    const bool storage_suspect = storage.recent_io_error;
     const bool allow_sd_probe =
         g_app_state != STATE_BOOT &&
         !rescan.rescanning &&

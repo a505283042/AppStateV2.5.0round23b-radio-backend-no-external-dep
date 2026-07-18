@@ -138,6 +138,10 @@ bool audio_file_prepare_music_root_cache() {
     LOGW("[音频文件] 准备 Music 根目录缓存失败：等待 SD 锁超时");
     return false;
   }
+  if (!storage_is_ready()) {
+    LOGW("[音频文件] 准备目录缓存已取消：等待 SD 锁期间存储被卸载");
+    return false;
+  }
   const bool ok = open_music_root_locked(sd);
   LOGD("[音频文件] Music 根目录缓存准备完成：成功=%d", ok ? 1 : 0);
   return ok;
@@ -172,6 +176,13 @@ bool AudioFile::open(SdFat& sd_ref, const char* path) {
     _had_io_error = true;
     LOGE("[音频文件] 打开锁超时");
     storage_report_io_error("AudioFile::open_lock_timeout");
+    return false;
+  }
+
+  // 等待 SD 锁期间可能已确认拔卡；此时不要继续访问旧的 SdFat 对象。
+  if (!storage_is_ready()) {
+    _had_io_error = true;
+    LOGW("[音频文件] 打开已取消：等待 SD 锁期间存储被卸载");
     return false;
   }
 
@@ -246,6 +257,11 @@ ssize_t AudioFile::read(void* dst, size_t bytes) {
     return -1;
   }
 
+  if (!storage_is_ready()) {
+    _had_io_error = true;
+    return -1;
+  }
+
   uint32_t current_pos = f.curPosition();
 
   if (current_pos >= _cached_size) {
@@ -290,6 +306,11 @@ bool AudioFile::seek(uint32_t pos) {
     _had_io_error = true;
     LOGE("[音频文件] 获取 SD 锁超时");
     storage_report_io_error("AudioFile::seek_lock_timeout");
+    return false;
+  }
+
+  if (!storage_is_ready()) {
+    _had_io_error = true;
     return false;
   }
 
