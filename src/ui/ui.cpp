@@ -34,6 +34,7 @@ static int utf8_char_len(uint8_t c)
 }
 
 TaskHandle_t s_ui_task = nullptr;
+static StaticSemaphore_t s_ui_mtx_storage{};
 SemaphoreHandle_t s_ui_mtx = nullptr;
 bool s_rotate_wait_prefetch_done = false;
 
@@ -527,7 +528,8 @@ static bool ui_sync_init_once()
     return true;
   }
 
-  s_ui_mtx = xSemaphoreCreateRecursiveMutex();
+  s_ui_mtx = xSemaphoreCreateRecursiveMutexStatic(
+      &s_ui_mtx_storage);
   if (!s_ui_mtx) {
     LOGE("[界面] 创建 UI 递归互斥量失败");
     return false;
