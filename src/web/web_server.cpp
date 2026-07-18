@@ -65,7 +65,36 @@ static portMUX_TYPE s_web_start_task_mux = portMUX_INITIALIZER_UNLOCKED;
 static bool s_ap_mode = false;
 static String s_hostname_runtime = WEBCTRL_HOSTNAME_DEFAULT;
 static String s_wifi_source = "ap_fallback";
-static volatile bool s_web_volume_locked = true;
+
+// Web 音量锁由状态页和控制接口共同访问，统一通过短临界区读取和发布。
+struct WebUiControlSnapshot {
+  bool volume_locked = true;
+  uint32_t revision = 1;
+};
+
+static WebUiControlSnapshot s_web_ui_control{};
+static portMUX_TYPE s_web_ui_control_mux = portMUX_INITIALIZER_UNLOCKED;
+
+static WebUiControlSnapshot web_ui_control_snapshot_get()
+{
+  portENTER_CRITICAL(&s_web_ui_control_mux);
+  const WebUiControlSnapshot snapshot = s_web_ui_control;
+  portEXIT_CRITICAL(&s_web_ui_control_mux);
+  return snapshot;
+}
+
+static void web_ui_volume_locked_set(bool locked)
+{
+  portENTER_CRITICAL(&s_web_ui_control_mux);
+  if (s_web_ui_control.volume_locked != locked) {
+    s_web_ui_control.volume_locked = locked;
+    ++s_web_ui_control.revision;
+    if (s_web_ui_control.revision == 0) {
+      ++s_web_ui_control.revision;
+    }
+  }
+  portEXIT_CRITICAL(&s_web_ui_control_mux);
+}
 
 static bool web_start_task_try_reserve()
 {
@@ -1536,8 +1565,11 @@ static void web_handle_status() {
 
   json.field_uint("play_ms", snap.play_ms);
   json.field_uint("total_ms", snap.total_ms);
+  const WebUiControlSnapshot ui_control =
+      web_ui_control_snapshot_get();
+
   json.field_uint("volume", snap.volume);
-  json.field_bool("volume_locked", s_web_volume_locked);
+  json.field_bool("volume_locked", ui_control.volume_locked);
 
   json.field_string("mode", snap.mode);
   json.field_string("mode_label", snap.mode_label);
@@ -2578,24 +2610,30 @@ static bool web_parse_lock_value(bool& out_value, bool current_value) {
 }
 
 static void web_send_volume_lock_state_json() {
+  const WebUiControlSnapshot ui_control =
+      web_ui_control_snapshot_get();
+
   web_send_no_cache_headers();
 
   String json = "{\"ok\":true";
   json += ",\"volume_locked\":";
-  json += (s_web_volume_locked ? "true" : "false");
+  json += (ui_control.volume_locked ? "true" : "false");
   json += "}";
 
   s_server.send(200, "application/json; charset=utf-8", json);
 }
 
 static void web_handle_volume_lock() {
+  const WebUiControlSnapshot ui_control =
+      web_ui_control_snapshot_get();
+
   bool v = false;
-  if (!web_parse_lock_value(v, s_web_volume_locked)) {
+  if (!web_parse_lock_value(v, ui_control.volume_locked)) {
     web_send_json_err("音量锁参数错误");
     return;
   }
 
-  s_web_volume_locked = v;
+  web_ui_volume_locked_set(v);
   web_send_volume_lock_state_json();
 }
 
