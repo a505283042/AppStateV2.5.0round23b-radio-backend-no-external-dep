@@ -39,7 +39,6 @@ void boot_state_run(void)
 {
     static bool done = false;
     if (done) return;
-    done = true;
 
     // 主串口已经在 setup() 中初始化，这里只输出启动阶段日志。
     Serial.println("[启动] 开始");
@@ -48,8 +47,13 @@ void boot_state_run(void)
                 (int)psramFound(), (unsigned)ESP.getPsramSize(), (unsigned)ESP.getFreePsram());
     Serial.printf("[内存] 内部堆可用=%u\n", (unsigned)ESP.getFreeHeap());
 
-    // 1) 初始化两条 SPI：默认SPI=UI，SPI_SD=SD
-    board_spi_init();
+    // 1) 初始化两条 SPI：默认SPI=UI，SPI_SD=SD。
+    // UI 与 NFC 共享 SPI，互斥量创建失败时不能继续启动；保留 BOOT 状态供下一轮重试。
+    if (!board_spi_init()) {
+        LOGE("[启动] SPI 总线或共享锁初始化失败，稍后重试");
+        return;
+    }
+    done = true;
 
     // keys_init() 早于 MCP23017 初始化执行。扩展器就绪后必须重新同步一次，
     // 消费上电期间的残留电平，避免首次松键被误判为短按。
@@ -97,7 +101,10 @@ void boot_state_run(void)
 
     // ✅ 启动音频专用任务（双核：音频与UI分离，避免旋转推屏导致卡顿）
     audio_service_start();
-    runtime_monitor_start();
+    if (!runtime_monitor_start()) {
+        // 监控任务只负责诊断，创建失败不阻止播放器进入主功能。
+        LOGW("[启动] RuntimeMon 创建失败，继续启动播放器");
+    }
 
     nfc_init();
 

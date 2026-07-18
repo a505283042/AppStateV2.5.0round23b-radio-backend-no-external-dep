@@ -146,15 +146,31 @@ static void runtime_monitor_task_entry(void*)
 }
 
 // 启动运行时监控任务
-void runtime_monitor_start(void) 
+bool runtime_monitor_start(void)
 {
-  if (s_runtime_monitor_task) return;
+  if (s_runtime_monitor_task) {
+    return true;
+  }
 
-  xTaskCreatePinnedToCore(runtime_monitor_task_entry,
-                          "RuntimeMon",
-                          kRuntimeMonStackBytes,
-                          nullptr,
-                          1,
-                          &s_runtime_monitor_task,
-                          1);
+  TaskHandle_t created_task = nullptr;
+  const BaseType_t created =
+      xTaskCreatePinnedToCore(runtime_monitor_task_entry,
+                              "RuntimeMon",
+                              kRuntimeMonStackBytes,
+                              nullptr,
+                              1,
+                              &created_task,
+                              1);
+
+  if (created != pdPASS || !created_task) {
+    s_runtime_monitor_task = nullptr;
+    LOGE("[监控] 创建 RuntimeMon 任务失败：返回值=%ld",
+         (long)created);
+    return false;
+  }
+
+  s_runtime_monitor_task = created_task;
+  LOGD("[监控] RuntimeMon 任务已创建：栈=%uB 核心=1",
+       (unsigned)kRuntimeMonStackBytes);
+  return true;
 }

@@ -14,14 +14,25 @@
 #include "hal/pcf85063.h"
 
 SPIClass SPI_SD;              /* SD专用SPI类实例 */
+static StaticSemaphore_t s_ui_spi_mtx_storage{};
 static SemaphoreHandle_t s_ui_spi_mtx = nullptr;
 
 /* 初始化板级SPI总线 - 初始化默认SPI和SD专用SPI */
-void board_spi_init(void)
+bool board_spi_init(void)
 {
     static bool inited = false;  /* 静态标志，确保初始化只执行一次 */
-    if (inited) return;          /* 如果已经初始化则直接返回 */
-    inited = true;
+    if (inited) return s_ui_spi_mtx != nullptr;
+
+    // UI 与 NFC 共用默认 SPI。共享锁必须在任何设备访问总线前建立，
+    // 使用静态互斥量避免启动阶段堆不足导致锁创建失败。
+    if (!s_ui_spi_mtx) {
+        s_ui_spi_mtx =
+            xSemaphoreCreateRecursiveMutexStatic(&s_ui_spi_mtx_storage);
+    }
+    if (!s_ui_spi_mtx) {
+        Serial.println("[总线] 创建 UI SPI 递归互斥量失败");
+        return false;
+    }
 
     Serial.println("[启动] 初始化SPI总线...");
 
@@ -74,10 +85,6 @@ void board_spi_init(void)
         Serial.println("[总线] 初始化IIC扩展失败");
     }
 
-    if (!s_ui_spi_mtx) {
-        s_ui_spi_mtx = xSemaphoreCreateRecursiveMutex();
-    }
-
     // ---------- Chip Select safe state ----------
     pinMode(PIN_TFT_CS, OUTPUT);
     digitalWrite(PIN_TFT_CS, HIGH);
@@ -113,6 +120,9 @@ void board_spi_init(void)
                   PIN_SPI_SD_MOSI,
                   PIN_SPI_SD_MISO,
                   PIN_SD_CS);
+
+    inited = true;
+    return true;
 }
 
 void board_spi_ui_lock(void)

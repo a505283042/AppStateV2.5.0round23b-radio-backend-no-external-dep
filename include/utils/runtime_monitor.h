@@ -1,3 +1,3 @@
 #pragma once
 
-void runtime_monitor_start(void);
+bool runtime_monitor_start(void);

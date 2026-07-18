@@ -24,6 +24,8 @@ static enum { DEC_NONE, DEC_MP3, DEC_FLAC } g_dec = DEC_NONE;
 #endif
 // --- Total duration (ms), 0 = unknown ---
 static volatile uint32_t s_total_ms = 0;
+static StaticSemaphore_t s_probe_buf_mutex_storage{};
+static SemaphoreHandle_t s_probe_buf_mutex = nullptr;
 static portMUX_TYPE s_end_state_mux = portMUX_INITIALIZER_UNLOCKED;
 static AudioPlaybackEndState s_end_state;
 
@@ -204,13 +206,17 @@ static uint32_t sniff_mp3_total_ms(SdFat& sd, const char* path)
   const uint8_t* p = nullptr;
   const uint8_t* q = nullptr;
 
-  static SemaphoreHandle_t s_buf_mutex = nullptr;
-  if (s_buf_mutex == nullptr) {
-    s_buf_mutex = xSemaphoreCreateMutex();
-    if (s_buf_mutex == nullptr) return 0;
+  if (s_probe_buf_mutex == nullptr) {
+    // 总时长探测会复用静态读取缓冲，使用静态互斥量避免运行期堆分配。
+    s_probe_buf_mutex =
+        xSemaphoreCreateMutexStatic(&s_probe_buf_mutex_storage);
+    if (s_probe_buf_mutex == nullptr) {
+      LOGE("[音频] 创建总时长探测互斥量失败");
+      return 0;
+    }
   }
 
-  if (xSemaphoreTake(s_buf_mutex, pdMS_TO_TICKS(500)) != pdTRUE) goto cleanup;
+  if (xSemaphoreTake(s_probe_buf_mutex, pdMS_TO_TICKS(500)) != pdTRUE) goto cleanup;
   buf_mutex_taken = true;
 
   if (!f.open(sd, path)) goto cleanup;
@@ -300,7 +306,7 @@ static uint32_t sniff_mp3_total_ms(SdFat& sd, const char* path)
 
 cleanup:
   f.close();
-  if (buf_mutex_taken) xSemaphoreGive(s_buf_mutex);
+  if (buf_mutex_taken) xSemaphoreGive(s_probe_buf_mutex);
   return ms;
 }
 

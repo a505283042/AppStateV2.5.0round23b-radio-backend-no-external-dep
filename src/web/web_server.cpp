@@ -5,6 +5,8 @@
 #include <SdFat.h>
 #include <vector>
 #include <cstring>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 #include "app_state.h"
 #include "app_power.h"
@@ -58,10 +60,45 @@ static WebServer s_server(80);
 static bool s_started = false;
 static bool s_ready = false;
 static TaskHandle_t s_web_start_task = nullptr;
+static bool s_web_start_in_progress = false;
+static portMUX_TYPE s_web_start_task_mux = portMUX_INITIALIZER_UNLOCKED;
 static bool s_ap_mode = false;
 static String s_hostname_runtime = WEBCTRL_HOSTNAME_DEFAULT;
 static String s_wifi_source = "ap_fallback";
 static volatile bool s_web_volume_locked = true;
+
+static bool web_start_task_try_reserve()
+{
+    portENTER_CRITICAL(&s_web_start_task_mux);
+    if (s_web_start_in_progress) {
+        portEXIT_CRITICAL(&s_web_start_task_mux);
+        return false;
+    }
+
+    s_web_start_in_progress = true;
+    s_web_start_task = nullptr;
+    portEXIT_CRITICAL(&s_web_start_task_mux);
+    return true;
+}
+
+static void web_start_task_publish_handle(TaskHandle_t task)
+{
+    portENTER_CRITICAL(&s_web_start_task_mux);
+    if (s_web_start_in_progress) {
+        s_web_start_task = task;
+    }
+    portEXIT_CRITICAL(&s_web_start_task_mux);
+}
+
+static void web_start_task_finish(TaskHandle_t task)
+{
+    portENTER_CRITICAL(&s_web_start_task_mux);
+    if (!task || !s_web_start_task || s_web_start_task == task) {
+        s_web_start_task = nullptr;
+        s_web_start_in_progress = false;
+    }
+    portEXIT_CRITICAL(&s_web_start_task_mux);
+}
 
 bool web_wifi_is_enabled()
 {
@@ -2788,7 +2825,7 @@ static void web_start_task_entry(void* arg)
 
     web_server_start();
 
-    s_web_start_task = nullptr;
+    web_start_task_finish(xTaskGetCurrentTaskHandle());
     vTaskDelete(nullptr);
 }
 
@@ -2864,24 +2901,26 @@ void web_server_start_async()
         return;
     }
 
-    if (s_started || s_web_start_task != nullptr) {
+    if (s_started || !web_start_task_try_reserve()) {
         return;
     }
 
+    TaskHandle_t created_task = nullptr;
     const BaseType_t ok = xTaskCreatePinnedToCore(
         web_start_task_entry,
         "WebStart",
         6144,
         nullptr,
         1,
-        &s_web_start_task,
+        &created_task,
         1
     );
 
-    if (ok != pdPASS) {
-        s_web_start_task = nullptr;
-        LOGE("[网页] 创建异步启动任务失败");
+    if (ok != pdPASS || !created_task) {
+        web_start_task_finish(nullptr);
+        LOGE("[网页] 创建异步启动任务失败：返回值=%ld", (long)ok);
     } else {
+        web_start_task_publish_handle(created_task);
         LOGD("[网页] 异步启动任务已创建");
     }
 #else
