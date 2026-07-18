@@ -265,9 +265,16 @@ static void audio_task_publish_state()
     network_snapshot.channels = audio_mp3_get_channels();
   }
 
+  // 只有网络请求仍处于生命周期内时才发布 MP3 网络错误。
+  // 显式停止或切回本地 FLAC 后，不能把上一条网络流的旧错误继续带到状态页。
+  const bool network_context =
+      s_task_network_start_phase != AudioNetworkStartPhase::Idle ||
+      source_snapshot.open ||
+      (audio_mp3_is_active() && audio_mp3_is_stream_source());
+
   const char* error = s_task_network_error[0]
       ? s_task_network_error
-      : audio_mp3_get_last_error();
+      : (network_context ? audio_mp3_get_last_error() : nullptr);
   if (error && *error) {
     strncpy(network_snapshot.error, error, sizeof(network_snapshot.error) - 1);
     network_snapshot.error[sizeof(network_snapshot.error) - 1] = '\0';

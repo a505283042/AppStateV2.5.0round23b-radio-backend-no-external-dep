@@ -33,5 +33,8 @@ bool audio_mp3_audiotools_source_open(const char* url, uint32_t operation_id, Au
 bool audio_mp3_audiotools_source_open_from_offset(const char* url, uint32_t start_offset, uint32_t operation_id, AudioMp3Source& out_source);
 void audio_mp3_audiotools_source_close();
 
+// 返回最近一次 HTTP 音源失败的稳定错误码。仅返回内部静态缓冲指针，调用方不得释放。
+const char* audio_mp3_audiotools_source_get_last_error();
+
 // 只读取缓存快照，不接触 WiFiClient，可由 UI/状态任务安全调用。
 bool audio_mp3_audiotools_source_get_snapshot(AudioMp3HttpSourceSnapshot* out_snapshot);

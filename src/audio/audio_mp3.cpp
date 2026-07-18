@@ -47,6 +47,12 @@ static void set_last_error(const char* error)
   s_mp3_last_error = error ? String(error) : String();
 }
 
+static void set_http_source_error_or(const char* fallback)
+{
+  const char* source_error = audio_mp3_audiotools_source_get_last_error();
+  set_last_error((source_error && *source_error) ? source_error : fallback);
+}
+
 static constexpr size_t kMp3FileInputBufferBytes = 8 * 1024;
 // 网络 MP3 流比本地文件更怕 UI/菜单短时间抢 CPU。
 // 这里给网络流单独使用更大的输入缓冲，并优先放到 PSRAM。
@@ -225,8 +231,15 @@ static bool fill_input_buffer(size_t min_fill_target, uint32_t wait_timeout_ms =
     }
 
     set_end_reason_if_none(AudioPlaybackEndReason::SourceIoError);
-    set_last_error(g_source_is_stream ? "stream_read_failed" : "source_read_failed");
-    LOGE("[MP3] 音源读取失败：名称=%s 代码=%d", s_debug_name ? s_debug_name : "<null>", n);
+    if (g_source_is_stream) {
+      set_http_source_error_or("stream_read_failed");
+    } else {
+      set_last_error("source_read_failed");
+    }
+    LOGE("[MP3] 音源读取失败：名称=%s 代码=%d 错误=%s",
+         s_debug_name ? s_debug_name : "<null>",
+         n,
+         s_mp3_last_error.c_str());
     return false;
   }
 
@@ -437,8 +450,14 @@ bool audio_mp3_start_file(SdFat& sd, const char* path)
 
 bool audio_mp3_start_url(const char* url, uint32_t operation_id)
 {
+  // HTTP 打开可能在进入统一解码核心前失败，因此必须先清除上一条流的错误。
+  s_end_reason = AudioPlaybackEndReason::None;
+  set_last_error(nullptr);
+
   AudioMp3Source src{};
   if (!audio_mp3_audiotools_source_open(url, operation_id, src)) {
+    set_end_reason_if_none(AudioPlaybackEndReason::SourceIoError);
+    set_http_source_error_or("stream_open_failed");
     return false;
   }
 
@@ -456,8 +475,14 @@ bool audio_mp3_start_url_from_offset(const char* url, uint32_t start_offset, uin
     return audio_mp3_start_url(url, operation_id);
   }
 
+  // Range 打开失败时也要覆盖旧错误，供 AudioTask 决定是否回退普通 URL。
+  s_end_reason = AudioPlaybackEndReason::None;
+  set_last_error(nullptr);
+
   AudioMp3Source src{};
   if (!audio_mp3_audiotools_source_open_from_offset(url, start_offset, operation_id, src)) {
+    set_end_reason_if_none(AudioPlaybackEndReason::SourceIoError);
+    set_http_source_error_or("stream_open_failed");
     return false;
   }
 

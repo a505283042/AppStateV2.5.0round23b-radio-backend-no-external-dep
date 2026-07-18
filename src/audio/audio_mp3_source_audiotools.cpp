@@ -12,6 +12,8 @@
 #include <WiFiClient.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <stdio.h>
+#include <string.h>
 
 #include "utils/log.h"
 
@@ -29,6 +31,29 @@ static uint32_t s_operation_generation = 1;
 static uint32_t s_active_operation_id = 0;
 static uint32_t s_stream_opened_ms = 0;
 static uint32_t s_last_body_data_ms = 0;
+static char s_last_error[64] = {0};
+
+static void clear_source_error()
+{
+  s_last_error[0] = '\0';
+}
+
+static void set_source_error(const char* error)
+{
+  if (!error || !*error) {
+    clear_source_error();
+    return;
+  }
+
+  strncpy(s_last_error, error, sizeof(s_last_error) - 1);
+  s_last_error[sizeof(s_last_error) - 1] = '\0';
+}
+
+static void set_http_status_error(int status_code)
+{
+  snprintf(s_last_error, sizeof(s_last_error), "http_status_%d", status_code);
+  s_last_error[sizeof(s_last_error) - 1] = '\0';
+}
 
 constexpr uint16_t kDefaultHttpPort = 80;
 constexpr uint32_t kConnectTimeoutMs = 5000;
@@ -85,14 +110,23 @@ static void publish_source_snapshot(bool open,
 
 static bool parse_http_url(const char* url, ParsedUrl& out)
 {
-  if (!url || !*url) return false;
+  if (!url || !*url) {
+    set_source_error("invalid_url");
+    return false;
+  }
 
   String u(url);
   u.trim();
 
   const char* prefix = "http://";
   if (!u.startsWith(prefix)) {
-    LOGE("[电台] only http 流 is 支持ed: %s", url);
+    if (u.startsWith("https://")) {
+      set_source_error("https_not_supported");
+      LOGE("[电台] 暂不支持 HTTPS 流：%s", url);
+    } else {
+      set_source_error("unsupported_url_scheme");
+      LOGE("[电台] 不支持的 URL 协议：%s", url);
+    }
     return false;
   }
 
@@ -101,19 +135,30 @@ static bool parse_http_url(const char* url, ParsedUrl& out)
   String host_port = slash >= 0 ? rest.substring(0, slash) : rest;
   out.path = slash >= 0 ? rest.substring(slash) : String("/");
 
-  if (host_port.length() == 0) return false;
+  if (host_port.length() == 0) {
+    set_source_error("invalid_url");
+    return false;
+  }
 
   const int colon = host_port.lastIndexOf(':');
   if (colon > 0) {
     out.host = host_port.substring(0, colon);
     const int port = host_port.substring(colon + 1).toInt();
-    out.port = port > 0 ? static_cast<uint16_t>(port) : kDefaultHttpPort;
+    if (port <= 0 || port > 65535) {
+      set_source_error("invalid_url_port");
+      return false;
+    }
+    out.port = static_cast<uint16_t>(port);
   } else {
     out.host = host_port;
     out.port = kDefaultHttpPort;
   }
 
-  return out.host.length() > 0 && out.path.length() > 0;
+  if (out.host.length() == 0 || out.path.length() == 0) {
+    set_source_error("invalid_url");
+    return false;
+  }
+  return true;
 }
 
 static bool read_line_with_timeout(String& line, uint32_t timeout_ms, uint32_t operation_id)
@@ -123,6 +168,7 @@ static bool read_line_with_timeout(String& line, uint32_t timeout_ms, uint32_t o
 
   while (millis() - start < timeout_ms) {
     if (!operation_is_current(operation_id)) {
+      set_source_error("cancelled");
       LOGD("[电台] HTTP 头读取已取消：操作=%lu", (unsigned long)operation_id);
       return false;
     }
@@ -133,19 +179,24 @@ static bool read_line_with_timeout(String& line, uint32_t timeout_ms, uint32_t o
       if (c == '\n') return true;
       line += c;
       if (line.length() > 512) {
+        set_source_error("http_header_line_too_long");
         LOGW("[电台] HTTP 头行过长");
         return false;
       }
     }
 
     if (!g_client.connected()) {
+      if (line.length() == 0) {
+        set_source_error("http_header_disconnected");
+      }
       return line.length() > 0;
     }
 
     delay(5);
   }
 
-  LOGW("[电台] HTTP 头 读取 超时");
+  set_source_error("http_header_timeout");
+  LOGW("[电台] HTTP 头读取超时");
   return false;
 }
 
@@ -248,11 +299,17 @@ static bool read_response_header(const ParsedUrl& current, int& status_code, Str
 
   uint32_t remaining_ms = remaining_timeout_ms();
   if (remaining_ms == 0 || !read_line_with_timeout(line, remaining_ms, operation_id)) {
+    if (s_last_error[0] == '\0') set_source_error("http_status_line_missing");
     LOGE("[电台] 缺少 HTTP 状态行");
     return false;
   }
 
   status_code = parse_status_code(line);
+  if (status_code <= 0) {
+    set_source_error("http_status_invalid");
+    LOGE("[电台] HTTP 状态行无效：%s", line.c_str());
+    return false;
+  }
   LOGD("[电台] HTTP 状态: %s", line.c_str());
 
   for (;;) {
@@ -283,6 +340,7 @@ static bool read_response_header(const ParsedUrl& current, int& status_code, Str
     }
   }
 
+  if (s_last_error[0] == '\0') set_source_error("http_header_incomplete");
   LOGE("[电台] HTTP 头未完整读取，总超时=%lums", (unsigned long)kHeaderTimeoutMs);
   return false;
 }
@@ -292,6 +350,7 @@ static bool open_http_stream_once(const char* url, uint32_t start_offset, uint32
   redirect_url = String();
 
   if (!operation_is_current(operation_id)) {
+    set_source_error("cancelled");
     return false;
   }
 
@@ -330,8 +389,13 @@ static bool open_http_stream_once(const char* url, uint32_t start_offset, uint32
 
   if (!connected) {
     if (!operation_is_current(operation_id)) {
+      set_source_error("cancelled");
       LOGD("[电台] HTTP 连接已取消：操作=%lu", (unsigned long)operation_id);
+    } else if (!WiFi.isConnected()) {
+      set_source_error("wifi_disconnected");
+      LOGE("[电台] HTTP 连接期间 WiFi 已断开");
     } else {
+      set_source_error("http_connect_failed");
       LOGE("[电台] HTTP 连接失败 主机=%s 端口=%u", parsed.host.c_str(), parsed.port);
     }
     g_client.stop();
@@ -339,6 +403,7 @@ static bool open_http_stream_once(const char* url, uint32_t start_offset, uint32
   }
 
   if (!operation_is_current(operation_id)) {
+    set_source_error("cancelled");
     g_client.stop();
     return false;
   }
@@ -373,6 +438,7 @@ static bool open_http_stream_once(const char* url, uint32_t start_offset, uint32
 
   if (status_code == 301 || status_code == 302 || status_code == 307 || status_code == 308) {
     if (location.length() == 0) {
+      set_source_error("redirect_missing_location");
       LOGE("[电台] HTTP 重定向缺少 Location");
       g_client.stop();
       return false;
@@ -385,6 +451,7 @@ static bool open_http_stream_once(const char* url, uint32_t start_offset, uint32
   }
 
   if (start_offset > 0 && status_code != 206) {
+    set_source_error("http_range_not_supported");
     LOGW("[电台] Range 起播被服务器拒绝或忽略 状态=%d offset=%lu URL=%s",
          status_code,
          (unsigned long)start_offset,
@@ -394,18 +461,23 @@ static bool open_http_stream_once(const char* url, uint32_t start_offset, uint32
   }
 
   if (status_code < 200 || status_code >= 300) {
+    set_http_status_error(status_code);
     LOGE("[电台] HTTP 状态异常=%d URL=%s", status_code, url);
     g_client.stop();
     return false;
   }
 
+  clear_source_error();
   return true;
 }
 
 static int http_source_read(void* ctx, uint8_t* dst, size_t bytes)
 {
   auto* client = static_cast<WiFiClient*>(ctx);
-  if (!client || !dst || bytes == 0) return AUDIO_MP3_SOURCE_ERROR;
+  if (!client || !dst || bytes == 0) {
+    set_source_error("source_read_invalid_argument");
+    return AUDIO_MP3_SOURCE_ERROR;
+  }
   if (!s_open) return AUDIO_MP3_SOURCE_EOF;
 
   if (s_active_operation_id == 0 || !operation_is_current(s_active_operation_id)) {
@@ -421,6 +493,7 @@ static int http_source_read(void* ctx, uint8_t* dst, size_t bytes)
   // WiFi 被动断开属于网络读取错误，不能伪装成正常 EOF。
   // 用户主动停止会先使 operation_id 失效，并走上面的取消分支。
   if (!WiFi.isConnected()) {
+    set_source_error("wifi_disconnected");
     client->stop();
     s_open = false;
     s_active_operation_id = 0;
@@ -449,6 +522,7 @@ static int http_source_read(void* ctx, uint8_t* dst, size_t bytes)
         : s_stream_opened_ms;
     if (activity_base_ms != 0 &&
         (uint32_t)(now_ms - activity_base_ms) >= kStreamNoDataTimeoutMs) {
+      set_source_error("stream_no_data_timeout");
       LOGE("[电台] HTTP 流长期无数据，主动断开：等待=%lums URL=%s",
            (unsigned long)(now_ms - activity_base_ms),
            s_url.c_str());
@@ -486,6 +560,7 @@ static int http_source_read(void* ctx, uint8_t* dst, size_t bytes)
   }
 
   if (!WiFi.isConnected()) {
+    set_source_error("wifi_disconnected");
     client->stop();
     s_open = false;
     s_active_operation_id = 0;
@@ -509,6 +584,7 @@ static int http_source_read(void* ctx, uint8_t* dst, size_t bytes)
       : s_stream_opened_ms;
   if (activity_base_ms != 0 &&
       (uint32_t)(millis() - activity_base_ms) >= kStreamNoDataTimeoutMs) {
+    set_source_error("stream_no_data_timeout");
     LOGE("[电台] HTTP 流读取长期无进展，主动断开：URL=%s", s_url.c_str());
     client->stop();
     s_open = false;
@@ -628,21 +704,25 @@ bool audio_mp3_audiotools_source_probe_audio_start_offset(const char* url,
 bool audio_mp3_audiotools_source_open_from_offset(const char* url, uint32_t start_offset, uint32_t operation_id, AudioMp3Source& out_source)
 {
   audio_mp3_audiotools_source_close();
+  clear_source_error();
   publish_source_snapshot(false, false, true, false, 0);
 
   if (!operation_is_current(operation_id)) {
+    set_source_error("cancelled");
     LOGD("[电台] HTTP 音源打开请求已过期：操作=%lu", (unsigned long)operation_id);
     publish_source_snapshot(false, false, false, false, 0);
     return false;
   }
 
   if (!url || !*url) {
+    set_source_error("invalid_url");
     LOGE("[电台] HTTP 音源打开失败：URL 为空");
     publish_source_snapshot(false, false, false, false, 0);
     return false;
   }
 
   if (!WiFi.isConnected()) {
+    set_source_error("wifi_disconnected");
     LOGE("[电台] HTTP 音源打开失败：WiFi 未连接");
     publish_source_snapshot(false, false, false, false, 0);
     return false;
@@ -664,11 +744,18 @@ bool audio_mp3_audiotools_source_open_from_offset(const char* url, uint32_t star
   }
 
   if (!ok) {
-    LOGE("[电台] HTTP 流 打开失败：%s offset=%lu", url, (unsigned long)start_offset);
+    if (s_last_error[0] == '\0') {
+      set_source_error("too_many_redirects");
+    }
+    LOGE("[电台] HTTP 流打开失败：%s offset=%lu 错误=%s",
+         url,
+         (unsigned long)start_offset,
+         s_last_error);
     publish_source_snapshot(false, false, false, false, 0);
     return false;
   }
 
+  clear_source_error();
   s_open = true;
   s_active_operation_id = operation_id;
   s_url = current_url;
@@ -715,6 +802,11 @@ void audio_mp3_audiotools_source_close()
   s_last_body_data_ms = 0;
   s_url = String();
   publish_source_snapshot(false, false, false, false, 0);
+}
+
+const char* audio_mp3_audiotools_source_get_last_error()
+{
+  return s_last_error;
 }
 
 bool audio_mp3_audiotools_source_get_snapshot(AudioMp3HttpSourceSnapshot* out_snapshot)
