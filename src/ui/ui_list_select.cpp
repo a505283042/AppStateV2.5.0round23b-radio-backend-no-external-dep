@@ -647,6 +647,230 @@ static void drawTrackItem(TrackIndex16 track_idx, int idx, int list_pos,
   tft.setTextDatum(top_left);
 }
 
+static void drawSnapshotItem(const PlayerListSelectViewItem& item,
+                             int global_idx,
+                             int list_pos,
+                             bool is_selected,
+                             int scroll_offset = 0,
+                             bool draw_bg = true)
+{
+  tft.setFont(&g_font_cjk);
+  tft.setTextSize(1);
+  tft.setTextWrap(false);
+
+  const int ITEM_HEIGHT = 18;
+  const int START_Y = 60;
+  const int y = START_Y + list_pos * ITEM_HEIGHT;
+
+  const int row_x = 10;
+  const int row_w = 210;
+  const int row_h = ITEM_HEIGHT;
+  const int row_r = 5;
+
+  const int row_top = y - row_h / 2;
+  const int row_mid_y = row_top + row_h / 2;
+  const int clip_y = row_top;
+  const int clip_h = row_h;
+
+  if (draw_bg) {
+    tft.fillRoundRect(row_x,
+                      row_top,
+                      row_w,
+                      row_h,
+                      row_r,
+                      is_selected ? 0x4208 : TFT_BLACK);
+  }
+
+  const String name = item.name.length() ? item.name : String("未命名");
+  String right = item.right_text;
+  const String prefix = String(global_idx + 1) + ". ";
+
+  const int list_left_edge = 25;
+  const int list_right_edge = 210;
+  const int prefix_width = tft.textWidth(prefix);
+  int right_width = right.length() ? tft.textWidth(right) : 0;
+  const int text_start_x = list_left_edge + prefix_width;
+  int available_width = list_right_edge - right_width - text_start_x;
+
+  // 右侧信息过长时优先保证名称至少有基本显示空间。
+  if (available_width < 40) {
+    right = "";
+    right_width = 0;
+    available_width = list_right_edge - text_start_x;
+  }
+
+  const int name_width = tft.textWidth(name);
+  const bool need_scroll = is_selected && name_width > available_width;
+
+  if (need_scroll) {
+    tft.setTextColor(TFT_YELLOW, 0x4208);
+    tft.setTextDatum(middle_left);
+    tft.drawString(prefix, list_left_edge, row_mid_y);
+
+    drawScrollingTextPixel(name,
+                           text_start_x,
+                           row_mid_y,
+                           clip_y,
+                           clip_h,
+                           available_width,
+                           scroll_offset,
+                           TFT_YELLOW,
+                           0x4208);
+
+    if (right.length()) {
+      tft.setTextColor(TFT_LIGHTGREY, 0x4208);
+      tft.setTextDatum(middle_right);
+      tft.drawString(right, list_right_edge, row_mid_y);
+    }
+  } else {
+    String display_name = name;
+
+    if (name_width > available_width) {
+      display_name = truncateByPixel(name, available_width);
+      if (display_name.length() < name.length()) {
+        const int ellipsis_width = tft.textWidth("...");
+        if (tft.textWidth(display_name) + ellipsis_width <= available_width) {
+          display_name += "...";
+        } else {
+          display_name = truncateByPixel(display_name, available_width - ellipsis_width);
+          display_name += "...";
+        }
+      }
+    }
+
+    const uint16_t bg = is_selected ? 0x4208 : TFT_BLACK;
+    tft.setTextColor(is_selected ? TFT_YELLOW : TFT_WHITE, bg);
+    tft.setTextDatum(middle_left);
+    tft.drawString(prefix + display_name, list_left_edge, row_mid_y);
+
+    if (right.length()) {
+      tft.setTextColor(TFT_LIGHTGREY, bg);
+      tft.setTextDatum(middle_right);
+      tft.drawString(right, list_right_edge, row_mid_y);
+    }
+  }
+
+  tft.setTextDatum(top_left);
+}
+
+void ui_draw_list_select_snapshot(const std::vector<PlayerListSelectViewItem>& items,
+                                  int page_start_idx,
+                                  int selected_global_idx,
+                                  int total,
+                                  const char* title)
+{
+  if (items.empty() || total <= 0) return;
+
+  tft.setFont(&g_font_cjk);
+  tft.setTextSize(1);
+  tft.setTextWrap(false);
+
+  const int ITEMS_VISIBLE = 5;
+  int selected_local_idx = selected_global_idx - page_start_idx;
+  if (selected_local_idx < 0) selected_local_idx = 0;
+  if (selected_local_idx >= (int)items.size()) {
+    selected_local_idx = (int)items.size() - 1;
+  }
+
+  if (selected_global_idx != s_scroll_state.scroll_idx) {
+    s_scroll_state.reset(selected_global_idx);
+  }
+
+  const bool is_page_changed = page_start_idx != s_last_start_idx;
+  const bool is_selection_changed = selected_global_idx != s_last_selected_idx;
+
+  bool is_offset_changed = false;
+  {
+    const PlayerListSelectViewItem& selected = items[(size_t)selected_local_idx];
+    const String prefix = String(selected_global_idx + 1) + ". ";
+    const int prefix_width = tft.textWidth(prefix);
+    int right_width = selected.right_text.length()
+        ? tft.textWidth(selected.right_text)
+        : 0;
+
+    const int list_left_edge = 25;
+    const int list_right_edge = 210;
+    const int text_start_x = list_left_edge + prefix_width;
+    int available_width = list_right_edge - right_width - text_start_x;
+    if (available_width < 40) {
+      available_width = list_right_edge - text_start_x;
+    }
+
+    const String selected_name = selected.name.length()
+        ? selected.name
+        : String("未命名");
+    is_offset_changed = s_scroll_state.update(
+        tft.textWidth(selected_name),
+        available_width);
+  }
+
+  if (!s_first_draw &&
+      !is_page_changed &&
+      !is_selection_changed &&
+      !is_offset_changed &&
+      selected_global_idx == last_drawn_selected &&
+      s_scroll_state.scroll_offset == last_drawn_offset) {
+    return;
+  }
+
+  if (s_first_draw || is_page_changed) {
+    tft.fillScreen(TFT_BLACK);
+    drawListFrame(title, page_start_idx, total, ITEMS_VISIBLE);
+
+    for (int local = 0; local < (int)items.size(); ++local) {
+      const int global_idx = page_start_idx + local;
+      const bool is_selected = global_idx == selected_global_idx;
+      drawSnapshotItem(items[(size_t)local],
+                       global_idx,
+                       local,
+                       is_selected,
+                       is_selected ? s_scroll_state.scroll_offset : 0,
+                       true);
+    }
+  } else if (is_selection_changed) {
+    if (s_last_selected_idx >= page_start_idx &&
+        s_last_selected_idx < page_start_idx + (int)items.size()) {
+      const int old_pos = s_last_selected_idx - page_start_idx;
+      int old_row_top = 0;
+      int old_row_h = 0;
+      getListRowRect(old_pos, old_row_top, old_row_h);
+      tft.fillRoundRect(10, old_row_top, 210, old_row_h, 5, TFT_BLACK);
+      drawSnapshotItem(items[(size_t)old_pos],
+                       s_last_selected_idx,
+                       old_pos,
+                       false,
+                       0,
+                       false);
+    }
+
+    const int new_pos = selected_global_idx - page_start_idx;
+    if (new_pos >= 0 && new_pos < (int)items.size()) {
+      drawSnapshotItem(items[(size_t)new_pos],
+                       selected_global_idx,
+                       new_pos,
+                       true,
+                       0,
+                       true);
+    }
+  } else if (is_offset_changed) {
+    const int list_pos = selected_global_idx - page_start_idx;
+    if (list_pos >= 0 && list_pos < (int)items.size()) {
+      drawSnapshotItem(items[(size_t)list_pos],
+                       selected_global_idx,
+                       list_pos,
+                       true,
+                       s_scroll_state.scroll_offset,
+                       false);
+    }
+  }
+
+  s_last_selected_idx = selected_global_idx;
+  s_last_start_idx = page_start_idx;
+  last_drawn_selected = selected_global_idx;
+  last_drawn_offset = s_scroll_state.scroll_offset;
+  s_first_draw = false;
+}
+
 // =============================================================================
 // 绘制列表选择界面
 // 参数: groups - 列表组数据

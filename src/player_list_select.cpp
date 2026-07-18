@@ -1,6 +1,10 @@
 #include "player_list_select.h"
 
+#include <algorithm>
 #include <Preferences.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+#include <utility>
 #include "ui/ui_list_select_view.h"
 #include "ui/ui.h"
 
@@ -11,6 +15,7 @@
 #include "player_snapshot.h"
 #include "storage/storage_catalog_v3.h"
 #include "storage/storage_groups_v3.h"
+#include "storage/storage_view_v3.h"
 #include "radio/radio_catalog.h"
 #include "net_music/net_music_catalog.h"
 #include "utils/log.h"
@@ -51,6 +56,113 @@ static constexpr uint32_t LIST_TIMEOUT_TRACK_MS = 60000;  // 二级列表 60 秒
 // 二级歌曲列表
 std::vector<TrackIndex16> s_list_tracks;
 
+StaticSemaphore_t s_view_mutex_storage{};
+SemaphoreHandle_t s_view_mutex = nullptr;
+PlayerListSelectViewSnapshot s_view_snapshot{};
+uint32_t s_view_revision = 0;
+
+static constexpr int LIST_VISIBLE_ITEMS = 5;
+
+const std::vector<PlaylistGroup>& list_select_current_groups();
+const std::vector<RadioItem>& list_select_current_radios();
+
+static inline bool list_select_view_lock(TickType_t wait_ticks = portMAX_DELAY)
+{
+    return s_view_mutex && xSemaphoreTake(s_view_mutex, wait_ticks) == pdTRUE;
+}
+
+static inline void list_select_view_unlock()
+{
+    if (s_view_mutex) {
+        xSemaphoreGive(s_view_mutex);
+    }
+}
+
+static String list_select_track_display_name(TrackIndex16 track_idx)
+{
+    TrackInfo track{};
+    if (storage_fill_trackinfo_from_v3(storage_catalog_v3(), track_idx, track)) {
+        return track.title.length() ? track.title : String("未知歌曲");
+    }
+    return String("未知歌曲");
+}
+
+static void list_select_publish_view()
+{
+    if (!s_view_mutex) {
+        return;
+    }
+
+    PlayerListSelectViewSnapshot next{};
+    next.active = s_list_state != ListSelectState::NONE;
+    next.state = s_list_state;
+    next.selected_idx = s_list_selected_idx;
+
+    if (next.active) {
+        next.items.reserve(LIST_VISIBLE_ITEMS);
+
+        if (s_list_state == ListSelectState::NET_TRACK) {
+            next.page_start_idx = s_net_track_page_start_idx;
+            next.total = s_net_track_total;
+
+            for (const NetMusicItem& item : s_list_net_tracks) {
+                PlayerListSelectViewItem view_item{};
+                view_item.name = item.title.length() ? item.title : String("未命名");
+                view_item.right_text = item.artist.length() ? item.artist : String("NAS");
+                next.items.push_back(std::move(view_item));
+            }
+        } else if (s_list_state == ListSelectState::TRACKS) {
+            next.total = static_cast<int>(s_list_tracks.size());
+            next.page_start_idx = (next.selected_idx / LIST_VISIBLE_ITEMS) * LIST_VISIBLE_ITEMS;
+            const int end_idx = std::min(next.page_start_idx + LIST_VISIBLE_ITEMS, next.total);
+
+            for (int i = next.page_start_idx; i < end_idx; ++i) {
+                PlayerListSelectViewItem view_item{};
+                view_item.name = list_select_track_display_name(s_list_tracks[(size_t)i]);
+                next.items.push_back(std::move(view_item));
+            }
+        } else if (s_list_state == ListSelectState::RADIO) {
+            const auto& radios = list_select_current_radios();
+            next.total = static_cast<int>(radios.size());
+            next.page_start_idx = (next.selected_idx / LIST_VISIBLE_ITEMS) * LIST_VISIBLE_ITEMS;
+            const int end_idx = std::min(next.page_start_idx + LIST_VISIBLE_ITEMS, next.total);
+
+            for (int i = next.page_start_idx; i < end_idx; ++i) {
+                PlayerListSelectViewItem view_item{};
+                view_item.name = radios[(size_t)i].name;
+                view_item.right_text = radios[(size_t)i].region;
+                next.items.push_back(std::move(view_item));
+            }
+        } else {
+            const auto& groups = list_select_current_groups();
+            next.total = static_cast<int>(groups.size());
+            next.page_start_idx = (next.selected_idx / LIST_VISIBLE_ITEMS) * LIST_VISIBLE_ITEMS;
+            const int end_idx = std::min(next.page_start_idx + LIST_VISIBLE_ITEMS, next.total);
+            const MusicCatalogV3& catalog = storage_catalog_v3();
+
+            for (int i = next.page_start_idx; i < end_idx; ++i) {
+                const PlaylistGroup& group = groups[(size_t)i];
+                PlayerListSelectViewItem view_item{};
+                view_item.name = playlist_group_display_string(catalog, group);
+                view_item.right_text = "(" + String(group.track_indices.size()) + "首)";
+                next.items.push_back(std::move(view_item));
+            }
+        }
+    }
+
+    if (!list_select_view_lock()) {
+        return;
+    }
+
+    ++s_view_revision;
+    if (s_view_revision == 0) {
+        ++s_view_revision;
+    }
+    next.revision = s_view_revision;
+    s_view_snapshot = std::move(next);
+    list_select_view_unlock();
+}
+
 // 更新列表选择活动时间戳
 static inline void list_select_touch_activity()
 {
@@ -71,6 +183,7 @@ static inline uint32_t list_select_timeout_ms()
 // 造成实际已经进入列表状态，但屏幕仍停留在菜单页。
 static void list_select_prepare_view_on_enter()
 {
+    list_select_publish_view();
     ui_clear_list_select();
     ui_request_refresh_now();
 }
@@ -164,6 +277,8 @@ void list_select_clear_state(bool clear_ui)
     s_parent_group_idx = -1;
     s_parent_group_state = ListSelectState::NONE;
     s_list_last_action_ms = 0;
+
+    list_select_publish_view();
 
     if (clear_ui) {
         ui_clear_list_select();
@@ -267,6 +382,8 @@ void list_select_move_selection(int delta, int item_count, bool is_net_track)
         (void)list_select_load_net_track_page_for_selected();
         list_select_remember_net_track_position();
     }
+
+    list_select_publish_view();
 
     // 旋钮/按键移动后立刻唤醒 UiTask，避免等下一帧才看到高亮变化。
     ui_request_refresh_now();
@@ -374,6 +491,20 @@ bool list_select_try_play_selected_net_track()
 }
 
 } // 只给本文件用的内部变量和内部函数结束
+
+void player_list_select_init()
+{
+    if (!s_view_mutex) {
+        s_view_mutex = xSemaphoreCreateMutexStatic(&s_view_mutex_storage);
+    }
+
+    if (!s_view_mutex) {
+        LOGE("[列表] 创建可见页快照互斥量失败");
+        return;
+    }
+
+    list_select_publish_view();
+}
 
 // 设置列表选择模块回调
 void player_list_select_setup_hooks(const PlayerListSelectHooks& hooks)
@@ -654,48 +785,31 @@ bool player_list_select_enter(play_mode_t mode)
 // 判断列表选择模块是否激活
 bool player_list_select_is_active()
 {
-    return s_list_state != ListSelectState::NONE;
-}
-// 获取当前列表选择状态
-ListSelectState player_list_select_get_state()
-{
-    return s_list_state;
-}
-// 获取当前选中的组索引
-int player_list_select_get_selected_idx()
-{
-    return s_list_selected_idx;
-}
-// 获取当前播放列表中的组
-const std::vector<PlaylistGroup>& player_list_select_get_groups()
-{
-    return list_select_current_groups();
-}
-// 获取当前播放列表中的 radio
-const std::vector<RadioItem>& player_list_select_get_radios()
-{
-    return list_select_current_radios();
+    return player_list_select_view_runtime_get().active;
 }
 
-const std::vector<NetMusicItem>& player_list_select_get_net_tracks()
+PlayerListSelectViewRuntime player_list_select_view_runtime_get()
 {
-    return s_list_net_tracks;
+    PlayerListSelectViewRuntime runtime{};
+    if (!list_select_view_lock()) {
+        return runtime;
+    }
+
+    runtime.active = s_view_snapshot.active;
+    runtime.revision = s_view_snapshot.revision;
+    list_select_view_unlock();
+    return runtime;
 }
 
-int player_list_select_get_net_track_page_start()
+bool player_list_select_copy_view_snapshot(PlayerListSelectViewSnapshot& out)
 {
-    return s_net_track_page_start_idx;
-}
+    if (!list_select_view_lock(pdMS_TO_TICKS(20))) {
+        return false;
+    }
 
-int player_list_select_get_net_track_total()
-{
-    return s_net_track_total;
-}
-
-// 获取当前播放列表中的歌曲
-const std::vector<TrackIndex16>& player_list_select_get_tracks()
-{
-    return s_list_tracks;
+    out = s_view_snapshot;
+    list_select_view_unlock();
+    return true;
 }
 // 处理按键事件
 void player_list_select_handle_key(key_event_t evt)
@@ -762,6 +876,7 @@ void player_list_select_handle_key(key_event_t evt)
                 s_list_tracks.clear();
 
                 list_select_touch_activity();
+                list_select_publish_view();
 
                 ui_clear_list_select();
                 ui_request_refresh_now();

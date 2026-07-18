@@ -13,6 +13,7 @@
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <utility>
 
 #include "fonts/u8g2_font_wenquanyi_merged.h"
 #include "lyrics/lyrics.h"
@@ -88,6 +89,26 @@ bool s_rotFramesInited = false;
 LGFX_Sprite* s_src = nullptr;
 
 int s_list_last_drawn_idx = -1;
+PlayerListSelectViewSnapshot s_list_view_cache{};
+
+static bool ui_list_snapshot_items_equal(const PlayerListSelectViewSnapshot& a,
+                                         const PlayerListSelectViewSnapshot& b)
+{
+  if (a.total != b.total ||
+      a.page_start_idx != b.page_start_idx ||
+      a.items.size() != b.items.size()) {
+    return false;
+  }
+
+  for (size_t i = 0; i < a.items.size(); ++i) {
+    if (a.items[i].name != b.items[i].name ||
+        a.items[i].right_text != b.items[i].right_text) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool s_quick_menu_was_active = false;
 bool s_list_select_was_active = false;
 
@@ -190,7 +211,9 @@ static inline TickType_t ui_period_ticks()
   // 列表选择模式优先于快捷菜单。
   // 从快捷菜单进入列表时菜单仍保持 active，帧率判断也要优先按列表处理，
   // 避免列表刷新被菜单状态降级或延后。
-  if (player_list_select_is_active()) return pdMS_TO_TICKS(1000 / UI_FPS_LIST_SELECT);
+  if (player_list_select_view_runtime_get().active) {
+    return pdMS_TO_TICKS(1000 / UI_FPS_LIST_SELECT);
+  }
 
   // 快捷菜单：不需要高帧率，但需要比 1fps 更跟手。
   if (quick_menu_is_active()) return pdMS_TO_TICKS(1000 / UI_FPS_QUICK_MENU);
@@ -249,42 +272,72 @@ static void ui_task_entry(void*)
     // 播放源菜单打开列表时会保留 quick_menu active，方便 MODE 短按返回菜单；
     // 如果这里先画菜单，屏幕会停在菜单页，出现“列表能选能播但 UI 不变”。
     
-    if (player_list_select_is_active()) {
+    const PlayerListSelectViewRuntime list_runtime =
+        player_list_select_view_runtime_get();
+
+    if (list_runtime.active) {
       s_list_select_was_active = true;
       // 菜单/列表覆盖播放器时，暂停封面旋转时钟，避免退出后 dt 累积导致角度跳变。
       s_rot_last_ms = now_ms;
 
-      ui_draw_lock();
+      if (s_list_view_cache.revision != list_runtime.revision) {
+        PlayerListSelectViewSnapshot next{};
+        if (player_list_select_copy_view_snapshot(next)) {
+          const bool force_full_redraw =
+              s_list_view_cache.active &&
+              (next.state != s_list_view_cache.state ||
+               (next.page_start_idx == s_list_view_cache.page_start_idx &&
+                !ui_list_snapshot_items_equal(next, s_list_view_cache)));
 
-      int current_idx = player_list_select_get_selected_idx();
-      ListSelectState state = player_list_select_get_state();
-
-      if (state == ListSelectState::RADIO) {
-        const auto& radios = player_list_select_get_radios();
-        ui_draw_radio_select(radios, current_idx, "选择电台");
-      } else if (state == ListSelectState::NET_TRACK) {
-        const auto& items = player_list_select_get_net_tracks();
-        ui_draw_net_music_select(items,
-                                player_list_select_get_net_track_page_start(),
-                                current_idx,
-                                player_list_select_get_net_track_total(),
-                                "选择NAS歌曲");
-      } else if (state == ListSelectState::TRACKS) {
-        const auto& tracks = player_list_select_get_tracks();
-        ui_draw_track_select(tracks, current_idx, "选择歌曲");
-      } else {
-        const char* title = (state == ListSelectState::ARTIST) ? "选择歌手" : "选择专辑";
-        const auto& groups = player_list_select_get_groups();
-        ui_draw_list_select(groups, current_idx, title);
+          s_list_view_cache = std::move(next);
+          if (force_full_redraw) {
+            // 列表类型或同一选中位置的显示内容发生变化时，旧的局部绘制缓存不能复用。
+            ui_clear_list_select();
+          }
+        }
       }
 
-      s_list_last_drawn_idx = current_idx;
+      if (!s_list_view_cache.active || s_list_view_cache.items.empty()) {
+        continue;
+      }
+
+      ui_draw_lock();
+
+      const char* title = "选择专辑";
+      switch (s_list_view_cache.state) {
+        case ListSelectState::ARTIST:
+          title = "选择歌手";
+          break;
+        case ListSelectState::TRACKS:
+          title = "选择歌曲";
+          break;
+        case ListSelectState::RADIO:
+          title = "选择电台";
+          break;
+        case ListSelectState::NET_TRACK:
+          title = "选择NAS歌曲";
+          break;
+        case ListSelectState::ALBUM:
+        case ListSelectState::NONE:
+        default:
+          title = "选择专辑";
+          break;
+      }
+
+      ui_draw_list_select_snapshot(s_list_view_cache.items,
+                                   s_list_view_cache.page_start_idx,
+                                   s_list_view_cache.selected_idx,
+                                   s_list_view_cache.total,
+                                   title);
+
+      s_list_last_drawn_idx = s_list_view_cache.selected_idx;
       ui_draw_unlock();
       continue;
     }
 
     if (s_list_select_was_active) {
       s_list_select_was_active = false;
+      s_list_view_cache = PlayerListSelectViewSnapshot{};
 
       if (quick_menu_is_active()) {
         // 列表刚退回菜单时，菜单内容本身可能没有 revision 变化，

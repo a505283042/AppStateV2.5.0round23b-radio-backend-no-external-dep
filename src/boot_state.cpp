@@ -18,6 +18,7 @@
 #include "net_music/net_music_catalog.h"
 #include "keys/keys.h"
 #include "hal/mcp23017_u3.h"
+#include "player_list_select.h"
 
 static void prepare_music_catalogs()
 {
@@ -87,6 +88,9 @@ void boot_state_run(void)
     if (!cover_init_buffer()) {
         Serial.println("[启动] 封面缓冲区初始化失败");
     }
+
+    // UiTask 启动前先建立列表可见页快照互斥量，避免 UI 首帧并发读取未初始化状态。
+    player_list_select_init();
 
     // 2) 先点亮屏幕  启动 UI（TFT_eSPI 用默认 SPI，不会再打架）
     ui_init();

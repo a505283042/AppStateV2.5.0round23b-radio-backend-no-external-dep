@@ -47,6 +47,37 @@ struct PlayerListSelectHooks {
     bool (*play_net_track_dispatch)(int idx) = nullptr;
 };
 
+/** UI 列表页中的一条轻量显示项。只保留当前可见页真正需要的文字。 */
+struct PlayerListSelectViewItem {
+    String name;
+    String right_text;
+};
+
+/**
+ * @brief 提供给 UiTask 的不可变可见页快照。
+ *
+ * items 最多保存当前页 5 项，不暴露 player_list_select 内部 vector，
+ * 避免 UiTask 与主循环在重置、翻页或 TF 热插拔时并发访问同一容器。
+ */
+struct PlayerListSelectViewSnapshot {
+    bool active = false;
+    ListSelectState state = ListSelectState::NONE;
+    int selected_idx = 0;
+    int page_start_idx = 0;
+    int total = 0;
+    uint32_t revision = 0;
+    std::vector<PlayerListSelectViewItem> items;
+};
+
+/** UiTask 高频检查使用的纯数值运行态。 */
+struct PlayerListSelectViewRuntime {
+    bool active = false;
+    uint32_t revision = 0;
+};
+
+/** 在 UiTask 启动前创建列表快照互斥量。 */
+void player_list_select_init();
+
 /** 设置回调。 */
 void player_list_select_setup_hooks(const PlayerListSelectHooks& hooks);
 /** 清空列表选择状态。 */
@@ -73,20 +104,10 @@ bool player_list_select_enter_radio();
 bool player_list_select_enter_net_track();
 
 bool player_list_select_is_active();
-/** 读取当前列表选择状态。 */
-ListSelectState player_list_select_get_state();
-/** 当前高亮项下标。 */
-int player_list_select_get_selected_idx();
-/** 当前正在展示的 group 列表。 */
-const std::vector<PlaylistGroup>& player_list_select_get_groups();
-/** 当前正在展示的 track 列表。 */
-const std::vector<TrackIndex16>& player_list_select_get_tracks();
-/** 当前正在展示的 radio 列表。 */
-const std::vector<RadioItem>& player_list_select_get_radios();
-
-const std::vector<NetMusicItem>& player_list_select_get_net_tracks();
-int player_list_select_get_net_track_page_start();
-int player_list_select_get_net_track_total();
+/** 读取列表页活动标志和快照版本，不复制 String/vector。 */
+PlayerListSelectViewRuntime player_list_select_view_runtime_get();
+/** 复制一份最多 5 项的可见页快照。返回值只表示复制是否成功。 */
+bool player_list_select_copy_view_snapshot(PlayerListSelectViewSnapshot& out);
 
 /** 在列表选择状态下处理按键事件。 */
 void player_list_select_handle_key(key_event_t evt);
