@@ -14,24 +14,31 @@ namespace {
 
 static constexpr uint32_t kManifestMagic = 0x31464E4Du;  // "MNF1"
 static constexpr uint16_t kManifestLegacyVersion = 1;
-static constexpr uint16_t kManifestVersion = 2;
+static constexpr uint16_t kManifestAttributesVersion = 2;
+static constexpr uint16_t kManifestVersion = 3;
 static constexpr uint16_t kManifestFlagsCrc32 = 1u << 0;
 static constexpr uint16_t kManifestFlagsCatalogCrc32 = 1u << 1;
+static constexpr uint16_t kManifestFlagsDirectorySnapshots = 1u << 2;
 static constexpr uint32_t kManifestBaseHeaderBytes = 24;
-static constexpr uint32_t kManifestHeaderBytes = 28;
+static constexpr uint32_t kManifestCatalogHeaderBytes = 28;
+static constexpr uint32_t kManifestHeaderBytes = 32;
 static constexpr uint32_t kManifestMaxEntries = UINT16_MAX;
+static constexpr uint32_t kManifestMaxDirectories = 8192;
 static constexpr uint32_t kManifestMaxPayloadBytes = 8u * 1024u * 1024u;
 static constexpr uint16_t kManifestMaxStringBytes = 4096;
 
 struct ManifestHeaderV1 {
   uint32_t magic = kManifestMagic;
   uint16_t version = kManifestVersion;
-  uint16_t flags = kManifestFlagsCrc32 | kManifestFlagsCatalogCrc32;
+  uint16_t flags = kManifestFlagsCrc32 |
+                   kManifestFlagsCatalogCrc32 |
+                   kManifestFlagsDirectorySnapshots;
   uint32_t header_size = kManifestHeaderBytes;
   uint32_t entry_count = 0;
   uint32_t payload_size = 0;
   uint32_t crc32 = 0;
   uint32_t catalog_crc32 = 0;
+  uint32_t directory_count = 0;
 };
 
 static_assert(sizeof(ManifestHeaderV1) == kManifestHeaderBytes,
@@ -116,7 +123,8 @@ static bool write_header(File32& file, const ManifestHeaderV1& header)
          write_u32(file, header.entry_count) &&
          write_u32(file, header.payload_size) &&
          write_u32(file, header.crc32) &&
-         write_u32(file, header.catalog_crc32);
+         write_u32(file, header.catalog_crc32) &&
+         write_u32(file, header.directory_count);
 }
 
 static bool read_header(File32& file, ManifestHeaderV1& header)
@@ -132,10 +140,18 @@ static bool read_header(File32& file, ManifestHeaderV1& header)
   }
 
   header.catalog_crc32 = 0;
-  if (header.header_size >= kManifestHeaderBytes) {
-    return read_u32(file, header.catalog_crc32);
+  header.directory_count = 0;
+  if (header.header_size >= kManifestCatalogHeaderBytes &&
+      !read_u32(file, header.catalog_crc32)) {
+    return false;
   }
-  return header.header_size == kManifestBaseHeaderBytes;
+  if (header.header_size >= kManifestHeaderBytes &&
+      !read_u32(file, header.directory_count)) {
+    return false;
+  }
+  return header.header_size == kManifestBaseHeaderBytes ||
+         header.header_size == kManifestCatalogHeaderBytes ||
+         header.header_size == kManifestHeaderBytes;
 }
 
 static bool string_size_valid(const PsramString& value)
@@ -166,6 +182,11 @@ static bool calculate_payload_layout(const StorageMusicManifestV1& manifest,
 {
   if (manifest.entries.size() > kManifestMaxEntries) {
     LOGE("[曲库清单] 条目过多：%u", (unsigned)manifest.entries.size());
+    return false;
+  }
+  if (manifest.directories.size() > kManifestMaxDirectories) {
+    LOGE("[曲库清单] 目录快照过多：%u",
+         (unsigned)manifest.directories.size());
     return false;
   }
 
@@ -212,6 +233,33 @@ static bool calculate_payload_layout(const StorageMusicManifestV1& manifest,
     add_fingerprint(entry.audio_fingerprint);
     add_fingerprint(entry.lrc_fingerprint);
     add_fingerprint(entry.cover_fingerprint);
+
+    if (payload_size > kManifestMaxPayloadBytes) {
+      LOGE("[曲库清单] 清单数据过大：%llu",
+           (unsigned long long)payload_size);
+      return false;
+    }
+  }
+
+  for (const auto& directory : manifest.directories) {
+    if (!string_size_valid(directory.dir_rel) ||
+        !string_size_valid(directory.effective_cover_rel)) {
+      LOGE("[曲库清单] 目录快照字符串无效：%s",
+           directory.dir_rel.c_str());
+      return false;
+    }
+
+    add_string(directory.dir_rel);
+    add_fingerprint(directory.directory_attributes);
+    add_string(directory.effective_cover_rel);
+    add_fingerprint(directory.effective_cover_attributes);
+
+    const uint8_t flags =
+        (directory.has_local_cover ? 1u : 0u) |
+        (directory.has_subdirectories ? 2u : 0u);
+    add_crc(&flags, sizeof(flags));
+    add_crc(&directory.subtree_track_count,
+            sizeof(directory.subtree_track_count));
 
     if (payload_size > kManifestMaxPayloadBytes) {
       LOGE("[曲库清单] 清单数据过大：%llu",
@@ -299,7 +347,7 @@ static bool read_fingerprint_crc(File32& file,
   if (!read_u8(file, present)) return false;
   crc = crc32_update(crc, &present, sizeof(present));
 
-  if (manifest_version >= kManifestVersion) {
+  if (manifest_version >= kManifestAttributesVersion) {
     if (!read_u8(file, attributes_valid)) return false;
     crc = crc32_update(crc, &attributes_valid, sizeof(attributes_valid));
   }
@@ -309,7 +357,7 @@ static bool read_fingerprint_crc(File32& file,
                      reinterpret_cast<const uint8_t*>(&fp.size),
                      sizeof(fp.size));
 
-  if (manifest_version >= kManifestVersion) {
+  if (manifest_version >= kManifestAttributesVersion) {
     if (!read_u16(file, fp.modify_date) ||
         !read_u16(file, fp.modify_time)) {
       return false;
@@ -340,7 +388,7 @@ static bool read_fingerprint_crc(File32& file,
 
   remaining -= need;
   fp.present = present != 0;
-  fp.attributes_valid = manifest_version >= kManifestVersion &&
+  fp.attributes_valid = manifest_version >= kManifestAttributesVersion &&
                         attributes_valid != 0;
   return true;
 }
@@ -374,17 +422,100 @@ static bool read_entry_crc(File32& file,
   return !entry.audio_rel.isEmpty();
 }
 
+static bool write_directory_snapshot(
+    File32& file,
+    const StorageDirectorySnapshotV1& directory)
+{
+  const uint8_t flags =
+      (directory.has_local_cover ? 1u : 0u) |
+      (directory.has_subdirectories ? 2u : 0u);
+
+  return write_string(file, directory.dir_rel) &&
+         write_fingerprint(file, directory.directory_attributes) &&
+         write_string(file, directory.effective_cover_rel) &&
+         write_fingerprint(file, directory.effective_cover_attributes) &&
+         write_u8(file, flags) &&
+         write_u32(file, directory.subtree_track_count);
+}
+
+static bool read_directory_snapshot_crc(
+    File32& file,
+    StorageDirectorySnapshotV1& directory,
+    uint32_t& crc,
+    uint32_t& remaining)
+{
+  directory = StorageDirectorySnapshotV1{};
+  if (!read_string_crc(file, directory.dir_rel, crc, remaining) ||
+      !read_fingerprint_crc(file,
+                            directory.directory_attributes,
+                            crc,
+                            remaining,
+                            kManifestVersion) ||
+      !read_string_crc(file,
+                       directory.effective_cover_rel,
+                       crc,
+                       remaining) ||
+      !read_fingerprint_crc(file,
+                            directory.effective_cover_attributes,
+                            crc,
+                            remaining,
+                            kManifestVersion)) {
+    return false;
+  }
+
+  if (remaining < sizeof(uint8_t) + sizeof(uint32_t)) return false;
+
+  uint8_t flags = 0;
+  if (!read_u8(file, flags) ||
+      !read_u32(file, directory.subtree_track_count)) {
+    return false;
+  }
+  crc = crc32_update(crc, &flags, sizeof(flags));
+  crc = crc32_update(
+      crc,
+      reinterpret_cast<const uint8_t*>(&directory.subtree_track_count),
+      sizeof(directory.subtree_track_count));
+  remaining -= sizeof(uint8_t) + sizeof(uint32_t);
+
+  directory.has_local_cover = (flags & 1u) != 0;
+  directory.has_subdirectories = (flags & 2u) != 0;
+  return true;
+}
+
 static bool validate_header(const ManifestHeaderV1& header,
                             uint32_t file_size)
 {
+  const bool version_valid =
+      header.version == kManifestLegacyVersion ||
+      header.version == kManifestAttributesVersion ||
+      header.version == kManifestVersion;
+  const uint32_t expected_header_size =
+      header.version == kManifestLegacyVersion
+          ? kManifestBaseHeaderBytes
+          : (header.version == kManifestAttributesVersion
+                 ? kManifestCatalogHeaderBytes
+                 : kManifestHeaderBytes);
+
   if (header.magic != kManifestMagic ||
-      (header.version != kManifestLegacyVersion &&
-       header.version != kManifestVersion) ||
-      (header.header_size != kManifestBaseHeaderBytes &&
-       header.header_size != kManifestHeaderBytes) ||
+      !version_valid ||
+      header.header_size != expected_header_size ||
       (header.flags & kManifestFlagsCrc32) == 0 ||
       header.entry_count > kManifestMaxEntries ||
+      header.directory_count > kManifestMaxDirectories ||
       header.payload_size > kManifestMaxPayloadBytes) {
+    return false;
+  }
+
+  if (header.version >= kManifestAttributesVersion &&
+      (header.flags & kManifestFlagsCatalogCrc32) == 0) {
+    return false;
+  }
+  if (header.version >= kManifestVersion &&
+      (header.flags & kManifestFlagsDirectorySnapshots) == 0) {
+    return false;
+  }
+  if (header.version < kManifestVersion &&
+      header.directory_count != 0) {
     return false;
   }
 
@@ -440,6 +571,23 @@ static bool load_manifest_locked(StorageMusicManifestV1& out_manifest,
     out_manifest.entries.push_back(std::move(entry));
   }
 
+  out_manifest.directories.reserve(header.directory_count);
+  for (uint32_t i = 0; i < header.directory_count; ++i) {
+    StorageDirectorySnapshotV1 directory{};
+    if (!read_directory_snapshot_crc(
+            file, directory, crc, remaining)) {
+      file.close();
+      out_manifest.clear();
+      if (!quiet) {
+        LOGW("[曲库清单] 目录快照读取失败：%s index=%lu",
+             path,
+             (unsigned long)i);
+      }
+      return false;
+    }
+    out_manifest.directories.push_back(std::move(directory));
+  }
+
   file.close();
   crc = crc32_finish(crc);
 
@@ -456,7 +604,7 @@ static bool load_manifest_locked(StorageMusicManifestV1& out_manifest,
   }
 
   out_manifest.catalog_crc_valid =
-      header.header_size >= kManifestHeaderBytes &&
+      header.header_size >= kManifestCatalogHeaderBytes &&
       (header.flags & kManifestFlagsCatalogCrc32) != 0;
   out_manifest.catalog_crc32 = header.catalog_crc32;
   out_manifest.format_version = header.version;
@@ -475,6 +623,23 @@ static bool load_manifest_locked(StorageMusicManifestV1& out_manifest,
       if (!quiet) {
         LOGW("[曲库清单] 存在重复音频路径：%s",
              path);
+      }
+      return false;
+    }
+  }
+
+  std::sort(out_manifest.directories.begin(),
+            out_manifest.directories.end(),
+            [](const StorageDirectorySnapshotV1& a,
+               const StorageDirectorySnapshotV1& b) {
+              return a.dir_rel.compareTo(b.dir_rel) < 0;
+            });
+  for (size_t i = 1; i < out_manifest.directories.size(); ++i) {
+    if (out_manifest.directories[i - 1].dir_rel ==
+        out_manifest.directories[i].dir_rel) {
+      out_manifest.clear();
+      if (!quiet) {
+        LOGW("[曲库清单] 存在重复目录快照：%s", path);
       }
       return false;
     }
@@ -502,18 +667,20 @@ bool storage_manifest_load_v1(StorageMusicManifestV1& out_manifest,
   }
 
   if (load_manifest_locked(out_manifest, manifest_path, true)) {
-    LOGI("[曲库清单] 加载成功：来源=%s 条目=%u 版本=%u",
+    LOGI("[曲库清单] 加载成功：来源=%s 条目=%u 目录=%u 版本=%u",
          manifest_path,
          (unsigned)out_manifest.entries.size(),
+         (unsigned)out_manifest.directories.size(),
          (unsigned)out_manifest.format_version);
     return true;
   }
 
   const String backup_path = String(manifest_path) + ".bak";
   if (load_manifest_locked(out_manifest, backup_path.c_str(), true)) {
-    LOGW("[曲库清单] 正式文件不可用，已使用备份：%s 条目=%u 版本=%u",
+    LOGW("[曲库清单] 正式文件不可用，已使用备份：%s 条目=%u 目录=%u 版本=%u",
          backup_path.c_str(),
          (unsigned)out_manifest.entries.size(),
+         (unsigned)out_manifest.directories.size(),
          (unsigned)out_manifest.format_version);
     return true;
   }
@@ -555,6 +722,7 @@ bool storage_manifest_save_v1(const StorageMusicManifestV1& manifest,
 
   ManifestHeaderV1 header{};
   header.entry_count = (uint32_t)manifest.entries.size();
+  header.directory_count = (uint32_t)manifest.directories.size();
   header.payload_size = payload_size;
   header.crc32 = payload_crc;
   header.catalog_crc32 = manifest.catalog_crc32;
@@ -570,6 +738,10 @@ bool storage_manifest_save_v1(const StorageMusicManifestV1& manifest,
     if (!ok) break;
     ok = write_entry(file, entry);
   }
+  for (const auto& directory : manifest.directories) {
+    if (!ok) break;
+    ok = write_directory_snapshot(file, directory);
+  }
   if (ok) ok = file.sync();
   file.close();
 
@@ -582,6 +754,7 @@ bool storage_manifest_save_v1(const StorageMusicManifestV1& manifest,
   StorageMusicManifestV1 verify_manifest;
   if (!load_manifest_locked(verify_manifest, tmp_path.c_str(), true) ||
       verify_manifest.entries.size() != manifest.entries.size() ||
+      verify_manifest.directories.size() != manifest.directories.size() ||
       !verify_manifest.catalog_crc_valid ||
       verify_manifest.catalog_crc32 != manifest.catalog_crc32) {
     remove_if_exists_locked(tmp_path.c_str());
@@ -609,6 +782,7 @@ bool storage_manifest_save_v1(const StorageMusicManifestV1& manifest,
   StorageMusicManifestV1 final_verify;
   if (!load_manifest_locked(final_verify, final_path.c_str(), true) ||
       final_verify.entries.size() != manifest.entries.size() ||
+      final_verify.directories.size() != manifest.directories.size() ||
       !final_verify.catalog_crc_valid ||
       final_verify.catalog_crc32 != manifest.catalog_crc32) {
     LOGE("[曲库清单] 正式文件替换后校验失败");
@@ -619,10 +793,11 @@ bool storage_manifest_save_v1(const StorageMusicManifestV1& manifest,
     return false;
   }
 
-  LOGI("[曲库清单] 原子保存成功：%s 版本=%u 条目=%u payload=%lu CRC=0x%08lx catalog=0x%08lx 备份=%s",
+  LOGI("[曲库清单] 原子保存成功：%s 版本=%u 条目=%u 目录=%u payload=%lu CRC=0x%08lx catalog=0x%08lx 备份=%s",
        manifest_path,
        (unsigned)kManifestVersion,
        (unsigned)manifest.entries.size(),
+       (unsigned)manifest.directories.size(),
        (unsigned long)payload_size,
        (unsigned long)payload_crc,
        (unsigned long)manifest.catalog_crc32,

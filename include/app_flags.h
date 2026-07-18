@@ -3,7 +3,8 @@
 #include "ui/ui.h"
 
 enum class AppRescanMode : uint8_t {
-  FastIncremental = 0,
+  UltraFastIncremental = 0,
+  FastIncremental,
   StrictIncremental,
   Full,
 };

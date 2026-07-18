@@ -15,6 +15,7 @@ enum class QuickMenuKey : uint8_t {
 enum class QuickMenuPage : uint8_t {
     Root,
     Playback,
+    LibraryRescan,
     Source,
     Display,
     TimeAlarm,

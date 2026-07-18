@@ -91,7 +91,9 @@ struct UiScanProgress {
   bool full_scan = false;
   bool forced_full_scan = false;
   bool strict_incremental = false;
+  bool ultra_fast_incremental = false;
   uint32_t discovered = 0;
+  uint32_t directories_skipped = 0;
   uint32_t reused = 0;
   uint32_t added = 0;
   uint32_t modified = 0;
@@ -103,7 +105,10 @@ struct UiScanSummary {
   bool full_scan = false;
   bool forced_full_scan = false;
   bool strict_incremental = false;
+  bool ultra_fast_incremental = false;
+  bool unchanged = false;
   uint32_t discovered = 0;
+  uint32_t directories_skipped = 0;
   uint32_t reused = 0;
   uint32_t added = 0;
   uint32_t modified = 0;
@@ -113,7 +118,8 @@ struct UiScanSummary {
 
 void ui_scan_begin(bool full_scan = false,
                    bool forced_full_scan = false,
-                   bool strict_incremental = false);
+                   bool strict_incremental = false,
+                   bool ultra_fast_incremental = false);
 void ui_scan_tick(const UiScanProgress& progress);
 void ui_scan_tick(int tracks_count);
 void ui_scan_end();

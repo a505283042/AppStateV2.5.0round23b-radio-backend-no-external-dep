@@ -46,7 +46,9 @@ static void app_rescan_task_entry(void* )
     const AppRescanState rescan = app_rescan_state_get();
     StorageCatalogRebuildMode rebuild_mode =
         StorageCatalogRebuildMode::FastIncremental;
-    if (rescan.mode == AppRescanMode::StrictIncremental) {
+    if (rescan.mode == AppRescanMode::UltraFastIncremental) {
+        rebuild_mode = StorageCatalogRebuildMode::UltraFastIncremental;
+    } else if (rescan.mode == AppRescanMode::StrictIncremental) {
         rebuild_mode = StorageCatalogRebuildMode::StrictIncremental;
     } else if (rescan.mode == AppRescanMode::Full) {
         rebuild_mode = StorageCatalogRebuildMode::Full;
@@ -79,6 +81,11 @@ static void app_rescan_task_entry(void* )
         ui_summary.full_scan = summary.full_scan;
         ui_summary.forced_full_scan = summary.forced_full_scan;
         ui_summary.strict_incremental = summary.strict_incremental;
+        ui_summary.ultra_fast_incremental =
+            summary.ultra_fast_incremental;
+        ui_summary.unchanged = summary.unchanged;
+        ui_summary.directories_skipped =
+            summary.directories_skipped;
         ui_summary.discovered = summary.discovered;
         ui_summary.reused = summary.reused;
         ui_summary.added = summary.added;
@@ -435,7 +442,9 @@ bool app_request_start_rescan(AppRescanMode mode)
     }
 
     const char* mode_label = "快速增量";
-    if (mode == AppRescanMode::StrictIncremental) {
+    if (mode == AppRescanMode::UltraFastIncremental) {
+        mode_label = "超快速目录";
+    } else if (mode == AppRescanMode::StrictIncremental) {
         mode_label = "严格增量";
     } else if (mode == AppRescanMode::Full) {
         mode_label = "强制全量";

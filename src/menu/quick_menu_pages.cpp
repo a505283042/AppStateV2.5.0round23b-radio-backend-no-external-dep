@@ -41,6 +41,9 @@ const QuickMenuPageDef& quick_menu_get_page_def(QuickMenuPage page)
         case QuickMenuPage::Playback:
             return quick_menu_get_playback_page();
 
+        case QuickMenuPage::LibraryRescan:
+            return quick_menu_get_library_rescan_page();
+
         case QuickMenuPage::Source:
             return quick_menu_get_source_page();
 

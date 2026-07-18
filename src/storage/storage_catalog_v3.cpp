@@ -117,10 +117,13 @@ static bool rebuild_v3_native(
         mode == StorageCatalogRebuildMode::Full;
     const bool strict_verify =
         mode == StorageCatalogRebuildMode::StrictIncremental;
+    const bool ultra_fast =
+        mode == StorageCatalogRebuildMode::UltraFastIncremental;
 
     StorageCatalogRebuildSummary summary{};
     summary.forced_full_scan = force_full_scan;
     summary.strict_incremental = strict_verify;
+    summary.ultra_fast_incremental = ultra_fast;
 
     StorageTrackBuildListV3 tmp_tracks;
     StorageMusicManifestV1 next_manifest;
@@ -129,7 +132,9 @@ static bool rebuild_v3_native(
     LOGI("[曲库] 开始重建本地索引：请求模式=%s",
          force_full_scan
              ? "强制全量"
-             : (strict_verify ? "严格增量" : "快速增量"));
+             : (ultra_fast
+                    ? "超快速目录"
+                    : (strict_verify ? "严格增量" : "快速增量")));
 
     const MusicCatalogV3* reuse_catalog =
         (!force_full_scan && storage_catalog_v3_ready())
@@ -143,8 +148,13 @@ static bool rebuild_v3_native(
                                            music_root,
                                            kManifestPath,
                                            force_full_scan,
-                                           strict_verify)) {
+                                           strict_verify,
+                                           ultra_fast)) {
         summary.full_scan = scan_stats.full_scan;
+        summary.ultra_fast_incremental =
+            scan_stats.ultra_fast_incremental;
+        summary.directories_skipped =
+            scan_stats.directories_skipped;
         summary.discovered = scan_stats.discovered;
         summary.reused = scan_stats.reused;
         summary.added = scan_stats.added;
@@ -155,6 +165,92 @@ static bool rebuild_v3_native(
         LOGE("[曲库] scan 失败：模式=%s",
              scan_stats.full_scan ? "全量" : "增量");
         return false;
+    }
+
+    if (scan_stats.unchanged && storage_catalog_v3_ready()) {
+        const uint32_t temporary_track_bytes =
+            (uint32_t)(tmp_tracks.capacity() * sizeof(TrackBuildTempV3));
+        {
+            StorageTrackBuildListV3 released_tracks;
+            tmp_tracks.swap(released_tracks);
+        }
+
+        bool manifest_refreshed = false;
+        if (scan_stats.manifest_refresh_needed) {
+            next_manifest.catalog_crc32 =
+                storage_manifest_catalog_crc_v1(s_catalog_v3);
+            next_manifest.catalog_crc_valid = true;
+            manifest_refreshed = storage_manifest_save_v1(
+                next_manifest, kManifestPath);
+            if (!manifest_refreshed) {
+                // Catalog 内容没有变化，旧 Manifest 仍可继续使用；
+                // 刷新失败只会让下次重扫多做一次验证，不破坏当前曲库。
+                LOGW("[曲库] 曲库内容无变化，但 Manifest 快照刷新失败；保留当前 Catalog 和旧清单");
+            }
+        }
+
+        {
+            PsramVector<StorageManifestEntryV1> released_entries;
+            next_manifest.entries.swap(released_entries);
+        }
+        {
+            PsramVector<StorageDirectorySnapshotV1> released_directories;
+            next_manifest.directories.swap(released_directories);
+        }
+        next_manifest.clear();
+
+        scan_stats.elapsed_ms = millis() - rebuild_started_ms;
+        const uint32_t rebuild_internal_end =
+            (uint32_t)heap_caps_get_free_size(
+                MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        const uint32_t rebuild_psram_end =
+            (uint32_t)heap_caps_get_free_size(
+                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+
+        if (scan_stats.manifest_refresh_needed) {
+            LOGI("[曲库] 曲库内容无变化：跳过 Catalog 重建和索引写入，Manifest 快照=%s，已释放临时曲目=%luB",
+                 manifest_refreshed ? "已刷新" : "保留旧版",
+                 (unsigned long)temporary_track_bytes);
+        } else {
+            LOGI("[曲库] 曲库完全无变化：跳过 Catalog 重建、索引写入和 Manifest 写入，已释放临时曲目=%luB",
+                 (unsigned long)temporary_track_bytes);
+        }
+        LOGI("[曲库][内存] 无变化直接结束 内部空闲=%luB 变化=%ldB PSRAM空闲=%luB 变化=%ldB",
+             (unsigned long)rebuild_internal_end,
+             (long)rebuild_internal_end - (long)rebuild_internal_start,
+             (unsigned long)rebuild_psram_end,
+             (long)rebuild_psram_end - (long)rebuild_psram_start);
+        LOGI("[曲库] 本地索引无需更新：扫描模式=%s 跳过目录=%lu 复用=%lu 清单刷新=%d 用时=%lums 歌曲=%lu 专辑=%lu 歌手=%lu",
+             scan_stats.ultra_fast_incremental
+                 ? "超快速目录"
+                 : (scan_stats.strict_incremental
+                        ? "严格增量"
+                        : "快速增量"),
+             (unsigned long)scan_stats.directories_skipped,
+             (unsigned long)scan_stats.reused,
+             manifest_refreshed ? 1 : 0,
+             (unsigned long)scan_stats.elapsed_ms,
+             (unsigned long)s_catalog_v3.track_count,
+             (unsigned long)s_catalog_v3.album_count,
+             (unsigned long)s_catalog_v3.artist_count);
+
+        summary.success = true;
+        summary.full_scan = false;
+        summary.forced_full_scan = false;
+        summary.strict_incremental = scan_stats.strict_incremental;
+        summary.ultra_fast_incremental =
+            scan_stats.ultra_fast_incremental;
+        summary.unchanged = true;
+        summary.directories_skipped =
+            scan_stats.directories_skipped;
+        summary.discovered = scan_stats.discovered;
+        summary.reused = scan_stats.reused;
+        summary.added = 0;
+        summary.modified = 0;
+        summary.deleted = 0;
+        summary.elapsed_ms = scan_stats.elapsed_ms;
+        if (out_summary) *out_summary = summary;
+        return true;
     }
 
     storage_catalog_v3_clear();
@@ -206,9 +302,13 @@ static bool rebuild_v3_native(
     }
 
     {
-        // Manifest 已经落盘，立即归还扫描期路径和指纹缓冲。
+        // Manifest 已经落盘，立即归还扫描期路径、目录快照和指纹缓冲。
         PsramVector<StorageManifestEntryV1> released_entries;
         next_manifest.entries.swap(released_entries);
+    }
+    {
+        PsramVector<StorageDirectorySnapshotV1> released_directories;
+        next_manifest.directories.swap(released_directories);
     }
     next_manifest.clear();
 
@@ -224,12 +324,17 @@ static bool rebuild_v3_native(
 
     scan_stats.elapsed_ms = millis() - rebuild_started_ms;
 
-    LOGI("[曲库] 本地索引重建完成：扫描模式=%s 校验=%s 强制=%d 复用=%lu 属性直复用=%lu CRC确认=%lu 新增=%lu 修改=%lu 删除=%lu 用时=%lums 歌曲=%lu 专辑=%lu 歌手=%lu 字符池=%lu 歌手分组=%d 专辑分组=%d",
+    LOGI("[曲库] 本地索引重建完成：扫描模式=%s 校验=%s 强制=%d 跳过目录=%lu 复用=%lu 属性直复用=%lu CRC确认=%lu 新增=%lu 修改=%lu 删除=%lu 用时=%lums 歌曲=%lu 专辑=%lu 歌手=%lu 字符池=%lu 歌手分组=%d 专辑分组=%d",
          scan_stats.full_scan ? "全量" : "增量",
          scan_stats.full_scan
              ? "完整解析"
-             : (scan_stats.strict_incremental ? "严格内容" : "快速属性"),
+             : (scan_stats.ultra_fast_incremental
+                    ? "超快速目录"
+                    : (scan_stats.strict_incremental
+                           ? "严格内容"
+                           : "快速属性")),
          force_full_scan ? 1 : 0,
+         (unsigned long)scan_stats.directories_skipped,
          (unsigned long)scan_stats.reused,
          (unsigned long)scan_stats.attribute_reused,
          (unsigned long)scan_stats.content_verified,
@@ -250,6 +355,11 @@ static bool rebuild_v3_native(
     summary.full_scan = scan_stats.full_scan;
     summary.forced_full_scan = force_full_scan;
     summary.strict_incremental = scan_stats.strict_incremental;
+    summary.ultra_fast_incremental =
+        scan_stats.ultra_fast_incremental;
+    summary.unchanged = scan_stats.unchanged;
+    summary.directories_skipped =
+        scan_stats.directories_skipped;
     summary.discovered = scan_stats.discovered;
     summary.reused = scan_stats.reused;
     summary.added = scan_stats.added;

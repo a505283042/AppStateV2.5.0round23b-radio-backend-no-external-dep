@@ -18,7 +18,11 @@ struct StorageIncrementalScanStatsV3 {
   bool full_scan = true;
   bool forced_full_scan = false;
   bool strict_incremental = false;
+  bool ultra_fast_incremental = false;
+  bool unchanged = false;
+  bool manifest_refresh_needed = false;
   uint32_t discovered = 0;
+  uint32_t directories_skipped = 0;
   uint32_t reused = 0;
   uint32_t added = 0;
   uint32_t modified = 0;
@@ -85,4 +89,5 @@ bool storage_scan_music_incremental_v3(
     const char* music_root = "/Music",
     const char* manifest_path = "/System/music_manifest_v1.bin",
     bool force_full_scan = false,
-    bool strict_verify = false);
+    bool strict_verify = false,
+    bool ultra_fast = false);

@@ -2670,12 +2670,14 @@ static void web_handle_scan() {
     String mode = s_server.arg("mode");
     mode.trim();
     mode.toLowerCase();
-    if (mode == "strict") {
+    if (mode == "ultra" || mode == "directory") {
+      requested_mode = AppRescanMode::UltraFastIncremental;
+    } else if (mode == "strict") {
       requested_mode = AppRescanMode::StrictIncremental;
     } else if (mode == "full") {
       requested_mode = AppRescanMode::Full;
     } else if (mode != "fast" && mode != "incremental") {
-      web_send_json_err("重扫模式无效：fast/strict/full");
+      web_send_json_err("重扫模式无效：ultra/fast/strict/full");
       return;
     }
   }
@@ -2690,7 +2692,9 @@ static void web_handle_scan() {
           ? "rescan_full_started"
           : (requested_mode == AppRescanMode::StrictIncremental
                  ? "rescan_strict_started"
-                 : "rescan_fast_started"));
+                 : (requested_mode == AppRescanMode::UltraFastIncremental
+                        ? "rescan_ultra_started"
+                        : "rescan_fast_started")));
 }
 
 static void web_handle_wifiinfo_toggle() {

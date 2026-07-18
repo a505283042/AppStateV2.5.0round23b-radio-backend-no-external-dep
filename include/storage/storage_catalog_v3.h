@@ -8,7 +8,8 @@
 
 // 曲库重建模式：普通重扫优先复用 Manifest，强制全量会忽略旧清单。
 enum class StorageCatalogRebuildMode : uint8_t {
-  FastIncremental = 0,
+  UltraFastIncremental = 0,
+  FastIncremental,
   StrictIncremental,
   Full,
 };
@@ -18,7 +19,10 @@ struct StorageCatalogRebuildSummary {
   bool full_scan = true;
   bool forced_full_scan = false;
   bool strict_incremental = false;
+  bool ultra_fast_incremental = false;
+  bool unchanged = false;
   uint32_t discovered = 0;
+  uint32_t directories_skipped = 0;
   uint32_t reused = 0;
   uint32_t added = 0;
   uint32_t modified = 0;

@@ -319,7 +319,7 @@ void ui_nfc_admin_show_done()
 
 void ui_show_scanning()
 {
-  ui_scan_begin(false, false, false);
+  ui_scan_begin(false, false, false, false);
 }
 
 // =============================================================================
@@ -328,9 +328,11 @@ void ui_show_scanning()
 
 static const char* scan_mode_label(bool full_scan,
                                    bool forced_full_scan,
-                                   bool strict_incremental)
+                                   bool strict_incremental,
+                                   bool ultra_fast_incremental)
 {
   if (!full_scan) {
+    if (ultra_fast_incremental) return "超快速目录扫描";
     return strict_incremental ? "严格增量扫描" : "快速增量扫描";
   }
   return forced_full_scan ? "强制全量扫描" : "自动全量扫描";
@@ -367,7 +369,8 @@ static void scan_current_name(const char* current_path,
 
 void ui_scan_begin(bool full_scan,
                    bool forced_full_scan,
-                   bool strict_incremental)
+                   bool strict_incremental,
+                   bool ultra_fast_incremental)
 {
   ui_draw_lock();
   ui_set_screen(UI_SCREEN_BOOT);
@@ -382,7 +385,7 @@ void ui_scan_begin(bool full_scan,
 
   tft.setTextSize(1);
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
-  draw_center_text(scan_mode_label(full_scan, forced_full_scan, strict_incremental), 50);
+  draw_center_text(scan_mode_label(full_scan, forced_full_scan, strict_incremental, ultra_fast_incremental), 50);
 
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   draw_center_text("正在准备...", 98);
@@ -430,7 +433,8 @@ void ui_scan_tick(const UiScanProgress& progress)
   draw_center_text(
       scan_mode_label(progress.full_scan,
                       progress.forced_full_scan,
-                      progress.strict_incremental),
+                      progress.strict_incremental,
+                      progress.ultra_fast_incremental),
       50);
 
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
@@ -446,6 +450,9 @@ void ui_scan_tick(const UiScanProgress& progress)
 
   if (progress.full_scan) {
     snprintf(line, sizeof(line), "全量解析进行中");
+  } else if (progress.ultra_fast_incremental) {
+    snprintf(line, sizeof(line), "已跳过目录 %lu",
+             (unsigned long)progress.directories_skipped);
   } else {
     snprintf(line, sizeof(line), "删除将在完成后统计");
   }
@@ -467,6 +474,7 @@ void ui_scan_tick(int tracks_count)
   progress.full_scan = true;
   progress.forced_full_scan = true;
   progress.strict_incremental = false;
+  progress.ultra_fast_incremental = false;
   progress.discovered = tracks_count > 0 ? (uint32_t)tracks_count : 0;
   ui_scan_tick(progress);
 }
@@ -494,7 +502,8 @@ void ui_scan_complete(const UiScanSummary& summary)
   draw_center_text(
       scan_mode_label(summary.full_scan,
                       summary.forced_full_scan,
-                      summary.strict_incremental),
+                      summary.strict_incremental,
+                      summary.ultra_fast_incremental),
       55);
 
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
@@ -513,6 +522,16 @@ void ui_scan_complete(const UiScanSummary& summary)
            (unsigned long)(summary.elapsed_ms / 1000u),
            (unsigned long)((summary.elapsed_ms % 1000u) / 100u));
   draw_center_text(line, 136);
+
+  if (summary.unchanged) {
+    tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    draw_center_text("无变化，已跳过索引重建", 162);
+  } else if (summary.ultra_fast_incremental) {
+    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+    snprintf(line, sizeof(line), "跳过目录 %lu",
+             (unsigned long)summary.directories_skipped);
+    draw_center_text(line, 162);
+  }
 
   tft.setTextColor(TFT_YELLOW, TFT_BLACK);
   draw_center_text("即将返回播放器", 196);

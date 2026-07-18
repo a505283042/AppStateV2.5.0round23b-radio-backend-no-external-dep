@@ -300,6 +300,16 @@ bool action_cycle_sleep_timer()
     return true;
 }
 
+bool action_start_ultra_fast_rescan()
+{
+    const bool ok = app_request_start_rescan(
+        AppRescanMode::UltraFastIncremental);
+    if (ok) {
+        quick_menu_exit();
+    }
+    return ok;
+}
+
 bool action_start_fast_incremental_rescan()
 {
     const bool ok = app_request_start_rescan(
@@ -339,11 +349,17 @@ const QuickMenuItem PLAYBACK_ITEMS[] = {
     {"状态灯亮度", QuickMenuItemType::Toggle, QuickMenuPage::Playback, "", value_status_led_brightness, action_cycle_status_led_brightness, true, false},
     {"电磁铁动作", QuickMenuItemType::Toggle, QuickMenuPage::Playback, "", value_solenoid_enabled, action_toggle_solenoid, true, false},
     {"睡眠关机", QuickMenuItemType::Toggle, QuickMenuPage::Playback, "", value_sleep_timer, action_cycle_sleep_timer, true, false},
-    {"快速增量重扫", QuickMenuItemType::Action, QuickMenuPage::Playback, "", value_execute, action_start_fast_incremental_rescan, true, false},
-    {"严格增量重扫", QuickMenuItemType::Action, QuickMenuPage::Playback, "", value_execute, action_start_strict_incremental_rescan, true, false},
-    {"强制全量重扫", QuickMenuItemType::Action, QuickMenuPage::Playback, "", value_execute, action_start_full_rescan, true, false},
+    {"曲库重扫", QuickMenuItemType::SubPage, QuickMenuPage::LibraryRescan, "", value_open, nullptr, true, false},
     {"TF卡状态", QuickMenuItemType::Status, QuickMenuPage::Playback, "", value_tf_status, nullptr, true, false},
     {"返回", QuickMenuItemType::Back, QuickMenuPage::Root, "", nullptr, nullptr, true, false},
+};
+
+const QuickMenuItem LIBRARY_RESCAN_ITEMS[] = {
+    {"超快速目录重扫", QuickMenuItemType::Action, QuickMenuPage::LibraryRescan, "", value_execute, action_start_ultra_fast_rescan, true, false},
+    {"快速增量重扫", QuickMenuItemType::Action, QuickMenuPage::LibraryRescan, "", value_execute, action_start_fast_incremental_rescan, true, false},
+    {"严格增量重扫", QuickMenuItemType::Action, QuickMenuPage::LibraryRescan, "", value_execute, action_start_strict_incremental_rescan, true, false},
+    {"强制全量重扫", QuickMenuItemType::Action, QuickMenuPage::LibraryRescan, "", value_execute, action_start_full_rescan, true, false},
+    {"返回", QuickMenuItemType::Back, QuickMenuPage::Playback, "", nullptr, nullptr, true, false},
 };
 
 } // namespace
@@ -356,6 +372,19 @@ const QuickMenuPageDef& quick_menu_get_playback_page()
         QuickMenuPage::Root,
         PLAYBACK_ITEMS,
         MENU_COUNT(PLAYBACK_ITEMS),
+    };
+
+    return page;
+}
+
+const QuickMenuPageDef& quick_menu_get_library_rescan_page()
+{
+    static const QuickMenuPageDef page = {
+        "曲库重扫",
+        QuickMenuPage::LibraryRescan,
+        QuickMenuPage::Playback,
+        LIBRARY_RESCAN_ITEMS,
+        MENU_COUNT(LIBRARY_RESCAN_ITEMS),
     };
 
     return page;

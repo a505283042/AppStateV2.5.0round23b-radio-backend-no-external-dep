@@ -474,7 +474,7 @@ struct DirectoryEntrySnapshotV3 {
     PsramString name;
     bool is_dir = false;
     bool is_audio = false;
-    StorageFileFingerprintV1 audio_attributes;
+    StorageFileFingerprintV1 entry_attributes;
 };
 
 struct PsramStringLessV3 {
@@ -500,6 +500,7 @@ struct IncrementalScanContextV3 {
     StorageMusicManifestV1* out_manifest = nullptr;
     StorageIncrementalScanStatsV3* stats = nullptr;
     bool strict_verify = false;
+    bool ultra_fast = false;
     PsramVector<CachedFingerprintV1> cover_fingerprint_cache;
 };
 
@@ -556,13 +557,17 @@ static void log_incremental_scan_memory_v3(
          (unsigned long)current.psram_free,
          signed_heap_delta_v3(start.psram_free, current.psram_free));
 
-    LOGI("[增量扫描][PSRAM] tracks=%luB ext=%d old_manifest=%luB ext=%d next_manifest=%luB ext=%d order=%luB ext=%d seen=%luB ext=%d cover_cache=%luB ext=%d",
+    LOGI("[增量扫描][PSRAM] tracks=%luB ext=%d old_manifest=%luB ext=%d old_dirs=%luB ext=%d next_manifest=%luB ext=%d next_dirs=%luB ext=%d order=%luB ext=%d seen=%luB ext=%d cover_cache=%luB ext=%d",
          (unsigned long)(tracks.capacity() * sizeof(TrackBuildTempV3)),
          (!tracks.empty() && esp_ptr_external_ram(tracks.data())) ? 1 : 0,
          (unsigned long)(old_manifest.entries.capacity() * sizeof(StorageManifestEntryV1)),
          (!old_manifest.entries.empty() && esp_ptr_external_ram(old_manifest.entries.data())) ? 1 : 0,
+         (unsigned long)(old_manifest.directories.capacity() * sizeof(StorageDirectorySnapshotV1)),
+         (!old_manifest.directories.empty() && esp_ptr_external_ram(old_manifest.directories.data())) ? 1 : 0,
          (unsigned long)(next_manifest.entries.capacity() * sizeof(StorageManifestEntryV1)),
          (!next_manifest.entries.empty() && esp_ptr_external_ram(next_manifest.entries.data())) ? 1 : 0,
+         (unsigned long)(next_manifest.directories.capacity() * sizeof(StorageDirectorySnapshotV1)),
+         (!next_manifest.directories.empty() && esp_ptr_external_ram(next_manifest.directories.data())) ? 1 : 0,
          (unsigned long)(path_order.capacity() * sizeof(uint32_t)),
          (!path_order.empty() && esp_ptr_external_ram(path_order.data())) ? 1 : 0,
          (unsigned long)(old_seen.capacity() * sizeof(uint8_t)),
@@ -589,6 +594,14 @@ static void log_incremental_scan_memory_v3(
     }
     for (const auto& entry : next_manifest.entries) {
         count_psram_text_v3(entry.audio_rel, text_total, text_external, text_internal_fallback);
+    }
+    for (const auto& directory : old_manifest.directories) {
+        count_psram_text_v3(directory.dir_rel, text_total, text_external, text_internal_fallback);
+        count_psram_text_v3(directory.effective_cover_rel, text_total, text_external, text_internal_fallback);
+    }
+    for (const auto& directory : next_manifest.directories) {
+        count_psram_text_v3(directory.dir_rel, text_total, text_external, text_internal_fallback);
+        count_psram_text_v3(directory.effective_cover_rel, text_total, text_external, text_internal_fallback);
     }
     for (const auto& item : cover_cache) {
         count_psram_text_v3(item.path, text_total, text_external, text_internal_fallback);
@@ -666,6 +679,21 @@ static bool fingerprint_attributes_from_open_file_v1(
 
     out.present = true;
     out.size = (uint32_t)size64;
+    out.attributes_valid = file.getModifyDateTime(
+        &out.modify_date, &out.modify_time);
+    return true;
+}
+
+template <typename FileType>
+static bool directory_attributes_from_open_file_v3(
+    FileType& file,
+    StorageFileFingerprintV1& out)
+{
+    out = StorageFileFingerprintV1{};
+    if (!file || !file.isDir()) return false;
+
+    out.present = true;
+    out.size = 0;
     out.attributes_valid = file.getModifyDateTime(
         &out.modify_date, &out.modify_time);
     return true;
@@ -755,11 +783,15 @@ static bool inventory_directory_v3(
     const String& dir_path,
     DirectoryEntryListV3& out_entries,
     DirectoryLrcMapV3& out_lrc_by_base,
-    String& out_local_cover)
+    String& out_local_cover,
+    StorageFileFingerprintV1& out_local_cover_attributes,
+    bool& out_has_subdirectories)
 {
     out_entries.clear();
     out_lrc_by_base.clear();
     out_local_cover = String();
+    out_local_cover_attributes = StorageFileFingerprintV1{};
+    out_has_subdirectories = false;
 
     SdFile dir;
     if (!dir.open(dir_path.c_str(), O_RDONLY) || !dir.isDir()) {
@@ -787,11 +819,15 @@ static bool inventory_directory_v3(
         entry.name = entry_name;
         entry.is_dir = file.isDir();
 
-        if (!entry.is_dir) {
+        if (entry.is_dir) {
+            out_has_subdirectories = true;
+            (void)directory_attributes_from_open_file_v3(
+                file, entry.entry_attributes);
+        } else {
             entry.is_audio = is_audio_filename_v3(entry_name);
             if (entry.is_audio &&
                 !fingerprint_attributes_from_open_file_v1(
-                    file, entry.audio_attributes)) {
+                    file, entry.entry_attributes)) {
                 LOGE("[增量扫描] 音频目录属性读取失败：%s/%s",
                      dir_path.c_str(),
                      entry_name.c_str());
@@ -814,6 +850,10 @@ static bool inventory_directory_v3(
                 cover_priority < best_cover_priority) {
                 best_cover_priority = cover_priority;
                 out_local_cover = dir_path + "/" + entry_name;
+                if (!fingerprint_attributes_from_open_file_v1(
+                        file, out_local_cover_attributes)) {
+                    out_local_cover_attributes = StorageFileFingerprintV1{};
+                }
             }
         }
 
@@ -860,6 +900,74 @@ static bool fingerprint_content_equal_v1(
            a.head_crc == b.head_crc &&
            a.middle_crc == b.middle_crc &&
            a.tail_crc == b.tail_crc;
+}
+
+static bool fingerprint_snapshot_equal_v3(
+    const StorageFileFingerprintV1& a,
+    const StorageFileFingerprintV1& b)
+{
+    return a.present == b.present &&
+           a.attributes_valid == b.attributes_valid &&
+           a.size == b.size &&
+           a.modify_date == b.modify_date &&
+           a.modify_time == b.modify_time &&
+           a.head_crc == b.head_crc &&
+           a.middle_crc == b.middle_crc &&
+           a.tail_crc == b.tail_crc;
+}
+
+static bool manifest_scan_snapshot_equal_v3(
+    const StorageMusicManifestV1& old_manifest,
+    const StorageMusicManifestV1& next_manifest)
+{
+    if (old_manifest.format_version < 3 ||
+        old_manifest.entries.size() != next_manifest.entries.size() ||
+        old_manifest.directories.size() != next_manifest.directories.size()) {
+        return false;
+    }
+
+    for (size_t i = 0; i < old_manifest.entries.size(); ++i) {
+        const StorageManifestEntryV1& old_entry = old_manifest.entries[i];
+        const StorageManifestEntryV1& next_entry = next_manifest.entries[i];
+        if (old_entry.audio_rel != next_entry.audio_rel ||
+            !fingerprint_snapshot_equal_v3(
+                old_entry.audio_fingerprint,
+                next_entry.audio_fingerprint) ||
+            !fingerprint_snapshot_equal_v3(
+                old_entry.lrc_fingerprint,
+                next_entry.lrc_fingerprint) ||
+            !fingerprint_snapshot_equal_v3(
+                old_entry.cover_fingerprint,
+                next_entry.cover_fingerprint)) {
+            return false;
+        }
+    }
+
+    for (size_t i = 0; i < old_manifest.directories.size(); ++i) {
+        const StorageDirectorySnapshotV1& old_directory =
+            old_manifest.directories[i];
+        const StorageDirectorySnapshotV1& next_directory =
+            next_manifest.directories[i];
+        if (old_directory.dir_rel != next_directory.dir_rel ||
+            old_directory.effective_cover_rel !=
+                next_directory.effective_cover_rel ||
+            old_directory.has_local_cover !=
+                next_directory.has_local_cover ||
+            old_directory.has_subdirectories !=
+                next_directory.has_subdirectories ||
+            old_directory.subtree_track_count !=
+                next_directory.subtree_track_count ||
+            !fingerprint_snapshot_equal_v3(
+                old_directory.directory_attributes,
+                next_directory.directory_attributes) ||
+            !fingerprint_snapshot_equal_v3(
+                old_directory.effective_cover_attributes,
+                next_directory.effective_cover_attributes)) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 static String music_absolute_path_v3(const char* music_root,
@@ -1061,6 +1169,174 @@ static bool temp_from_catalog_track_v3(
             catalog.albums[row.album_id].name_off);
     }
     return !out.audio_rel.isEmpty();
+}
+
+static String directory_relative_path_v3(const String& dir_path,
+                                         const char* music_root)
+{
+    String root = music_root ? String(music_root) : String("/Music");
+    if (dir_path == root) return String();
+
+    if (dir_path.startsWith(root + "/")) {
+        return dir_path.substring(root.length() + 1);
+    }
+    return dir_path;
+}
+
+static int find_directory_snapshot_v1(
+    const StorageMusicManifestV1& manifest,
+    const String& dir_rel)
+{
+    size_t low = 0;
+    size_t high = manifest.directories.size();
+    while (low < high) {
+        const size_t middle = low + (high - low) / 2;
+        const int compare =
+            manifest.directories[middle].dir_rel.compareTo(dir_rel);
+        if (compare < 0) low = middle + 1;
+        else high = middle;
+    }
+
+    if (low < manifest.directories.size() &&
+        manifest.directories[low].dir_rel == dir_rel) {
+        return (int)low;
+    }
+    return -1;
+}
+
+static bool path_is_inside_directory_v3(const char* audio_rel,
+                                        const String& dir_rel)
+{
+    if (!audio_rel) return false;
+    if (dir_rel.isEmpty()) return audio_rel[0] != '\0';
+
+    const size_t prefix_length = dir_rel.length();
+    return strncmp(audio_rel, dir_rel.c_str(), prefix_length) == 0 &&
+           audio_rel[prefix_length] == '/';
+}
+
+static size_t first_manifest_entry_in_directory_v3(
+    const StorageMusicManifestV1& manifest,
+    const String& dir_rel)
+{
+    String prefix = dir_rel;
+    if (!prefix.isEmpty()) prefix += "/";
+
+    size_t low = 0;
+    size_t high = manifest.entries.size();
+    while (low < high) {
+        const size_t middle = low + (high - low) / 2;
+        const int compare =
+            manifest.entries[middle].audio_rel.compareTo(prefix);
+        if (compare < 0) low = middle + 1;
+        else high = middle;
+    }
+    return low;
+}
+
+static bool directory_cover_context_matches_v3(
+    const StorageDirectorySnapshotV1& old_directory,
+    const String& inherited_cover_path,
+    const StorageFileFingerprintV1& inherited_cover_attributes)
+{
+    if (old_directory.has_local_cover) {
+        // 叶子目录自身 FAT 时间未变化时，超快速模式信任本目录封面未变化。
+        return true;
+    }
+
+    const String inherited_rel = to_music_relative_path_v3(
+        inherited_cover_path);
+    return old_directory.effective_cover_rel == inherited_rel &&
+           fingerprint_attributes_equal_v1(
+               old_directory.effective_cover_attributes,
+               inherited_cover_attributes);
+}
+
+static bool reuse_unchanged_directory_v3(
+    const StorageDirectorySnapshotV1& old_directory,
+    IncrementalScanContextV3& context)
+{
+    if (!context.old_manifest || !context.reuse_catalog ||
+        !context.catalog_path_order || !context.old_seen ||
+        !context.out_tracks || !context.out_manifest || !context.stats) {
+        return false;
+    }
+
+    const String dir_rel(old_directory.dir_rel.c_str());
+    size_t index = first_manifest_entry_in_directory_v3(
+        *context.old_manifest, dir_rel);
+    const size_t first = index;
+
+    while (index < context.old_manifest->entries.size() &&
+           path_is_inside_directory_v3(
+               context.old_manifest->entries[index].audio_rel.c_str(),
+               dir_rel)) {
+        ++index;
+    }
+
+    const size_t count = index - first;
+    if (count != old_directory.subtree_track_count) {
+        LOGW("[超快速扫描] 目录曲目计数不匹配，改为正常扫描：%s old=%lu actual=%lu",
+             dir_rel.c_str(),
+             (unsigned long)old_directory.subtree_track_count,
+             (unsigned long)count);
+        return false;
+    }
+
+    // 先在局部容器完整验证并重建全部曲目，成功后再提交，
+    // 避免中途失败留下部分重复条目。
+    StorageTrackBuildListV3 staged_tracks;
+    staged_tracks.reserve(count);
+    for (size_t i = first; i < index; ++i) {
+        const StorageManifestEntryV1& old_entry =
+            context.old_manifest->entries[i];
+        const int catalog_track_index = find_catalog_track_v3(
+            *context.reuse_catalog,
+            *context.catalog_path_order,
+            old_entry.audio_rel);
+        if (catalog_track_index < 0) return false;
+
+        TrackBuildTempV3 track{};
+        if (!temp_from_catalog_track_v3(
+                *context.reuse_catalog,
+                (uint32_t)catalog_track_index,
+                track)) {
+            return false;
+        }
+        staged_tracks.push_back(std::move(track));
+    }
+
+    for (size_t offset = 0; offset < count; ++offset) {
+        const size_t old_index = first + offset;
+        context.out_tracks->push_back(
+            std::move(staged_tracks[offset]));
+        context.out_manifest->entries.push_back(
+            context.old_manifest->entries[old_index]);
+        (*context.old_seen)[old_index] = 1;
+        ++context.stats->discovered;
+        ++context.stats->reused;
+        ++context.stats->attribute_reused;
+    }
+
+    // 当前只跳过没有子目录的叶子目录；复制本目录快照即可。
+    context.out_manifest->directories.push_back(old_directory);
+    ++context.stats->directories_skipped;
+
+    UiScanProgress progress{};
+    progress.full_scan = context.stats->full_scan;
+    progress.forced_full_scan = context.stats->forced_full_scan;
+    progress.strict_incremental = context.stats->strict_incremental;
+    progress.ultra_fast_incremental =
+        context.stats->ultra_fast_incremental;
+    progress.directories_skipped = context.stats->directories_skipped;
+    progress.discovered = context.stats->discovered;
+    progress.reused = context.stats->reused;
+    progress.added = context.stats->added;
+    progress.modified = context.stats->modified;
+    progress.deleted = context.stats->deleted;
+    progress.current_path = dir_rel.c_str();
+    ui_scan_tick(progress);
+    return true;
 }
 
 static bool manifest_matches_catalog_v3(
@@ -1396,6 +1672,9 @@ static bool scan_incremental_audio_file_v3(
     progress.full_scan = context.stats->full_scan;
     progress.forced_full_scan = context.stats->forced_full_scan;
     progress.strict_incremental = context.stats->strict_incremental;
+    progress.ultra_fast_incremental =
+        context.stats->ultra_fast_incremental;
+    progress.directories_skipped = context.stats->directories_skipped;
     progress.discovered = context.stats->discovered;
     progress.reused = context.stats->reused;
     progress.added = context.stats->added;
@@ -1409,24 +1688,68 @@ static bool scan_incremental_audio_file_v3(
 static bool scan_dir_incremental_v3(
     const String& dir_path,
     const String& inherited_cover_path,
+    const StorageFileFingerprintV1& inherited_cover_attributes,
+    const StorageFileFingerprintV1* directory_attributes,
     IncrementalScanContextV3& context)
 {
     scan_v3_cooperate_wdt();
 
+    const String dir_rel = directory_relative_path_v3(
+        dir_path, context.music_root);
+
+    if (context.ultra_fast &&
+        context.old_manifest &&
+        directory_attributes &&
+        !dir_rel.isEmpty()) {
+        const int old_directory_index = find_directory_snapshot_v1(
+            *context.old_manifest, dir_rel);
+        if (old_directory_index >= 0) {
+            const StorageDirectorySnapshotV1& old_directory =
+                context.old_manifest->directories[
+                    (size_t)old_directory_index];
+
+            // 结构目录仍需打开，以便发现新增/删除的下级专辑；
+            // 只跳过 FAT 时间未变化且没有子目录的叶子目录。
+            if (!old_directory.has_subdirectories &&
+                fingerprint_attributes_equal_v1(
+                    old_directory.directory_attributes,
+                    *directory_attributes) &&
+                directory_cover_context_matches_v3(
+                    old_directory,
+                    inherited_cover_path,
+                    inherited_cover_attributes) &&
+                reuse_unchanged_directory_v3(
+                    old_directory, context)) {
+                return true;
+            }
+        }
+    }
+
+    const uint32_t discovered_before = context.stats->discovered;
+
     DirectoryEntryListV3 entries;
     DirectoryLrcMapV3 lrc_by_base;
     String local_cover;
+    StorageFileFingerprintV1 local_cover_attributes{};
+    bool has_subdirectories = false;
     if (!inventory_directory_v3(
             dir_path,
             entries,
             lrc_by_base,
-            local_cover)) {
+            local_cover,
+            local_cover_attributes,
+            has_subdirectories)) {
         return false;
     }
 
-    const String effective_cover = local_cover.isEmpty()
-        ? inherited_cover_path
-        : local_cover;
+    const bool has_local_cover = !local_cover.isEmpty();
+    const String effective_cover = has_local_cover
+        ? local_cover
+        : inherited_cover_path;
+    const StorageFileFingerprintV1 effective_cover_attributes =
+        has_local_cover
+            ? local_cover_attributes
+            : inherited_cover_attributes;
 
     String fallback_artist;
     String fallback_album;
@@ -1456,6 +1779,8 @@ static bool scan_dir_incremental_v3(
             if (!scan_dir_incremental_v3(
                     child_dir,
                     effective_cover,
+                    effective_cover_attributes,
+                    &entry.entry_attributes,
                     context)) {
                 return false;
             }
@@ -1478,7 +1803,7 @@ static bool scan_dir_incremental_v3(
                 fallback_album,
                 effective_cover,
                 lrc_abs,
-                &entry.audio_attributes,
+                &entry.entry_attributes,
                 context)) {
             return false;
         }
@@ -1486,9 +1811,25 @@ static bool scan_dir_incremental_v3(
         delay(0);
     }
 
+    StorageDirectorySnapshotV1 directory_snapshot{};
+    directory_snapshot.dir_rel = dir_rel;
+    if (directory_attributes) {
+        directory_snapshot.directory_attributes =
+            *directory_attributes;
+    }
+    directory_snapshot.effective_cover_rel =
+        to_music_relative_path_v3(effective_cover);
+    directory_snapshot.effective_cover_attributes =
+        effective_cover_attributes;
+    directory_snapshot.has_local_cover = has_local_cover;
+    directory_snapshot.has_subdirectories = has_subdirectories;
+    directory_snapshot.subtree_track_count =
+        context.stats->discovered - discovered_before;
+    context.out_manifest->directories.push_back(
+        std::move(directory_snapshot));
+
     return !app_rescan_should_abort();
 }
-
 }  // namespace
 
 bool storage_scan_music_incremental_v3(
@@ -1499,7 +1840,8 @@ bool storage_scan_music_incremental_v3(
     const char* music_root,
     const char* manifest_path,
     bool force_full_scan,
-    bool strict_verify)
+    bool strict_verify,
+    bool ultra_fast)
 {
     StorageSdLockGuard sd_lock(2000);
     if (!sd_lock) {
@@ -1536,9 +1878,15 @@ bool storage_scan_music_incremental_v3(
     out_stats.full_scan = force_full_scan || !out_stats.manifest_loaded;
     out_stats.forced_full_scan = force_full_scan;
     out_stats.strict_incremental = strict_verify && !out_stats.full_scan;
+    out_stats.ultra_fast_incremental =
+        ultra_fast &&
+        !out_stats.full_scan &&
+        old_manifest.format_version >= 3 &&
+        !old_manifest.directories.empty();
     ui_scan_begin(out_stats.full_scan,
                   out_stats.forced_full_scan,
-                  out_stats.strict_incremental);
+                  out_stats.strict_incremental,
+                  out_stats.ultra_fast_incremental);
 
     if (force_full_scan) {
         LOGI("[增量扫描] 用户请求强制全量解析，本轮忽略现有清单");
@@ -1553,10 +1901,18 @@ bool storage_scan_music_incremental_v3(
         old_seen.assign(old_manifest.entries.size(), 0);
         out_tracks.reserve(old_manifest.entries.size() + 8);
         out_manifest.entries.reserve(old_manifest.entries.size() + 8);
-        LOGI("[增量扫描] 使用旧清单和当前 Catalog：条目=%u 清单版本=%u 校验=%s",
+        out_manifest.directories.reserve(
+            old_manifest.directories.size() + 8);
+        LOGI("[增量扫描] 使用旧清单和当前 Catalog：条目=%u 目录=%u 清单版本=%u 校验=%s",
              (unsigned)old_manifest.entries.size(),
+             (unsigned)old_manifest.directories.size(),
              (unsigned)old_manifest.format_version,
-             strict_verify ? "严格内容" : "快速属性");
+             out_stats.ultra_fast_incremental
+                 ? "超快速目录"
+                 : (strict_verify ? "严格内容" : "快速属性"));
+        if (ultra_fast && !out_stats.ultra_fast_incremental) {
+            LOGW("[超快速扫描] 旧清单没有目录快照，本轮退化为快速增量并升级清单");
+        }
         LOGI("[增量扫描] 目录优化：每个目录单次枚举，歌词与封面从目录快照匹配");
     } else {
         LOGI("[增量扫描] %s，本轮执行全量解析",
@@ -1581,10 +1937,14 @@ bool storage_scan_music_incremental_v3(
     context.out_manifest = &out_manifest;
     context.stats = &out_stats;
     context.strict_verify = strict_verify;
+    context.ultra_fast = out_stats.ultra_fast_incremental;
 
+    const StorageFileFingerprintV1 empty_attributes{};
     const bool scan_ok = scan_dir_incremental_v3(
         String(music_root),
         String(),
+        empty_attributes,
+        nullptr,
         context);
 
     if (!scan_ok || app_rescan_should_abort()) {
@@ -1611,6 +1971,23 @@ bool storage_scan_music_incremental_v3(
                  const StorageManifestEntryV1& b) {
                 return a.audio_rel.compareTo(b.audio_rel) < 0;
               });
+    std::sort(out_manifest.directories.begin(),
+              out_manifest.directories.end(),
+              [](const StorageDirectorySnapshotV1& a,
+                 const StorageDirectorySnapshotV1& b) {
+                return a.dir_rel.compareTo(b.dir_rel) < 0;
+              });
+
+    out_stats.unchanged =
+        out_stats.manifest_loaded &&
+        out_stats.added == 0 &&
+        out_stats.modified == 0 &&
+        out_stats.deleted == 0 &&
+        out_stats.reused == out_stats.discovered;
+    out_stats.manifest_refresh_needed =
+        out_stats.unchanged &&
+        !manifest_scan_snapshot_equal_v3(
+            old_manifest, out_manifest);
 
     log_incremental_scan_memory_v3(
         "扫描完成",
@@ -1625,12 +2002,19 @@ bool storage_scan_music_incremental_v3(
     out_stats.elapsed_ms = millis() - scan_started_ms;
     ui_scan_end();
 
-    LOGI("[增量扫描] 完成：模式=%s 校验=%s 强制=%d 发现=%lu 复用=%lu 属性直复用=%lu CRC确认=%lu 新增=%lu 修改=%lu 删除=%lu 用时=%lums",
+    LOGI("[增量扫描] 完成：模式=%s 校验=%s 强制=%d 无变化=%d 清单刷新=%d 跳过目录=%lu 发现=%lu 复用=%lu 属性直复用=%lu CRC确认=%lu 新增=%lu 修改=%lu 删除=%lu 用时=%lums",
          out_stats.full_scan ? "全量" : "增量",
          out_stats.full_scan
              ? "完整解析"
-             : (out_stats.strict_incremental ? "严格内容" : "快速属性"),
+             : (out_stats.ultra_fast_incremental
+                    ? "超快速目录"
+                    : (out_stats.strict_incremental
+                           ? "严格内容"
+                           : "快速属性")),
          out_stats.forced_full_scan ? 1 : 0,
+         out_stats.unchanged ? 1 : 0,
+         out_stats.manifest_refresh_needed ? 1 : 0,
+         (unsigned long)out_stats.directories_skipped,
          (unsigned long)out_stats.discovered,
          (unsigned long)out_stats.reused,
          (unsigned long)out_stats.attribute_reused,

@@ -35,14 +35,27 @@ struct StorageManifestEntryV1 {
   StorageFileFingerprintV1 cover_fingerprint;
 };
 
+struct StorageDirectorySnapshotV1 {
+  // 相对 /Music 的目录路径；空字符串代表 /Music 根目录。
+  PsramString dir_rel;
+  StorageFileFingerprintV1 directory_attributes;
+  PsramString effective_cover_rel;
+  StorageFileFingerprintV1 effective_cover_attributes;
+  bool has_local_cover = false;
+  bool has_subdirectories = false;
+  uint32_t subtree_track_count = 0;
+};
+
 struct StorageMusicManifestV1 {
   PsramVector<StorageManifestEntryV1> entries;
+  PsramVector<StorageDirectorySnapshotV1> directories;
   uint32_t catalog_crc32 = 0;
   bool catalog_crc_valid = false;
   uint16_t format_version = 0;
 
   void clear() {
     entries.clear();
+    directories.clear();
     catalog_crc32 = 0;
     catalog_crc_valid = false;
     format_version = 0;
