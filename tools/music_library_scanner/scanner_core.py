@@ -29,10 +29,14 @@ SEC_V3_TRACKS = 4
 
 MANIFEST_MAGIC = 0x31464E4D  # MNF1
 MANIFEST_LEGACY_VERSION = 1
-MANIFEST_VERSION = 2
+MANIFEST_ATTRIBUTES_VERSION = 2
+MANIFEST_VERSION = 3
 MANIFEST_FLAG_CRC32 = 1 << 0
 MANIFEST_FLAG_CATALOG_CRC32 = 1 << 1
-MANIFEST_HEADER_SIZE = 28
+MANIFEST_FLAG_DIRECTORY_SNAPSHOTS = 1 << 2
+MANIFEST_BASE_HEADER_SIZE = 24
+MANIFEST_CATALOG_HEADER_SIZE = 28
+MANIFEST_HEADER_SIZE = 32
 MANIFEST_FULL_CRC_MAX_BYTES = 16 * 1024
 MANIFEST_SAMPLE_BYTES = 512
 
@@ -60,7 +64,9 @@ ALBUM_STRUCT = struct.Struct("<III")
 TRACK_STRUCT = struct.Struct("<9IBBHH2x")
 INDEX_HEADER_STRUCT = struct.Struct("<IHHIIIIIII")
 SECTION_STRUCT = struct.Struct("<III")
-MANIFEST_HEADER_STRUCT = struct.Struct("<IHHIIIII")
+MANIFEST_BASE_HEADER_STRUCT = struct.Struct("<IHHIIII")
+MANIFEST_CATALOG_HEADER_STRUCT = struct.Struct("<IHHIIIII")
+MANIFEST_HEADER_STRUCT = struct.Struct("<IHHIIIIII")
 FINGERPRINT_V1_STRUCT = struct.Struct("<BIIII")
 FINGERPRINT_V2_STRUCT = struct.Struct("<BBIHHIII")
 
@@ -147,6 +153,17 @@ class ManifestEntry:
     audio_fingerprint: FileFingerprint
     lrc_fingerprint: FileFingerprint
     cover_fingerprint: FileFingerprint
+
+
+@dataclass(slots=True)
+class DirectorySnapshot:
+    dir_rel: str
+    directory_attributes: FileFingerprint
+    effective_cover_rel: str
+    effective_cover_attributes: FileFingerprint
+    has_local_cover: bool
+    has_subdirectories: bool
+    subtree_track_count: int
 
 
 @dataclass(slots=True)
@@ -682,48 +699,107 @@ def _validate_catalog(catalog: Catalog) -> None:
             raise ScanError("歌曲音频路径为空")
 
 
-def serialize_manifest(entries: Iterable[ManifestEntry], catalog_crc: int) -> bytes:
+def _pack_manifest_string(value: str) -> bytes:
+    encoded = value.encode("utf-8")
+    if len(encoded) > 4096 or len(encoded) > 0xFFFF:
+        raise ScanError(f"Manifest 字符串长度无效: {value}")
+    return struct.pack("<H", len(encoded)) + encoded
+
+
+def _read_manifest_string(payload: bytes, offset: int, *, allow_empty: bool) -> tuple[str, int]:
+    if offset + 2 > len(payload):
+        raise ScanError("Manifest 字符串长度越界")
+    length = struct.unpack_from("<H", payload, offset)[0]
+    offset += 2
+    if (not allow_empty and length == 0) or offset + length > len(payload):
+        raise ScanError("Manifest 字符串越界")
+    value = payload[offset : offset + length].decode("utf-8", errors="strict")
+    return value, offset + length
+
+
+def serialize_manifest(
+    entries: Iterable[ManifestEntry],
+    catalog_crc: int,
+    directories: Iterable[DirectorySnapshot] = (),
+) -> bytes:
     sorted_entries = sorted(entries, key=lambda item: item.audio_rel.encode("utf-8"))
+    sorted_directories = sorted(
+        directories, key=lambda item: item.dir_rel.encode("utf-8")
+    )
     payload = bytearray()
     for entry in sorted_entries:
-        encoded = entry.audio_rel.encode("utf-8")
-        if not encoded or len(encoded) > 4096 or len(encoded) > 0xFFFF:
-            raise ScanError(f"Manifest 路径长度无效: {entry.audio_rel}")
-        payload.extend(struct.pack("<H", len(encoded)))
-        payload.extend(encoded)
+        if not entry.audio_rel:
+            raise ScanError("Manifest 音频路径为空")
+        payload.extend(_pack_manifest_string(entry.audio_rel))
         payload.extend(entry.audio_fingerprint.to_bytes())
         payload.extend(entry.lrc_fingerprint.to_bytes())
         payload.extend(entry.cover_fingerprint.to_bytes())
+
+    for directory in sorted_directories:
+        payload.extend(_pack_manifest_string(directory.dir_rel))
+        payload.extend(directory.directory_attributes.to_bytes())
+        payload.extend(_pack_manifest_string(directory.effective_cover_rel))
+        payload.extend(directory.effective_cover_attributes.to_bytes())
+        flags = (1 if directory.has_local_cover else 0) | (
+            2 if directory.has_subdirectories else 0
+        )
+        payload.extend(struct.pack("<BI", flags, directory.subtree_track_count))
 
     payload_crc = zlib.crc32(payload) & 0xFFFFFFFF
     header = MANIFEST_HEADER_STRUCT.pack(
         MANIFEST_MAGIC,
         MANIFEST_VERSION,
-        MANIFEST_FLAG_CRC32 | MANIFEST_FLAG_CATALOG_CRC32,
+        MANIFEST_FLAG_CRC32
+        | MANIFEST_FLAG_CATALOG_CRC32
+        | MANIFEST_FLAG_DIRECTORY_SNAPSHOTS,
         MANIFEST_HEADER_SIZE,
         len(sorted_entries),
         len(payload),
         payload_crc,
         catalog_crc,
+        len(sorted_directories),
     )
     return header + payload
 
 
-def load_manifest(path: Path) -> tuple[list[ManifestEntry], int]:
+def load_manifest(
+    path: Path,
+) -> tuple[list[ManifestEntry], int, list[DirectorySnapshot]]:
     data = path.read_bytes()
-    if len(data) < MANIFEST_HEADER_SIZE:
+    if len(data) < MANIFEST_BASE_HEADER_SIZE:
         raise ScanError("Manifest 文件过短")
-    magic, version, flags, header_size, count, payload_size, expected_crc, cat_crc = (
-        MANIFEST_HEADER_STRUCT.unpack_from(data, 0)
+
+    magic, version, flags, header_size, count, payload_size, expected_crc = (
+        MANIFEST_BASE_HEADER_STRUCT.unpack_from(data, 0)
     )
-    if magic != MANIFEST_MAGIC or version not in (MANIFEST_LEGACY_VERSION, MANIFEST_VERSION):
-        raise ScanError("Manifest 版本不兼容")
-    if header_size != MANIFEST_HEADER_SIZE:
-        raise ScanError("Manifest 缺少 Catalog CRC，需执行全量扫描升级")
-    if (flags & (MANIFEST_FLAG_CRC32 | MANIFEST_FLAG_CATALOG_CRC32)) != (
-        MANIFEST_FLAG_CRC32 | MANIFEST_FLAG_CATALOG_CRC32
+    if magic != MANIFEST_MAGIC or version not in (
+        MANIFEST_LEGACY_VERSION,
+        MANIFEST_ATTRIBUTES_VERSION,
+        MANIFEST_VERSION,
     ):
-        raise ScanError("Manifest 标志不完整")
+        raise ScanError("Manifest 版本不兼容")
+
+    expected_header_size = {
+        MANIFEST_LEGACY_VERSION: MANIFEST_BASE_HEADER_SIZE,
+        MANIFEST_ATTRIBUTES_VERSION: MANIFEST_CATALOG_HEADER_SIZE,
+        MANIFEST_VERSION: MANIFEST_HEADER_SIZE,
+    }[version]
+    if header_size != expected_header_size:
+        raise ScanError("Manifest 头尺寸与版本不匹配")
+    if (flags & MANIFEST_FLAG_CRC32) == 0:
+        raise ScanError("Manifest 缺少 CRC 标志")
+
+    cat_crc = 0
+    directory_count = 0
+    if header_size >= MANIFEST_CATALOG_HEADER_SIZE:
+        cat_crc = struct.unpack_from("<I", data, 24)[0]
+        if (flags & MANIFEST_FLAG_CATALOG_CRC32) == 0:
+            raise ScanError("Manifest 缺少 Catalog CRC 标志")
+    if header_size >= MANIFEST_HEADER_SIZE:
+        directory_count = struct.unpack_from("<I", data, 28)[0]
+        if (flags & MANIFEST_FLAG_DIRECTORY_SNAPSHOTS) == 0:
+            raise ScanError("Manifest 缺少目录快照标志")
+
     if len(data) != header_size + payload_size:
         raise ScanError("Manifest 文件尺寸不一致")
     payload = data[header_size:]
@@ -734,24 +810,43 @@ def load_manifest(path: Path) -> tuple[list[ManifestEntry], int]:
     entries: list[ManifestEntry] = []
     offset = 0
     for _ in range(count):
-        if offset + 2 > len(payload):
-            raise ScanError("Manifest 路径长度越界")
-        length = struct.unpack_from("<H", payload, offset)[0]
-        offset += 2
-        if length == 0 or offset + length > len(payload):
-            raise ScanError("Manifest 路径越界")
-        audio_rel = payload[offset : offset + length].decode("utf-8", errors="strict")
-        offset += length
+        audio_rel, offset = _read_manifest_string(payload, offset, allow_empty=False)
         audio_fp, offset = FileFingerprint.from_bytes(payload, offset, version)
         lrc_fp, offset = FileFingerprint.from_bytes(payload, offset, version)
         cover_fp, offset = FileFingerprint.from_bytes(payload, offset, version)
         entries.append(ManifestEntry(audio_rel, audio_fp, lrc_fp, cover_fp))
+
+    directories: list[DirectorySnapshot] = []
+    for _ in range(directory_count):
+        dir_rel, offset = _read_manifest_string(payload, offset, allow_empty=True)
+        directory_fp, offset = FileFingerprint.from_bytes(payload, offset, version)
+        cover_rel, offset = _read_manifest_string(payload, offset, allow_empty=True)
+        cover_fp, offset = FileFingerprint.from_bytes(payload, offset, version)
+        if offset + 5 > len(payload):
+            raise ScanError("Manifest 目录快照越界")
+        directory_flags, subtree_count = struct.unpack_from("<BI", payload, offset)
+        offset += 5
+        directories.append(
+            DirectorySnapshot(
+                dir_rel=dir_rel,
+                directory_attributes=directory_fp,
+                effective_cover_rel=cover_rel,
+                effective_cover_attributes=cover_fp,
+                has_local_cover=bool(directory_flags & 1),
+                has_subdirectories=bool(directory_flags & 2),
+                subtree_track_count=subtree_count,
+            )
+        )
+
     if offset != len(payload):
         raise ScanError("Manifest 存在未解析数据")
     entries.sort(key=lambda item: item.audio_rel.encode("utf-8"))
+    directories.sort(key=lambda item: item.dir_rel.encode("utf-8"))
     if len({entry.audio_rel for entry in entries}) != len(entries):
         raise ScanError("Manifest 存在重复路径")
-    return entries, cat_crc
+    if len({item.dir_rel for item in directories}) != len(directories):
+        raise ScanError("Manifest 存在重复目录快照")
+    return entries, cat_crc, directories
 
 
 def _atomic_write(path: Path, data: bytes, verifier: Callable[[Path], None]) -> None:
@@ -1095,6 +1190,79 @@ def _file_fingerprint(
         return base
 
 
+def _directory_attributes(path: Path, *, root: bool = False) -> FileFingerprint:
+    if root:
+        # 与设备端一致：/Music 根目录没有父目录项可复用，不保存目录 FAT 属性。
+        return FileFingerprint()
+    stat = path.stat()
+    modify_date, modify_time = _fat_datetime(stat.st_mtime)
+    return FileFingerprint(
+        present=True,
+        attributes_valid=True,
+        size=0,
+        modify_date=modify_date,
+        modify_time=modify_time,
+    )
+
+
+def _build_directory_snapshots(
+    music_root: Path,
+    discovered: Iterable[DiscoveredAudio],
+) -> list[DirectorySnapshot]:
+    track_counts: dict[Path, int] = {}
+    for item in discovered:
+        folder = item.full_path.parent
+        while True:
+            track_counts[folder] = track_counts.get(folder, 0) + 1
+            if folder == music_root:
+                break
+            folder = folder.parent
+
+    cover_cache: dict[Path, Optional[Path]] = {}
+    snapshots: list[DirectorySnapshot] = []
+
+    def walk(folder: Path, inherited_cover: Optional[Path]) -> None:
+        local_cover = _folder_cover(folder, cover_cache)
+        effective_cover = local_cover or inherited_cover
+        try:
+            children = [
+                Path(entry.path)
+                for entry in os.scandir(folder)
+                if entry.is_dir(follow_symlinks=False)
+                and entry.name
+                and not entry.name.startswith(".")
+            ]
+        except OSError as exc:
+            raise ScanError(f"无法读取目录快照 {folder}: {exc}") from exc
+
+        dir_rel = "" if folder == music_root else _normalize_rel(folder, music_root)
+        cover_rel = (
+            _normalize_rel(effective_cover, music_root) if effective_cover else ""
+        )
+        snapshots.append(
+            DirectorySnapshot(
+                dir_rel=dir_rel,
+                directory_attributes=_directory_attributes(
+                    folder, root=folder == music_root
+                ),
+                effective_cover_rel=cover_rel,
+                effective_cover_attributes=(
+                    _file_fingerprint(effective_cover, include_content=False)
+                    if effective_cover
+                    else FileFingerprint()
+                ),
+                has_local_cover=local_cover is not None,
+                has_subdirectories=bool(children),
+                subtree_track_count=track_counts.get(folder, 0),
+            )
+        )
+        for child in children:
+            walk(child, effective_cover)
+
+    walk(music_root, None)
+    return snapshots
+
+
 def _folder_cover(folder: Path, cache: dict[Path, Optional[Path]]) -> Optional[Path]:
     cached = cache.get(folder)
     if folder in cache:
@@ -1314,7 +1482,7 @@ def _load_pair(system_root: Path, log: LogCallback) -> LoadedPair:
         if not path.exists():
             continue
         try:
-            entries, manifest_crc = load_manifest(path)
+            entries, manifest_crc, _ = load_manifest(path)
             manifest_source = path.name
             break
         except Exception as exc:
@@ -1587,7 +1755,10 @@ def scan_library(
     catalog = build_catalog(tracks)
     index_data = serialize_index(catalog)
     cat_crc = catalog_crc32(catalog)
-    manifest_data = serialize_manifest(next_manifest, cat_crc)
+    directory_snapshots = _build_directory_snapshots(music_root, discovered)
+    manifest_data = serialize_manifest(
+        next_manifest, cat_crc, directory_snapshots
+    )
 
     index_path = system_root / "music_index_v3.bin"
     manifest_path = system_root / "music_manifest_v1.bin"
@@ -1654,7 +1825,7 @@ def verify_library(selected_root: str | os.PathLike[str]) -> dict[str, object]:
     index_path = system_root / "music_index_v3.bin"
     manifest_path = system_root / "music_manifest_v1.bin"
     catalog = load_index(index_path)
-    entries, manifest_crc = load_manifest(manifest_path)
+    entries, manifest_crc, directories = load_manifest(manifest_path)
     actual_crc = catalog_crc32(catalog)
     if actual_crc != manifest_crc:
         raise ScanError(
@@ -1673,6 +1844,7 @@ def verify_library(selected_root: str | os.PathLike[str]) -> dict[str, object]:
         "artists": len(catalog.artists),
         "pool_bytes": len(catalog.pool),
         "catalog_crc32": f"0x{actual_crc:08X}",
+        "directories": len(directories),
         "index_path": str(index_path),
         "manifest_path": str(manifest_path),
     }

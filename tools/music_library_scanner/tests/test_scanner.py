@@ -10,6 +10,12 @@ from scanner_core import (
     COVER_FLAC_PICTURE,
     COVER_MP3_APIC,
     catalog_crc32,
+    FileFingerprint,
+    MANIFEST_ATTRIBUTES_VERSION,
+    MANIFEST_CATALOG_HEADER_SIZE,
+    MANIFEST_FLAG_CATALOG_CRC32,
+    MANIFEST_FLAG_CRC32,
+    MANIFEST_MAGIC,
     load_index,
     load_manifest,
     scan_library,
@@ -100,8 +106,10 @@ class ScannerTest(unittest.TestCase):
         self.assertEqual(first.added, 3)
 
         catalog = load_index(self.root / "System" / "music_index_v3.bin")
-        entries, manifest_crc = load_manifest(self.root / "System" / "music_manifest_v1.bin")
+        entries, manifest_crc, directories = load_manifest(self.root / "System" / "music_manifest_v1.bin")
         self.assertEqual(len(entries), 3)
+        self.assertGreaterEqual(len(directories), 3)
+        self.assertTrue(any(item.dir_rel == "Artist A/Album A" for item in directories))
         self.assertEqual(catalog_crc32(catalog), manifest_crc)
 
         by_path = {catalog.track_to_temp(i).audio_rel: catalog.track_to_temp(i) for i in range(3)}
@@ -142,6 +150,48 @@ class ScannerTest(unittest.TestCase):
         verified = verify_library(self.root)
         self.assertTrue(verified["ok"])
         self.assertEqual(verified["tracks"], 2)
+
+    def test_load_manifest_v2_compatibility(self) -> None:
+        path = self.root / "System" / "legacy_manifest_v2.bin"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        audio_rel = "Artist A/Album A/01-song.mp3".encode("utf-8")
+        fingerprint = FileFingerprint(
+            present=True,
+            attributes_valid=True,
+            size=1234,
+            modify_date=0x5821,
+            modify_time=0x7C00,
+            head_crc=1,
+            middle_crc=2,
+            tail_crc=3,
+        )
+        payload = (
+            struct.pack("<H", len(audio_rel))
+            + audio_rel
+            + fingerprint.to_bytes()
+            + FileFingerprint().to_bytes()
+            + FileFingerprint().to_bytes()
+        )
+        import zlib
+
+        header = struct.pack(
+            "<IHHIIIII",
+            MANIFEST_MAGIC,
+            MANIFEST_ATTRIBUTES_VERSION,
+            MANIFEST_FLAG_CRC32 | MANIFEST_FLAG_CATALOG_CRC32,
+            MANIFEST_CATALOG_HEADER_SIZE,
+            1,
+            len(payload),
+            zlib.crc32(payload) & 0xFFFFFFFF,
+            0x12345678,
+        )
+        path.write_bytes(header + payload)
+
+        entries, catalog_crc, directories = load_manifest(path)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].audio_rel, audio_rel.decode("utf-8"))
+        self.assertEqual(catalog_crc, 0x12345678)
+        self.assertEqual(directories, [])
 
 
 if __name__ == "__main__":
