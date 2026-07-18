@@ -131,9 +131,13 @@ bool board_hw_pulse_bt_switch(uint32_t pulse_ms = 200);
 
 bool board_hw_set_amp_mute(bool enabled);
 bool board_hw_get_amp_mute();
+// 从 MCP23017 GPIOA 实际读回 MUTE 控制脚，返回 true 表示本次读回有效。
+bool board_hw_read_amp_mute(bool* enabled);
 
 bool board_hw_set_amp_shutdown(bool enabled);
 bool board_hw_get_amp_shutdown();
+// 从 MCP23017 GPIOA 实际读回 SHDN 控制脚，返回 true 表示本次读回有效。
+bool board_hw_read_amp_shutdown(bool* enabled);
 
 enum class SolenoidDirection : uint8_t {
     A = 0,

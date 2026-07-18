@@ -45,7 +45,12 @@ const char* value_i2c_status()
 
 const char* value_bq27441_status()
 {
-    return bq27441_is_ready() ? "OK" : "ERR";
+    if (bq27441_is_ready()) return "OK";
+
+    // 仍有上一份有效电池缓存时表示通信正在恢复，不把瞬时 NACK 直接显示成硬件 ERR。
+    return board_hw_get_battery_status_cached().valid
+        ? "重试"
+        : "ERR";
 }
 
 const char* value_pcf85063_status()

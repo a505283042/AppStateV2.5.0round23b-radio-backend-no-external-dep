@@ -9,6 +9,10 @@ void i2c_bus_set_ready(bool ready);
 bool i2c_bus_is_ready();
 bool i2c_bus_io_allowed();
 
+// 动态调整共享 I2C 时钟。蓝牙发射干扰较强时可降速，离开发射模式后恢复。
+bool i2c_bus_set_clock_hz(uint32_t clock_hz);
+uint32_t i2c_bus_clock_hz();
+
 // MCP23017/RTC 等关键设备上报总线事务结果。
 // 连续失败达到阈值后只标记恢复请求，真正恢复在主循环 service 中执行。
 void i2c_bus_note_critical_result(bool success, uint8_t error_code);

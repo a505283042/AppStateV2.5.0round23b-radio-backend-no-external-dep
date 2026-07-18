@@ -20,11 +20,13 @@ uint8_t s_consecutive_critical_failures = 0;
 uint8_t s_last_error_code = 0;
 uint32_t s_next_recovery_ms = 0;
 uint32_t s_last_recovery_log_ms = 0;
+uint32_t s_clock_hz = 100000;
 
 constexpr uint8_t I2C_FAILURES_BEFORE_RECOVERY = 3;
 constexpr uint32_t I2C_RECOVERY_RETRY_MS = 2000;
 constexpr uint32_t I2C_RECOVERY_LOG_INTERVAL_MS = 10000;
-constexpr uint32_t I2C_CLOCK_HZ = 100000;
+constexpr uint32_t I2C_CLOCK_MIN_HZ = 10000;
+constexpr uint32_t I2C_CLOCK_MAX_HZ = 400000;
 constexpr uint16_t I2C_TRANSACTION_TIMEOUT_MS = 40;
 
 SemaphoreHandle_t i2c_bus_mutex()
@@ -72,6 +74,7 @@ bool recover_bus_locked()
 {
     portENTER_CRITICAL(&s_state_mux);
     s_i2c_bus_ready = false;
+    const uint32_t clock_hz = s_clock_hz;
     portEXIT_CRITICAL(&s_state_mux);
 
     Wire.end();
@@ -82,7 +85,7 @@ bool recover_bus_locked()
         return false;
     }
 
-    Wire.setClock(I2C_CLOCK_HZ);
+    Wire.setClock(clock_hz);
     Wire.setTimeOut(I2C_TRANSACTION_TIMEOUT_MS);
 
     portENTER_CRITICAL(&s_state_mux);
@@ -136,6 +139,43 @@ bool i2c_bus_io_allowed()
     return allowed;
 }
 
+
+bool i2c_bus_set_clock_hz(uint32_t clock_hz)
+{
+    if (clock_hz < I2C_CLOCK_MIN_HZ || clock_hz > I2C_CLOCK_MAX_HZ) {
+        LOGW("[I2C] 拒绝无效时钟：%luHz", static_cast<unsigned long>(clock_hz));
+        return false;
+    }
+
+    bool ready = false;
+    bool changed = false;
+
+    portENTER_CRITICAL(&s_state_mux);
+    changed = s_clock_hz != clock_hz;
+    s_clock_hz = clock_hz;
+    ready = s_i2c_bus_ready;
+    portEXIT_CRITICAL(&s_state_mux);
+
+    if (ready) {
+        i2c_bus_lock();
+        Wire.setClock(clock_hz);
+        i2c_bus_unlock();
+    }
+
+    if (changed) {
+        LOGI("[I2C] 总线时钟调整为 %luHz", static_cast<unsigned long>(clock_hz));
+    }
+    return true;
+}
+
+uint32_t i2c_bus_clock_hz()
+{
+    portENTER_CRITICAL(&s_state_mux);
+    const uint32_t clock_hz = s_clock_hz;
+    portEXIT_CRITICAL(&s_state_mux);
+    return clock_hz;
+}
+
 void i2c_bus_note_critical_result(bool success, uint8_t error_code)
 {
     const uint32_t now = millis();
@@ -183,10 +223,11 @@ bool i2c_bus_service()
         const uint32_t generation = ++s_generation;
         portEXIT_CRITICAL(&s_state_mux);
 
-        LOGW("[I2C] 总线恢复完成：代次=%lu SDA=%d SCL=%d 超时=%ums",
+        LOGW("[I2C] 总线恢复完成：代次=%lu SDA=%d SCL=%d 时钟=%luHz 超时=%ums",
              static_cast<unsigned long>(generation),
              board::PIN_I2C_SDA,
              board::PIN_I2C_SCL,
+             static_cast<unsigned long>(i2c_bus_clock_hz()),
              static_cast<unsigned>(I2C_TRANSACTION_TIMEOUT_MS));
         return true;
     }

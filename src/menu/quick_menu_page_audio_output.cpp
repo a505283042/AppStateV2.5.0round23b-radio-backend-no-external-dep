@@ -3,6 +3,7 @@
 #include "audio/audio_output_route.h"
 #include "hal/bluetooth_restart_controller.h"
 #include "hal/board_hw_control.h"
+#include "hal/bt62sp_uart_debug.h"
 #include "utils/log.h"
 
 namespace {
@@ -26,14 +27,17 @@ const char* value_switch_route()
 
 const char* value_amp_power()
 {
-    // SHDN 为功放关断控制：true 表示功放被关断，false 表示允许工作。
-    return board_hw_get_amp_shutdown() ? "关断" : "工作";
+    // 使用 MCP23017 实际引脚读回，而不是仅显示软件缓存。
+    bool shutdown = false;
+    if (!board_hw_read_amp_shutdown(&shutdown)) return "读取失败";
+    return shutdown ? "关断" : "工作";
 }
 
 const char* value_amp_mute()
 {
-    // MUTE 为功放静音控制：true 表示静音，false 表示正常播放。
-    return board_hw_get_amp_mute() ? "静音" : "播放";
+    bool muted = false;
+    if (!board_hw_read_amp_mute(&muted)) return "读取失败";
+    return muted ? "静音" : "播放";
 }
 
 const char* value_bt_pair()
@@ -66,6 +70,44 @@ const char* value_bt_link()
     }
 
     return linked ? "已连接" : "未连接";
+}
+
+const char* value_bt_connected_device()
+{
+    static char buf[40];
+
+    if (!bt_route_ready()) return "未连接";
+
+    bool linked = false;
+    if (!board_hw_read_bt_link(&linked)) return "读取失败";
+    if (!linked) return "未连接";
+
+    const Bt62spConnectedDeviceSnapshot device =
+        bt62sp_uart_debug_connected_device_snapshot_get();
+
+    if (device.state == Bt62spConnectedDeviceState::Querying) return "查询中";
+    if (device.state == Bt62spConnectedDeviceState::Timeout) return "查询超时";
+    if (device.state == Bt62spConnectedDeviceState::ParseError) return "解析失败";
+    if (device.state == Bt62spConnectedDeviceState::ConnectedNoIdentity) {
+        return "已连接·无名称记录";
+    }
+    if (device.state == Bt62spConnectedDeviceState::Connected) {
+        snprintf(buf,
+                 sizeof(buf),
+                 "%s",
+                 device.name[0] ? device.name : (device.mac[0] ? device.mac : "已连接"));
+        return buf;
+    }
+    return "按下查询";
+}
+
+bool action_query_bt_connected_device()
+{
+    if (!bt_route_ready()) return false;
+
+    bool linked = false;
+    if (!board_hw_read_bt_link(&linked) || !linked) return false;
+    return bt62sp_uart_debug_request_connected_device_query();
 }
 
 const char* value_bt_reboot()
@@ -165,6 +207,9 @@ const QuickMenuItem BLUETOOTH_TX_ITEMS[] = {
     {"切到耳机", QuickMenuItemType::Action, QuickMenuPage::AudioOutput, "", value_switch_route, action_select_headphone_only, true, false},
     {"切到功放", QuickMenuItemType::Action, QuickMenuPage::AudioOutput, "", value_switch_route, action_select_speaker, true, false},
     {"连接状态", QuickMenuItemType::Status, QuickMenuPage::AudioOutput, "", value_bt_link, nullptr, true, false},
+    {"已连设备", QuickMenuItemType::Action, QuickMenuPage::AudioOutput, "", value_bt_connected_device, action_query_bt_connected_device, true, false},
+    {"功放状态", QuickMenuItemType::Status, QuickMenuPage::AudioOutput, "", value_amp_power, nullptr, true, false},
+    {"功放静音", QuickMenuItemType::Status, QuickMenuPage::AudioOutput, "", value_amp_mute, nullptr, true, false},
     {"蓝牙模式", QuickMenuItemType::Toggle, QuickMenuPage::AudioOutput, "", value_bt_mode, action_toggle_bt_mode, true, false},
     {"蓝牙配对", QuickMenuItemType::Action, QuickMenuPage::AudioOutput, "", value_bt_pair, action_pulse_bt_switch, true, false},
     {"蓝牙重启", QuickMenuItemType::Action, QuickMenuPage::AudioOutput, "", value_bt_reboot, action_reboot_bt_module, true, false},

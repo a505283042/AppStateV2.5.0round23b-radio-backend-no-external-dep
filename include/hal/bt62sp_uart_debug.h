@@ -14,6 +14,23 @@ struct Bt62spVolumeQueryEvent {
     uint8_t volume = 0;
 };
 
+enum class Bt62spConnectedDeviceState : uint8_t {
+    Unknown = 0,
+    Querying,
+    Connected,
+    ConnectedNoIdentity,
+    NotConnected,
+    Timeout,
+    ParseError,
+};
+
+struct Bt62spConnectedDeviceSnapshot {
+    Bt62spConnectedDeviceState state = Bt62spConnectedDeviceState::Unknown;
+    char name[33] = {0};
+    char mac[18] = {0};
+    uint32_t revision = 0;
+};
+
 // 初始化 EWM104-BT62SP 串口调试桥。
 // USB 串口仍然使用 Serial，BT62SP 使用 UART1。
 void bt62sp_uart_debug_begin(uint32_t baud = 1000000);
@@ -43,3 +60,10 @@ bool bt62sp_uart_debug_take_volume_query_event(Bt62spVolumeQueryEvent* out_event
 // 非阻塞排队发送 BT62SP 音量设置命令 AT+VOL=<0..100>。
 // 新的设置会覆盖尚未发送的旧设置，并取消仍在进行的音量查询。
 bool bt62sp_uart_debug_set_volume(uint8_t volume);
+
+// 非阻塞查询当前已连接设备。模块通过 AT+LIST? 返回名称/MAC 表和当前连接索引。
+// 查询期间不会与音量查询并发发送 AT 命令。
+bool bt62sp_uart_debug_request_connected_device_query(uint32_t settle_ms = 0);
+
+// 获取当前已连接设备查询快照。
+Bt62spConnectedDeviceSnapshot bt62sp_uart_debug_connected_device_snapshot_get();

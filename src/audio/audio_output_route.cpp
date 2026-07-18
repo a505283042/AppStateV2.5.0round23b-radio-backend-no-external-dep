@@ -8,6 +8,7 @@
 #include "audio/audio_service.h"
 #include "hal/bt62sp_uart_debug.h"
 #include "hal/board_hw_control.h"
+#include "hal/i2c_bus_lock.h"
 #include "ui/ui.h"
 #include "utils/log.h"
 
@@ -27,6 +28,11 @@ static constexpr char BT_TX_PREFS_KEY[] = "bt_vol";
 static constexpr uint32_t BT_TX_VOLUME_APPLY_FALLBACK_MS = 2500;
 static constexpr uint32_t BT_TX_VOLUME_APPLY_AFTER_READY_MS = 300;
 static constexpr uint32_t BT_TX_VOLUME_APPLY_RETRY_MS = 100;
+
+// 蓝牙发射射频与高瞬时负载会降低共享 I2C 的噪声裕量。
+// 发射期间降到 50kHz，离开发射路线后恢复 100kHz。
+static constexpr uint32_t I2C_CLOCK_NORMAL_HZ = 100000;
+static constexpr uint32_t I2C_CLOCK_BT_TX_HZ = 50000;
 
 struct AudioOutputRouteState {
     // 默认使用功放输出；3.5 耳机/Line out 始终常通，不受本状态控制。
@@ -100,6 +106,54 @@ bool set_route(AudioOutputRoute route)
 bool route_allows_amp()
 {
     return current_route() == AudioOutputRoute::Speaker;
+}
+
+bool verify_amp_control_state(bool expected_mute,
+                              bool expected_shutdown,
+                              const char* route_name)
+{
+    bool mute = false;
+    bool shutdown = false;
+
+    const bool mute_ok = board_hw_read_amp_mute(&mute);
+    const bool shutdown_ok = board_hw_read_amp_shutdown(&shutdown);
+
+    if (!mute_ok || !shutdown_ok) {
+        LOGE("[音频输出] 功放控制脚读回失败：路线=%s MUTE读取=%d SHDN读取=%d",
+             route_name ? route_name : "未知",
+             mute_ok ? 1 : 0,
+             shutdown_ok ? 1 : 0);
+        return false;
+    }
+
+    if (mute != expected_mute || shutdown != expected_shutdown) {
+        LOGE("[音频输出] 功放控制脚读回不匹配：路线=%s MUTE=%d/%d SHDN=%d/%d",
+             route_name ? route_name : "未知",
+             mute ? 1 : 0,
+             expected_mute ? 1 : 0,
+             shutdown ? 1 : 0,
+             expected_shutdown ? 1 : 0);
+        return false;
+    }
+
+    LOGI("[音频输出] 功放控制脚读回确认：路线=%s MUTE=%d SHDN=%d",
+         route_name ? route_name : "未知",
+         mute ? 1 : 0,
+         shutdown ? 1 : 0);
+    return true;
+}
+
+bool keep_safe_outputs_after_route_failure()
+{
+    // 路由切换失败时优先保证喇叭和蓝牙都不会意外出声。
+    bool ok = true;
+    ok = board_hw_set_amp_mute(true) && ok;
+    ok = board_hw_set_amp_shutdown(true) && ok;
+    ok = board_hw_set_bt_power(false) && ok;
+    ok = board_hw_set_bt_mode(false) && ok;
+    ok = i2c_bus_set_clock_hz(I2C_CLOCK_NORMAL_HZ) && ok;
+    ok = verify_amp_control_state(true, true, "故障安全") && ok;
+    return ok;
 }
 
 bool time_reached(uint32_t now, uint32_t target)
@@ -423,24 +477,44 @@ bool audio_output_route_set_amp_shutdown(bool enabled)
 
 bool audio_output_route_apply_from_audio_task(AudioOutputRoute route)
 {
-    // 只有 AudioTask 可以直接操作输出硬件。对外可见的路由在硬件与音量策略处理完成后一次发布，
-    // 避免其它任务读到“新路由 + 旧音量策略”的中间组合。
+    // 只有 AudioTask 可以直接操作输出硬件。必须在全部硬件操作和功放控制脚读回成功后，
+    // 才发布新的对外路线；否则菜单不能显示“已切换”而实际功放仍处于未知状态。
     bool ok = true;
 
     if (route == AudioOutputRoute::BluetoothTx) {
-        // 耳机+蓝牙：功放必须保持关闭，避免喇叭与蓝牙同时出声。
+        // 先关功放并读回确认，再打开蓝牙发射，避免功放与蓝牙同时耗电/出声。
         ok = board_hw_set_amp_mute(true) && ok;
         ok = board_hw_set_amp_shutdown(true) && ok;
-        ok = board_hw_set_bt_mode(true) && ok;
-        ok = board_hw_set_bt_power(true) && ok;
+        ok = verify_amp_control_state(true, true, "耳机+蓝牙") && ok;
+
+        if (ok) {
+            ok = i2c_bus_set_clock_hz(I2C_CLOCK_BT_TX_HZ) && ok;
+            ok = board_hw_set_bt_mode(true) && ok;
+            ok = board_hw_set_bt_power(true) && ok;
+        }
+
+        if (!ok) {
+            if (keep_safe_outputs_after_route_failure()) {
+                restore_normal_volume_policy_if_needed();
+                publish_route(AudioOutputRoute::HeadphoneOnly);
+                sync_ui_volume_from_route_state();
+            }
+            LOGE("[音频输出] 切到蓝牙失败：未发布蓝牙路线，已尝试回到仅耳机安全状态");
+            return false;
+        }
+
         apply_bluetooth_tx_volume_policy();
         publish_route(route);
         sync_ui_volume_from_route_state();
         LOGD("[音频输出] 路线=耳机+蓝牙，功放静音并关断，蓝牙切到发射模式并上电");
-        return ok;
+        return true;
     }
 
-    restore_normal_volume_policy_if_needed();
+    // 离开蓝牙路线时先保存模块音量，但在硬件切换成功前不清除音量策略，
+    // 避免失败后出现“仍显示蓝牙路线但播放器已经恢复普通音量”的中间状态。
+    if (state_snapshot_get().bt_tx_volume_policy_active) {
+        (void)save_bt_tx_volume_to_nvs_if_needed();
+    }
 
     if (route == AudioOutputRoute::HeadphoneOnly) {
         // 仅耳机：关闭蓝牙，同时保持功放静音和关断。
@@ -448,10 +522,24 @@ bool audio_output_route_apply_from_audio_task(AudioOutputRoute route)
         ok = board_hw_set_bt_mode(false) && ok;
         ok = board_hw_set_amp_mute(true) && ok;
         ok = board_hw_set_amp_shutdown(true) && ok;
+        ok = i2c_bus_set_clock_hz(I2C_CLOCK_NORMAL_HZ) && ok;
+        ok = verify_amp_control_state(true, true, "仅耳机") && ok;
+
+        if (!ok) {
+            if (keep_safe_outputs_after_route_failure()) {
+                restore_normal_volume_policy_if_needed();
+                publish_route(AudioOutputRoute::HeadphoneOnly);
+                sync_ui_volume_from_route_state();
+            }
+            LOGE("[音频输出] 切到仅耳机失败：已尝试保持仅耳机安全状态");
+            return false;
+        }
+
+        restore_normal_volume_policy_if_needed();
         publish_route(route);
         sync_ui_volume_from_route_state();
         LOGD("[音频输出] 路线=仅耳机，功放静音并关断，蓝牙关闭并回到接收模式");
-        return ok;
+        return true;
     }
 
     // 切到功放时先解除关断但继续静音。是否取消静音由 AudioTask 根据播放/暂停状态决定。
@@ -459,10 +547,24 @@ bool audio_output_route_apply_from_audio_task(AudioOutputRoute route)
     ok = board_hw_set_bt_mode(false) && ok;
     ok = board_hw_set_amp_mute(true) && ok;
     ok = board_hw_set_amp_shutdown(false) && ok;
+    ok = i2c_bus_set_clock_hz(I2C_CLOCK_NORMAL_HZ) && ok;
+    ok = verify_amp_control_state(true, false, "耳机+功放") && ok;
+
+    if (!ok) {
+        if (keep_safe_outputs_after_route_failure()) {
+            restore_normal_volume_policy_if_needed();
+            publish_route(AudioOutputRoute::HeadphoneOnly);
+            sync_ui_volume_from_route_state();
+        }
+        LOGE("[音频输出] 切到功放失败：未发布功放路线，已尝试回到仅耳机安全状态");
+        return false;
+    }
+
+    restore_normal_volume_policy_if_needed();
     publish_route(AudioOutputRoute::Speaker);
     sync_ui_volume_from_route_state();
     LOGD("[音频输出] 路线=耳机+功放，功放已解除关断并保持静音");
-    return ok;
+    return true;
 }
 
 bool audio_output_route_set_amp_mute_from_audio_task(bool enabled)

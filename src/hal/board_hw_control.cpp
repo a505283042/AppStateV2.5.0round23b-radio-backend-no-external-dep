@@ -26,6 +26,7 @@ static constexpr uint32_t BATTERY_UI_BOOT_SAMPLE_INTERVAL_MS = 3000;
 static constexpr uint32_t BATTERY_UI_STABLE_SAMPLE_INTERVAL_MS = 60UL * 1000UL;
 static constexpr uint32_t BATTERY_RUNTIME_SAMPLE_INTERVAL_MS = 10UL * 1000UL;
 static constexpr uint32_t BATTERY_RUNTIME_SETTLE_MS = 30UL * 1000UL;
+static constexpr uint32_t BATTERY_SAMPLE_AFTER_LOAD_CHANGE_DELAY_MS = 3000;
 static constexpr uint16_t BATTERY_RUNTIME_MIN_DISCHARGE_MA = 20;
 static constexpr uint16_t BATTERY_RUNTIME_SHIFT_MIN_MA = 35;
 static constexpr uint8_t BATTERY_RUNTIME_SHIFT_PERCENT = 30;
@@ -46,6 +47,7 @@ static BatteryShutdownReason s_battery_shutdown_last_reason = BatteryShutdownRea
 static uint32_t s_battery_ui_last_sample_ms = 0;
 static uint32_t s_charger_ui_last_sample_ms = 0;
 static uint32_t s_battery_runtime_last_sample_ms = 0;
+static uint32_t s_battery_sample_not_before_ms = 0;
 static uint8_t s_battery_ui_sample_count = 0;
 
 static bool s_battery_runtime_filter_ready = false;
@@ -159,8 +161,11 @@ static void apply_battery_runtime_load_change(uint32_t now)
         reset_battery_runtime_estimate(BatteryRuntimeEstimateState::ExternalPower, now);
     } else if (s_battery_ui_status.valid) {
         reset_battery_runtime_estimate(BatteryRuntimeEstimateState::Stabilizing, now);
-        // 负载切换后下一轮立即重新采样，而不是继续使用切换前的电流。
-        s_battery_runtime_last_sample_ms = 0;
+        // 蓝牙上电和功放切换会产生供电瞬态。延迟 BQ27441 采样，避免在电压跌落尖峰期间
+        // 立即访问 0x55，导致地址 NACK 并错误进入 ERR。
+        s_battery_runtime_last_sample_ms = now;
+        s_battery_sample_not_before_ms =
+            now + BATTERY_SAMPLE_AFTER_LOAD_CHANGE_DELAY_MS;
     } else {
         reset_battery_runtime_estimate(BatteryRuntimeEstimateState::Unavailable, now);
     }
@@ -473,6 +478,12 @@ void board_hw_battery_status_tick()
         apply_battery_runtime_load_change(now);
     }
 
+    if (s_battery_sample_not_before_ms != 0 &&
+        static_cast<int32_t>(now - s_battery_sample_not_before_ms) < 0) {
+        return;
+    }
+    s_battery_sample_not_before_ms = 0;
+
     const bool boot_sampling =
         s_battery_ui_sample_count < BATTERY_UI_BOOT_SAMPLE_COUNT;
 
@@ -512,11 +523,13 @@ void board_hw_battery_status_tick()
     Bq27441RuntimeSample runtime{};
     s_battery_runtime_last_sample_ms = now;
     if (!bq27441_read_runtime(&runtime) || !runtime.valid) {
-        if (!bq27441_is_ready()) {
-            reset_battery_runtime_estimate(
-                BatteryRuntimeEstimateState::Unavailable,
-                now);
-        }
+        // 轻量续航字段失败不再把 BQ27441 整体标成离线。
+        // 保留电压/SOC 缓存，并让续航重新进入稳定等待，下一轮继续采样。
+        reset_battery_runtime_estimate(
+            bq27441_is_ready()
+                ? BatteryRuntimeEstimateState::Stabilizing
+                : BatteryRuntimeEstimateState::Unavailable,
+            now);
         return;
     }
 
@@ -822,25 +835,39 @@ bool board_hw_set_amp_mute(bool enabled)
 {
     if (!mcp23017_u3_is_ready()) return false;
 
-    if (s_amp_mute_enabled == enabled) {
-        // 状态未变化时不重复写 MCP23017，避免切歌时出现多次相同静音日志和无意义 I2C 操作。
-        return true;
-    }
-
+    const bool changed = s_amp_mute_enabled != enabled;
     const bool level = level_from_enabled(enabled, AMP_MUTE_ACTIVE_LEVEL);
+
+    // 即使缓存状态相同也重新写入硬件。MCP23017 复位或总线恢复后，
+    // 仅依赖缓存提前返回可能让实际 MUTE 引脚没有处于预期电平。
     if (!mcp23017_u3_set_a(board::MCP_A_MUTE_EN, level)) {
         return false;
     }
 
     s_amp_mute_enabled = enabled;
-    board_hw_battery_estimate_notify_load_change();
-    LOGD("[硬件控制] 功放静音 %s 电平=%d", enabled ? "开启" : "关闭", level ? 1 : 0);
+    if (changed) {
+        board_hw_battery_estimate_notify_load_change();
+        LOGD("[硬件控制] 功放静音 %s 电平=%d", enabled ? "开启" : "关闭", level ? 1 : 0);
+    }
     return true;
 }
 
 bool board_hw_get_amp_mute()
 {
     return s_amp_mute_enabled;
+}
+
+bool board_hw_read_amp_mute(bool* enabled)
+{
+    if (!enabled) return false;
+
+    bool level = false;
+    if (!mcp23017_u3_read_a_bit(board::MCP_A_MUTE_EN, &level)) {
+        return false;
+    }
+
+    *enabled = level == AMP_MUTE_ACTIVE_LEVEL;
+    return true;
 }
 
 bool board_hw_set_amp_shutdown(bool enabled)
@@ -854,14 +881,29 @@ bool board_hw_set_amp_shutdown(bool enabled)
     }
 
     s_amp_shutdown_enabled = enabled;
-    if (changed) board_hw_battery_estimate_notify_load_change();
-    LOGI("[硬件控制] 功放关断 %s 电平=%d", enabled ? "开启" : "关闭", level ? 1 : 0);
+    if (changed) {
+        board_hw_battery_estimate_notify_load_change();
+        LOGI("[硬件控制] 功放关断 %s 电平=%d", enabled ? "开启" : "关闭", level ? 1 : 0);
+    }
     return true;
 }
 
 bool board_hw_get_amp_shutdown()
 {
     return s_amp_shutdown_enabled;
+}
+
+bool board_hw_read_amp_shutdown(bool* enabled)
+{
+    if (!enabled) return false;
+
+    bool level = false;
+    if (!mcp23017_u3_read_a_bit(board::MCP_A_SHDN_EN, &level)) {
+        return false;
+    }
+
+    *enabled = level == AMP_SHDN_ACTIVE_LEVEL;
+    return true;
 }
 
 void board_hw_debug_dump()

@@ -2,6 +2,7 @@
 
 #include "hal/bluetooth_restart_controller.h"
 #include "hal/board_hw_control.h"
+#include "hal/bt62sp_uart_debug.h"
 #include "utils/log.h"
 
 namespace {
@@ -47,6 +48,59 @@ const char* value_bt_link()
     }
 
     return linked ? "已连接" : "未连接";
+}
+
+const char* value_bt_connected_device()
+{
+    static char buf[40];
+
+    if (bluetooth_restart_is_in_progress()) return "重启中";
+    if (!board_hw_get_bt_power()) return "未上电";
+
+    bool linked = false;
+    if (!board_hw_read_bt_link(&linked)) return "读取失败";
+    if (!linked) return "未连接";
+
+    const Bt62spConnectedDeviceSnapshot device =
+        bt62sp_uart_debug_connected_device_snapshot_get();
+
+    switch (device.state) {
+        case Bt62spConnectedDeviceState::Querying:
+            return "查询中";
+        case Bt62spConnectedDeviceState::Connected:
+            if (device.name[0]) {
+                snprintf(buf, sizeof(buf), "%s", device.name);
+                return buf;
+            }
+            if (device.mac[0]) {
+                snprintf(buf, sizeof(buf), "%s", device.mac);
+                return buf;
+            }
+            return "已连接";
+        case Bt62spConnectedDeviceState::ConnectedNoIdentity:
+            return "已连接·无名称记录";
+        case Bt62spConnectedDeviceState::Timeout:
+            return "查询超时";
+        case Bt62spConnectedDeviceState::ParseError:
+            return "解析失败";
+        case Bt62spConnectedDeviceState::NotConnected:
+            return "未连接";
+        case Bt62spConnectedDeviceState::Unknown:
+        default:
+            return "按下查询";
+    }
+}
+
+bool action_query_bt_connected_device()
+{
+    if (!bt_can_use_control_items()) return false;
+
+    bool linked = false;
+    if (!board_hw_read_bt_link(&linked) || !linked) {
+        return false;
+    }
+
+    return bt62sp_uart_debug_request_connected_device_query();
 }
 
 const char* value_bt_switch()
@@ -116,7 +170,7 @@ const QuickMenuItem BLUETOOTH_ITEMS[] = {
     {"连接状态", QuickMenuItemType::Status, QuickMenuPage::Bluetooth, "", value_bt_link, nullptr, true, false},
     {"蓝牙角色查询", QuickMenuItemType::Placeholder, QuickMenuPage::Bluetooth, "占位", nullptr, nullptr, false, true},
     {"输入模式查询", QuickMenuItemType::Placeholder, QuickMenuPage::Bluetooth, "占位", nullptr, nullptr, false, true},
-    {"蓝牙名称查询", QuickMenuItemType::Placeholder, QuickMenuPage::Bluetooth, "占位", nullptr, nullptr, false, true},
+    {"已连设备", QuickMenuItemType::Action, QuickMenuPage::Bluetooth, "", value_bt_connected_device, action_query_bt_connected_device, true, false},
     {"允许配对", QuickMenuItemType::Placeholder, QuickMenuPage::Bluetooth, "待接入", nullptr, nullptr, false, true},
     {"SW配对确认", QuickMenuItemType::Action, QuickMenuPage::Bluetooth, "", value_bt_switch, action_pulse_bt_switch, true, false},
     {"蓝牙重启", QuickMenuItemType::Action, QuickMenuPage::Bluetooth, "", value_bt_reboot, action_reboot_bt_module, true, false},

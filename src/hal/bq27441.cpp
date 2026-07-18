@@ -65,6 +65,9 @@ constexpr uint32_t BQ27441_WARN_INTERVAL_MS = 60UL * 1000UL;
 constexpr uint32_t BQ27441_RETRY_AFTER_RUNTIME_FAILURE_MS = 15UL * 1000UL;
 constexpr uint32_t BQ27441_RETRY_AFTER_MISSING_MS = 60UL * 1000UL;
 constexpr uint32_t BQ27441_CONFIG_RETRY_MS = 15UL * 1000UL;
+constexpr uint8_t BQ27441_MANDATORY_READ_ATTEMPTS = 4;
+constexpr uint8_t BQ27441_RUNTIME_READ_ATTEMPTS = 4;
+constexpr uint8_t BQ27441_MANDATORY_FAILURES_BEFORE_OFFLINE = 8;
 
 #ifndef BQ27441_DESIGN_CAPACITY_MAH
 #define BQ27441_DESIGN_CAPACITY_MAH 500
@@ -348,6 +351,44 @@ bool read_word_at(uint8_t addr, uint8_t cmd, uint16_t* out)
 bool read_word(uint8_t cmd, uint16_t* out)
 {
     return read_word_at(BQ27441_ADDR, cmd, out);
+}
+
+bool read_word_resilient(uint8_t cmd,
+                         uint16_t* out,
+                         uint8_t attempts,
+                         uint8_t* out_first_error = nullptr)
+{
+    if (!out || attempts == 0 || !i2c_ready_for_bq()) return false;
+
+    uint8_t first_error = 0;
+    for (uint8_t attempt = 0; attempt < attempts; ++attempt) {
+        if (read_word(cmd, out)) {
+            if (attempt > 0) {
+                LOGD("[BQ27441] 寄存器重试成功：命令=0x%02X 尝试=%u 首次err=%u 时钟=%luHz",
+                     cmd,
+                     static_cast<unsigned>(attempt + 1),
+                     static_cast<unsigned>(first_error),
+                     static_cast<unsigned long>(i2c_bus_clock_hz()));
+            }
+            i2c_bus_note_critical_result(true, 0);
+            if (out_first_error) *out_first_error = first_error;
+            return true;
+        }
+
+        if (attempt == 0) {
+            first_error = s_last_i2c_error;
+        }
+
+        if (attempt + 1 < attempts) {
+            static constexpr uint8_t retry_delays_ms[] = {2, 5, 10};
+            const uint8_t delay_index = attempt < 3 ? attempt : 2;
+            delay(retry_delays_ms[delay_index]);
+        }
+    }
+
+    if (out_first_error) *out_first_error = first_error;
+    i2c_bus_note_critical_result(false, s_last_i2c_error);
+    return false;
 }
 
 bool execute_control_locked(uint16_t subcmd)
@@ -939,27 +980,31 @@ bool bq27441_read_runtime(Bq27441RuntimeSample* out)
     uint16_t remaining_capacity = 0;
     uint16_t current_raw = 0;
 
-    i2c_bus_lock();
+    // 蓝牙发射期间优先使用多次短事务重试。每次重试之间释放 I2C 锁，
+    // 避免一个受干扰的 BQ 事务长时间阻塞 MCP23017 和 RTC。
     const bool got_capacity =
-        read_word_at_locked(BQ27441_ADDR, CMD_REMAINING_CAPACITY, &remaining_capacity);
+        read_word_resilient(CMD_REMAINING_CAPACITY,
+                            &remaining_capacity,
+                            BQ27441_RUNTIME_READ_ATTEMPTS);
     const bool got_current = got_capacity &&
-        read_word_at_locked(BQ27441_ADDR, CMD_AVERAGE_CURRENT, &current_raw);
-    i2c_bus_unlock();
+        read_word_resilient(CMD_AVERAGE_CURRENT,
+                            &current_raw,
+                            BQ27441_RUNTIME_READ_ATTEMPTS);
 
     if (!got_capacity || !got_current) {
         if (s_consecutive_runtime_read_failures < 255) {
             ++s_consecutive_runtime_read_failures;
         }
         if (warn_due(s_last_runtime_warn_ms, BQ27441_WARN_INTERVAL_MS)) {
-            LOGW("[BQ27441] 续航轻量采样失败：命令=0x%02X err=%u 连续失败=%u",
+            LOGW("[BQ27441] 续航轻量采样失败：命令=0x%02X err=%u 连续失败=%u 时钟=%luHz；保留电量计在线状态",
                  s_last_failed_cmd,
                  s_last_i2c_error,
-                 s_consecutive_runtime_read_failures);
+                 s_consecutive_runtime_read_failures,
+                 static_cast<unsigned long>(i2c_bus_clock_hz()));
         }
-        if (s_consecutive_runtime_read_failures >= 3) {
-            s_ready = false;
-            s_next_begin_attempt_ms = millis() + BQ27441_RETRY_AFTER_RUNTIME_FAILURE_MS;
-        }
+
+        // RM/平均电流只用于续航估算，不能因为这两个附加字段失败就把整颗电量计标成 ERR。
+        // 电量计是否离线仍由电压、Flags、SOC 等必要字段的完整采样连续失败来决定。
         return false;
     }
 
@@ -998,7 +1043,11 @@ bool bq27441_read(Bq27441Sample* out)
     uint8_t failed_err = 0;
 
     auto read_required = [&](uint8_t cmd, uint16_t* value) -> bool {
-        if (read_word(cmd, value)) return true;
+        if (read_word_resilient(cmd,
+                                value,
+                                BQ27441_MANDATORY_READ_ATTEMPTS)) {
+            return true;
+        }
         failed_cmd = cmd;
         failed_err = s_last_i2c_error;
         return false;
@@ -1014,15 +1063,20 @@ bool bq27441_read(Bq27441Sample* out)
             ++s_consecutive_mandatory_read_failures;
         }
         if (warn_due(s_last_read_warn_ms, BQ27441_WARN_INTERVAL_MS)) {
-            LOGW("[BQ27441] 读取失败：必要命令=0x%02X err=%u 连续失败=%u ready=%d",
+            LOGW("[BQ27441] 读取失败：必要命令=0x%02X err=%u 连续失败=%u ready=%d 时钟=%luHz",
                  failed_cmd,
                  failed_err,
                  s_consecutive_mandatory_read_failures,
-                 s_ready ? 1 : 0);
+                 s_ready ? 1 : 0,
+                 static_cast<unsigned long>(i2c_bus_clock_hz()));
         }
-        if (s_consecutive_mandatory_read_failures >= 3) {
+        if (s_consecutive_mandatory_read_failures >=
+            BQ27441_MANDATORY_FAILURES_BEFORE_OFFLINE) {
             s_ready = false;
             s_next_begin_attempt_ms = millis() + BQ27441_RETRY_AFTER_RUNTIME_FAILURE_MS;
+            LOGW("[BQ27441] 必要寄存器连续失败达到阈值，暂时标记离线：失败=%u 阈值=%u",
+                 static_cast<unsigned>(s_consecutive_mandatory_read_failures),
+                 static_cast<unsigned>(BQ27441_MANDATORY_FAILURES_BEFORE_OFFLINE));
         }
         *out = Bq27441Sample{};
         return false;
