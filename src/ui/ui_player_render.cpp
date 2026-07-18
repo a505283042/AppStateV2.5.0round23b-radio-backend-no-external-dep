@@ -88,6 +88,8 @@ void cover_panel_invalidate_source_cache();
 
 static bool draw_fullscreen_rotated_cover_bilinear(LGFX_Sprite* dst, LGFX_Sprite* src, float angle_deg);
 
+// Overlay 状态由主循环更新、UiTask 读取。包含 String 的状态统一在 ui_lock() 内发布，
+// 绘制函数只使用锁内复制出的局部快照，避免字符串重分配与渲染并发。
 static void cover_set_source(LGFX_Sprite* src)
 {
   s_src = src;
@@ -100,8 +102,13 @@ static void cover_set_source(LGFX_Sprite* src)
 
 static constexpr uint32_t VOLUME_STEP_HINT_DURATION_MS = 1200;
 
-static volatile uint8_t s_volume_step_hint = 1;
-static volatile uint32_t s_volume_step_hint_until_ms = 0;
+static uint8_t s_volume_step_hint = 1;
+static uint32_t s_volume_step_hint_until_ms = 0;
+
+struct VolumeStepHintSnapshot {
+  uint8_t step = 1;
+  uint32_t until_ms = 0;
+};
 
 void ui_show_volume_step_hint(uint8_t step)
 {
@@ -109,19 +116,23 @@ void ui_show_volume_step_hint(uint8_t step)
     step = 1;
   }
 
+  ui_lock();
   s_volume_step_hint = step;
   s_volume_step_hint_until_ms = millis() + VOLUME_STEP_HINT_DURATION_MS;
+  ui_unlock();
 
   ui_request_refresh();
 }
 
-static bool volume_step_hint_active(uint32_t now)
+static bool volume_step_hint_snapshot(uint32_t now, VolumeStepHintSnapshot& out)
 {
-  if (s_volume_step_hint_until_ms == 0) {
-    return false;
-  }
+  ui_lock();
+  out.step = s_volume_step_hint;
+  out.until_ms = s_volume_step_hint_until_ms;
+  ui_unlock();
 
-  return static_cast<int32_t>(s_volume_step_hint_until_ms - now) > 0;
+  return out.until_ms != 0 &&
+         static_cast<int32_t>(out.until_ms - now) > 0;
 }
 
 static void draw_volume_step_hint_overlay(LGFX_Sprite* dst)
@@ -131,11 +142,12 @@ static void draw_volume_step_hint_overlay(LGFX_Sprite* dst)
   }
 
   const uint32_t now = millis();
-  if (!volume_step_hint_active(now)) {
+  VolumeStepHintSnapshot hint{};
+  if (!volume_step_hint_snapshot(now, hint)) {
     return;
   }
 
-  const uint8_t step = s_volume_step_hint;
+  const uint8_t step = hint.step;
   const uint8_t volume = s_ui_volume;
 
   // 圆屏上中间小弹窗，显示当前音量值和本次旋钮步进。
@@ -321,9 +333,15 @@ static void draw_sleep_timer_overlay(LGFX_Sprite* dst)
 
 static constexpr uint32_t TRACK_CHANGE_POPUP_DURATION_MS = 2600;
 
-static volatile uint32_t s_track_change_popup_until_ms = 0;
+static uint32_t s_track_change_popup_until_ms = 0;
 static String s_track_change_popup_title;
 static String s_track_change_popup_artist;
+
+struct TrackChangePopupSnapshot {
+  uint32_t until_ms = 0;
+  String title;
+  String artist;
+};
 
 template <typename CanvasT>
 static String track_popup_fit_text_px(CanvasT* dst, String text, int max_w)
@@ -357,33 +375,51 @@ static String track_popup_fit_text_px(CanvasT* dst, String text, int max_w)
   return out + ellipsis;
 }
 
-static bool track_change_popup_active(uint32_t now)
+static bool track_change_popup_snapshot(uint32_t now,
+                                        TrackChangePopupSnapshot& out)
 {
-  return s_track_change_popup_until_ms != 0 &&
-         static_cast<int32_t>(s_track_change_popup_until_ms - now) > 0;
+  ui_lock();
+  out.until_ms = s_track_change_popup_until_ms;
+  const bool active = out.until_ms != 0 &&
+                      static_cast<int32_t>(out.until_ms - now) > 0;
+  if (active) {
+    out.title = s_track_change_popup_title;
+    out.artist = s_track_change_popup_artist;
+  }
+  ui_unlock();
+  return active;
 }
 
 void ui_show_track_change_popup(const char* title, const char* artist)
 {
-  s_track_change_popup_title = title ? String(title) : String("");
-  s_track_change_popup_artist = artist ? String(artist) : String("");
-  s_track_change_popup_title.trim();
-  s_track_change_popup_artist.trim();
+  String next_title = title ? String(title) : String("");
+  String next_artist = artist ? String(artist) : String("");
+  next_title.trim();
+  next_artist.trim();
 
-  if (s_track_change_popup_title.isEmpty()) {
-    s_track_change_popup_title = "未知歌曲";
+  if (next_title.isEmpty()) {
+    next_title = "未知歌曲";
   }
-  if (s_track_change_popup_artist.isEmpty()) {
-    s_track_change_popup_artist = "未知歌手";
+  if (next_artist.isEmpty()) {
+    next_artist = "未知歌手";
   }
 
+  ui_lock();
+  s_track_change_popup_title = next_title;
+  s_track_change_popup_artist = next_artist;
   s_track_change_popup_until_ms = millis() + TRACK_CHANGE_POPUP_DURATION_MS;
+  ui_unlock();
   ui_request_refresh();
 }
 
 static void draw_track_change_popup_overlay(LGFX_Sprite* dst)
 {
-  if (!dst || !track_change_popup_active(millis())) {
+  if (!dst) {
+    return;
+  }
+
+  TrackChangePopupSnapshot popup{};
+  if (!track_change_popup_snapshot(millis(), popup)) {
     return;
   }
 
@@ -404,8 +440,8 @@ static void draw_track_change_popup_overlay(LGFX_Sprite* dst)
   dst->setTextSize(1);
   dst->setTextWrap(false);
 
-  const String title = track_popup_fit_text_px(dst, s_track_change_popup_title, TEXT_MAX_W);
-  const String artist = track_popup_fit_text_px(dst, s_track_change_popup_artist, TEXT_MAX_W);
+  const String title = track_popup_fit_text_px(dst, popup.title, TEXT_MAX_W);
+  const String artist = track_popup_fit_text_px(dst, popup.artist, TEXT_MAX_W);
 
   dst->setTextDatum(middle_center);
   dst->setTextColor(TFT_WHITE, TFT_BLACK);
@@ -421,19 +457,36 @@ static void draw_track_change_popup_overlay(LGFX_Sprite* dst)
 // NFC 绑定类型选择 Overlay
 // =============================================================================
 
-static volatile bool s_nfc_bind_target_popup_visible = false;
-static volatile uint8_t s_nfc_bind_target_popup_selected = 0;
-static volatile bool s_nfc_bind_target_popup_dirty = false;
+static bool s_nfc_bind_target_popup_visible = false;
+static uint8_t s_nfc_bind_target_popup_selected = 0;
+static bool s_nfc_bind_target_popup_dirty = false;
+
+struct NfcBindTargetPopupSnapshot {
+  bool visible = false;
+  uint8_t selected = 0;
+};
+
+static NfcBindTargetPopupSnapshot nfc_bind_target_popup_snapshot()
+{
+  NfcBindTargetPopupSnapshot snapshot{};
+  ui_lock();
+  snapshot.visible = s_nfc_bind_target_popup_visible;
+  snapshot.selected = s_nfc_bind_target_popup_selected;
+  ui_unlock();
+  return snapshot;
+}
 
 bool ui_nfc_bind_target_popup_is_visible()
 {
-  return s_nfc_bind_target_popup_visible;
+  return nfc_bind_target_popup_snapshot().visible;
 }
 
 bool ui_nfc_bind_target_popup_consume_dirty()
 {
+  ui_lock();
   const bool dirty = s_nfc_bind_target_popup_dirty;
   s_nfc_bind_target_popup_dirty = false;
+  ui_unlock();
   return dirty;
 }
 
@@ -500,35 +553,45 @@ void ui_show_nfc_bind_target_popup(uint8_t selected)
     selected = 0;
   }
 
+  ui_lock();
   s_nfc_bind_target_popup_selected = selected;
   s_nfc_bind_target_popup_visible = true;
   s_nfc_bind_target_popup_dirty = true;
+  ui_unlock();
   ui_request_refresh();
 }
 
 void ui_hide_nfc_bind_target_popup()
 {
+  ui_lock();
   s_nfc_bind_target_popup_visible = false;
   s_nfc_bind_target_popup_dirty = true;
+  ui_unlock();
   ui_request_refresh();
 }
 
 void ui_draw_nfc_bind_target_popup_on_tft_if_visible()
 {
-  if (!s_nfc_bind_target_popup_visible) {
+  const NfcBindTargetPopupSnapshot popup = nfc_bind_target_popup_snapshot();
+  if (!popup.visible) {
     return;
   }
 
-  draw_nfc_bind_target_popup_canvas(&tft, s_nfc_bind_target_popup_selected);
+  draw_nfc_bind_target_popup_canvas(&tft, popup.selected);
 }
 
 static void draw_nfc_bind_target_popup_overlay(LGFX_Sprite* dst)
 {
-  if (!dst || !s_nfc_bind_target_popup_visible) {
+  if (!dst) {
     return;
   }
 
-  draw_nfc_bind_target_popup_canvas(dst, s_nfc_bind_target_popup_selected);
+  const NfcBindTargetPopupSnapshot popup = nfc_bind_target_popup_snapshot();
+  if (!popup.visible) {
+    return;
+  }
+
+  draw_nfc_bind_target_popup_canvas(dst, popup.selected);
 }
 
 // =============================================================================
@@ -537,14 +600,24 @@ static void draw_nfc_bind_target_popup_overlay(LGFX_Sprite* dst)
 
 static constexpr uint32_t NFC_SCAN_POPUP_DURATION_MS = 4200; // 弹窗时间3.2s
 
-static volatile bool s_nfc_scan_popup_visible = false;
-static volatile bool s_nfc_scan_popup_dirty = false;
-static volatile uint32_t s_nfc_scan_popup_until_ms = 0;
+static bool s_nfc_scan_popup_visible = false;
+static bool s_nfc_scan_popup_dirty = false;
+static uint32_t s_nfc_scan_popup_until_ms = 0;
 static bool s_nfc_scan_popup_bound = false;
 static String s_nfc_scan_popup_uid;
 static String s_nfc_scan_popup_card_type;
 static String s_nfc_scan_popup_bind_type;
 static String s_nfc_scan_popup_bind_name;
+
+struct NfcScanPopupSnapshot {
+  bool visible = false;
+  bool bound = false;
+  uint32_t until_ms = 0;
+  String uid;
+  String card_type;
+  String bind_type;
+  String bind_name;
+};
 
 static String nfc_popup_fit_text(String text, size_t max_chars)
 {
@@ -594,7 +667,7 @@ static String nfc_popup_fit_text_px(CanvasT* dst, String text, int max_w)
   return out + ellipsis;
 }
 
-static bool nfc_scan_popup_active(uint32_t now)
+static bool nfc_scan_popup_update_active_locked(uint32_t now)
 {
   if (!s_nfc_scan_popup_visible) {
     return false;
@@ -609,15 +682,37 @@ static bool nfc_scan_popup_active(uint32_t now)
   return false;
 }
 
+static bool nfc_scan_popup_snapshot(uint32_t now, NfcScanPopupSnapshot& out)
+{
+  ui_lock();
+  const bool active = nfc_scan_popup_update_active_locked(now);
+  if (active) {
+    out.visible = true;
+    out.bound = s_nfc_scan_popup_bound;
+    out.until_ms = s_nfc_scan_popup_until_ms;
+    out.uid = s_nfc_scan_popup_uid;
+    out.card_type = s_nfc_scan_popup_card_type;
+    out.bind_type = s_nfc_scan_popup_bind_type;
+    out.bind_name = s_nfc_scan_popup_bind_name;
+  }
+  ui_unlock();
+  return active;
+}
+
 bool ui_nfc_scan_popup_is_visible()
 {
-  return nfc_scan_popup_active(millis());
+  ui_lock();
+  const bool active = nfc_scan_popup_update_active_locked(millis());
+  ui_unlock();
+  return active;
 }
 
 bool ui_nfc_scan_popup_consume_dirty()
 {
+  ui_lock();
   const bool dirty = s_nfc_scan_popup_dirty;
   s_nfc_scan_popup_dirty = false;
+  ui_unlock();
   return dirty;
 }
 
@@ -627,36 +722,47 @@ void ui_show_nfc_scan_popup(const String& uid,
                             const String& bind_name,
                             bool bound)
 {
-  s_nfc_scan_popup_uid = uid;
-  s_nfc_scan_popup_uid.trim();
-  s_nfc_scan_popup_card_type = card_type;
-  s_nfc_scan_popup_card_type.trim();
-  s_nfc_scan_popup_bind_type = bind_type;
-  s_nfc_scan_popup_bind_type.trim();
-  s_nfc_scan_popup_bind_name = bind_name;
-  s_nfc_scan_popup_bind_name.trim();
+  String next_uid = uid;
+  String next_card_type = card_type;
+  String next_bind_type = bind_type;
+  String next_bind_name = bind_name;
+  next_uid.trim();
+  next_card_type.trim();
+  next_bind_type.trim();
+  next_bind_name.trim();
+
+  if (next_card_type.isEmpty()) {
+    next_card_type = "未知卡";
+  }
+  if (next_bind_type.isEmpty()) {
+    next_bind_type = bound ? String("已绑定") : String("未绑定");
+  }
+  if (!bound && next_bind_name.isEmpty()) {
+    next_bind_name = "长按上一曲可绑定";
+  }
+
+  ui_lock();
+  s_nfc_scan_popup_uid = next_uid;
+  s_nfc_scan_popup_card_type = next_card_type;
+  s_nfc_scan_popup_bind_type = next_bind_type;
+  s_nfc_scan_popup_bind_name = next_bind_name;
   s_nfc_scan_popup_bound = bound;
-
-  if (s_nfc_scan_popup_card_type.isEmpty()) {
-    s_nfc_scan_popup_card_type = "未知卡";
-  }
-  if (s_nfc_scan_popup_bind_type.isEmpty()) {
-    s_nfc_scan_popup_bind_type = bound ? String("已绑定") : String("未绑定");
-  }
-  if (!bound && s_nfc_scan_popup_bind_name.isEmpty()) {
-    s_nfc_scan_popup_bind_name = "长按上一曲可绑定";
-  }
-
   s_nfc_scan_popup_visible = true;
   s_nfc_scan_popup_dirty = true;
   s_nfc_scan_popup_until_ms = millis() + NFC_SCAN_POPUP_DURATION_MS;
+  ui_unlock();
   ui_request_refresh();
 }
 
 template <typename CanvasT>
 static void draw_nfc_scan_popup_canvas(CanvasT* dst)
 {
-  if (!dst || !nfc_scan_popup_active(millis())) {
+  if (!dst) {
+    return;
+  }
+
+  NfcScanPopupSnapshot popup{};
+  if (!nfc_scan_popup_snapshot(millis(), popup)) {
     return;
   }
 
@@ -668,7 +774,7 @@ static void draw_nfc_scan_popup_canvas(CanvasT* dst)
   static constexpr int BOX_Y = (240 - BOX_H) / 2;
   static constexpr int BOX_R = 14;
 
-  const uint16_t status_color = s_nfc_scan_popup_bound ? TFT_GREEN : TFT_ORANGE;
+  const uint16_t status_color = popup.bound ? TFT_GREEN : TFT_ORANGE;
 
   dst->fillRoundRect(BOX_X, BOX_Y, BOX_W, BOX_H, BOX_R, TFT_BLACK);
   dst->drawRoundRect(BOX_X, BOX_Y, BOX_W, BOX_H, BOX_R, status_color);
@@ -679,7 +785,7 @@ static void draw_nfc_scan_popup_canvas(CanvasT* dst)
 
   dst->setTextDatum(middle_center);
   dst->setTextColor(status_color, TFT_BLACK);
-  dst->drawString(s_nfc_scan_popup_bound ? "NFC卡  已绑定" : "NFC卡  未绑定",
+  dst->drawString(popup.bound ? "NFC卡  已绑定" : "NFC卡  未绑定",
                   BOX_X + BOX_W / 2,
                   BOX_Y + 15);
 
@@ -696,20 +802,20 @@ static void draw_nfc_scan_popup_canvas(CanvasT* dst)
   static constexpr int Y_NAME  = 87;
 
   dst->drawString("UID:", left, BOX_Y + Y_UID);
-  dst->drawString(nfc_popup_fit_text(s_nfc_scan_popup_uid, 30), value_left, BOX_Y + Y_UID);
+  dst->drawString(nfc_popup_fit_text(popup.uid, 30), value_left, BOX_Y + Y_UID);
 
   dst->drawString("卡:", left, BOX_Y + Y_CARD);
-  dst->drawString(nfc_popup_fit_text(s_nfc_scan_popup_card_type, 22), value_left, BOX_Y + Y_CARD);
+  dst->drawString(nfc_popup_fit_text(popup.card_type, 22), value_left, BOX_Y + Y_CARD);
 
   dst->drawString("类型:", left, BOX_Y + Y_TYPE);
   dst->setTextColor(status_color, TFT_BLACK);
-  dst->drawString(nfc_popup_fit_text(s_nfc_scan_popup_bind_type, 20), value_left, BOX_Y + Y_TYPE);
+  dst->drawString(nfc_popup_fit_text(popup.bind_type, 20), value_left, BOX_Y + Y_TYPE);
 
   // 绑定名称/歌名限制在弹窗框内：按像素宽度裁剪，超出才加省略号。
   // 注意这里不用固定“字符数”截断，避免中文歌名明明放得下却被提前省略。
   static constexpr int NAME_PAD_X = 12;
   const int name_max_w = BOX_W - NAME_PAD_X * 2;
-  const String name_text = nfc_popup_fit_text_px(dst, s_nfc_scan_popup_bind_name, name_max_w);
+  const String name_text = nfc_popup_fit_text_px(dst, popup.bind_name, name_max_w);
 
   dst->setTextDatum(middle_center);
   dst->setTextColor(TFT_WHITE, TFT_BLACK);
@@ -871,9 +977,15 @@ void ui_draw_battery_footer(LGFX_Sprite* dst)
 
 static constexpr uint32_t ALARM_WAKEUP_POPUP_DURATION_MS = 5000;
 
-static volatile uint32_t s_alarm_wakeup_popup_until_ms = 0;
+static uint32_t s_alarm_wakeup_popup_until_ms = 0;
 static String s_alarm_wakeup_popup_title;
 static String s_alarm_wakeup_popup_detail;
+
+struct AlarmWakeupPopupSnapshot {
+  uint32_t until_ms = 0;
+  String title;
+  String detail;
+};
 
 static const char* alarm_repeat_short_label(AppAlarmRepeatMode mode)
 {
@@ -889,26 +1001,39 @@ static const char* alarm_repeat_short_label(AppAlarmRepeatMode mode)
 
 void ui_show_alarm_wakeup_popup(const char* title, const char* detail)
 {
-    s_alarm_wakeup_popup_title = title ? String(title) : String("闹钟已响");
-    s_alarm_wakeup_popup_detail = detail ? String(detail) : String("");
-    s_alarm_wakeup_popup_title.trim();
-    s_alarm_wakeup_popup_detail.trim();
+    String next_title = title ? String(title) : String("闹钟已响");
+    String next_detail = detail ? String(detail) : String("");
+    next_title.trim();
+    next_detail.trim();
 
-    if (s_alarm_wakeup_popup_title.isEmpty()) {
-        s_alarm_wakeup_popup_title = "闹钟已响";
+    if (next_title.isEmpty()) {
+        next_title = "闹钟已响";
     }
-    if (s_alarm_wakeup_popup_detail.isEmpty()) {
-        s_alarm_wakeup_popup_detail = "正在处理";
+    if (next_detail.isEmpty()) {
+        next_detail = "正在处理";
     }
 
+    ui_lock();
+    s_alarm_wakeup_popup_title = next_title;
+    s_alarm_wakeup_popup_detail = next_detail;
     s_alarm_wakeup_popup_until_ms = millis() + ALARM_WAKEUP_POPUP_DURATION_MS;
+    ui_unlock();
     ui_request_refresh();
 }
 
-static bool alarm_wakeup_popup_active(uint32_t now)
+static bool alarm_wakeup_popup_snapshot(uint32_t now,
+                                        AlarmWakeupPopupSnapshot& out)
 {
-    return s_alarm_wakeup_popup_until_ms != 0 &&
-           static_cast<int32_t>(s_alarm_wakeup_popup_until_ms - now) > 0;
+    ui_lock();
+    out.until_ms = s_alarm_wakeup_popup_until_ms;
+    const bool active = out.until_ms != 0 &&
+                        static_cast<int32_t>(out.until_ms - now) > 0;
+    if (active) {
+        out.title = s_alarm_wakeup_popup_title;
+        out.detail = s_alarm_wakeup_popup_detail;
+    }
+    ui_unlock();
+    return active;
 }
 
 static void draw_alarm_status_overlay(LGFX_Sprite* dst, int box_y = -1)
@@ -959,7 +1084,12 @@ static void draw_alarm_status_overlay(LGFX_Sprite* dst, int box_y = -1)
 
 static void draw_alarm_wakeup_popup_overlay(LGFX_Sprite* dst)
 {
-    if (!dst || !alarm_wakeup_popup_active(millis())) {
+    if (!dst) {
+        return;
+    }
+
+    AlarmWakeupPopupSnapshot popup{};
+    if (!alarm_wakeup_popup_snapshot(millis(), popup)) {
         return;
     }
 
@@ -982,10 +1112,10 @@ static void draw_alarm_wakeup_popup_overlay(LGFX_Sprite* dst)
     dst->setTextDatum(middle_center);
 
     dst->setTextColor(title_color, TFT_BLACK);
-    dst->drawString(s_alarm_wakeup_popup_title, 120, BOX_Y + 15);
+    dst->drawString(popup.title, 120, BOX_Y + 15);
 
     dst->setTextColor(detail_color, TFT_BLACK);
-    dst->drawString(s_alarm_wakeup_popup_detail, 120, BOX_Y + 32);
+    dst->drawString(popup.detail, 120, BOX_Y + 32);
     dst->setTextDatum(top_left);
 }
 
@@ -1199,13 +1329,14 @@ static constexpr int COVER_PANEL_NEXT_X = 147;
 static constexpr int COVER_PANEL_PLAY_X = 120;
 
 // 导航反馈：上/下/无
-static volatile int8_t s_cover_panel_nav_feedback = 0;
-static volatile uint32_t s_cover_panel_nav_feedback_until_ms = 0;
+static int8_t s_cover_panel_nav_feedback = 0;
+static uint32_t s_cover_panel_nav_feedback_until_ms = 0;
 
 // 通知封面面板导航反馈（上/下）
 // 导航反馈会持续 320ms，超过时间后自动清除。
 void ui_notify_cover_panel_nav_feedback(int8_t dir)
 {
+  ui_lock();
   if (dir < 0) {
     s_cover_panel_nav_feedback = -1;
   } else if (dir > 0) {
@@ -1216,6 +1347,7 @@ void ui_notify_cover_panel_nav_feedback(int8_t dir)
 
   // COVER_PANEL 帧率可能只有 8FPS，时间太短可能看不到
   s_cover_panel_nav_feedback_until_ms = millis() + 320;
+  ui_unlock();
 }
 
 // 音量 / 模式跟上一曲 / 下一曲中心对齐
@@ -2110,11 +2242,16 @@ static void draw_cover_panel_info(LGFX_Sprite* dst)
   const int y_side = COVER_PANEL_SIDE_Y;
 
   const uint32_t now = millis();
-  const bool feedback_alive =
-      (int32_t)(s_cover_panel_nav_feedback_until_ms - now) > 0;
+  ui_lock();
+  const int8_t nav_feedback = s_cover_panel_nav_feedback;
+  const uint32_t nav_feedback_until_ms = s_cover_panel_nav_feedback_until_ms;
+  ui_unlock();
 
-  const bool prev_active = feedback_alive && (s_cover_panel_nav_feedback < 0);
-  const bool next_active = feedback_alive && (s_cover_panel_nav_feedback > 0);
+  const bool feedback_alive =
+      static_cast<int32_t>(nav_feedback_until_ms - now) > 0;
+
+  const bool prev_active = feedback_alive && (nav_feedback < 0);
+  const bool next_active = feedback_alive && (nav_feedback > 0);
 
   draw_cover_panel_button(dst,
                           COVER_PANEL_PREV_X,
@@ -2763,7 +2900,7 @@ bool ui_draw_cover_for_track(const TrackInfo& t, bool force_redraw)
   }
 
   const bool nfc_overlay_visible =
-      s_nfc_bind_target_popup_visible || nfc_scan_popup_active(millis());
+      ui_nfc_bind_target_popup_is_visible() || ui_nfc_scan_popup_is_visible();
   if (nfc_overlay_visible) {
     if (s_view == UI_VIEW_COVER_PANEL) {
       cover_panel_draw(0.0f);
