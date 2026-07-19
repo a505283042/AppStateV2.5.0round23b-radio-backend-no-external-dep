@@ -1,0 +1,5 @@
+﻿1. 双击 Run_NAS_Multi_Library_Generator.cmd，不要直接双击 ps1。
+2. 把 ffprobe.exe 放到本文件夹，或者把 FFmpeg 的 bin 目录加入 PATH。
+3. 脚本默认扫描：\\192.168.1.105\麦田广告\Music
+4. 结果和错误日志位于桌面：net_music_sources.txt、net_music_generator.log。
+5. 每个 NAS 子文件夹中会生成自己的 net_music.txt。
