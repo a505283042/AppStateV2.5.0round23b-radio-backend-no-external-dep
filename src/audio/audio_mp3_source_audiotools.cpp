@@ -72,6 +72,10 @@ constexpr uint32_t kStartupProbeTimeoutMs = 1500;
 constexpr uint32_t kStreamNoDataTimeoutMs = 12000;
 constexpr uint32_t kMaxStartupSkipBytes = 2 * 1024 * 1024u;
 constexpr int kMaxRedirects = 2;
+constexpr uint32_t kReconnectPollMs = 50;
+constexpr uint32_t kReconnectDelaysMs[] = {1000, 2000, 4000, 8000, 15000};
+constexpr size_t kReconnectDelayCount =
+    sizeof(kReconnectDelaysMs) / sizeof(kReconnectDelaysMs[0]);
 
 struct ParsedUrl {
   String host;
@@ -88,6 +92,30 @@ static bool operation_is_current(uint32_t operation_id)
   current = (operation_id == s_operation_generation);
   portEXIT_CRITICAL(&s_operation_mux);
   return current;
+}
+
+static bool source_error_is_retryable(const char* error)
+{
+  if (!error || !*error) return false;
+
+  if (strcmp(error, "wifi_disconnected") == 0 ||
+      strcmp(error, "http_connect_failed") == 0 ||
+      strcmp(error, "http_header_timeout") == 0 ||
+      strcmp(error, "http_header_disconnected") == 0 ||
+      strcmp(error, "http_status_line_missing") == 0 ||
+      strcmp(error, "tcp_closed_before_eof") == 0 ||
+      strcmp(error, "stream_no_data_timeout") == 0) {
+    return true;
+  }
+
+  static const char kHttpPrefix[] = "http_status_";
+  if (strncmp(error, kHttpPrefix, sizeof(kHttpPrefix) - 1u) == 0) {
+    const int status = atoi(error + sizeof(kHttpPrefix) - 1u);
+    return status == 408 || status == 425 || status == 429 ||
+           status == 500 || status == 502 || status == 503 || status == 504;
+  }
+
+  return false;
 }
 
 static void publish_source_snapshot(bool open,
@@ -541,6 +569,121 @@ static bool reopen_http_at_offset(uint32_t absolute_offset)
   return true;
 }
 
+static bool wait_before_reconnect(uint32_t operation_id, uint32_t delay_ms)
+{
+  const uint32_t started_ms = millis();
+  while ((uint32_t)(millis() - started_ms) < delay_ms) {
+    if (!operation_is_current(operation_id)) {
+      set_source_error("cancelled");
+      return false;
+    }
+
+    const uint32_t elapsed = millis() - started_ms;
+    const uint32_t remaining = elapsed < delay_ms ? delay_ms - elapsed : 0;
+    const uint32_t slice = remaining < kReconnectPollMs ? remaining : kReconnectPollMs;
+    if (slice == 0) break;
+    publish_source_snapshot(true, false, true, false, 0);
+    vTaskDelay(pdMS_TO_TICKS(slice));
+  }
+  return operation_is_current(operation_id);
+}
+
+static bool reconnect_http_at_current_offset(const char* trigger_error)
+{
+  const uint32_t operation_id = s_active_operation_id;
+  const uint32_t resume_offset = s_current_offset;
+  char cause[64] = {0};
+  strncpy(cause,
+          trigger_error && *trigger_error ? trigger_error : "tcp_closed_before_eof",
+          sizeof(cause) - 1u);
+
+  if (operation_id == 0 || !operation_is_current(operation_id)) {
+    set_source_error("cancelled");
+    return false;
+  }
+  if (s_total_size == 0 || resume_offset >= s_total_size) {
+    return false;
+  }
+  if (!source_error_is_retryable(cause)) {
+    set_source_error(cause);
+    return false;
+  }
+
+  g_client.stop();
+  LOGW("[NAS MP3] 网络中断：原因=%s offset=%lu/%lu，准备 Range 续传",
+       cause,
+       (unsigned long)resume_offset,
+       (unsigned long)s_total_size);
+
+  for (size_t i = 0; i < kReconnectDelayCount; ++i) {
+    LOGW("[NAS MP3] 准备 Range 续传：尝试=%u/%u 延迟=%lums offset=%lu 原因=%s",
+         (unsigned)(i + 1u),
+         (unsigned)kReconnectDelayCount,
+         (unsigned long)kReconnectDelaysMs[i],
+         (unsigned long)resume_offset,
+         cause);
+
+    if (!wait_before_reconnect(operation_id, kReconnectDelaysMs[i])) {
+      set_source_error("cancelled");
+      return false;
+    }
+
+    if (reopen_http_at_offset(resume_offset)) {
+      clear_source_error();
+      LOGI("[NAS MP3] Range 续传成功：offset=%lu 尝试=%u/%u",
+           (unsigned long)resume_offset,
+           (unsigned)(i + 1u),
+           (unsigned)kReconnectDelayCount);
+      return true;
+    }
+
+    const char* latest = s_last_error[0] ? s_last_error : "http_reconnect_failed";
+    strncpy(cause, latest, sizeof(cause) - 1u);
+    cause[sizeof(cause) - 1u] = '\0';
+    LOGW("[NAS MP3] Range 续传失败：尝试=%u/%u offset=%lu 错误=%s WiFi=%d",
+         (unsigned)(i + 1u),
+         (unsigned)kReconnectDelayCount,
+         (unsigned long)resume_offset,
+         cause,
+         WiFi.isConnected() ? 1 : 0);
+    if (!source_error_is_retryable(cause)) break;
+  }
+
+  LOGE("[NAS MP3] Range 续传失败达到上限：offset=%lu 最后错误=%s",
+       (unsigned long)resume_offset,
+       cause);
+  set_source_error("mp3_reconnect_exhausted");
+  g_client.stop();
+  s_open = false;
+  s_active_operation_id = 0;
+  s_stream_opened_ms = 0;
+  s_last_body_data_ms = 0;
+  publish_source_snapshot(false, false, false, false, 0);
+  return false;
+}
+
+static bool source_is_at_known_eof()
+{
+  return s_total_size > 0 && s_current_offset >= s_total_size;
+}
+
+static int close_source_as_eof(const char* reason)
+{
+  LOGI("[NAS MP3] HTTP 音源到达结尾：原因=%s offset=%lu total=%lu URL=%s",
+       reason && *reason ? reason : "eof",
+       (unsigned long)s_current_offset,
+       (unsigned long)s_total_size,
+       s_url.c_str());
+  g_client.stop();
+  s_open = false;
+  s_active_operation_id = 0;
+  s_stream_opened_ms = 0;
+  s_last_body_data_ms = 0;
+  clear_source_error();
+  publish_source_snapshot(false, false, false, true, 0);
+  return AUDIO_MP3_SOURCE_EOF;
+}
+
 static int http_source_read(void* ctx, uint8_t* dst, size_t bytes)
 {
   auto* client = static_cast<WiFiClient*>(ctx);
@@ -563,13 +706,11 @@ static int http_source_read(void* ctx, uint8_t* dst, size_t bytes)
   // WiFi 被动断开属于网络读取错误，不能伪装成正常 EOF。
   // 用户主动停止会先使 operation_id 失效，并走上面的取消分支。
   if (!WiFi.isConnected()) {
-    set_source_error("wifi_disconnected");
-    client->stop();
-    s_open = false;
-    s_active_operation_id = 0;
-    s_stream_opened_ms = 0;
-    s_last_body_data_ms = 0;
-    publish_source_snapshot(false, false, false, true, 0);
+    if (reconnect_http_at_current_offset("wifi_disconnected")) {
+      return AUDIO_MP3_SOURCE_WOULD_BLOCK;
+    }
+    if (source_is_at_known_eof()) return close_source_as_eof("known_size");
+    if (s_last_error[0] == '\0') set_source_error("wifi_disconnected");
     return AUDIO_MP3_SOURCE_ERROR;
   }
 
@@ -577,14 +718,18 @@ static int http_source_read(void* ctx, uint8_t* dst, size_t bytes)
   int avail = client->available();
   if (avail <= 0) {
     if (!client->connected()) {
-      // HTTP 文件以关闭连接表示正常结束；这里必须保留 EOF 语义，
-      // 否则 NAS 歌曲播完会被误判为网络错误。电台断流重连由后续状态机单独处理。
-      s_open = false;
-      s_active_operation_id = 0;
-      s_stream_opened_ms = 0;
-      s_last_body_data_ms = 0;
-      publish_source_snapshot(false, false, false, true, 0);
-      return AUDIO_MP3_SOURCE_EOF;
+      // 已读取到 Content-Length/Content-Range 末尾才是真正 EOF；
+      // 提前关闭属于传输中断，使用当前位置发起 Range 续传。
+      if (source_is_at_known_eof()) {
+        return close_source_as_eof("known_size");
+      }
+      if (s_total_size > 0 && reconnect_http_at_current_offset("tcp_closed_before_eof")) {
+        return AUDIO_MP3_SOURCE_WOULD_BLOCK;
+      }
+      if (s_total_size > 0) return AUDIO_MP3_SOURCE_ERROR;
+
+      // 极少数没有长度信息的直播流仍沿用关闭即 EOF 的旧语义。
+      return close_source_as_eof("unknown_size_transport_closed");
     }
 
     const uint32_t activity_base_ms = s_last_body_data_ms != 0
@@ -592,16 +737,15 @@ static int http_source_read(void* ctx, uint8_t* dst, size_t bytes)
         : s_stream_opened_ms;
     if (activity_base_ms != 0 &&
         (uint32_t)(now_ms - activity_base_ms) >= kStreamNoDataTimeoutMs) {
-      set_source_error("stream_no_data_timeout");
-      LOGE("[电台] HTTP 流长期无数据，主动断开：等待=%lums URL=%s",
+      LOGW("[NAS MP3] HTTP 流长期无数据：等待=%lums offset=%lu/%lu URL=%s",
            (unsigned long)(now_ms - activity_base_ms),
+           (unsigned long)s_current_offset,
+           (unsigned long)s_total_size,
            s_url.c_str());
-      client->stop();
-      s_open = false;
-      s_active_operation_id = 0;
-      s_stream_opened_ms = 0;
-      s_last_body_data_ms = 0;
-      publish_source_snapshot(false, false, false, true, 0);
+      if (reconnect_http_at_current_offset("stream_no_data_timeout")) {
+        return AUDIO_MP3_SOURCE_WOULD_BLOCK;
+      }
+      if (s_last_error[0] == '\0') set_source_error("stream_no_data_timeout");
       return AUDIO_MP3_SOURCE_ERROR;
     }
 
@@ -631,23 +775,24 @@ static int http_source_read(void* ctx, uint8_t* dst, size_t bytes)
   }
 
   if (!WiFi.isConnected()) {
-    set_source_error("wifi_disconnected");
-    client->stop();
-    s_open = false;
-    s_active_operation_id = 0;
-    s_stream_opened_ms = 0;
-    s_last_body_data_ms = 0;
-    publish_source_snapshot(false, false, false, true, 0);
+    if (reconnect_http_at_current_offset("wifi_disconnected")) {
+      return AUDIO_MP3_SOURCE_WOULD_BLOCK;
+    }
+    if (source_is_at_known_eof()) return close_source_as_eof("known_size");
+    if (s_last_error[0] == '\0') set_source_error("wifi_disconnected");
     return AUDIO_MP3_SOURCE_ERROR;
   }
 
   if (!client->connected()) {
-    s_open = false;
-    s_active_operation_id = 0;
-    s_stream_opened_ms = 0;
-    s_last_body_data_ms = 0;
-    publish_source_snapshot(false, false, false, true, 0);
-    return AUDIO_MP3_SOURCE_EOF;
+    if (source_is_at_known_eof()) {
+      return close_source_as_eof("known_size");
+    }
+    if (s_total_size > 0 && reconnect_http_at_current_offset("tcp_closed_before_eof")) {
+      return AUDIO_MP3_SOURCE_WOULD_BLOCK;
+    }
+    if (s_total_size > 0) return AUDIO_MP3_SOURCE_ERROR;
+
+    return close_source_as_eof("unknown_size_transport_closed");
   }
 
   const uint32_t activity_base_ms = s_last_body_data_ms != 0
@@ -655,14 +800,14 @@ static int http_source_read(void* ctx, uint8_t* dst, size_t bytes)
       : s_stream_opened_ms;
   if (activity_base_ms != 0 &&
       (uint32_t)(millis() - activity_base_ms) >= kStreamNoDataTimeoutMs) {
-    set_source_error("stream_no_data_timeout");
-    LOGE("[电台] HTTP 流读取长期无进展，主动断开：URL=%s", s_url.c_str());
-    client->stop();
-    s_open = false;
-    s_active_operation_id = 0;
-    s_stream_opened_ms = 0;
-    s_last_body_data_ms = 0;
-    publish_source_snapshot(false, false, false, true, 0);
+    LOGW("[NAS MP3] HTTP 流读取长期无进展：offset=%lu/%lu URL=%s",
+         (unsigned long)s_current_offset,
+         (unsigned long)s_total_size,
+         s_url.c_str());
+    if (reconnect_http_at_current_offset("stream_no_data_timeout")) {
+      return AUDIO_MP3_SOURCE_WOULD_BLOCK;
+    }
+    if (s_last_error[0] == '\0') set_source_error("stream_no_data_timeout");
     return AUDIO_MP3_SOURCE_ERROR;
   }
 

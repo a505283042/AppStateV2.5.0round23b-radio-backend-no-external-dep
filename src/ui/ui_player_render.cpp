@@ -20,6 +20,7 @@
 #include "player_source.h"
 #include "hal/board_hw_control.h"
 #include "utils/log.h"
+#include "utils/text_normalize.h"
 #include "app_diagnostics.h"
 #include "app_alarm.h"
 #include "app_power.h"
@@ -504,6 +505,8 @@ void ui_show_track_change_popup(const char* title, const char* artist)
 {
   String next_title = title ? String(title) : String("");
   String next_artist = artist ? String(artist) : String("");
+  (void)text_normalize_display_spaces_inplace(next_title);
+  (void)text_normalize_display_spaces_inplace(next_artist);
   next_title.trim();
   next_artist.trim();
 
@@ -3040,9 +3043,23 @@ bool ui_draw_cover_for_track(const TrackInfo& t, bool force_redraw)
 
 void ui_set_now_playing(const char* title, const char* artist)
 {
+  String normalized_title = title ? String(title) : String("");
+  String normalized_artist = artist ? String(artist) : String("");
+  const uint32_t title_changes =
+      text_normalize_display_spaces_inplace(normalized_title);
+  const uint32_t artist_changes =
+      text_normalize_display_spaces_inplace(normalized_artist);
+  normalized_title.trim();
+  normalized_artist.trim();
+  if (title_changes + artist_changes > 0u) {
+    LOGD("[文本] 已规范化播放信息空白：标题=%lu 歌手=%lu",
+         (unsigned long)title_changes,
+         (unsigned long)artist_changes);
+  }
+
   ui_lock();
-  s_np_title  = title  ? String(title)  : String("");
-  s_np_artist = artist ? String(artist) : String("");
+  s_np_title = normalized_title;
+  s_np_artist = normalized_artist;
   // 切歌时重置滚动偏移
   s_title_scroll_x = 0;
   s_artist_scroll_x = 0;
@@ -3053,8 +3070,12 @@ void ui_set_now_playing(const char* title, const char* artist)
 
 void ui_set_album(const String& album)
 {
+  String normalized_album = album;
+  (void)text_normalize_display_spaces_inplace(normalized_album);
+  normalized_album.trim();
+
   ui_lock();
-  s_np_album = album;
+  s_np_album = normalized_album;
   ui_unlock();
   // 切歌时重置专辑滚动偏移
   reset_album_scroll();

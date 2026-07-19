@@ -1,5 +1,6 @@
 #include "storage/storage_view_v3.h"
 #include "utils/log.h"
+#include "utils/text_normalize.h"
 
 /* =========================
  * 工具函数
@@ -65,6 +66,12 @@ bool storage_make_track_view_v3(const MusicCatalogV3& cat,
   out.title = pool_string_safe(cat.pool, row.title_off);
   out.artist = pool_string_safe(cat.pool, row.artist_off);
   out.album = album_name_from_id(cat, row.album_id);
+  (void)text_normalize_display_spaces_inplace(out.title);
+  (void)text_normalize_display_spaces_inplace(out.artist);
+  (void)text_normalize_display_spaces_inplace(out.album);
+  out.title.trim();
+  out.artist.trim();
+  out.album.trim();
 
   String audio_rel = pool_string_safe(cat.pool, row.audio_rel_off);
   String lrc_rel = pool_string_safe(cat.pool, row.lrc_rel_off);

@@ -877,19 +877,8 @@ bool player_control_try_auto_next(bool entered, bool started)
         }
     }
 
-    // MP3 仍保持原有策略：播放期间 WiFi 断开后立即停止并锁定错误状态。
-    // FLAC 不走这里，由 Range 音源完成 1/2/4/8/15 秒续传。
-    if (source.type == PlayerSourceType::NET_TRACK &&
-        source.net_track_format != "flac" &&
-        WiFi.status() != WL_CONNECTED) {
-        if (audio_service_is_playing() || audio_service_is_paused()) {
-            (void)audio_service_stop(true);
-        }
-        if (source.net_track_active || source.net_track_state != "error") {
-            control_latch_net_track_failure(source, "wifi_disconnected");
-        }
-        return false;
-    }
+    // NAS MP3 与 FLAC 都由各自的 Range 音源执行断流续传。
+    // 播放器层不能在 WiFi 短暂断开时主动 stop，否则会取消音源内部的重连操作。
 
     if (s_user_paused) return false;
 
@@ -922,12 +911,28 @@ bool player_control_try_auto_next(bool entered, bool started)
             const bool flac_retry_exhausted =
                 source.net_track_format == "flac" &&
                 strcmp(network.error, "flac_reconnect_exhausted") == 0;
+            const bool mp3_retry_exhausted =
+                source.net_track_format == "mp3" &&
+                strcmp(network.error, "mp3_reconnect_exhausted") == 0;
 
-            // NAS FLAC 已完成 1/2/4/8/15 秒全部续传尝试后，才允许跳过当前曲目。
-            // 其它中途断流仍停在当前歌曲并显示错误，避免网络故障时连续扫完整个列表。
-            if (flac_retry_exhausted) {
-                LOGW("[网络歌曲] NAS FLAC 续传失败达到上限，跳过当前歌曲：索引=%d",
+            const AudioPlaybackEndState end_state = audio_get_last_end_state();
+            const bool natural_eof =
+                end_state.reason == AudioPlaybackEndReason::NaturalEof;
+
+            // NAS MP3/FLAC 已完成 1/2/4/8/15 秒全部续传尝试后，才允许跳过当前曲目。
+            // 普通瞬时断流先由音源内部续传，避免直接停住或连续扫完整个列表。
+            if (flac_retry_exhausted || mp3_retry_exhausted) {
+                LOGW("[网络歌曲] NAS %s 续传失败达到上限，跳过当前歌曲：索引=%d",
+                     source.net_track_format.c_str(),
                      source.net_track_idx);
+                should_advance = true;
+            } else if (natural_eof) {
+                if (!control_net_track_is_near_natural_end(source)) {
+                    LOGW("[网络歌曲] HTTP 文件已完整读取但早于列表时长结束：索引=%d 播放=%lums 列表=%lums，将自动下一首",
+                         source.net_track_idx,
+                         (unsigned long)end_state.play_ms,
+                         (unsigned long)source.net_track_duration_ms);
+                }
                 should_advance = true;
             } else if (!control_net_track_is_near_natural_end(source)) {
                 const char* reason = "stream_interrupted";

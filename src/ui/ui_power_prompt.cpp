@@ -85,8 +85,12 @@ static void draw_power_icon(int cx, int cy, uint16_t accent, bool done, bool war
     // 电源图标
     tft.drawFastVLine(cx, cy - 26, 24, TFT_WHITE);
     tft.drawFastVLine(cx + 1, cy - 26, 24, TFT_WHITE);
-    tft.drawArc(cx, cy + 3, 24, 25, 35, 325, TFT_WHITE);
-    tft.drawArc(cx, cy + 3, 21, 22, 42, 318, accent);
+    // LovyanGFX 的 0° 在右侧。原来 35°..325° 会把缺口留在右边；
+    // 分成两段绘制，把缺口旋转到正上方并与电源竖线对齐。
+    tft.drawArc(cx, cy + 3, 24, 25, 305, 359, TFT_WHITE);
+    tft.drawArc(cx, cy + 3, 24, 25, 0, 235, TFT_WHITE);
+    tft.drawArc(cx, cy + 3, 21, 22, 312, 359, accent);
+    tft.drawArc(cx, cy + 3, 21, 22, 0, 228, accent);
 }
 
 static void draw_status_dots(uint16_t accent, bool done, bool warn)

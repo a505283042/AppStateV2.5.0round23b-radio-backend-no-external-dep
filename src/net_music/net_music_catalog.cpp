@@ -8,6 +8,7 @@
 
 #include "storage/storage_io.h"
 #include "utils/log.h"
+#include "utils/text_normalize.h"
 
 extern SdFat sd;
 
@@ -711,6 +712,23 @@ static bool parse_line(const String& raw, NetMusicItem* out) {
   }
 
   item.format.toLowerCase();
+
+  const uint32_t title_space_changes =
+      text_normalize_display_spaces_inplace(item.title);
+  const uint32_t artist_space_changes =
+      text_normalize_display_spaces_inplace(item.artist);
+  const uint32_t album_space_changes =
+      text_normalize_display_spaces_inplace(item.album);
+  if (title_space_changes + artist_space_changes + album_space_changes > 0u) {
+    LOGD("[网络音乐] 已规范化标题空白：标题=%lu 歌手=%lu 专辑=%lu",
+         (unsigned long)title_space_changes,
+         (unsigned long)artist_space_changes,
+         (unsigned long)album_space_changes);
+  }
+
+  item.title.trim();
+  item.artist.trim();
+  item.album.trim();
 
   if (!item.artist.length()) {
     item.artist = "NAS";

@@ -95,13 +95,15 @@ static uint32_t s_diag_resync_events = 0;
 enum class Mp3SeekStrategy : uint8_t {
   Proportional = 0,
   XingToc,
+  VbriToc,
   CbrBitrate
 };
 
 enum class Mp3VbrHeaderKind : uint8_t {
   None = 0,
   Xing,
-  Info
+  Info,
+  Vbri
 };
 
 struct Mp3SeekIndexState {
@@ -112,6 +114,13 @@ struct Mp3SeekIndexState {
   uint32_t xing_frames = 0;
   uint32_t xing_stream_bytes = 0;
   uint32_t xing_total_ms = 0;
+  uint32_t vbri_stream_bytes = 0;
+  uint32_t vbri_frames = 0;
+  uint32_t vbri_total_ms = 0;
+  uint16_t vbri_entry_count = 0;
+  uint16_t vbri_frames_per_entry = 0;
+  uint32_t vbri_indexed_bytes = 0;
+  uint32_t* vbri_cumulative_bytes = nullptr;
   Mp3VbrHeaderKind header_kind = Mp3VbrHeaderKind::None;
   bool toc_valid = false;
   uint8_t toc[100] = {0};
@@ -147,6 +156,12 @@ static void reset_stream_diag_state()
   s_diag_resync_events = 0;
 }
 
+static uint16_t read_be16(const uint8_t* p)
+{
+  if (!p) return 0;
+  return (uint16_t)(((uint16_t)p[0] << 8) | (uint16_t)p[1]);
+}
+
 static uint32_t read_be32(const uint8_t* p)
 {
   if (!p) return 0;
@@ -156,10 +171,21 @@ static uint32_t read_be32(const uint8_t* p)
          (uint32_t)p[3];
 }
 
+static uint32_t read_be_variable(const uint8_t* p, uint8_t bytes)
+{
+  if (!p || bytes == 0 || bytes > 4) return 0;
+  uint32_t value = 0;
+  for (uint8_t i = 0; i < bytes; ++i) {
+    value = (value << 8) | p[i];
+  }
+  return value;
+}
+
 static const char* seek_strategy_label(Mp3SeekStrategy strategy)
 {
   switch (strategy) {
     case Mp3SeekStrategy::XingToc: return "Xing/Info TOC";
+    case Mp3SeekStrategy::VbriToc: return "VBRI TOC";
     case Mp3SeekStrategy::CbrBitrate: return "CBR码率";
     case Mp3SeekStrategy::Proportional:
     default: return "字节比例";
@@ -168,6 +194,9 @@ static const char* seek_strategy_label(Mp3SeekStrategy strategy)
 
 static void reset_seek_index_state()
 {
+  if (s_seek_index.vbri_cumulative_bytes) {
+    heap_caps_free(s_seek_index.vbri_cumulative_bytes);
+  }
   s_seek_index = Mp3SeekIndexState{};
   s_prepared_frame_offset = 0;
 }
@@ -281,6 +310,116 @@ static bool validate_xing_toc(const uint8_t* toc)
   return has_progress && toc[99] > 0;
 }
 
+static bool inspect_vbri_seek_metadata(const uint8_t* frame,
+                                       size_t frame_bytes,
+                                       uint32_t absolute_offset,
+                                       const Mp3FrameHeaderSummary& header)
+{
+  // VBRI 固定在 MPEG 音频头结束后 32 字节，即帧起点 + 4 + 32。
+  static constexpr size_t kVbriOffset = 4u + 32u;
+  static constexpr size_t kVbriFixedBytes = 26u;
+  static constexpr uint16_t kMaxVbriEntries = 1024u;
+
+  if (!frame || frame_bytes < kVbriOffset + kVbriFixedBytes) return false;
+  const uint8_t* vbri = frame + kVbriOffset;
+  if (memcmp(vbri, "VBRI", 4) != 0) return false;
+
+  // 已识别到 VBRI 标记后，即使索引字段损坏或内存不足，也不能再误判为 CBR。
+  s_seek_index.header_kind = Mp3VbrHeaderKind::Vbri;
+
+  const uint16_t version = read_be16(vbri + 4u);
+  const uint32_t stream_bytes = read_be32(vbri + 10u);
+  const uint32_t total_frames = read_be32(vbri + 14u);
+  const uint16_t entry_count = read_be16(vbri + 18u);
+  const uint16_t scale = read_be16(vbri + 20u);
+  const uint16_t entry_bytes = read_be16(vbri + 22u);
+  const uint16_t frames_per_entry = read_be16(vbri + 24u);
+  const size_t table_bytes = (size_t)entry_count * (size_t)entry_bytes;
+
+  const bool fields_valid = version == 1u &&
+      stream_bytes > 0u && total_frames > 0u &&
+      entry_count > 0u && entry_count <= kMaxVbriEntries &&
+      scale > 0u && entry_bytes >= 1u && entry_bytes <= 4u &&
+      frames_per_entry > 0u &&
+      kVbriOffset + kVbriFixedBytes + table_bytes <= frame_bytes;
+  if (!fields_valid) {
+    LOGW("[MP3] VBRI 索引无效：版本=%u 字节=%lu 帧=%lu 条目=%u 缩放=%u 条目字节=%u 每段帧=%u 帧大小=%u 来源=%s",
+         (unsigned)version,
+         (unsigned long)stream_bytes,
+         (unsigned long)total_frames,
+         (unsigned)entry_count,
+         (unsigned)scale,
+         (unsigned)entry_bytes,
+         (unsigned)frames_per_entry,
+         (unsigned)frame_bytes,
+         g_source_is_stream ? "NAS" : "本地");
+    return false;
+  }
+
+  const size_t cumulative_bytes = ((size_t)entry_count + 1u) * sizeof(uint32_t);
+  uint32_t* cumulative = static_cast<uint32_t*>(
+      heap_caps_malloc(cumulative_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (!cumulative) {
+    cumulative = static_cast<uint32_t*>(
+        heap_caps_malloc(cumulative_bytes, MALLOC_CAP_8BIT));
+  }
+  if (!cumulative) {
+    LOGW("[MP3] VBRI 索引内存分配失败：条目=%u 字节=%u",
+         (unsigned)entry_count,
+         (unsigned)cumulative_bytes);
+    return false;
+  }
+
+  cumulative[0] = 0;
+  const uint8_t* table = vbri + kVbriFixedBytes;
+  bool table_valid = true;
+  bool table_has_progress = false;
+  for (uint16_t i = 0; i < entry_count; ++i) {
+    const uint32_t raw = read_be_variable(table + (size_t)i * entry_bytes,
+                                          (uint8_t)entry_bytes);
+    const uint64_t segment_bytes = (uint64_t)raw * (uint64_t)scale;
+    const uint64_t next = (uint64_t)cumulative[i] + segment_bytes;
+    if (next > UINT32_MAX) {
+      table_valid = false;
+      break;
+    }
+    if (segment_bytes > 0u) table_has_progress = true;
+    cumulative[i + 1u] = (uint32_t)next;
+  }
+
+  if (!table_valid || !table_has_progress || cumulative[entry_count] == 0u) {
+    heap_caps_free(cumulative);
+    LOGW("[MP3] VBRI TOC 条目无效：条目=%u 来源=%s",
+         (unsigned)entry_count,
+         g_source_is_stream ? "NAS" : "本地");
+    return false;
+  }
+
+  s_seek_index.vbri_stream_bytes = stream_bytes;
+  s_seek_index.vbri_frames = total_frames;
+  s_seek_index.vbri_entry_count = entry_count;
+  s_seek_index.vbri_frames_per_entry = frames_per_entry;
+  s_seek_index.vbri_indexed_bytes = cumulative[entry_count];
+  s_seek_index.vbri_cumulative_bytes = cumulative;
+  if (header.samples_per_frame > 0u && header.sample_rate > 0u) {
+    const uint64_t samples =
+        (uint64_t)total_frames * (uint64_t)header.samples_per_frame;
+    s_seek_index.vbri_total_ms =
+        (uint32_t)(samples * 1000ull / (uint64_t)header.sample_rate);
+  }
+
+  LOGI("[MP3] 跳转索引：类型=VBRI TOC=1 帧=%lu 字节=%lu 时长=%lums 条目=%u 每段帧=%u 索引字节=%lu 首帧=%lu 来源=%s",
+       (unsigned long)s_seek_index.vbri_frames,
+       (unsigned long)s_seek_index.vbri_stream_bytes,
+       (unsigned long)s_seek_index.vbri_total_ms,
+       (unsigned)s_seek_index.vbri_entry_count,
+       (unsigned)s_seek_index.vbri_frames_per_entry,
+       (unsigned long)s_seek_index.vbri_indexed_bytes,
+       (unsigned long)absolute_offset,
+       g_source_is_stream ? "NAS" : "本地");
+  return true;
+}
+
 static void inspect_first_frame_seek_metadata(const uint8_t* frame,
                                               size_t frame_bytes,
                                               uint32_t absolute_offset,
@@ -308,7 +447,16 @@ static void inspect_first_frame_seek_metadata(const uint8_t* frame,
   } else if (memcmp(tag, "Info", 4) == 0) {
     s_seek_index.header_kind = Mp3VbrHeaderKind::Info;
   } else {
-    LOGD("[MP3] 跳转索引：未发现 Xing/Info，开始观察码率 来源=%s 首帧=%lu 码率=%lukbps",
+    if (inspect_vbri_seek_metadata(frame, frame_bytes, absolute_offset, header)) {
+      return;
+    }
+    if (s_seek_index.header_kind == Mp3VbrHeaderKind::Vbri) {
+      LOGW("[MP3] 已发现 VBRI，但索引不可用，回退字节比例定位 来源=%s 首帧=%lu",
+           g_source_is_stream ? "NAS" : "本地",
+           (unsigned long)absolute_offset);
+      return;
+    }
+    LOGD("[MP3] 跳转索引：未发现 Xing/Info/VBRI，开始观察码率 来源=%s 首帧=%lu 码率=%lukbps",
          g_source_is_stream ? "NAS" : "本地",
          (unsigned long)absolute_offset,
          (unsigned long)s_seek_index.first_bitrate_kbps);
@@ -444,6 +592,7 @@ static void observe_frame_bitrate(uint32_t bitrate_kbps)
 
   // Xing 表示 VBR；没有 TOC 时仍使用比例回退，不能因为开头若干帧相同而误判 CBR。
   if (s_seek_index.header_kind == Mp3VbrHeaderKind::Xing ||
+      s_seek_index.header_kind == Mp3VbrHeaderKind::Vbri ||
       s_seek_index.bitrate_varied ||
       s_seek_index.cbr_confirmed) {
     return;
@@ -466,6 +615,10 @@ static uint32_t usable_audio_stream_bytes(uint32_t source_size, uint32_t audio_b
       s_seek_index.xing_stream_bytes <= source_audio_bytes) {
     return s_seek_index.xing_stream_bytes;
   }
+  if (s_seek_index.vbri_stream_bytes >= 4u &&
+      s_seek_index.vbri_stream_bytes <= source_audio_bytes) {
+    return s_seek_index.vbri_stream_bytes;
+  }
   return source_audio_bytes;
 }
 
@@ -473,6 +626,13 @@ static Mp3SeekStrategy select_seek_strategy()
 {
   if (s_seek_index.first_frame_found && s_seek_index.toc_valid) {
     return Mp3SeekStrategy::XingToc;
+  }
+  if (s_seek_index.first_frame_found &&
+      s_seek_index.header_kind == Mp3VbrHeaderKind::Vbri &&
+      s_seek_index.vbri_cumulative_bytes &&
+      s_seek_index.vbri_entry_count > 0u &&
+      s_seek_index.vbri_frames > 0u) {
+    return Mp3SeekStrategy::VbriToc;
   }
   if (s_seek_index.first_frame_found &&
       s_seek_index.cbr_confirmed &&
@@ -509,6 +669,41 @@ static uint32_t calculate_seek_offset(Mp3SeekStrategy strategy,
       relative_bytes =
           (uint64_t)stream_bytes * toc_milli / (256ull * 1000ull);
     }
+  } else if (strategy == Mp3SeekStrategy::VbriToc) {
+    const uint32_t total_frames = s_seek_index.vbri_frames;
+    const uint16_t entry_count = s_seek_index.vbri_entry_count;
+    const uint16_t frames_per_entry = s_seek_index.vbri_frames_per_entry;
+    const uint32_t* cumulative = s_seek_index.vbri_cumulative_bytes;
+    if (total_frames > 0u && entry_count > 0u && frames_per_entry > 0u && cumulative) {
+      uint64_t target_frame =
+          (uint64_t)target_ms * (uint64_t)total_frames / (uint64_t)total_ms;
+      if (target_frame >= total_frames) target_frame = total_frames - 1u;
+      uint32_t entry = (uint32_t)(target_frame / frames_per_entry);
+      if (entry >= entry_count) entry = entry_count - 1u;
+      const uint64_t entry_first_frame = (uint64_t)entry * frames_per_entry;
+      const uint32_t remaining_frames = total_frames > entry_first_frame
+          ? (uint32_t)(total_frames - entry_first_frame)
+          : 0u;
+      const uint32_t entry_frames = remaining_frames < frames_per_entry
+          ? remaining_frames
+          : (uint32_t)frames_per_entry;
+      const uint32_t frame_in_entry =
+          (uint32_t)(target_frame - entry_first_frame);
+      const uint32_t segment_bytes = cumulative[entry + 1u] - cumulative[entry];
+      relative_bytes = cumulative[entry];
+      if (entry_frames > 0u) {
+        relative_bytes +=
+            (uint64_t)segment_bytes * frame_in_entry / entry_frames;
+      }
+      if (s_seek_index.vbri_indexed_bytes > 0u &&
+          s_seek_index.vbri_indexed_bytes != stream_bytes) {
+        relative_bytes = relative_bytes * stream_bytes /
+            s_seek_index.vbri_indexed_bytes;
+      }
+    } else {
+      relative_bytes =
+          (uint64_t)stream_bytes * (uint64_t)target_ms / (uint64_t)total_ms;
+    }
   } else if (strategy == Mp3SeekStrategy::CbrBitrate) {
     // kbps × ms / 8 正好得到字节数。
     relative_bytes =
@@ -540,6 +735,58 @@ static uint32_t estimate_seek_actual_ms(Mp3SeekStrategy strategy,
   if (strategy == Mp3SeekStrategy::CbrBitrate &&
       s_seek_index.first_bitrate_kbps > 0) {
     const uint64_t ms = (uint64_t)relative * 8ull / s_seek_index.first_bitrate_kbps;
+    return ms > total_ms ? total_ms : (uint32_t)ms;
+  }
+
+  if (strategy == Mp3SeekStrategy::VbriToc &&
+      s_seek_index.vbri_cumulative_bytes &&
+      s_seek_index.vbri_entry_count > 0u &&
+      s_seek_index.vbri_frames_per_entry > 0u &&
+      s_seek_index.vbri_frames > 0u) {
+    const uint32_t* cumulative = s_seek_index.vbri_cumulative_bytes;
+    const uint16_t count = s_seek_index.vbri_entry_count;
+    const uint16_t frames_per_entry = s_seek_index.vbri_frames_per_entry;
+    uint32_t table_relative = relative;
+    if (s_seek_index.vbri_indexed_bytes > 0u &&
+        stream_bytes > 0u &&
+        s_seek_index.vbri_indexed_bytes != stream_bytes) {
+      table_relative = (uint32_t)((uint64_t)relative *
+          s_seek_index.vbri_indexed_bytes / stream_bytes);
+    }
+    if (table_relative > s_seek_index.vbri_indexed_bytes) {
+      table_relative = s_seek_index.vbri_indexed_bytes;
+    }
+
+    uint16_t lo = 0;
+    uint16_t hi = count;
+    while (lo < hi) {
+      const uint16_t mid = (uint16_t)(lo + (hi - lo) / 2u);
+      if (cumulative[mid + 1u] < table_relative) lo = (uint16_t)(mid + 1u);
+      else hi = mid;
+    }
+    uint16_t entry = lo < count ? lo : (uint16_t)(count - 1u);
+    const uint32_t segment_begin = cumulative[entry];
+    const uint32_t segment_end = cumulative[entry + 1u];
+    const uint64_t entry_first_frame = (uint64_t)entry * frames_per_entry;
+    const uint32_t remaining_frames =
+        s_seek_index.vbri_frames > entry_first_frame
+            ? (uint32_t)(s_seek_index.vbri_frames - entry_first_frame)
+            : 0u;
+    const uint32_t entry_frames = remaining_frames < frames_per_entry
+        ? remaining_frames
+        : (uint32_t)frames_per_entry;
+    uint32_t frame_in_entry = 0;
+    if (segment_end > segment_begin &&
+        table_relative > segment_begin &&
+        entry_frames > 0u) {
+      frame_in_entry = (uint32_t)(((uint64_t)(table_relative - segment_begin) *
+          entry_frames) / (segment_end - segment_begin));
+      if (frame_in_entry > entry_frames) frame_in_entry = entry_frames;
+    }
+    uint64_t frame = entry_first_frame + frame_in_entry;
+    if (frame > s_seek_index.vbri_frames) frame = s_seek_index.vbri_frames;
+    const uint64_t ms =
+        (uint64_t)total_ms * frame / s_seek_index.vbri_frames;
     return ms > total_ms ? total_ms : (uint32_t)ms;
   }
 
