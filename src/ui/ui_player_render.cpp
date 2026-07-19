@@ -197,6 +197,115 @@ static void draw_volume_step_hint_overlay(LGFX_Sprite* dst)
 
 
 // =============================================================================
+// 快退 / 快进预览 Overlay
+// =============================================================================
+
+static bool s_seek_preview_visible = false;
+static bool s_seek_preview_available = true;
+static int8_t s_seek_preview_direction = 1;
+static uint32_t s_seek_preview_target_ms = 0;
+
+struct SeekPreviewSnapshot {
+  bool visible = false;
+  bool available = true;
+  int8_t direction = 1;
+  uint32_t target_ms = 0;
+};
+
+void ui_show_seek_preview(int8_t direction, uint32_t target_ms)
+{
+  ui_lock();
+  s_seek_preview_visible = true;
+  s_seek_preview_available = true;
+  s_seek_preview_direction = direction < 0 ? -1 : 1;
+  s_seek_preview_target_ms = target_ms;
+  ui_unlock();
+  ui_request_refresh();
+}
+
+void ui_show_seek_unavailable()
+{
+  ui_lock();
+  s_seek_preview_visible = true;
+  s_seek_preview_available = false;
+  s_seek_preview_direction = 0;
+  s_seek_preview_target_ms = 0;
+  ui_unlock();
+  ui_request_refresh();
+}
+
+void ui_hide_seek_preview()
+{
+  ui_lock();
+  const bool changed = s_seek_preview_visible;
+  s_seek_preview_visible = false;
+  ui_unlock();
+  if (changed) {
+    ui_request_refresh();
+  }
+}
+
+static SeekPreviewSnapshot seek_preview_snapshot()
+{
+  SeekPreviewSnapshot out{};
+  ui_lock();
+  out.visible = s_seek_preview_visible;
+  out.available = s_seek_preview_available;
+  out.direction = s_seek_preview_direction;
+  out.target_ms = s_seek_preview_target_ms;
+  ui_unlock();
+  return out;
+}
+
+static void draw_seek_preview_overlay(LGFX_Sprite* dst)
+{
+  if (!dst) {
+    return;
+  }
+
+  const SeekPreviewSnapshot preview = seek_preview_snapshot();
+  if (!preview.visible) {
+    return;
+  }
+
+  static constexpr int BOX_W = 150;
+  static constexpr int BOX_H = 46;
+  static constexpr int BOX_X = (240 - BOX_W) / 2;
+  static constexpr int BOX_Y = 76;
+  static constexpr int BOX_R = 12;
+
+  const uint16_t accent = preview.available ? TFT_CYAN : TFT_ORANGE;
+  dst->fillRoundRect(BOX_X, BOX_Y, BOX_W, BOX_H, BOX_R, TFT_BLACK);
+  dst->drawRoundRect(BOX_X, BOX_Y, BOX_W, BOX_H, BOX_R, accent);
+
+  dst->setFont(&g_font_cjk);
+  dst->setTextSize(1);
+  dst->setTextWrap(false);
+  dst->setTextDatum(middle_center);
+  dst->setTextColor(accent, TFT_BLACK);
+
+  if (!preview.available) {
+    dst->drawString("当前音源不可跳转", 120, BOX_Y + BOX_H / 2);
+    dst->setTextDatum(top_left);
+    return;
+  }
+
+  dst->drawString(preview.direction < 0 ? "快退" : "快进", 120, BOX_Y + 14);
+
+  const uint32_t total_seconds = preview.target_ms / 1000UL;
+  char time_text[20];
+  snprintf(time_text,
+           sizeof(time_text),
+           "%02lu:%02lu",
+           (unsigned long)(total_seconds / 60UL),
+           (unsigned long)(total_seconds % 60UL));
+  dst->setTextColor(TFT_WHITE, TFT_BLACK);
+  dst->drawString(time_text, 120, BOX_Y + 32);
+  dst->setTextDatum(top_left);
+}
+
+
+// =============================================================================
 // 低电量提示 Overlay
 // =============================================================================
 
@@ -1159,6 +1268,7 @@ void cover_rotate_draw(float angle_deg)
   draw_low_battery_hint_overlay(dst);
   draw_alarm_wakeup_popup_overlay(dst);
   draw_volume_step_hint_overlay(dst);
+  draw_seek_preview_overlay(dst);
   draw_nfc_bind_target_popup_overlay(dst);
   draw_nfc_scan_popup_overlay(dst);
 
@@ -2649,8 +2759,9 @@ void cover_panel_draw(float angle_deg)
   // 9. RTC 闹钟开机后的临时提示
   draw_alarm_wakeup_popup_overlay(dst);
 
-  // 10. 绘制音量步进小提示
+  // 10. 绘制音量步进小提示 / 快退快进预览
   draw_volume_step_hint_overlay(dst);
+  draw_seek_preview_overlay(dst);
   draw_nfc_bind_target_popup_overlay(dst);
   draw_nfc_scan_popup_overlay(dst);
 
@@ -2865,8 +2976,9 @@ void cover_info_draw()
   // 10) RTC 闹钟开机后的临时提示 Overlay
   draw_alarm_wakeup_popup_overlay(dst);
 
-  // 11) 音量步进小提示 Overlay
+  // 11) 音量步进小提示 / 快退快进预览 Overlay
   draw_volume_step_hint_overlay(dst);
+  draw_seek_preview_overlay(dst);
   draw_nfc_bind_target_popup_overlay(dst);
   draw_nfc_scan_popup_overlay(dst);
 

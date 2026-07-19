@@ -98,8 +98,15 @@ bool audio_service_is_paused(void);
 // 统一进度跳转：本地 MP3/FLAC 与 NAS MP3/FLAC 均走 AudioTask 串行执行。
 bool audio_service_seek_ms(uint32_t target_ms, bool wait = true);
 bool audio_service_seek_ms_async(uint32_t target_ms, uint32_t* out_request_id = nullptr);
+// 仅当歌曲世代仍与 expected_playback_revision 一致时执行。
+// 用于实体按键长按预览后松手提交，避免长按期间自动切歌后跳转到新歌曲。
+bool audio_service_seek_ms_async_if_revision(uint32_t target_ms,
+                                             uint32_t expected_playback_revision,
+                                             uint32_t* out_request_id = nullptr);
 bool audio_service_get_seek_state(AudioSeekStateSnapshot* out_snapshot);
 bool audio_service_is_seekable(void);
+// 当前歌曲世代；播放、切歌、停止时递增。
+uint32_t audio_service_playback_revision(void);
 
 // 音频输出硬件控制统一由 AudioTask 执行。
 bool audio_service_set_output_route(AudioOutputRoute route, bool wait = true);

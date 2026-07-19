@@ -103,8 +103,24 @@ bool player_set_paused(bool paused,
 void player_toggle_play(PlayerToggleTrigger trigger = PlayerToggleTrigger::Unknown);
 /** 按步长调整音量，delta 可正可负。 */
 void player_volume_step(int delta);
+
+struct PlayerSeekWindow {
+    uint32_t current_ms = 0;
+    uint32_t total_ms = 0;
+    uint32_t playback_revision = 0;
+};
+
+/** 获取当前歌曲可跳转范围和歌曲世代。 */
+bool player_seek_window_get(PlayerSeekWindow* out_window);
 /**
- * @brief “NEXT/LIST 长按”对应的导航动作。
+ * 提交实体按键预览得到的绝对进度。
+ * expected_playback_revision 不匹配时，AudioTask 会取消请求，避免误跳新歌曲。
+ */
+bool player_seek_to_ms_async(uint32_t target_ms,
+                             uint32_t expected_playback_revision,
+                             uint32_t* out_request_id = nullptr);
+/**
+ * @brief “按住编码器 + 长按 NEXT/LIST”对应的导航动作。
  *
  * 统一进入当前播放源/播放模式对应的列表：
  * - 本地全部播放：全部歌曲列表

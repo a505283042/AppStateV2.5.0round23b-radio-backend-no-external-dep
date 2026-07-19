@@ -144,6 +144,10 @@ void ui_volume_key_pressed();
 
 // 显示音量步进小提示，例如：音量图标 x5
 void ui_show_volume_step_hint(uint8_t step);
+// 实体按键长按时显示快退/快进目标；direction: -1=快退，+1=快进。
+void ui_show_seek_preview(int8_t direction, uint32_t target_ms);
+void ui_show_seek_unavailable();
+void ui_hide_seek_preview();
 // 显示 / 隐藏 NFC 绑定类型小弹窗，selected: 0=单曲, 1=歌手, 2=专辑
 void ui_show_nfc_bind_target_popup(uint8_t selected);
 void ui_hide_nfc_bind_target_popup();

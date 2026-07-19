@@ -1554,14 +1554,77 @@ void player_volume_step(int delta)
          audio_output_route_label());
 }
 
+bool player_seek_window_get(PlayerSeekWindow* out_window)
+{
+    if (!out_window) {
+        return false;
+    }
+
+    *out_window = PlayerSeekWindow{};
+    const uint32_t total_ms = audio_get_total_ms();
+    if (total_ms == 0 || !audio_service_is_seekable()) {
+        return false;
+    }
+
+    out_window->total_ms = total_ms;
+    out_window->current_ms = audio_get_play_ms();
+    if (out_window->current_ms > total_ms) {
+        out_window->current_ms = total_ms;
+    }
+    out_window->playback_revision = audio_service_playback_revision();
+    return out_window->playback_revision != 0;
+}
+
+bool player_seek_to_ms_async(uint32_t target_ms,
+                             uint32_t expected_playback_revision,
+                             uint32_t* out_request_id)
+{
+    if (out_request_id) {
+        *out_request_id = 0;
+    }
+
+    const uint32_t total_ms = audio_get_total_ms();
+    if (total_ms == 0 || !audio_service_is_seekable() ||
+        expected_playback_revision == 0) {
+        LOGW("[播放器] 实体按键跳转不可用：总时长=%lums 可跳转=%d 世代=%lu",
+             (unsigned long)total_ms,
+             audio_service_is_seekable() ? 1 : 0,
+             (unsigned long)expected_playback_revision);
+        return false;
+    }
+
+    if (target_ms >= total_ms) {
+        target_ms = total_ms > 500 ? total_ms - 500 : 0;
+    }
+
+    uint32_t request_id = 0;
+    const bool ok = audio_service_seek_ms_async_if_revision(target_ms,
+                                                            expected_playback_revision,
+                                                            &request_id);
+    if (ok) {
+        if (out_request_id) {
+            *out_request_id = request_id;
+        }
+        LOGI("[播放器] 实体按键跳转已提交：请求=%lu 目标=%lums 世代=%lu",
+             (unsigned long)request_id,
+             (unsigned long)target_ms,
+             (unsigned long)expected_playback_revision);
+    } else {
+        LOGW("[播放器] 实体按键跳转提交失败：目标=%lums 世代=%lu",
+             (unsigned long)target_ms,
+             (unsigned long)expected_playback_revision);
+    }
+    return ok;
+}
+
 void player_next_group()
 {
-    // NEXT 长按的统一语义：进入当前播放源/当前播放模式对应的列表。
+    // 编码器按住 + NEXT 长按：进入当前播放源/当前播放模式对应的列表。
     // - 本地全部播放：打开“全部歌曲”列表
     // - 歌手/专辑播放：打开对应分组列表
     // - 网络电台：打开电台列表
     // - NAS歌曲：打开 NAS 歌曲列表
-    // 旧逻辑在“本地全部播放”时会跳 10 首，导致长按 NEXT/LIST 不能打开列表。
+    // 普通 NEXT 长按已经改为快进；只有组合键进入列表。
     if (control_enter_list_select_dispatch()) {
         return;
     }

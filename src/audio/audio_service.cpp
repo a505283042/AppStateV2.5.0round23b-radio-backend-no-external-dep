@@ -447,6 +447,11 @@ bool audio_service_is_seekable(void)
   return seekable;
 }
 
+uint32_t audio_service_playback_revision(void)
+{
+  return audio_service_playback_revision_snapshot();
+}
+
 bool audio_service_get_network_state(AudioNetworkStateSnapshot* out_snapshot)
 {
   if (!out_snapshot) return false;
@@ -1600,7 +1605,8 @@ bool audio_service_resume(bool wait)
 
 static bool audio_service_queue_seek_request(uint32_t target_ms,
                                              bool wait,
-                                             uint32_t* out_request_id)
+                                             uint32_t* out_request_id,
+                                             uint32_t expected_playback_revision = 0)
 {
   if (out_request_id) *out_request_id = 0;
 
@@ -1608,7 +1614,9 @@ static bool audio_service_queue_seek_request(uint32_t target_ms,
   if (!request) return false;
   request->type = CMD_SEEK_MS;
   request->seek_target_ms = target_ms;
-  request->playback_revision = audio_service_playback_revision_snapshot();
+  request->playback_revision = expected_playback_revision != 0
+      ? expected_playback_revision
+      : audio_service_playback_revision_snapshot();
 
   const uint32_t request_id = request->request_id;
   audio_seek_request_mark_latest(request_id);
@@ -1627,6 +1635,21 @@ bool audio_service_seek_ms(uint32_t target_ms, bool wait)
 bool audio_service_seek_ms_async(uint32_t target_ms, uint32_t* out_request_id)
 {
   return audio_service_queue_seek_request(target_ms, false, out_request_id);
+}
+
+bool audio_service_seek_ms_async_if_revision(uint32_t target_ms,
+                                             uint32_t expected_playback_revision,
+                                             uint32_t* out_request_id)
+{
+  if (expected_playback_revision == 0) {
+    if (out_request_id) *out_request_id = 0;
+    return false;
+  }
+
+  return audio_service_queue_seek_request(target_ms,
+                                          false,
+                                          out_request_id,
+                                          expected_playback_revision);
 }
 
 bool audio_service_set_output_route(AudioOutputRoute route, bool wait)

@@ -159,6 +159,32 @@ static constexpr uint32_t VOLUME_FAST_MODE_TIMEOUT_MS = 5000;
 static bool s_volume_fast_mode = false;
 static uint32_t s_volume_fast_last_ms = 0;
 
+// 正常播放器页的 PREV/NEXT 长按状态。
+// 普通长按用于快退/快进；编码器先按住时，长按 PREV/NEXT 进入 NFC/列表组合功能。
+static constexpr uint32_t PLAYER_COMBO_HOLD_MS = 600;
+static constexpr uint32_t PLAYER_SEEK_HOLD_MS = 650;
+static constexpr uint32_t PLAYER_SEEK_REPEAT_MS = 400;
+static constexpr uint32_t PLAYER_SEEK_STEP_MS = 10000;
+static constexpr uint32_t PLAYER_ENCODER_LONG_MS = 800;
+
+enum class PlayerNavHoldAction : uint8_t {
+    None = 0,
+    SeekPrev,
+    SeekNext,
+    UnavailablePrev,
+    UnavailableNext,
+};
+
+static PlayerNavHoldAction s_player_nav_hold_action = PlayerNavHoldAction::None;
+static bool s_prev_combo_armed = false;
+static bool s_next_combo_armed = false;
+static bool s_seek_preview_visible = false;
+static uint32_t s_seek_preview_target_ms = 0;
+static uint32_t s_seek_preview_total_ms = 0;
+static uint32_t s_seek_preview_revision = 0;
+static uint32_t s_seek_preview_next_repeat_ms = 0;
+static uint32_t s_seek_preview_auto_hide_ms = 0;
+
 static void volume_fast_mode_enter()
 {
     s_volume_fast_mode = true;
@@ -275,7 +301,7 @@ static void nfc_bind_popup_open()
     nfc_bind_popup_touch();
     ui_show_nfc_bind_target_popup(s_nfc_bind_popup_selected);
 
-    // 长按 PREV 触发弹窗后，消费当前按键电平，避免松手又触发短按上一曲。
+    // 组合键触发弹窗后，消费当前按键电平，避免松手又触发快捷菜单或上一曲。
     keys_sync_to_hw_state();
 }
 
@@ -538,6 +564,281 @@ static void handle_key(KeyCtx& k,
   yield();
 }
 
+enum class KeyEdge : uint8_t {
+  None = 0,
+  Pressed,
+  Released,
+};
+
+static KeyEdge update_key_edge(KeyCtx& key, int level, uint32_t now)
+{
+  if (level == key.last) {
+    return KeyEdge::None;
+  }
+
+  key.last = level;
+  if (pressed(level)) {
+    key.t_down = now;
+    key.long_fired = false;
+    key.t_repeat = now;
+    return KeyEdge::Pressed;
+  }
+
+  return KeyEdge::Released;
+}
+
+static void player_nav_hold_reset(bool hide_preview)
+{
+  s_player_nav_hold_action = PlayerNavHoldAction::None;
+  s_prev_combo_armed = false;
+  s_next_combo_armed = false;
+  s_seek_preview_target_ms = 0;
+  s_seek_preview_total_ms = 0;
+  s_seek_preview_revision = 0;
+  s_seek_preview_next_repeat_ms = 0;
+  s_seek_preview_auto_hide_ms = 0;
+
+  if (hide_preview && s_seek_preview_visible) {
+    s_seek_preview_visible = false;
+    ui_hide_seek_preview();
+  }
+}
+
+static uint32_t player_seek_step_target(uint32_t target_ms,
+                                        uint32_t total_ms,
+                                        bool forward)
+{
+  const uint32_t max_target_ms = total_ms > 500 ? total_ms - 500 : 0;
+  if (!forward) {
+    return target_ms > PLAYER_SEEK_STEP_MS
+        ? target_ms - PLAYER_SEEK_STEP_MS
+        : 0;
+  }
+
+  if (target_ms >= max_target_ms ||
+      max_target_ms - target_ms <= PLAYER_SEEK_STEP_MS) {
+    return max_target_ms;
+  }
+  return target_ms + PLAYER_SEEK_STEP_MS;
+}
+
+static void player_seek_preview_begin(bool forward, uint32_t now)
+{
+  PlayerSeekWindow window{};
+  if (!player_seek_window_get(&window)) {
+    s_player_nav_hold_action = forward
+        ? PlayerNavHoldAction::UnavailableNext
+        : PlayerNavHoldAction::UnavailablePrev;
+    s_seek_preview_visible = true;
+    ui_show_seek_unavailable();
+    LOGW("[按键] %s不可用：当前音源不支持跳转",
+         forward ? "快进" : "快退");
+    return;
+  }
+
+  s_player_nav_hold_action = forward
+      ? PlayerNavHoldAction::SeekNext
+      : PlayerNavHoldAction::SeekPrev;
+  s_seek_preview_total_ms = window.total_ms;
+  s_seek_preview_revision = window.playback_revision;
+  s_seek_preview_target_ms = player_seek_step_target(window.current_ms,
+                                                     window.total_ms,
+                                                     forward);
+  s_seek_preview_next_repeat_ms = now + PLAYER_SEEK_REPEAT_MS;
+  s_seek_preview_visible = true;
+  ui_show_seek_preview(forward ? +1 : -1, s_seek_preview_target_ms);
+
+  LOGD("[按键] 开始%s预览：当前=%lums 目标=%lums 总时长=%lums 世代=%lu",
+       forward ? "快进" : "快退",
+       (unsigned long)window.current_ms,
+       (unsigned long)s_seek_preview_target_ms,
+       (unsigned long)window.total_ms,
+       (unsigned long)window.playback_revision);
+}
+
+static void player_seek_preview_repeat(bool forward, uint32_t now)
+{
+  if (s_seek_preview_total_ms == 0) {
+    return;
+  }
+
+  bool changed = false;
+  uint8_t catch_up = 0;
+  while (static_cast<int32_t>(now - s_seek_preview_next_repeat_ms) >= 0 &&
+         catch_up < 8) {
+    const uint32_t next_target = player_seek_step_target(s_seek_preview_target_ms,
+                                                        s_seek_preview_total_ms,
+                                                        forward);
+    if (next_target != s_seek_preview_target_ms) {
+      s_seek_preview_target_ms = next_target;
+      changed = true;
+    }
+    s_seek_preview_next_repeat_ms += PLAYER_SEEK_REPEAT_MS;
+    ++catch_up;
+  }
+
+  if (changed) {
+    ui_show_seek_preview(forward ? +1 : -1, s_seek_preview_target_ms);
+  }
+}
+
+static void player_seek_preview_commit(bool forward)
+{
+  const uint32_t target_ms = s_seek_preview_target_ms;
+  const uint32_t revision = s_seek_preview_revision;
+  player_nav_hold_reset(true);
+
+  uint32_t request_id = 0;
+  if (!player_seek_to_ms_async(target_ms, revision, &request_id)) {
+    ui_show_seek_unavailable();
+    s_seek_preview_visible = true;
+    s_seek_preview_auto_hide_ms = millis() + 1200;
+    LOGW("[按键] %s提交失败：目标=%lums 世代=%lu",
+         forward ? "快进" : "快退",
+         (unsigned long)target_ms,
+         (unsigned long)revision);
+    return;
+  }
+
+  LOGI("[按键] %s已提交：请求=%lu 目标=%lums",
+       forward ? "快进" : "快退",
+       (unsigned long)request_id,
+       (unsigned long)target_ms);
+}
+
+// 返回 true 表示本轮触发了会切换页面的组合动作，keys_update 应立即结束。
+static bool handle_player_navigation_keys()
+{
+  const uint32_t now = millis();
+  const int encoder_level = read_key_pin(k_ec06e.pin);
+  const int prev_level = read_key_pin(k_prev.pin);
+  const int next_level = read_key_pin(k_next.pin);
+
+  const KeyEdge encoder_edge = update_key_edge(k_ec06e, encoder_level, now);
+  const KeyEdge prev_edge = update_key_edge(k_prev, prev_level, now);
+  const KeyEdge next_edge = update_key_edge(k_next, next_level, now);
+
+  if (s_player_nav_hold_action == PlayerNavHoldAction::None &&
+      s_seek_preview_auto_hide_ms != 0 &&
+      static_cast<int32_t>(now - s_seek_preview_auto_hide_ms) >= 0) {
+    player_nav_hold_reset(true);
+  }
+
+  // 快退/快进已经开始后，另一侧导航键只被消费，禁止松开时切歌。
+  if (prev_edge == KeyEdge::Pressed &&
+      (s_player_nav_hold_action == PlayerNavHoldAction::SeekNext ||
+       s_player_nav_hold_action == PlayerNavHoldAction::UnavailableNext)) {
+    k_prev.long_fired = true;
+  }
+  if (next_edge == KeyEdge::Pressed &&
+      (s_player_nav_hold_action == PlayerNavHoldAction::SeekPrev ||
+       s_player_nav_hold_action == PlayerNavHoldAction::UnavailablePrev)) {
+    k_next.long_fired = true;
+  }
+
+  if (prev_edge == KeyEdge::Pressed) {
+    s_prev_combo_armed = pressed(encoder_level);
+    if (s_prev_combo_armed) {
+      // 编码器作为组合修饰键，不允许松开时再进入快捷菜单。
+      k_ec06e.long_fired = true;
+    }
+  }
+
+  if (next_edge == KeyEdge::Pressed) {
+    s_next_combo_armed = pressed(encoder_level);
+    if (s_next_combo_armed) {
+      k_ec06e.long_fired = true;
+    }
+  }
+
+  if (encoder_edge == KeyEdge::Pressed &&
+      (pressed(prev_level) || pressed(next_level))) {
+    // 编码器必须先按才构成组合键；后按时只消费编码器，原 PREV/NEXT 动作保持不变。
+    k_ec06e.long_fired = true;
+  }
+
+  // 组合键优先级最高，并要求编码器在 PREV/NEXT 按下前已经处于按下状态。
+  if (s_prev_combo_armed && pressed(encoder_level) && pressed(prev_level) &&
+      !k_prev.long_fired && now - k_prev.t_down >= PLAYER_COMBO_HOLD_MS) {
+    k_prev.long_fired = true;
+    k_ec06e.long_fired = true;
+    player_nav_hold_reset(true);
+    LOGI("[按键] 组合键：编码器 + 长按上一首 -> NFC绑定");
+    nfc_bind_popup_open();
+    return true;
+  }
+
+  if (s_next_combo_armed && pressed(encoder_level) && pressed(next_level) &&
+      !k_next.long_fired && now - k_next.t_down >= PLAYER_COMBO_HOLD_MS) {
+    k_next.long_fired = true;
+    k_ec06e.long_fired = true;
+    player_nav_hold_reset(true);
+    LOGI("[按键] 组合键：编码器 + 长按下一首 -> 播放列表");
+    player_next_group();
+    return true;
+  }
+
+  // 普通长按 PREV/NEXT：进入快退/快进预览。
+  if (s_player_nav_hold_action == PlayerNavHoldAction::None) {
+    if (!s_prev_combo_armed && pressed(prev_level) && !k_prev.long_fired &&
+        now - k_prev.t_down >= PLAYER_SEEK_HOLD_MS) {
+      k_prev.long_fired = true;
+      player_seek_preview_begin(false, now);
+    } else if (!s_next_combo_armed && pressed(next_level) && !k_next.long_fired &&
+               now - k_next.t_down >= PLAYER_SEEK_HOLD_MS) {
+      k_next.long_fired = true;
+      player_seek_preview_begin(true, now);
+    }
+  }
+
+  if (s_player_nav_hold_action == PlayerNavHoldAction::SeekPrev && pressed(prev_level)) {
+    player_seek_preview_repeat(false, now);
+  } else if (s_player_nav_hold_action == PlayerNavHoldAction::SeekNext && pressed(next_level)) {
+    player_seek_preview_repeat(true, now);
+  }
+
+  if (prev_edge == KeyEdge::Released) {
+    const uint32_t held_ms = now - k_prev.t_down;
+    if (s_player_nav_hold_action == PlayerNavHoldAction::SeekPrev) {
+      player_seek_preview_commit(false);
+    } else if (s_player_nav_hold_action == PlayerNavHoldAction::UnavailablePrev) {
+      player_nav_hold_reset(true);
+    } else if (!s_prev_combo_armed && !k_prev.long_fired && held_ms > 25) {
+      player_prev_track();
+    }
+    s_prev_combo_armed = false;
+  }
+
+  if (next_edge == KeyEdge::Released) {
+    const uint32_t held_ms = now - k_next.t_down;
+    if (s_player_nav_hold_action == PlayerNavHoldAction::SeekNext) {
+      player_seek_preview_commit(true);
+    } else if (s_player_nav_hold_action == PlayerNavHoldAction::UnavailableNext) {
+      player_nav_hold_reset(true);
+    } else if (!s_next_combo_armed && !k_next.long_fired && held_ms > 25) {
+      player_next_track();
+    }
+    s_next_combo_armed = false;
+  }
+
+  if (encoder_edge == KeyEdge::Released) {
+    const uint32_t held_ms = now - k_ec06e.t_down;
+    if (!k_ec06e.long_fired && held_ms > 25) {
+      enter_quick_menu_from_player();
+      return true;
+    }
+  }
+
+  // 编码器单独长按不执行动作，也不能在松开时误判为短按进入菜单。
+  if (pressed(encoder_level) && !k_ec06e.long_fired &&
+      now - k_ec06e.t_down >= PLAYER_ENCODER_LONG_MS) {
+    k_ec06e.long_fired = true;
+  }
+
+  yield();
+  return false;
+}
+
 void keys_init()
 {
   setup_key_pin(PIN_KEY_MODE);
@@ -585,6 +886,9 @@ void keys_init()
 void keys_sync_to_hw_state()
 {
   uint32_t now = millis();
+
+  // 页面/状态切换时取消尚未提交的快退快进预览。
+  player_nav_hold_reset(true);
 
   // 同步整组按键前只强制刷新一次 GPIOA。
   (void)refresh_mcp_a_cache(true);
@@ -893,18 +1197,20 @@ void keys_update()
   // 正常播放页：旋钮控制音量。
   handle_encoder_volume_step(encoder_step);
 
-  // EC06_E：短按进入快捷菜单。
-  handle_key(k_ec06e, enter_quick_menu_from_player, nullptr);
+  // EC06_E / PREV / NEXT 共用组合键状态机：
+  // - EC06_E 短按：快捷菜单
+  // - PREV/NEXT 短按：上一首/下一首
+  // - PREV/NEXT 长按：快退/快进，松手只提交一次 seek
+  // - 编码器先按住 + PREV/NEXT 长按：NFC绑定/播放列表
+  if (handle_player_navigation_keys()) {
+    return;
+  }
 
   // MODE：短按切换大步音量模式；长按切换播放界面视图。
   handle_key(k_mode, volume_fast_mode_toggle, ui_toggle_view);
 
   // PLAY：短按输出一次电磁铁短脉冲 + 播放/暂停，长按保存 NVS 后关机。
   handle_key(k_play, play_key_toggle_with_solenoid, app_power_save_and_shutdown);
-
-  // PREV / NEXT：短按=切歌，长按 PREV=弹出 NFC 绑定类型选择，长按 NEXT=进入列表选择模式。
-  handle_key(k_prev, player_prev_track, nfc_bind_popup_open);
-  handle_key(k_next, player_next_track, player_next_group);
 
   // VOL：旧板音量按键逻辑。新 PCB1 已禁用，不影响。
   handle_voldn_key_normal();
