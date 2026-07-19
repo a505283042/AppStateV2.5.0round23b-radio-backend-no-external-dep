@@ -7,6 +7,7 @@
 #include "menu/quick_menu_page_system.h"
 #include "menu/quick_menu_page_audio_output.h"
 #include "menu/quick_menu_page_source.h"
+#include "menu/quick_menu_page_nas_library.h"
 #include "menu/quick_menu_page_nfc.h"
 
 namespace {
@@ -46,6 +47,9 @@ const QuickMenuPageDef& quick_menu_get_page_def(QuickMenuPage page)
 
         case QuickMenuPage::Source:
             return quick_menu_get_source_page();
+
+        case QuickMenuPage::NasLibrary:
+            return quick_menu_get_nas_library_page();
 
         case QuickMenuPage::Display:
             return quick_menu_get_display_page();

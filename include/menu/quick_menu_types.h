@@ -17,6 +17,7 @@ enum class QuickMenuPage : uint8_t {
     Playback,
     LibraryRescan,
     Source,
+    NasLibrary,
     Display,
     TimeAlarm,
     AlarmSettings,

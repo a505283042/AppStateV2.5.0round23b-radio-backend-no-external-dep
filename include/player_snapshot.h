@@ -49,6 +49,9 @@ bool player_snapshot_capture_current_source();
 // 将本地、NAS、全局普通音量和最后音源一次性保存到 NVS。
 bool player_snapshot_save_to_nvs();
 
+/** 切换 NAS 曲库源后，只重新加载当前源自己的 NAS 快照。 */
+bool player_snapshot_reload_net_context_for_active_source();
+
 // 切换回本地前恢复本地播放模式/分组；不会启动播放。
 bool player_snapshot_apply_local_context();
 // 切换到 NAS 前恢复 NAS 顺序/随机模式；不会启动播放。

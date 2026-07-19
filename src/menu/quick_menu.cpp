@@ -97,6 +97,7 @@ static bool quick_menu_page_is_dynamic(QuickMenuPage page)
     switch (page) {
         case QuickMenuPage::Playback:
         case QuickMenuPage::Source:
+        case QuickMenuPage::NasLibrary:
         case QuickMenuPage::Network:
         case QuickMenuPage::MemoryInfo:
         case QuickMenuPage::StackInfo:

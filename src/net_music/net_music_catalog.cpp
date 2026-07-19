@@ -1,6 +1,7 @@
 #include "net_music/net_music_catalog.h"
 
 #include <HTTPClient.h>
+#include <Preferences.h>
 #include <SdFat.h>
 #include <WiFi.h>
 #include <esp_heap_caps.h>
@@ -20,6 +21,11 @@ bool s_base_loaded = false;
 String s_error;
 String s_base_url;
 
+constexpr uint8_t kMaxNetMusicSources = 8;
+NetMusicSourceInfo s_sources[kMaxNetMusicSources];
+uint8_t s_source_count = 0;
+uint8_t s_active_source_idx = 0;
+
 // NAS 歌曲列表只放内存，不写入 TF。
 // s_offsets 记录每一行在 s_list_buf 里的起始位置，强制放到 PSRAM，降低 WiFi 开启后的内部 RAM 压力。
 char* s_list_buf = nullptr;
@@ -29,6 +35,9 @@ uint32_t s_list_cap = 0;
 constexpr const char* kNetMusicListName = "net_music.txt";
 constexpr const char* kNetMusicMemoryPath = "memory:http/net_music.txt";
 constexpr const char* kNetMusicBasePath = "/System/net_music_base.txt";
+constexpr const char* kNetMusicSourcesPath = "/System/net_music_sources.txt";
+constexpr const char* kNetMusicPrefsNs = "netmusic";
+constexpr const char* kNetMusicSourcePrefKey = "source";
 constexpr uint32_t kMaxNetMusicLineLen = 768;
 constexpr uint32_t kNetMusicMaxItems = UINT16_MAX;
 constexpr uint32_t kHttpChunkSize = 256;
@@ -149,6 +158,180 @@ static void append_encoded_net_music_path(String& url,
   }
 }
 
+static String normalize_source_path(const String& raw) {
+  String path = trim_copy(raw);
+  path.replace('\\', '/');
+
+  while (path.startsWith("./")) {
+    path.remove(0, 2);
+  }
+  while (path.startsWith("/")) {
+    path.remove(0, 1);
+  }
+  while (path.endsWith("/")) {
+    path.remove(path.length() - 1);
+  }
+
+  return path;
+}
+
+static void clear_source_config() {
+  for (uint8_t i = 0; i < kMaxNetMusicSources; ++i) {
+    s_sources[i] = NetMusicSourceInfo{};
+  }
+  s_source_count = 0;
+  s_active_source_idx = 0;
+}
+
+static void install_default_source() {
+  clear_source_config();
+  s_sources[0].name = "NAS音乐";
+  s_sources[0].relative_path = "";
+  s_sources[0].list_name = kNetMusicListName;
+  s_sources[0].valid = true;
+  s_source_count = 1;
+}
+
+static bool parse_source_line(const String& raw, NetMusicSourceInfo& out) {
+  String line = trim_copy(raw);
+  strip_utf8_bom(line);
+  line = trim_copy(line);
+
+  if (!line.length() || line.startsWith("#") || line.startsWith(";")) {
+    return false;
+  }
+
+  const int p1 = line.indexOf('|');
+  const int p2 = p1 >= 0 ? line.indexOf('|', p1 + 1) : -1;
+
+  NetMusicSourceInfo source{};
+  if (p1 < 0) {
+    source.name = line;
+    source.relative_path = line;
+  } else {
+    source.name = trim_copy(line.substring(0, p1));
+    source.relative_path = p2 < 0
+        ? trim_copy(line.substring(p1 + 1))
+        : trim_copy(line.substring(p1 + 1, p2));
+    if (p2 >= 0) {
+      source.list_name = trim_copy(line.substring(p2 + 1));
+    }
+  }
+
+  source.relative_path = normalize_source_path(source.relative_path);
+  source.list_name = normalize_source_path(source.list_name);
+
+  if (!source.name.length()) {
+    source.name = source.relative_path.length()
+        ? source.relative_path
+        : String("NAS音乐");
+  }
+  if (!source.list_name.length()) {
+    source.list_name = kNetMusicListName;
+  }
+
+  // 防止配置越出 Web 音乐根目录。
+  if (source.relative_path == ".." ||
+      source.relative_path.startsWith("../") ||
+      source.relative_path.indexOf("/../") >= 0 ||
+      source.list_name == ".." ||
+      source.list_name.startsWith("../") ||
+      source.list_name.indexOf("/../") >= 0) {
+    return false;
+  }
+
+  source.valid = true;
+  out = source;
+  return true;
+}
+
+static bool read_sources_locked() {
+  clear_source_config();
+
+  File32 f = sd.open(kNetMusicSourcesPath, O_RDONLY);
+  if (!f) {
+    install_default_source();
+    LOGW("[网络音乐] 曲库源配置未找到，使用旧版单列表模式: %s",
+         kNetMusicSourcesPath);
+    return true;
+  }
+
+  while (f.available() && s_source_count < kMaxNetMusicSources) {
+    String line = f.readStringUntil('\n');
+    NetMusicSourceInfo source{};
+    if (!parse_source_line(line, source)) {
+      continue;
+    }
+
+    s_sources[s_source_count++] = source;
+  }
+  f.close();
+
+  if (s_source_count == 0) {
+    install_default_source();
+    LOGW("[网络音乐] 曲库源配置没有有效条目，使用旧版单列表模式");
+    return true;
+  }
+
+  LOGI("[网络音乐] 曲库源配置加载成功：数量=%u",
+       (unsigned)s_source_count);
+  return true;
+}
+
+static void restore_active_source_index() {
+  Preferences pref;
+  if (!pref.begin(kNetMusicPrefsNs, true)) {
+    s_active_source_idx = 0;
+    return;
+  }
+
+  const uint8_t saved = pref.getUChar(kNetMusicSourcePrefKey, 0);
+  pref.end();
+  s_active_source_idx = saved < s_source_count ? saved : 0;
+}
+
+static bool persist_active_source_index() {
+  Preferences pref;
+  if (!pref.begin(kNetMusicPrefsNs, false)) {
+    return false;
+  }
+
+  const size_t written = pref.putUChar(kNetMusicSourcePrefKey, s_active_source_idx);
+  pref.end();
+  return written > 0;
+}
+
+static const NetMusicSourceInfo* active_source() {
+  if (s_source_count == 0 || s_active_source_idx >= s_source_count) {
+    return nullptr;
+  }
+
+  const NetMusicSourceInfo& source = s_sources[s_active_source_idx];
+  return source.valid ? &source : nullptr;
+}
+
+static String build_active_source_root_url() {
+  String url = s_base_url;
+  if (!url.endsWith("/")) {
+    url += "/";
+  }
+
+  const NetMusicSourceInfo* source = active_source();
+  if (!source || !source->relative_path.length()) {
+    return url;
+  }
+
+  const size_t start = net_music_relative_path_start(source->relative_path);
+  const size_t encoded_len =
+      encoded_net_music_path_length(source->relative_path, start);
+  (void)url.reserve(url.length() + encoded_len + 2);
+  append_encoded_net_music_path(url, source->relative_path, start);
+  if (!url.endsWith("/")) {
+    url += "/";
+  }
+  return url;
+}
+
 
 static void free_remote_offsets() {
   if (s_offsets) {
@@ -203,6 +386,12 @@ static void free_remote_list_buffer() {
   s_list_buf = nullptr;
   s_list_len = 0;
   s_list_cap = 0;
+}
+
+static void clear_loaded_list_state() {
+  free_remote_offsets();
+  free_remote_list_buffer();
+  s_loaded = false;
 }
 
 static bool reserve_remote_list_capacity(uint32_t required_len) {
@@ -319,14 +508,30 @@ static bool read_base_url_locked() {
 }
 
 static bool load_base_from_tf(uint32_t lock_timeout_ms) {
-  StorageSdLockGuard guard(lock_timeout_ms);
-  if (!guard) {
-    s_error = "sd_lock_failed_base";
-    LOGW("[网络音乐] 读取 base 失败：获取 SD 锁超时");
-    return false;
+  bool ok = false;
+  {
+    StorageSdLockGuard guard(lock_timeout_ms);
+    if (!guard) {
+      s_error = "sd_lock_failed_base";
+      LOGW("[网络音乐] 读取 base 失败：获取 SD 锁超时");
+      return false;
+    }
+
+    ok = read_base_url_locked();
+    if (ok) {
+      ok = read_sources_locked();
+    }
   }
 
-  return read_base_url_locked();
+  if (ok) {
+    restore_active_source_index();
+    const NetMusicSourceInfo* source = active_source();
+    LOGI("[网络音乐] 当前曲库源：索引=%u 名称=%s 路径=%s",
+         (unsigned)s_active_source_idx,
+         source ? source->name.c_str() : "NAS音乐",
+         source ? source->relative_path.c_str() : "");
+  }
+  return ok;
 }
 
 static bool ensure_base_loaded() {
@@ -340,11 +545,15 @@ static bool ensure_base_loaded() {
 }
 
 static String build_remote_list_url() {
-  String url = s_base_url;
-  if (!url.endsWith("/")) {
-    url += "/";
-  }
-  url += kNetMusicListName;
+  String url = build_active_source_root_url();
+  const NetMusicSourceInfo* source = active_source();
+  const String list_name = source && source->list_name.length()
+      ? source->list_name
+      : String(kNetMusicListName);
+  const size_t start = net_music_relative_path_start(list_name);
+  const size_t encoded_len = encoded_net_music_path_length(list_name, start);
+  (void)url.reserve(url.length() + encoded_len + 1);
+  append_encoded_net_music_path(url, list_name, start);
   return url;
 }
 
@@ -582,11 +791,56 @@ bool net_music_catalog_load_base() {
   return load_base_from_tf(800);
 }
 
-bool net_music_catalog_load() {
-  free_remote_offsets();
-  s_loaded = false;
+uint8_t net_music_catalog_source_count() {
+  return s_source_count;
+}
+
+bool net_music_catalog_source_get(uint8_t idx, NetMusicSourceInfo* out) {
+  if (!out || idx >= s_source_count || !s_sources[idx].valid) {
+    return false;
+  }
+
+  *out = s_sources[idx];
+  return true;
+}
+
+uint8_t net_music_catalog_active_source_index() {
+  return s_active_source_idx;
+}
+
+String net_music_catalog_active_source_name() {
+  const NetMusicSourceInfo* source = active_source();
+  return source ? source->name : String("NAS音乐");
+}
+
+bool net_music_catalog_select_source(uint8_t idx) {
+  if (idx >= s_source_count || !s_sources[idx].valid) {
+    s_error = "net_music_source_out_of_range";
+    return false;
+  }
+
+  if (idx == s_active_source_idx) {
+    return true;
+  }
+
+  clear_loaded_list_state();
+  s_active_source_idx = idx;
   s_error = "";
-  free_remote_list_buffer();
+
+  if (!persist_active_source_index()) {
+    LOGW("[网络音乐] 当前曲库源 NVS 保存失败：索引=%u", (unsigned)idx);
+  }
+
+  LOGI("[网络音乐] 已切换曲库源：索引=%u 名称=%s 路径=%s，仅保留当前列表",
+       (unsigned)idx,
+       s_sources[idx].name.c_str(),
+       s_sources[idx].relative_path.c_str());
+  return true;
+}
+
+bool net_music_catalog_load() {
+  clear_loaded_list_state();
+  s_error = "";
 
   // 打开 NAS 时不读 /System/net_music.txt，也不写 /System/net_music.txt。
   // 这里只使用开机已读入的 base；如果没有，再兜底读一次很小的 base 文件。
@@ -664,13 +918,15 @@ bool net_music_catalog_load() {
   s_loaded = true;
   s_error = "";
 
-  LOGI("[网络音乐] 目录 加载ed 歌曲s=%lu 偏移s=%u offset_bytes=%lu offset_psram=%d list_psram=%d base=%s 来源=memory",
+  const NetMusicSourceInfo* source = active_source();
+  LOGI("[网络音乐] 列表加载完成：曲库=%s 歌曲=%lu 偏移=%u offset_bytes=%lu offset_psram=%d list_psram=%d base=%s 来源=memory",
+       source ? source->name.c_str() : "NAS音乐",
        (unsigned long)valid_count,
        (unsigned)s_offsets_count,
        (unsigned long)((size_t)s_offsets_cap * sizeof(uint32_t)),
        s_offsets ? (esp_ptr_external_ram(s_offsets) ? 1 : 0) : 0,
        s_list_buf ? (esp_ptr_external_ram(s_list_buf) ? 1 : 0) : 0,
-       s_base_url.c_str());
+       build_active_source_root_url().c_str());
 
   return true;
 }
@@ -780,19 +1036,18 @@ String net_music_catalog_build_url(const NetMusicItem& item) {
   const size_t encoded_len =
       encoded_net_music_path_length(item.encoded_path, path_start);
 
-  String url;
-  if (!url.reserve(s_base_url.length() + encoded_len + 1)) {
+  String url = build_active_source_root_url();
+  if (!url.reserve(url.length() + encoded_len + 1)) {
     s_error = "net_music_url_alloc_failed";
     return String();
   }
 
-  url += s_base_url;
   append_encoded_net_music_path(url, item.encoded_path, path_start);
   return url;
 }
 
 String net_music_catalog_base_url() {
-  return s_base_url;
+  return build_active_source_root_url();
 }
 
 String net_music_catalog_error() {
@@ -807,11 +1062,14 @@ const char* net_music_catalog_base_path() {
   return kNetMusicBasePath;
 }
 
+const char* net_music_catalog_sources_path() {
+  return kNetMusicSourcesPath;
+}
+
 void net_music_catalog_clear() {
-  free_remote_offsets();
-  s_loaded = false;
+  clear_loaded_list_state();
   s_base_loaded = false;
   s_error = "";
   s_base_url = "";
-  free_remote_list_buffer();
+  clear_source_config();
 }

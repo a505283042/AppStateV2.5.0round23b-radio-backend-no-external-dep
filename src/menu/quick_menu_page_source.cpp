@@ -68,25 +68,19 @@ const char* value_radio_source()
 
 const char* value_net_music_source()
 {
-    static char buf[16];
+    static char buf[40];
 
     const char* unavailable = value_network_unavailable_label();
     if (unavailable != nullptr) {
         return unavailable;
     }
 
-    // NAS 歌曲索引可能比较大，不能在菜单显示 value 时自动扫描。
-    // 只显示已缓存的数量；未加载时显示“打开”，由点击 NAS 音乐列表时再加载。
-    if (!net_music_catalog_is_loaded()) {
-        return "打开";
+    const String name = net_music_catalog_active_source_name();
+    if (!name.length()) {
+        return "选择";
     }
 
-    const uint32_t count = net_music_catalog_count();
-    if (count == 0) {
-        return "无列表";
-    }
-
-    snprintf(buf, sizeof(buf), "%lu首", (unsigned long)count);
+    name.toCharArray(buf, sizeof(buf));
     return buf;
 }
 
@@ -119,20 +113,10 @@ bool action_open_radio_source()
     return player_list_select_enter_radio();
 }
 
-bool action_open_net_music_source()
-{
-    if (!network_source_available()) {
-        return false;
-    }
-
-    // 保留快捷菜单会话，方便列表短按 MODE 返回“播放源”页面。
-    return player_list_select_enter_net_track();
-}
-
 const QuickMenuItem SOURCE_ITEMS[] = {
     {"本地音乐", QuickMenuItemType::Action, QuickMenuPage::Source, "", value_local_source, action_open_local_source, true, false},
     {"网络电台", QuickMenuItemType::Action, QuickMenuPage::Source, "", value_radio_source, action_open_radio_source, true, false},
-    {"NAS音乐", QuickMenuItemType::Action, QuickMenuPage::Source, "", value_net_music_source, action_open_net_music_source, true, false},
+    {"NAS音乐", QuickMenuItemType::SubPage, QuickMenuPage::NasLibrary, "", value_net_music_source, nullptr, true, false},
     {"返回", QuickMenuItemType::Back, QuickMenuPage::Root, "", nullptr, nullptr, true, false},
 };
 

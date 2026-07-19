@@ -44,9 +44,10 @@ int s_net_track_total = 0;
 int s_last_net_track_list_idx = -1;
 bool s_last_net_track_list_dirty = false;
 bool s_last_net_track_list_loaded = false;
+int s_last_net_track_source_idx = -1;
 
 static constexpr const char* kListPrefsNs = "plist";
-static constexpr const char* kNetTrackListIdxKey = "net_idx";
+static constexpr const char* kLegacyNetTrackListIdxKey = "net_idx";
 
 static uint32_t s_list_last_action_ms = 0;
 
@@ -221,8 +222,32 @@ static inline void list_select_remember_net_track_position()
     list_select_set_net_track_position_memory(s_list_selected_idx, total, true);
 }
 
+static void list_select_sync_net_track_source()
+{
+    const int source_idx = (int)net_music_catalog_active_source_index();
+    if (s_last_net_track_source_idx == source_idx) {
+        return;
+    }
+
+    s_last_net_track_source_idx = source_idx;
+    s_last_net_track_list_idx = -1;
+    s_last_net_track_list_dirty = false;
+    s_last_net_track_list_loaded = false;
+}
+
+static void list_select_net_track_position_key(char* out, size_t out_size)
+{
+    if (!out || out_size == 0) {
+        return;
+    }
+
+    snprintf(out, out_size, "net_%u",
+             (unsigned)net_music_catalog_active_source_index());
+}
+
 static void list_select_load_net_track_position_from_nvs_once()
 {
+    list_select_sync_net_track_source();
     if (s_last_net_track_list_loaded) {
         return;
     }
@@ -234,13 +259,22 @@ static void list_select_load_net_track_position_from_nvs_once()
         return;
     }
 
-    const int saved_idx = pref.getInt(kNetTrackListIdxKey, -1);
+    char key[16] = {0};
+    list_select_net_track_position_key(key, sizeof(key));
+
+    int saved_idx = pref.getInt(key, -1);
+    // source 0 兼容旧固件使用的固定 key。
+    if (saved_idx < 0 && net_music_catalog_active_source_index() == 0) {
+        saved_idx = pref.getInt(kLegacyNetTrackListIdxKey, -1);
+    }
     pref.end();
 
     if (saved_idx >= 0) {
         s_last_net_track_list_idx = saved_idx;
         s_last_net_track_list_dirty = false;
-        LOGD("[列表] NAS 位置 已从 NVS 读取: idx=%d", saved_idx);
+        LOGD("[列表] NAS 位置已从 NVS 读取：曲库=%u idx=%d",
+             (unsigned)net_music_catalog_active_source_index(),
+             saved_idx);
     } else {
         LOGD("[列表] NAS 位置 NVS 无保存值");
     }
@@ -519,6 +553,7 @@ void player_list_select_reset()
 
 bool player_list_select_flush_persistent_state()
 {
+    list_select_sync_net_track_source();
     list_select_load_net_track_position_from_nvs_once();
 
     const int total = (int)net_music_catalog_count();
@@ -548,7 +583,9 @@ bool player_list_select_flush_persistent_state()
         return false;
     }
 
-    const size_t written = pref.putInt(kNetTrackListIdxKey, s_last_net_track_list_idx);
+    char key[16] = {0};
+    list_select_net_track_position_key(key, sizeof(key));
+    const size_t written = pref.putInt(key, s_last_net_track_list_idx);
     pref.end();
 
     if (written == 0) {
@@ -557,7 +594,9 @@ bool player_list_select_flush_persistent_state()
     }
 
     s_last_net_track_list_dirty = false;
-    LOGI("[列表] NAS 位置 已保存到 NVS: idx=%d", s_last_net_track_list_idx);
+    LOGI("[列表] NAS 位置已保存到 NVS：曲库=%u idx=%d",
+         (unsigned)net_music_catalog_active_source_index(),
+         s_last_net_track_list_idx);
     return true;
 }
 

@@ -555,6 +555,28 @@ bool player_snapshot_save_to_nvs()
     return local_ok && net_ok && meta_ok;
 }
 
+bool player_snapshot_reload_net_context_for_active_source()
+{
+    s_net_valid = false;
+    s_net = PlayerNetPersistSnapshot{};
+
+    Preferences pref;
+    if (!pref.begin(kPrefsNs, true)) {
+        LOGW("[快照] NAS 曲库切换后加载失败：打开 NVS namespace");
+        return false;
+    }
+
+    s_net_valid = snapshot_read_net_blob(pref, s_net);
+    pref.end();
+
+    if (s_net_valid) {
+        snapshot_log_net("曲库切换加载", s_net);
+    } else {
+        LOGD("[快照] 当前 NAS 曲库没有历史播放快照");
+    }
+    return s_net_valid;
+}
+
 bool player_snapshot_apply_local_context()
 {
     if (!s_local_valid) return false;

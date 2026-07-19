@@ -1,0 +1,6 @@
+# 格式：显示名称|相对于 net_music_base.txt 的目录|该目录内的列表文件
+音乐|音乐|net_music.txt
+我喜欢|我喜欢|net_music.txt
+日文歌曲|日文歌曲|net_music.txt
+好听的英文歌|好听的英文歌|net_music.txt
+韩语歌曲|韩语歌曲|net_music.txt
