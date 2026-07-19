@@ -69,6 +69,9 @@ void player_source_set_net_track_stub(int idx,
 void player_source_set_net_track_status(bool active,
                                         const String& state,
                                         const String& err = String());
+                                        
+// 起播后发现列表时长不可信时，更新当前 NAS 曲目的运行时有效时长。
+void player_source_set_net_track_duration_ms(uint32_t duration_ms);
 void player_source_clear_net_track();
 
 PlayerSourceState player_source_get();

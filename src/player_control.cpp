@@ -716,9 +716,25 @@ static bool control_poll_net_track_start()
 
     if (network.start_phase == AudioNetworkStartPhase::Playing && network.active) {
         player_source_set_net_track_status(true, String("playing"), String());
+        uint32_t effective_duration_ms = source.net_track_duration_ms;
+        const uint32_t decoder_duration_ms = audio_get_total_ms();
+
+        // 正常 MP3 仍使用列表时长；只有解码层检测到 Info/Xing 声明大小超过
+        // HTTP 实际文件大小时，audio_get_total_ms() 才会提前带回修正值。
+        if (source.net_track_format == "mp3" && decoder_duration_ms > 0) {
+            effective_duration_ms = decoder_duration_ms;
+            if (effective_duration_ms != source.net_track_duration_ms) {
+                player_source_set_net_track_duration_ms(effective_duration_ms);
+                LOGW("[网络歌曲] MP3 列表时长已按实际文件大小修正：索引=%d 列表=%lums 修正=%lums",
+                    source.net_track_idx,
+                    (unsigned long)source.net_track_duration_ms,
+                    (unsigned long)effective_duration_ms);
+            }
+        }
+
         // 列表时长优先；FLAC 列表未提供时长时保留 dr_flac 从 STREAMINFO 得到的结果。
-        if (source.net_track_duration_ms > 0) {
-            audio_set_total_ms(source.net_track_duration_ms);
+        if (effective_duration_ms > 0) {
+            audio_set_total_ms(effective_duration_ms);
         }
 
         if (s_net_track_start_pending.reset_shuffle && control_is_net_track_random_mode()) {
@@ -735,13 +751,14 @@ static bool control_poll_net_track_start()
             net_music_embedded_cover_cancel();
         }
 
-        LOGI("[网络歌曲] 异步起播完成 索引=%d 标题=%s 格式=%s 时长=%lums 请求=%lu URL=%s",
-             source.net_track_idx,
-             source.net_track_title.c_str(),
-             source.net_track_format.c_str(),
-             (unsigned long)source.net_track_duration_ms,
-             (unsigned long)s_net_track_start_pending.request_id,
-             source.net_track_url.c_str());
+        LOGI("[网络歌曲] 异步起播完成 索引=%d 标题=%s 格式=%s 时长=%lums 列表=%lums 请求=%lu URL=%s",
+            source.net_track_idx,
+            source.net_track_title.c_str(),
+            source.net_track_format.c_str(),
+            (unsigned long)effective_duration_ms,
+            (unsigned long)source.net_track_duration_ms,
+            (unsigned long)s_net_track_start_pending.request_id,
+            source.net_track_url.c_str());
 
         control_clear_net_track_start_pending();
         ui_request_refresh_now();

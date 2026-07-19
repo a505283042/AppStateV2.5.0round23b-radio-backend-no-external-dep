@@ -22,5 +22,7 @@ bool audio_mp3_is_stream_source();
 uint32_t audio_mp3_get_sample_rate();
 uint8_t audio_mp3_get_channels();
 uint32_t audio_mp3_get_bitrate_kbps();
+// 仅在 Info/Xing 声明大小明显超过实际文件大小时返回修正时长，否则返回 0。
+uint32_t audio_mp3_get_repaired_total_ms();
 const char* audio_mp3_get_last_error();
 

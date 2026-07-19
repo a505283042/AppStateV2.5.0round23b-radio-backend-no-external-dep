@@ -212,6 +212,14 @@ void player_source_set_net_track_status(bool active,
   unlock_state();
 }
 
+void player_source_set_net_track_duration_ms(uint32_t duration_ms) {
+  lock_state();
+  if (s_state.type == PlayerSourceType::NET_TRACK) {
+    s_state.net_track_duration_ms = duration_ms;
+  }
+  unlock_state();
+}
+
 void player_source_clear_net_track() {
   lock_state();
   if (s_state.type == PlayerSourceType::NET_TRACK) {

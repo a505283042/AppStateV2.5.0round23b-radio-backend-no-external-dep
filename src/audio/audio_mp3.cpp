@@ -128,11 +128,17 @@ struct Mp3SeekIndexState {
   bool bitrate_varied = false;
   bool cbr_confirmed = false;
   bool cbr_revoke_logged = false;
+  bool xing_size_mismatch = false;
+  uint32_t repaired_total_ms = 0;
 };
 
 static Mp3SeekIndexState s_seek_index{};
 static uint32_t s_prepared_frame_offset = 0;
 static constexpr uint16_t kMp3CbrConfirmFrames = 48;
+static constexpr uint32_t kMp3HeaderSizeAbsoluteToleranceBytes = 4096;
+static constexpr uint32_t kMp3HeaderSizeRelativeToleranceDivisor = 100; // 允许约 1% 的尾部差异
+// 前置声明，避免辅助函数定义位于首帧解析函数之后导致编译失败。
+static void validate_xing_size_against_source();
 
 static bool diag_log_due(uint32_t& last_ms, uint32_t now_ms)
 {
@@ -508,6 +514,12 @@ static void inspect_first_frame_seek_metadata(const uint8_t* frame,
     s_seek_index.cbr_confirmed = s_seek_index.first_bitrate_kbps > 0;
   }
 
+  validate_xing_size_against_source();
+
+  const char* fields_state = !fields_valid
+      ? "截断"
+      : (s_seek_index.xing_size_mismatch ? "源大小不一致" : "正常");
+
   LOGI("[MP3] 跳转索引：类型=%s TOC=%d 帧=%lu 字节=%lu 时长=%lums 首帧=%lu 码率=%lukbps 字段=%s 来源=%s",
        s_seek_index.header_kind == Mp3VbrHeaderKind::Info ? "Info" : "Xing",
        s_seek_index.toc_valid ? 1 : 0,
@@ -516,7 +528,57 @@ static void inspect_first_frame_seek_metadata(const uint8_t* frame,
        (unsigned long)s_seek_index.xing_total_ms,
        (unsigned long)s_seek_index.first_frame_offset,
        (unsigned long)s_seek_index.first_bitrate_kbps,
-       fields_valid ? "正常" : "截断",
+       fields_state,
+       g_source_is_stream ? "NAS" : "本地");
+}
+
+static void validate_xing_size_against_source()
+{
+  if (!g_source_active || !g_source.size ||
+      !s_seek_index.first_frame_found ||
+      s_seek_index.xing_stream_bytes < 4u) {
+    return;
+  }
+
+  const uint32_t source_size = g_source.size(g_source.ctx);
+  if (source_size <= s_seek_index.first_frame_offset) return;
+
+  const uint32_t actual_audio_bytes =
+      source_size - s_seek_index.first_frame_offset;
+  const uint32_t declared_audio_bytes = s_seek_index.xing_stream_bytes;
+  if (declared_audio_bytes <= actual_audio_bytes) return;
+
+  const uint32_t missing_bytes = declared_audio_bytes - actual_audio_bytes;
+  uint32_t tolerance_bytes =
+      actual_audio_bytes / kMp3HeaderSizeRelativeToleranceDivisor;
+  if (tolerance_bytes < kMp3HeaderSizeAbsoluteToleranceBytes) {
+    tolerance_bytes = kMp3HeaderSizeAbsoluteToleranceBytes;
+  }
+  if (missing_bytes <= tolerance_bytes) return;
+
+  // 文件被截断或 Info/Xing 头来自旧文件时，TOC 和帧数都对应原始长度，
+  // 继续使用会造成跳转位置和总时长同时偏大。
+  s_seek_index.xing_size_mismatch = true;
+  s_seek_index.toc_valid = false;
+
+  if (s_seek_index.header_kind == Mp3VbrHeaderKind::Info &&
+      s_seek_index.first_bitrate_kbps > 0u) {
+    // Info 标记代表 CBR；kbps × ms / 8 = 字节，因此反推时长为 字节 × 8 / kbps。
+    const uint64_t repaired_ms =
+        (uint64_t)actual_audio_bytes * 8ull /
+        (uint64_t)s_seek_index.first_bitrate_kbps;
+    if (repaired_ms > 0u && repaired_ms <= UINT32_MAX) {
+      s_seek_index.repaired_total_ms = (uint32_t)repaired_ms;
+    }
+  }
+
+  LOGW("[MP3] %s 头与实际文件大小不一致：声明音频=%lu 实际音频=%lu 缺少=%lu 容差=%lu，TOC已禁用 修正时长=%lums 来源=%s",
+       s_seek_index.header_kind == Mp3VbrHeaderKind::Info ? "Info" : "Xing",
+       (unsigned long)declared_audio_bytes,
+       (unsigned long)actual_audio_bytes,
+       (unsigned long)missing_bytes,
+       (unsigned long)tolerance_bytes,
+       (unsigned long)s_seek_index.repaired_total_ms,
        g_source_is_stream ? "NAS" : "本地");
 }
 
@@ -1276,6 +1338,7 @@ bool audio_mp3_is_stream_source() { return g_source_is_stream; }
 uint32_t audio_mp3_get_sample_rate() { return s_mp3_sample_rate; }
 uint8_t audio_mp3_get_channels() { return s_mp3_channels; }
 uint32_t audio_mp3_get_bitrate_kbps() { return s_mp3_bitrate_kbps; }
+uint32_t audio_mp3_get_repaired_total_ms() { return s_seek_index.repaired_total_ms; }
 const char* audio_mp3_get_last_error() { return s_mp3_last_error.c_str(); }
 AudioPlaybackEndReason audio_mp3_get_end_reason() { return s_end_reason; }
 
