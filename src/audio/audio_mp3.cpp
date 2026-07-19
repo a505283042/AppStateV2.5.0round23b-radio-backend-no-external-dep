@@ -92,6 +92,39 @@ static uint32_t s_diag_wait_events = 0;
 static uint32_t s_diag_low_events = 0;
 static uint32_t s_diag_resync_events = 0;
 
+enum class Mp3SeekStrategy : uint8_t {
+  Proportional = 0,
+  XingToc,
+  CbrBitrate
+};
+
+enum class Mp3VbrHeaderKind : uint8_t {
+  None = 0,
+  Xing,
+  Info
+};
+
+struct Mp3SeekIndexState {
+  bool first_frame_found = false;
+  uint32_t first_frame_offset = 0;
+  uint32_t first_bitrate_kbps = 0;
+  uint32_t first_sample_rate = 0;
+  uint32_t xing_frames = 0;
+  uint32_t xing_stream_bytes = 0;
+  uint32_t xing_total_ms = 0;
+  Mp3VbrHeaderKind header_kind = Mp3VbrHeaderKind::None;
+  bool toc_valid = false;
+  uint8_t toc[100] = {0};
+  uint16_t same_bitrate_frames = 0;
+  bool bitrate_varied = false;
+  bool cbr_confirmed = false;
+  bool cbr_revoke_logged = false;
+};
+
+static Mp3SeekIndexState s_seek_index{};
+static uint32_t s_prepared_frame_offset = 0;
+static constexpr uint16_t kMp3CbrConfirmFrames = 48;
+
 static bool diag_log_due(uint32_t& last_ms, uint32_t now_ms)
 {
   if (last_ms == 0 || now_ms - last_ms >= kMp3DiagLogIntervalMs) {
@@ -112,6 +145,426 @@ static void reset_stream_diag_state()
   s_diag_wait_events = 0;
   s_diag_low_events = 0;
   s_diag_resync_events = 0;
+}
+
+static uint32_t read_be32(const uint8_t* p)
+{
+  if (!p) return 0;
+  return ((uint32_t)p[0] << 24) |
+         ((uint32_t)p[1] << 16) |
+         ((uint32_t)p[2] << 8) |
+         (uint32_t)p[3];
+}
+
+static const char* seek_strategy_label(Mp3SeekStrategy strategy)
+{
+  switch (strategy) {
+    case Mp3SeekStrategy::XingToc: return "Xing/Info TOC";
+    case Mp3SeekStrategy::CbrBitrate: return "CBR码率";
+    case Mp3SeekStrategy::Proportional:
+    default: return "字节比例";
+  }
+}
+
+static void reset_seek_index_state()
+{
+  s_seek_index = Mp3SeekIndexState{};
+  s_prepared_frame_offset = 0;
+}
+
+static uint32_t current_input_buffer_offset()
+{
+  if (!g_source_active || !g_source.tell) {
+    return g_source.audio_data_offset;
+  }
+
+  const uint32_t tell = g_source.tell(g_source.ctx);
+  return tell >= (uint32_t)g_inbuf_filled
+      ? tell - (uint32_t)g_inbuf_filled
+      : 0;
+}
+
+struct Mp3FrameHeaderSummary {
+  size_t xing_offset = 0;
+  uint32_t samples_per_frame = 0;
+  uint32_t bitrate_kbps = 0;
+  uint32_t sample_rate = 0;
+  uint32_t frame_bytes = 0;
+  uint8_t channels = 0;
+};
+
+static uint32_t mp3_header_bitrate_kbps(uint32_t version, uint32_t bitrate_index)
+{
+  static const uint16_t kMpeg1Layer3[16] = {
+      0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0};
+  static const uint16_t kMpeg2Layer3[16] = {
+      0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0};
+  if (bitrate_index >= 16u) return 0;
+  return version == 3u ? kMpeg1Layer3[bitrate_index] : kMpeg2Layer3[bitrate_index];
+}
+
+static uint32_t mp3_header_sample_rate(uint32_t version, uint32_t sample_rate_index)
+{
+  static const uint16_t kMpeg1[3] = {44100, 48000, 32000};
+  static const uint16_t kMpeg2[3] = {22050, 24000, 16000};
+  static const uint16_t kMpeg25[3] = {11025, 12000, 8000};
+  if (sample_rate_index >= 3u) return 0;
+  if (version == 3u) return kMpeg1[sample_rate_index];
+  if (version == 2u) return kMpeg2[sample_rate_index];
+  if (version == 0u) return kMpeg25[sample_rate_index];
+  return 0;
+}
+
+static bool parse_mp3_frame_header(const uint8_t* frame,
+                                   size_t available_bytes,
+                                   Mp3FrameHeaderSummary* out)
+{
+  if (out) *out = Mp3FrameHeaderSummary{};
+  if (!frame || available_bytes < 4 || !out) return false;
+
+  const uint32_t h = read_be32(frame);
+  if ((h & 0xFFE00000u) != 0xFFE00000u) return false;
+
+  const uint32_t version = (h >> 19) & 0x3u;
+  const uint32_t layer = (h >> 17) & 0x3u;
+  const bool protection_absent = ((h >> 16) & 0x1u) != 0;
+  const uint32_t bitrate_index = (h >> 12) & 0xFu;
+  const uint32_t sample_rate_index = (h >> 10) & 0x3u;
+  const uint32_t padding = (h >> 9) & 0x1u;
+  const uint32_t channel_mode = (h >> 6) & 0x3u;
+
+  if (version == 1u || layer != 1u ||
+      bitrate_index == 0u || bitrate_index == 0xFu ||
+      sample_rate_index == 3u) {
+    return false;
+  }
+
+  const uint32_t bitrate_kbps = mp3_header_bitrate_kbps(version, bitrate_index);
+  const uint32_t sample_rate = mp3_header_sample_rate(version, sample_rate_index);
+  if (bitrate_kbps == 0 || sample_rate == 0) return false;
+
+  const bool mono = channel_mode == 3u;
+  const size_t side_info_bytes = version == 3u
+      ? (mono ? 17u : 32u)
+      : (mono ? 9u : 17u);
+  const size_t crc_bytes = protection_absent ? 0u : 2u;
+  const size_t xing_offset = 4u + crc_bytes + side_info_bytes;
+  const uint32_t frame_bytes = version == 3u
+      ? (144000u * bitrate_kbps / sample_rate) + padding
+      : (72000u * bitrate_kbps / sample_rate) + padding;
+  if (frame_bytes < 4u ||
+      xing_offset + 8u > frame_bytes ||
+      xing_offset + 8u > available_bytes) {
+    return false;
+  }
+
+  out->xing_offset = xing_offset;
+  out->samples_per_frame = version == 3u ? 1152u : 576u;
+  out->bitrate_kbps = bitrate_kbps;
+  out->sample_rate = sample_rate;
+  out->frame_bytes = frame_bytes;
+  out->channels = mono ? 1u : 2u;
+  return true;
+}
+
+static bool validate_xing_toc(const uint8_t* toc)
+{
+  if (!toc) return false;
+
+  bool has_progress = false;
+  uint8_t previous = toc[0];
+  for (size_t i = 1; i < 100; ++i) {
+    if (toc[i] < previous) return false;
+    if (toc[i] > previous) has_progress = true;
+    previous = toc[i];
+  }
+  return has_progress && toc[99] > 0;
+}
+
+static void inspect_first_frame_seek_metadata(const uint8_t* frame,
+                                              size_t frame_bytes,
+                                              uint32_t absolute_offset,
+                                              const mp3dec_frame_info_t& info)
+{
+  if (s_seek_index.first_frame_found || !frame || frame_bytes < 4) return;
+
+  Mp3FrameHeaderSummary header{};
+  if (!parse_mp3_frame_header(frame, frame_bytes, &header)) return;
+  const size_t xing_offset = header.xing_offset;
+  const uint32_t samples_per_frame = header.samples_per_frame;
+
+  s_seek_index.first_frame_found = true;
+  s_seek_index.first_frame_offset = absolute_offset;
+  s_seek_index.first_bitrate_kbps = info.bitrate_kbps > 0
+      ? (uint32_t)info.bitrate_kbps
+      : 0;
+  s_seek_index.first_sample_rate = info.hz > 0
+      ? (uint32_t)info.hz
+      : 0;
+
+  const uint8_t* tag = frame + xing_offset;
+  if (memcmp(tag, "Xing", 4) == 0) {
+    s_seek_index.header_kind = Mp3VbrHeaderKind::Xing;
+  } else if (memcmp(tag, "Info", 4) == 0) {
+    s_seek_index.header_kind = Mp3VbrHeaderKind::Info;
+  } else {
+    LOGD("[MP3] 跳转索引：未发现 Xing/Info，开始观察码率 来源=%s 首帧=%lu 码率=%lukbps",
+         g_source_is_stream ? "NAS" : "本地",
+         (unsigned long)absolute_offset,
+         (unsigned long)s_seek_index.first_bitrate_kbps);
+    return;
+  }
+
+  const uint32_t flags = read_be32(tag + 4);
+  size_t cursor = xing_offset + 8u;
+  bool fields_valid = true;
+
+  if (flags & 0x0001u) {
+    if (cursor + 4u > frame_bytes) fields_valid = false;
+    else {
+      s_seek_index.xing_frames = read_be32(frame + cursor);
+      cursor += 4u;
+    }
+  }
+  if (fields_valid && (flags & 0x0002u)) {
+    if (cursor + 4u > frame_bytes) fields_valid = false;
+    else {
+      s_seek_index.xing_stream_bytes = read_be32(frame + cursor);
+      cursor += 4u;
+    }
+  }
+  if (fields_valid && (flags & 0x0004u)) {
+    if (cursor + sizeof(s_seek_index.toc) > frame_bytes) fields_valid = false;
+    else {
+      memcpy(s_seek_index.toc, frame + cursor, sizeof(s_seek_index.toc));
+      s_seek_index.toc_valid = validate_xing_toc(s_seek_index.toc);
+      cursor += sizeof(s_seek_index.toc);
+    }
+  }
+  if (fields_valid && (flags & 0x0008u)) {
+    if (cursor + 4u > frame_bytes) fields_valid = false;
+    else cursor += 4u;
+  }
+
+  if (s_seek_index.xing_frames > 0 &&
+      samples_per_frame > 0 &&
+      s_seek_index.first_sample_rate > 0) {
+    const uint64_t total_samples =
+        (uint64_t)s_seek_index.xing_frames * (uint64_t)samples_per_frame;
+    s_seek_index.xing_total_ms = (uint32_t)(
+        total_samples * 1000ull / s_seek_index.first_sample_rate);
+  }
+
+  if (s_seek_index.header_kind == Mp3VbrHeaderKind::Info) {
+    // LAME 的 Info 标记用于 CBR 文件；后续逐帧观察仍会在码率变化时撤销。
+    s_seek_index.cbr_confirmed = s_seek_index.first_bitrate_kbps > 0;
+  }
+
+  LOGI("[MP3] 跳转索引：类型=%s TOC=%d 帧=%lu 字节=%lu 时长=%lums 首帧=%lu 码率=%lukbps 字段=%s 来源=%s",
+       s_seek_index.header_kind == Mp3VbrHeaderKind::Info ? "Info" : "Xing",
+       s_seek_index.toc_valid ? 1 : 0,
+       (unsigned long)s_seek_index.xing_frames,
+       (unsigned long)s_seek_index.xing_stream_bytes,
+       (unsigned long)s_seek_index.xing_total_ms,
+       (unsigned long)s_seek_index.first_frame_offset,
+       (unsigned long)s_seek_index.first_bitrate_kbps,
+       fields_valid ? "正常" : "截断",
+       g_source_is_stream ? "NAS" : "本地");
+}
+
+static void probe_initial_seek_metadata()
+{
+  if (s_seek_index.first_frame_found || !g_inbuf || g_inbuf_filled < 4) return;
+
+  const uint32_t buffer_offset = current_input_buffer_offset();
+  const int scan_limit = g_inbuf_filled < 4096 ? g_inbuf_filled : 4096;
+  for (int i = 0; i <= scan_limit - 4; ++i) {
+    if (g_inbuf[i] != 0xFF || (g_inbuf[i + 1] & 0xE0) != 0xE0) continue;
+
+    Mp3FrameHeaderSummary header{};
+    if (!parse_mp3_frame_header(g_inbuf + i,
+                                (size_t)(g_inbuf_filled - i),
+                                &header) ||
+        header.frame_bytes > (uint32_t)(g_inbuf_filled - i)) {
+      continue;
+    }
+
+    // 初始探测不消费解码器状态，因此额外验证下一帧头，避免标签或封面数据中的伪同步字。
+    const int next_offset = i + (int)header.frame_bytes;
+    if (next_offset + 4 <= g_inbuf_filled) {
+      Mp3FrameHeaderSummary next{};
+      if (!parse_mp3_frame_header(g_inbuf + next_offset,
+                                  (size_t)(g_inbuf_filled - next_offset),
+                                  &next) ||
+          next.sample_rate != header.sample_rate ||
+          next.channels != header.channels) {
+        continue;
+      }
+    }
+
+    mp3dec_frame_info_t info{};
+    info.frame_bytes = (int)header.frame_bytes;
+    info.channels = header.channels;
+    info.hz = (int)header.sample_rate;
+    info.layer = 3;
+    info.bitrate_kbps = (int)header.bitrate_kbps;
+    inspect_first_frame_seek_metadata(g_inbuf + i,
+                                      header.frame_bytes,
+                                      buffer_offset + (uint32_t)i,
+                                      info);
+    return;
+  }
+}
+
+static void observe_frame_bitrate(uint32_t bitrate_kbps)
+{
+  if (!s_seek_index.first_frame_found || bitrate_kbps == 0) return;
+
+  if (s_seek_index.first_bitrate_kbps == 0) {
+    s_seek_index.first_bitrate_kbps = bitrate_kbps;
+  }
+
+  if (bitrate_kbps != s_seek_index.first_bitrate_kbps) {
+    s_seek_index.bitrate_varied = true;
+    s_seek_index.same_bitrate_frames = 0;
+    if (s_seek_index.cbr_confirmed && !s_seek_index.cbr_revoke_logged) {
+      LOGW("[MP3] 检测到码率变化，撤销 CBR 精确定位：首帧=%lukbps 当前=%lukbps 来源=%s",
+           (unsigned long)s_seek_index.first_bitrate_kbps,
+           (unsigned long)bitrate_kbps,
+           g_source_is_stream ? "NAS" : "本地");
+      s_seek_index.cbr_revoke_logged = true;
+    }
+    s_seek_index.cbr_confirmed = false;
+    return;
+  }
+
+  if (s_seek_index.same_bitrate_frames < UINT16_MAX) {
+    ++s_seek_index.same_bitrate_frames;
+  }
+
+  // Xing 表示 VBR；没有 TOC 时仍使用比例回退，不能因为开头若干帧相同而误判 CBR。
+  if (s_seek_index.header_kind == Mp3VbrHeaderKind::Xing ||
+      s_seek_index.bitrate_varied ||
+      s_seek_index.cbr_confirmed) {
+    return;
+  }
+
+  if (s_seek_index.same_bitrate_frames >= kMp3CbrConfirmFrames) {
+    s_seek_index.cbr_confirmed = true;
+    LOGI("[MP3] CBR 码率确认：码率=%lukbps 连续帧=%u 来源=%s",
+         (unsigned long)s_seek_index.first_bitrate_kbps,
+         (unsigned)s_seek_index.same_bitrate_frames,
+         g_source_is_stream ? "NAS" : "本地");
+  }
+}
+
+static uint32_t usable_audio_stream_bytes(uint32_t source_size, uint32_t audio_begin)
+{
+  if (source_size <= audio_begin) return 0;
+  const uint32_t source_audio_bytes = source_size - audio_begin;
+  if (s_seek_index.xing_stream_bytes >= 4u &&
+      s_seek_index.xing_stream_bytes <= source_audio_bytes) {
+    return s_seek_index.xing_stream_bytes;
+  }
+  return source_audio_bytes;
+}
+
+static Mp3SeekStrategy select_seek_strategy()
+{
+  if (s_seek_index.first_frame_found && s_seek_index.toc_valid) {
+    return Mp3SeekStrategy::XingToc;
+  }
+  if (s_seek_index.first_frame_found &&
+      s_seek_index.cbr_confirmed &&
+      !s_seek_index.bitrate_varied &&
+      s_seek_index.first_bitrate_kbps > 0) {
+    return Mp3SeekStrategy::CbrBitrate;
+  }
+  return Mp3SeekStrategy::Proportional;
+}
+
+static uint32_t calculate_seek_offset(Mp3SeekStrategy strategy,
+                                      uint32_t target_ms,
+                                      uint32_t total_ms,
+                                      uint32_t source_size,
+                                      uint32_t audio_begin)
+{
+  const uint32_t stream_bytes = usable_audio_stream_bytes(source_size, audio_begin);
+  if (stream_bytes == 0 || total_ms == 0) return audio_begin;
+
+  uint64_t relative_bytes = 0;
+  if (strategy == Mp3SeekStrategy::XingToc) {
+    const uint64_t percent_milli =
+        (uint64_t)target_ms * 100000ull / (uint64_t)total_ms;
+    const uint32_t index = (uint32_t)(percent_milli / 1000ull);
+    const uint32_t fraction = (uint32_t)(percent_milli % 1000ull);
+
+    if (index >= 100u) {
+      relative_bytes = stream_bytes;
+    } else {
+      const uint32_t a = s_seek_index.toc[index];
+      const uint32_t b = index < 99u ? s_seek_index.toc[index + 1u] : 256u;
+      const uint64_t toc_milli =
+          (uint64_t)a * 1000ull + (uint64_t)(b - a) * fraction;
+      relative_bytes =
+          (uint64_t)stream_bytes * toc_milli / (256ull * 1000ull);
+    }
+  } else if (strategy == Mp3SeekStrategy::CbrBitrate) {
+    // kbps × ms / 8 正好得到字节数。
+    relative_bytes =
+        (uint64_t)s_seek_index.first_bitrate_kbps * (uint64_t)target_ms / 8ull;
+  } else {
+    relative_bytes =
+        (uint64_t)stream_bytes * (uint64_t)target_ms / (uint64_t)total_ms;
+  }
+
+  if (relative_bytes >= stream_bytes) relative_bytes = stream_bytes - 1u;
+  uint64_t absolute = (uint64_t)audio_begin + relative_bytes;
+  if (absolute >= source_size) absolute = source_size - 1u;
+  return (uint32_t)absolute;
+}
+
+static uint32_t estimate_seek_actual_ms(Mp3SeekStrategy strategy,
+                                        uint32_t synced_offset,
+                                        uint32_t total_ms,
+                                        uint32_t source_size,
+                                        uint32_t audio_begin)
+{
+  if (synced_offset <= audio_begin || total_ms == 0 || source_size <= audio_begin) return 0;
+
+  const uint32_t stream_bytes = usable_audio_stream_bytes(source_size, audio_begin);
+  if (stream_bytes == 0) return 0;
+  uint32_t relative = synced_offset - audio_begin;
+  if (relative > stream_bytes) relative = stream_bytes;
+
+  if (strategy == Mp3SeekStrategy::CbrBitrate &&
+      s_seek_index.first_bitrate_kbps > 0) {
+    const uint64_t ms = (uint64_t)relative * 8ull / s_seek_index.first_bitrate_kbps;
+    return ms > total_ms ? total_ms : (uint32_t)ms;
+  }
+
+  if (strategy == Mp3SeekStrategy::XingToc && s_seek_index.toc_valid) {
+    const uint64_t value_milli =
+        (uint64_t)relative * 256000ull / (uint64_t)stream_bytes;
+    for (uint32_t i = 0; i < 100u; ++i) {
+      const uint32_t a = (uint32_t)s_seek_index.toc[i] * 1000u;
+      const uint32_t b = (i < 99u ? (uint32_t)s_seek_index.toc[i + 1u] : 256u) * 1000u;
+      if (value_milli > b && i < 99u) continue;
+
+      uint32_t fraction = 0;
+      if (b > a && value_milli > a) {
+        fraction = (uint32_t)(((value_milli - a) * 1000ull) / (uint64_t)(b - a));
+        if (fraction > 1000u) fraction = 1000u;
+      }
+      const uint64_t percent_milli = (uint64_t)i * 1000ull + fraction;
+      const uint64_t ms = (uint64_t)total_ms * percent_milli / 100000ull;
+      return ms > total_ms ? total_ms : (uint32_t)ms;
+    }
+    return total_ms;
+  }
+
+  const uint64_t ms = (uint64_t)relative * total_ms / stream_bytes;
+  return ms > total_ms ? total_ms : (uint32_t)ms;
 }
 
 static void release_stream_input_buffer()
@@ -279,6 +732,14 @@ static bool prepare_stream_first_frame()
       return false;
     }
 
+    const uint32_t frame_offset = current_input_buffer_offset();
+    inspect_first_frame_seek_metadata(g_inbuf,
+                                      (size_t)info.frame_bytes,
+                                      frame_offset,
+                                      info);
+    observe_frame_bitrate(info.bitrate_kbps > 0 ? (uint32_t)info.bitrate_kbps : 0);
+    s_prepared_frame_offset = frame_offset;
+
     memmove(g_inbuf,
             g_inbuf + info.frame_bytes,
             g_inbuf_filled - info.frame_bytes);
@@ -351,6 +812,21 @@ bool audio_mp3_start_source(const AudioMp3Source& source, const char* debug_name
   g_source = source;
   g_source_active = true;
   g_source_is_stream = source.is_stream;
+  reset_seek_index_state();
+
+  // 本地文件已知 ID3v2 结束位置时直接从首个音频字节预填，
+  // 避免解码器先扫描整段标签，也确保第一帧可以建立 Xing/Info 索引。
+  if (!g_source_is_stream &&
+      g_source.audio_data_offset > 0 &&
+      g_source.seek &&
+      !g_source.seek(g_source.ctx, g_source.audio_data_offset)) {
+    set_last_error("id3_skip_seek_failed");
+    LOGE("[MP3] 跳过 ID3v2 失败：offset=%lu 名称=%s",
+         (unsigned long)g_source.audio_data_offset,
+         debug_name ? debug_name : "<null>");
+    audio_mp3_stop();
+    return false;
+  }
 
   // debug_name 不能直接保存外部指针。
   // NAS 播放时传进来的 url 可能来自 AudioTask 栈上的 AudioCmd.path，
@@ -383,6 +859,10 @@ bool audio_mp3_start_source(const AudioMp3Source& source, const char* debug_name
     audio_mp3_stop();
     return false;
   }
+
+  // 在返回播放成功前先解析首帧索引。这样即使用户刚起播就拖动，
+  // Xing/Info TOC 也已经可用；探测使用独立 minimp3 状态，不消费正式解码缓冲。
+  probe_initial_seek_metadata();
 
   if (g_source_is_stream && g_inbuf_filled <= 0) {
     set_end_reason_if_none(AudioPlaybackEndReason::SourceIoError);
@@ -442,6 +922,7 @@ static bool prepare_after_seek(uint32_t* out_source_offset)
       ? kMp3StreamStartupPrefillTimeoutMs
       : 0;
 
+  s_prepared_frame_offset = 0;
   reset_decoder_state();
   if (!fill_input_buffer(prefill_target, prefill_timeout) || g_inbuf_filled <= 0) {
     return false;
@@ -454,11 +935,8 @@ static bool prepare_after_seek(uint32_t* out_source_offset)
   s_mp3_active = true;
   s_end_reason = AudioPlaybackEndReason::None;
   set_last_error(nullptr);
-  if (out_source_offset && g_source.tell) {
-    const uint32_t tell = g_source.tell(g_source.ctx);
-    *out_source_offset = tell >= (uint32_t)g_inbuf_filled
-        ? tell - (uint32_t)g_inbuf_filled
-        : 0;
+  if (out_source_offset) {
+    *out_source_offset = s_prepared_frame_offset;
   }
   return true;
 }
@@ -472,19 +950,23 @@ bool audio_mp3_seek_ms(uint32_t target_ms, uint32_t total_ms, uint32_t* out_actu
   }
 
   const uint32_t source_size = g_source.size(g_source.ctx);
-  const uint32_t audio_begin = g_source.audio_data_offset < source_size
-      ? g_source.audio_data_offset
-      : 0;
-  const uint32_t audio_bytes = source_size - audio_begin;
+  const uint32_t audio_begin =
+      s_seek_index.first_frame_found && s_seek_index.first_frame_offset < source_size
+          ? s_seek_index.first_frame_offset
+          : (g_source.audio_data_offset < source_size ? g_source.audio_data_offset : 0);
+  const uint32_t audio_bytes = usable_audio_stream_bytes(source_size, audio_begin);
   if (audio_bytes < 4) {
     set_last_error("seek_source_too_small");
     return false;
   }
 
   if (target_ms > total_ms) target_ms = total_ms;
-  uint64_t scaled = (uint64_t)audio_bytes * (uint64_t)target_ms;
-  uint32_t target_offset = audio_begin + (uint32_t)(scaled / total_ms);
-  if (target_offset >= source_size) target_offset = source_size - 1;
+  const Mp3SeekStrategy strategy = select_seek_strategy();
+  const uint32_t target_offset = calculate_seek_offset(strategy,
+                                                       target_ms,
+                                                       total_ms,
+                                                       source_size,
+                                                       audio_begin);
 
   const uint32_t source_tell = g_source.tell(g_source.ctx);
   const uint32_t rollback_offset = source_tell >= (uint32_t)g_inbuf_filled
@@ -524,14 +1006,20 @@ bool audio_mp3_seek_ms(uint32_t target_ms, uint32_t total_ms, uint32_t* out_actu
     return false;
   }
 
-  // CBR 文件通常接近目标位置；无 Xing/VBRI 索引的 VBR 文件属于比例近似。
-  const uint32_t actual_ms = target_ms;
+  const uint32_t actual_ms = estimate_seek_actual_ms(strategy,
+                                                     synced_offset,
+                                                     total_ms,
+                                                     source_size,
+                                                     audio_begin);
   if (out_actual_ms) *out_actual_ms = actual_ms;
-  LOGI("[MP3] 跳转成功：目标=%lums 字节=%lu/%lu 同步位置=%lu 来源=%s",
+  LOGI("[MP3] 跳转成功：策略=%s 目标=%lums 实际=%lums 请求字节=%lu 同步帧=%lu 音频=%lu/%lu 来源=%s",
+       seek_strategy_label(strategy),
        (unsigned long)target_ms,
+       (unsigned long)actual_ms,
        (unsigned long)target_offset,
-       (unsigned long)source_size,
        (unsigned long)synced_offset,
+       (unsigned long)audio_bytes,
+       (unsigned long)source_size,
        g_source_is_stream ? "NAS" : "本地");
   return true;
 }
@@ -622,6 +1110,7 @@ void audio_mp3_stop()
   g_playing = false;
   g_inbuf_filled = 0;
   g_source_eof = false;
+  reset_seek_index_state();
   release_stream_input_buffer();
 
   // 更新主线状态
@@ -754,6 +1243,13 @@ bool audio_mp3_loop()
     }
     return true;
   }
+
+  const uint32_t frame_offset = current_input_buffer_offset();
+  inspect_first_frame_seek_metadata(g_inbuf,
+                                    (size_t)info.frame_bytes,
+                                    frame_offset,
+                                    info);
+  observe_frame_bitrate(info.bitrate_kbps > 0 ? (uint32_t)info.bitrate_kbps : 0);
 
   // --- D) 消费输入 ---
   if (info.frame_bytes > 0 && info.frame_bytes <= g_inbuf_filled) {
