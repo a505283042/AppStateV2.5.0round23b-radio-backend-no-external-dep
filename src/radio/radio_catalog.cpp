@@ -3,6 +3,7 @@
 #include <SdFat.h>
 
 #include "storage/storage_io.h"
+#include "storage/system_paths.h"
 #include "utils/log.h"
 
 extern SdFat sd;
@@ -11,7 +12,7 @@ namespace {
 std::vector<RadioItem> s_items;
 bool s_loaded = false;
 String s_error;
-constexpr const char* kRadioListPath = "/System/radio_list.txt";
+constexpr const char* kRadioListPath = SystemPaths::kRadioList;
 
 static String trim_copy(const String& in) {
   String s = in;

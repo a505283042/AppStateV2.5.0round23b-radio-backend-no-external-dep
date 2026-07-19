@@ -9,7 +9,7 @@
 extern SdFat sd;
 
 static std::vector<NfcBindingEntry> s_bindings;
-// dirty=true 表示当前内存绑定表比 TF 卡上的 /System/nfc_map.txt 更新。
+// dirty=true 表示当前内存绑定表比 TF 卡上的 /System/config/nfc_map.txt 更新。
 // 刷卡绑定时只改这里，避免播放中写 TF；关机时再统一 flush。
 static bool s_bindings_dirty = false;
 // true 表示正在从 TF 卡加载绑定表。加载期间复用 nfc_binding_set()，
@@ -154,7 +154,7 @@ bool nfc_binding_set(const String& uid,
 
     if (!s_loading_from_file) {
         // NFC 绑定确认时只更新内存表并标记 dirty，不在播放中立即写 TF。
-        // 统一在关机流程停音频后再 flush 到 /System/nfc_map.txt。
+        // 统一在关机流程停音频后再 flush 到 /System/config/nfc_map.txt。
         s_bindings_dirty = true;
 
         LOGI("[NFC绑定] 更新 uid=%s 类型=%s key=%s 显示=%s",

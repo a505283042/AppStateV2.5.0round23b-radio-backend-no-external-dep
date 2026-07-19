@@ -2672,6 +2672,7 @@ static const char WEBCTRL_NETMUSIC_HTML[] PROGMEM = R"HTML(
     .list{display:grid;gap:10px}
     .item{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;padding:10px 12px;border-radius:12px;background:#161616;border:1px solid #2a2a2a}
     .item.active{border-color:#2f6feb;background:#182235}
+    .item.focused{border-color:#b8860b;background:#2a2415}
     .name{font-size:15px;font-weight:700;word-break:break-word;line-height:1.35}
     .meta{font-size:12px;color:#999;margin-top:4px;word-break:break-word;line-height:1.3}
     .pager{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:12px}
@@ -2686,7 +2687,7 @@ static const char WEBCTRL_NETMUSIC_HTML[] PROGMEM = R"HTML(
     <div class="topbar">
       <div>
         <div style="font-size:22px;font-weight:800">NAS音乐</div>
-        <div class="muted">通过 /System/net_music.txt 按需分页读取，不全量加载到网页</div>
+        <div class="muted">通过 NAS 的 net_music.txt 按需分页读取，不全量加载到网页</div>
       </div>
       <div class="nav" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:12px">
         <a class="secondary" href="/">控制页</a>
@@ -2714,6 +2715,12 @@ static const char WEBCTRL_NETMUSIC_HTML[] PROGMEM = R"HTML(
   </div>
 
   <div class="card">
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+      <label class="muted" for="sourceSelect">NAS歌曲文件夹</label>
+      <select id="sourceSelect" onchange="changeNetMusicSource()" style="min-width:160px">
+        <option value="0">加载中...</option>
+      </select>
+    </div>
     <div class="muted" id="pathInfo">-</div>
     <div class="pager">
       <button onclick="prevPage()">上一页</button>
@@ -2750,8 +2757,12 @@ let offset = 0;
 let limit = 20;
 let total = 0;
 let currentIdx = -1;
+let focusedIdx = -1;
+let autoLocatePending = false;
 let searchMode = false;
 let searchQuery = '';
+let activeSourceIndex = -1;
+let activeSourceName = 'NAS音乐';
 
 function setText(id, text){
   const el = document.getElementById(id);
@@ -2771,6 +2782,78 @@ function formatDuration(ms){
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 
+function renderNetMusicSources(data){
+  const select = document.getElementById('sourceSelect');
+  if(!select) return;
+
+  const sources = Array.isArray(data && data.sources) ? data.sources : [];
+  const idx = Number(data && data.source_index);
+  activeSourceIndex = Number.isInteger(idx) ? idx : 0;
+  activeSourceName = (data && data.source_name) ? data.source_name : 'NAS音乐';
+
+  clearNode(select);
+  if(!sources.length){
+    const option = document.createElement('option');
+    option.value = String(activeSourceIndex);
+    option.textContent = activeSourceName;
+    select.appendChild(option);
+    select.disabled = true;
+    return;
+  }
+
+  sources.forEach(source => {
+    const option = document.createElement('option');
+    option.value = String(source.idx);
+    option.textContent = source.name || `曲库 ${Number(source.idx) + 1}`;
+    select.appendChild(option);
+  });
+
+  select.value = String(activeSourceIndex);
+  select.disabled = sources.length <= 1;
+}
+
+async function changeNetMusicSource(){
+  const select = document.getElementById('sourceSelect');
+  if(!select) return;
+
+  const requestedIdx = parseInt(select.value || '-1', 10);
+  if(!Number.isInteger(requestedIdx) || requestedIdx < 0 || requestedIdx === activeSourceIndex){
+    return;
+  }
+
+  select.disabled = true;
+  setText('err', '正在切换 NAS 歌曲文件夹...');
+
+  try{
+    const r = await fetch(`/api/netmusic/source?idx=${requestedIdx}`, {method:'POST'});
+    const j = await r.json();
+    if(!r.ok || !j.ok){
+      throw new Error((j && (j.message || j.error)) || '切换失败');
+    }
+
+    activeSourceIndex = Number.isInteger(j.source_index) ? j.source_index : requestedIdx;
+    activeSourceName = j.source_name || activeSourceName;
+    total = Number(j.total || 0);
+    currentIdx = -1;
+    focusedIdx = Number.isInteger(j.focus_idx) ? j.focus_idx : -1;
+    autoLocatePending = focusedIdx >= 0;
+    offset = focusedIdx >= 0
+      ? Math.floor(focusedIdx / limit) * limit
+      : 0;
+    searchMode = false;
+    searchQuery = '';
+
+    const searchInput = document.getElementById('searchInput');
+    if(searchInput) searchInput.value = '';
+
+    await loadStatus();
+    await loadNetMusic();
+  }catch(e){
+    setText('err', `NAS 歌曲文件夹切换失败：${e && e.message ? e.message : 'unknown'}`);
+    await loadNetMusic();
+  }
+}
+
 function renderNetMusicItems(items){
   const box = document.getElementById('musicList');
   clearNode(box);
@@ -2778,7 +2861,12 @@ function renderNetMusicItems(items){
   (items || []).forEach(it => {
     const row = document.createElement('div');
     row.className = 'item';
-    if(it.idx === currentIdx) row.classList.add('active');
+    row.dataset.idx = String(it.idx);
+    if(it.idx === currentIdx){
+      row.classList.add('active');
+    }else if(it.idx === focusedIdx){
+      row.classList.add('focused');
+    }
 
     const left = document.createElement('div');
 
@@ -2809,6 +2897,7 @@ function renderNetMusicItems(items){
     const btn = document.createElement('button');
     btn.textContent = '播放';
     btn.onclick = async () => {
+      focusedIdx = it.idx;
       const resp = await fetch(`/api/netmusic/play?idx=${it.idx}`, {method:'POST'});
       const ret = await resp.json();
       alert(ret && ret.ok ? (ret.message || '已开始播放 NAS 歌曲') : (ret.message || '操作失败'));
@@ -2824,6 +2913,17 @@ function renderNetMusicItems(items){
     row.appendChild(btn);
     box.appendChild(row);
   });
+
+  if(autoLocatePending){
+    const targetIdx = currentIdx >= 0 ? currentIdx : focusedIdx;
+    const target = box && targetIdx >= 0
+      ? box.querySelector(`[data-idx="${targetIdx}"]`)
+      : null;
+    autoLocatePending = false;
+    if(target){
+      requestAnimationFrame(() => target.scrollIntoView({behavior:'smooth', block:'center'}));
+    }
+  }
 }
 
 async function loadNetMusic(){
@@ -2837,7 +2937,10 @@ async function loadNetMusic(){
       offset = Math.max(0, total - limit);
     }
 
-    setText('pathInfo', `Base：${j.base || '-'} / 共 ${total} 首`);
+    renderNetMusicSources(j);
+    const pathInfo = document.getElementById('pathInfo');
+    if(pathInfo) pathInfo.title = j.base || '';
+    setText('pathInfo', `当前文件夹：${activeSourceName || '-'} / 共 ${total} 首`);
     setText('err', j.ok ? '' : `加载提示：${j.error || 'unknown'}`);
 
     const pageNo = total > 0 ? Math.floor(offset / limit) + 1 : 0;
@@ -2878,8 +2981,9 @@ async function searchNetMusic(showAlert = true){
     const j = await r.json();
 
     total = j.matched || 0;
+    renderNetMusicSources(j);
 
-    setText('pathInfo', `搜索：${q}`);
+    setText('pathInfo', `当前文件夹：${activeSourceName || '-'} / 搜索：${q}`);
     setText('pageInfo', `匹配 ${j.matched || 0} 首，显示 ${j.returned || 0} 首`);
     setText('searchInfo', `搜索模式：${q}`);
     setText('err', j.ok ? '' : `搜索提示：${j.error || 'unknown'}`);
@@ -3060,6 +3164,8 @@ async function focusCurrentPlaying(){
   if(input) input.value = '';
 
   currentIdx = idx;
+  focusedIdx = idx;
+  autoLocatePending = true;
   offset = Math.floor(idx / limit) * limit;
 
   await loadNetMusic();
@@ -3097,6 +3203,7 @@ document.addEventListener('DOMContentLoaded', () => {
 loadStatus().then((status) => {
   if(status && status.source_type === 'net_track' && Number.isInteger(status.net_track_idx) && status.net_track_idx >= 0){
     currentIdx = status.net_track_idx;
+    focusedIdx = currentIdx;
     offset = Math.floor(currentIdx / limit) * limit;
   }
   return loadNetMusic();

@@ -4,7 +4,7 @@
 
 // 在 TF 卡挂载成功后调用。
 // 如果上一次发生 panic/WDT 并且 flash 里存在 core dump，
-// 会复制到 /System/coredump_xxxxxx.bin，同时写 /System/panic_xxxxxx.txt 和 /System/panic_summary.txt。
+// 会复制到 /System/crash/coredump_xxxxxx.bin，同时写 /System/crash/panic_xxxxxx.txt 和 /System/crash/panic_summary.txt。
 bool panic_diag_flush_to_sd(void);
 
 // 仅写入 reset reason 摘要，不要求一定有 core dump。

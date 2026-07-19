@@ -74,6 +74,10 @@ static const char* player_nfc_bind_type_label(NfcBindType type)
 
 static void player_show_nfc_scan_result_popup(const String& uid, const String& card_type)
 {
+    const PlayerSourceType source_type = player_source_type_get();
+    const bool network_source = source_type == PlayerSourceType::NET_TRACK ||
+                                source_type == PlayerSourceType::NET_RADIO;
+
     NfcBindingEntry entry;
     if (nfc_binding_find(uid, entry)) {
         String name = entry.display;
@@ -82,16 +86,31 @@ static void player_show_nfc_scan_result_popup(const String& uid, const String& c
             name = entry.key;
         }
 
+        String bind_type = player_nfc_bind_type_label(entry.type);
+        if (network_source) {
+            bind_type = String("回本地·") + bind_type;
+            LOGI("[NFC] 网络音源刷到已绑定卡，将切回本地播放：UID=%s 类型=%s",
+                 uid.c_str(),
+                 player_nfc_bind_type_label(entry.type));
+        }
+
         ui_show_nfc_scan_popup(uid,
                                card_type,
-                               player_nfc_bind_type_label(entry.type),
+                               bind_type,
                                name,
                                true);
     } else {
+        String hint = "长按上一曲可绑定";
+        if (source_type == PlayerSourceType::NET_TRACK) {
+            hint = "NAS播放时不能绑定";
+        } else if (source_type == PlayerSourceType::NET_RADIO) {
+            hint = "电台播放时不能绑定";
+        }
+
         ui_show_nfc_scan_popup(uid,
                                card_type,
                                "未绑定",
-                               "长按上一曲可绑定",
+                               hint,
                                false);
     }
 }

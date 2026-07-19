@@ -4,6 +4,7 @@
 #include "audio/audio.h"
 #include "audio/audio_service.h"
 #include "storage/storage_io.h"
+#include "storage/system_paths.h"
 #include "utils/log.h"
 #include "web/web_cover_cache.h"
 #undef LOG_TAG
@@ -427,7 +428,7 @@ bool cover_decode_to_sprite_from_track(const TrackInfo& t)
   // 默认封面缺失 “画占位并当作成功”
     {
       StorageSdLockGuard sd_lock(1000);
-      if (!sd_lock || !sd.exists("/System/default_cover.jpg")) {
+      if (!sd_lock || !sd.exists(SystemPaths::kDefaultCover)) {
         LOGW("[封面] 默认 封面 未找到 -> 占位图");
         ui_lock();
         cover_draw_placeholder("NO COVER");
@@ -445,7 +446,7 @@ bool cover_decode_to_sprite_from_track(const TrackInfo& t)
         s_coverSprReady = false;
         return false;
       }
-      f = sd.open("/System/default_cover.jpg", O_RDONLY);
+      f = sd.open(SystemPaths::kDefaultCover, O_RDONLY);
     }
     if (!f) {
       LOGW("[封面] 打开 默认 封面 失败");

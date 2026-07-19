@@ -1460,9 +1460,29 @@ def _track_map(catalog: Catalog) -> dict[str, tuple[int, TrackTemp]]:
     return result
 
 
+def _system_library_root(system_root: Path) -> Path:
+    return system_root / "library"
+
+
+def _system_reports_root(system_root: Path) -> Path:
+    return system_root / "reports"
+
+
 def _load_pair(system_root: Path, log: LogCallback) -> LoadedPair:
-    index_candidates = [system_root / "music_index_v3.bin", system_root / "music_index_v3.bin.bak"]
-    manifest_candidates = [system_root / "music_manifest_v1.bin", system_root / "music_manifest_v1.bin.bak"]
+    library_root = _system_library_root(system_root)
+    # 新布局优先；仍允许读取旧版 /System 根目录文件，扫描成功后会写入新目录。
+    index_candidates = [
+        library_root / "music_index_v3.bin",
+        library_root / "music_index_v3.bin.bak",
+        system_root / "music_index_v3.bin",
+        system_root / "music_index_v3.bin.bak",
+    ]
+    manifest_candidates = [
+        library_root / "music_manifest_v1.bin",
+        library_root / "music_manifest_v1.bin.bak",
+        system_root / "music_manifest_v1.bin",
+        system_root / "music_manifest_v1.bin.bak",
+    ]
 
     catalog = None
     index_source = ""
@@ -1651,9 +1671,11 @@ def _finish_without_catalog_rebuild(
     progress: ProgressCallback,
     log: LogCallback,
 ) -> ScanResult:
-    index_path = system_root / "music_index_v3.bin"
-    manifest_path = system_root / "music_manifest_v1.bin"
-    report_path = system_root / "music_scan_report.json"
+    library_root = _system_library_root(system_root)
+    reports_root = _system_reports_root(system_root)
+    index_path = library_root / "music_index_v3.bin"
+    manifest_path = library_root / "music_manifest_v1.bin"
+    report_path = reports_root / "music_scan_report.json"
     elapsed = time.monotonic() - started
     result = ScanResult(
         success=True,
@@ -1715,6 +1737,8 @@ def scan_library(
     started = time.monotonic()
     card_root, music_root, system_root = resolve_card_root(selected_root)
     system_root.mkdir(parents=True, exist_ok=True)
+    _system_library_root(system_root).mkdir(parents=True, exist_ok=True)
+    _system_reports_root(system_root).mkdir(parents=True, exist_ok=True)
     log(f"TF 根目录: {card_root}")
     log(f"音乐目录: {music_root}")
 
@@ -1741,7 +1765,7 @@ def scan_library(
                 "超快速扫描: /Music 为平铺目录且 FAT 属性未变化，"
                 f"整体跳过全部曲目={reused_count}"
             )
-            manifest_path = system_root / "music_manifest_v1.bin"
+            manifest_path = _system_library_root(system_root) / "music_manifest_v1.bin"
             return _finish_without_catalog_rebuild(
                 started=started,
                 music_root=music_root,
@@ -1893,9 +1917,11 @@ def scan_library(
         )
     )
     directory_snapshots = _build_directory_snapshots(music_root, discovered)
-    index_path = system_root / "music_index_v3.bin"
-    manifest_path = system_root / "music_manifest_v1.bin"
-    report_path = system_root / "music_scan_report.json"
+    library_root = _system_library_root(system_root)
+    reports_root = _system_reports_root(system_root)
+    index_path = library_root / "music_index_v3.bin"
+    manifest_path = library_root / "music_manifest_v1.bin"
+    report_path = reports_root / "music_scan_report.json"
 
     content_unchanged = (
         not full_scan
@@ -1939,7 +1965,7 @@ def scan_library(
     # 索引写成功后再写 Manifest，与设备端保存顺序一致。
     _atomic_write(manifest_path, manifest_data, lambda path: load_manifest(path))
 
-    report_csv = system_root / "music_scan_tracks.csv"
+    report_csv = reports_root / "music_scan_tracks.csv"
     _write_report_csv(report_csv, tracks)
     elapsed = time.monotonic() - started
 
@@ -1994,8 +2020,14 @@ def scan_library(
 
 def verify_library(selected_root: str | os.PathLike[str]) -> dict[str, object]:
     _, _, system_root = resolve_card_root(selected_root)
-    index_path = system_root / "music_index_v3.bin"
-    manifest_path = system_root / "music_manifest_v1.bin"
+    library_root = _system_library_root(system_root)
+    index_path = library_root / "music_index_v3.bin"
+    manifest_path = library_root / "music_manifest_v1.bin"
+    # 仅为旧卡提供校验兼容；新扫描结果始终写入 /System/library。
+    if not index_path.exists():
+        index_path = system_root / "music_index_v3.bin"
+    if not manifest_path.exists():
+        manifest_path = system_root / "music_manifest_v1.bin"
     catalog = load_index(index_path)
     entries, manifest_crc, directories = load_manifest(manifest_path)
     actual_crc = catalog_crc32(catalog)

@@ -101,7 +101,7 @@ class ScannerApp:
         title.pack(anchor="w")
         ttk.Label(
             outer,
-            text="生成设备端兼容的 /System/music_index_v3.bin 与 music_manifest_v1.bin",
+            text="生成设备端兼容的 /System/library 索引与 /System/reports 扫描报告",
         ).pack(anchor="w", pady=(2, 14))
 
         path_frame = ttk.LabelFrame(outer, text="TF 卡目录", padding=10)

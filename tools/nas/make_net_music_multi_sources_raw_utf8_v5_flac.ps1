@@ -560,7 +560,7 @@ try {
     Write-Host ""
     Write-Host "缓存复用：$totalReused；实际 ffprobe：$totalProbed" -ForegroundColor Cyan
     Write-Host "只有新增或已修改歌曲会重新读取标签。" -ForegroundColor Cyan
-    Write-Host "请把 net_music_sources.txt 复制到 TF 卡 /System/ 目录。" -ForegroundColor Cyan
+    Write-Host "请把 net_music_sources.txt 复制到 TF 卡 /System/config/ 目录。" -ForegroundColor Cyan
 }
 catch {
     $exitCode = 1

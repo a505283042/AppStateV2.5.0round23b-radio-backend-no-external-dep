@@ -50,8 +50,8 @@ uint32_t net_music_catalog_search(const String& query,
  * @brief 加载 NAS 根地址和曲库源配置，开机阶段调用。
  *
  * 配置文件：
- * - /System/net_music_base.txt
- * - /System/net_music_sources.txt
+ * - /System/config/net_music_base.txt
+ * - /System/config/net_music_sources.txt
  *
  * 这里只读取很小的配置，不下载任何歌曲列表。
  */
@@ -80,9 +80,9 @@ bool net_music_catalog_select_source(uint8_t idx);
  * @brief 从 NAS 下载 net_music.txt 到内存，并建立行偏移索引。
  *
  * 注意：
- * - 不读取 /System/net_music.txt
- * - 不写入 /System/net_music.txt
- * - 不写入 /System/net_music.tmp
+ * - 不从 TF 卡读取 net_music.txt
+ * - 不向 TF 卡写入 net_music.txt
+ * - 不向 TF 卡写入 net_music.tmp
  * - 打开 NAS 时不会和本地播放抢 TF 卡
  */
 bool net_music_catalog_load();

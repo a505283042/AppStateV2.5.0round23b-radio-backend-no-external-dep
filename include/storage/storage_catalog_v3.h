@@ -59,12 +59,12 @@ void storage_catalog_v3_free(MusicCatalogV3& cat);
  * 3) 成功后保存最新 V3
  */
 bool storage_catalog_v3_load_or_rebuild(const char* music_root = "/Music",
-                                        const char* v3_index_path = "/System/music_index_v3.bin");
+                                        const char* v3_index_path = "/System/library/music_index_v3.bin");
 
 /* 遍历曲库并重建 V3：有有效 Manifest 时增量复用，否则自动全量解析。 */
 bool storage_catalog_v3_rebuild(
     const char* music_root = "/Music",
-    const char* v3_index_path = "/System/music_index_v3.bin",
+    const char* v3_index_path = "/System/library/music_index_v3.bin",
     StorageCatalogRebuildMode mode = StorageCatalogRebuildMode::FastIncremental,
     StorageCatalogRebuildSummary* out_summary = nullptr);
 

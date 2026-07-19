@@ -63,8 +63,10 @@ static bool build_current_bind_target(NfcAdminTarget& out)
     out = NfcAdminTarget{};
 
     const PlayerSourceState source = player_source_get();
-    if (source.type == PlayerSourceType::NET_TRACK) {
-        LOGW("[NFC管理] NET_TRACK does not 支持 NFC bind");
+    if (source.type == PlayerSourceType::NET_TRACK ||
+        source.type == PlayerSourceType::NET_RADIO) {
+        LOGW("[NFC管理] 网络音源不支持 NFC 绑定：来源=%s",
+             player_source_type_key(source.type));
         return false;
     }
 

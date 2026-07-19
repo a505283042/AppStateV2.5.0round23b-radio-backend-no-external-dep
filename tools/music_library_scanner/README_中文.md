@@ -2,13 +2,13 @@
 
 本程序在 Windows 电脑上直接扫描 TF 卡的 `Music` 目录，并生成与当前设备固件兼容的：
 
-- `System/music_index_v3.bin`
-- `System/music_manifest_v1.bin`
+- `System/library/music_index_v3.bin`
+- `System/library/music_manifest_v1.bin`
 
 同时生成便于核对的：
 
-- `System/music_scan_report.json`
-- `System/music_scan_tracks.csv`
+- `System/reports/music_scan_report.json`
+- `System/reports/music_scan_tracks.csv`
 
 ## 功能
 
@@ -119,10 +119,12 @@ TF卡根目录
 │  │     └─ cover.jpg
 │  └─ ...
 └─ System
-   ├─ music_index_v3.bin
-   ├─ music_manifest_v1.bin
-   ├─ music_scan_report.json
-   └─ music_scan_tracks.csv
+   ├─ library
+   │  ├─ music_index_v3.bin
+   │  └─ music_manifest_v1.bin
+   └─ reports
+      ├─ music_scan_report.json
+      └─ music_scan_tracks.csv
 ```
 
 目录层级仅作为无标签歌曲的兜底：

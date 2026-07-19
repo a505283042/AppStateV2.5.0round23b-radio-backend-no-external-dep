@@ -7,6 +7,7 @@
 #include <esp_heap_caps.h>
 
 #include "storage/storage_io.h"
+#include "storage/system_paths.h"
 #include "utils/log.h"
 #include "utils/text_normalize.h"
 
@@ -35,8 +36,8 @@ uint32_t s_list_cap = 0;
 
 constexpr const char* kNetMusicListName = "net_music.txt";
 constexpr const char* kNetMusicMemoryPath = "memory:http/net_music.txt";
-constexpr const char* kNetMusicBasePath = "/System/net_music_base.txt";
-constexpr const char* kNetMusicSourcesPath = "/System/net_music_sources.txt";
+constexpr const char* kNetMusicBasePath = SystemPaths::kNetMusicBase;
+constexpr const char* kNetMusicSourcesPath = SystemPaths::kNetMusicSources;
 constexpr const char* kNetMusicPrefsNs = "netmusic";
 constexpr const char* kNetMusicSourcePrefKey = "source";
 constexpr uint32_t kMaxNetMusicLineLen = 768;
@@ -860,7 +861,7 @@ bool net_music_catalog_load() {
   clear_loaded_list_state();
   s_error = "";
 
-  // 打开 NAS 时不读 /System/net_music.txt，也不写 /System/net_music.txt。
+  // 打开 NAS 时只从 HTTP 下载列表到内存，不在 TF 卡读写 net_music.txt。
   // 这里只使用开机已读入的 base；如果没有，再兜底读一次很小的 base 文件。
   if (!ensure_base_loaded()) {
     return false;

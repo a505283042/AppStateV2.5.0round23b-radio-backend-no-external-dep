@@ -71,14 +71,14 @@ struct StorageMusicManifestV1 {
  */
 bool storage_manifest_load_v1(
     StorageMusicManifestV1& out_manifest,
-    const char* manifest_path = "/System/music_manifest_v1.bin");
+    const char* manifest_path = "/System/library/music_manifest_v1.bin");
 
 /**
  * @brief 使用 .tmp + .bak 原子保存清单，并在替换前后执行 CRC 校验。
  */
 bool storage_manifest_save_v1(
     const StorageMusicManifestV1& manifest,
-    const char* manifest_path = "/System/music_manifest_v1.bin");
+    const char* manifest_path = "/System/library/music_manifest_v1.bin");
 
 /** 计算当前 Catalog 的稳定一致性标识，供 Manifest 与索引配对校验。 */
 uint32_t storage_manifest_catalog_crc_v1(const MusicCatalogV3& catalog);

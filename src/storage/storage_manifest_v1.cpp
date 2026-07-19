@@ -6,6 +6,7 @@
 #include <utility>
 
 #include "storage/storage_io.h"
+#include "storage/system_paths.h"
 #include "utils/log.h"
 
 extern SdFat sd;
@@ -712,7 +713,8 @@ bool storage_manifest_save_v1(const StorageMusicManifestV1& manifest,
     return false;
   }
 
-  sd.mkdir("/System");
+  sd.mkdir(SystemPaths::kRoot);
+  sd.mkdir(SystemPaths::kLibraryDir);
 
   const String final_path(manifest_path);
   const String tmp_path = final_path + ".tmp";

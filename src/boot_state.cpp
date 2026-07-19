@@ -5,6 +5,7 @@
 #include "board/board_spi.h"
 #include "storage/storage.h"
 #include "storage/storage_catalog_v3.h"
+#include "storage/system_paths.h"
 #include "ui/ui.h"
 #include "ui/ui_cover_mem.h"
 #include "utils/log.h"
@@ -23,7 +24,7 @@
 static void prepare_music_catalogs()
 {
     if (storage_catalog_v3_load_or_rebuild("/Music",
-                                        "/System/music_index_v3.bin")) {
+                                        SystemPaths::kMusicIndexV3)) {
         LOGD("[启动] V3歌曲库 加载成功: 音乐=%lu 专辑=%lu 歌手=%lu",
             (unsigned long)storage_catalog_v3_track_count(),
             (unsigned long)storage_catalog_v3_album_count(),
@@ -70,14 +71,17 @@ void boot_state_run(void)
 
     const bool sd_ok = storage_init();
     if (sd_ok) {
+        // 先创建分类目录并迁移旧版 /System 根目录文件，后续模块统一使用新路径。
+        (void)storage_system_layout_prepare();
+
         // 上一次如果是 Guru Meditation / WDT / panic，ESP-IDF 会先把 core dump 写入 flash。
-        // 这里等 TF 卡和 SdFat 已经稳定挂载后，再复制到 /System/coredump_xxxxxxxx.bin。
+        // 这里等 TF 卡和 SdFat 已经稳定挂载后，再复制到 /System/crash/coredump_xxxxxxxx.bin。
         panic_diag_flush_to_sd();
 
         audio_file_prepare_music_root_cache();
 
         // 加载 NFC 绑定文件
-        if (nfc_binding_load("/System/nfc_map.txt")) {
+        if (nfc_binding_load(SystemPaths::kNfcMap)) {
             LOGD("[启动] NFC 绑定表 加载成功: %d 条", nfc_binding_count());
         } else {
             LOGI("[启动] 未找到 NFC 绑定表");
@@ -126,9 +130,9 @@ void boot_state_run(void)
     }
 
     // NAS/HTTP 歌曲索引不在开机阶段预加载。
-    // 开机只读取很小的 /System/net_music_base.txt。
+    // 开机只读取很小的 /System/config/net_music_base.txt。
     // 打开 NAS 歌曲列表或 Web NAS 页面时，再从 base URL 下载 net_music.txt 到内存。
-    // 注意：不会读取/写入 /System/net_music.txt，避免和本地播放抢 TF 卡。
+    // 注意：不会把 NAS 歌曲列表写入 TF 卡，避免和本地播放抢卡。
     if (storage_is_ready() && net_music_catalog_load_base()) {
         LOGD("[启动] NAS base 加载成功: %s", net_music_catalog_base_url().c_str());
     } else {

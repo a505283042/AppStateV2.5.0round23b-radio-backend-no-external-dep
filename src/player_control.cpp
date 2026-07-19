@@ -21,6 +21,7 @@
 #include "audio/audio_radio_backend.h"
 #include "storage/storage.h"
 #include "storage/storage_catalog_v3.h"
+#include "storage/system_paths.h"
 #include "ui/ui.h"
 #include "utils/log.h"
 #include "app_diagnostics.h"
@@ -218,7 +219,7 @@ static void control_apply_radio_cover(const RadioItem& item)
         LOGW("[电台] 台标 加载 失败: %s", logo.c_str());
     }
 
-    (void)control_apply_cover_file("/System/default_cover.jpg");
+    (void)control_apply_cover_file(SystemPaths::kDefaultCover);
 }
 
 static bool control_prepare_net_track_item(int& idx, NetMusicItem& item, String& url)
@@ -1267,9 +1268,9 @@ static bool control_play_net_track_index_impl(int idx, bool reset_shuffle)
     // MP3 后台会继续探测 APIC，因此先显示网络封面加载图。
     // NAS FLAC 起播先使用默认封面，后台找到 PICTURE 后再无阻塞替换。
     if (item.format == "flac") {
-        (void)control_apply_cover_file("/System/default_cover.jpg");
-    } else if (!control_apply_cover_file("/System/net_cover_loading.jpg")) {
-        (void)control_apply_cover_file("/System/default_cover.jpg");
+        (void)control_apply_cover_file(SystemPaths::kDefaultCover);
+    } else if (!control_apply_cover_file(SystemPaths::kNetCoverLoading)) {
+        (void)control_apply_cover_file(SystemPaths::kDefaultCover);
     }
     ui_request_refresh_now();
 

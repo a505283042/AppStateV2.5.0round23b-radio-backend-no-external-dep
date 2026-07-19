@@ -4,6 +4,7 @@
 #include "player_control.h"
 #include "player_source.h"
 #include "player_state.h"
+#include "storage/system_paths.h"
 #include "utils/log.h"
 #include <vector>
 
@@ -67,12 +68,12 @@ static bool nfc_binding_prepare_safe_commit(bool* was_playing_before)
 
 static bool nfc_binding_save_map_with_rollback()
 {
-    if (nfc_binding_save("/System/nfc_map.txt")) {
+    if (nfc_binding_save(SystemPaths::kNfcMap)) {
         return true;
     }
 
     LOGW("[NFC绑定] 保存 失败, re加载 文件 rollback");
-    (void)nfc_binding_load("/System/nfc_map.txt");
+    (void)nfc_binding_load(SystemPaths::kNfcMap);
     return false;
 }
 

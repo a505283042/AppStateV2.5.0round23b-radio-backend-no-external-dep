@@ -90,6 +90,14 @@ void player_list_select_reset();
 bool player_list_select_flush_persistent_state();
 
 /**
+ * @brief 读取当前 NAS 曲库上次保存的列表位置。
+ *
+ * 会按当前曲库编号加载独立 NVS key，并按当前列表总数校正索引。
+ * 没有保存值或列表为空时返回 -1。
+ */
+int player_list_select_saved_net_track_index();
+
+/**
  * @brief 按当前大类模式进入列表选择。
  *
  * 全部模式进入本地全部歌曲列表；歌手/专辑模式进入对应分组列表；

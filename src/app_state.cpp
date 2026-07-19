@@ -21,6 +21,7 @@
 #include "storage/storage.h"
 #include "storage/storage_catalog_v3.h"
 #include "storage/storage_hotplug.h"
+#include "storage/system_paths.h"
 #include "player_assets.h"
 #include "player_playlist.h"
 #include "player_recover.h"
@@ -66,7 +67,7 @@ static void app_rescan_task_entry(void* )
     if (storage_is_ready()) {
         success = storage_catalog_v3_rebuild(
             "/Music",
-            "/System/music_index_v3.bin",
+            SystemPaths::kMusicIndexV3,
             rebuild_mode,
             &summary);
     } else {
@@ -168,6 +169,9 @@ static void app_handle_tf_mounted()
 {
     LOGD("[应用] TF 已挂载");
 
+    // 热插拔重新挂载后也要创建分类目录并迁移旧路径。
+    (void)storage_system_layout_prepare();
+
     const PlayerSourceState source_before_mount = player_source_get();
 
     const bool radio_active =
@@ -176,7 +180,7 @@ static void app_handle_tf_mounted()
 
     audio_file_prepare_music_root_cache();
 
-    if (nfc_binding_load("/System/nfc_map.txt")) {
+    if (nfc_binding_load(SystemPaths::kNfcMap)) {
         LOGD("[应用] NFC bindings re加载ed: %d entries", nfc_binding_count());
     } else {
         LOGD("[应用] no NFC bindings after TF 已挂载");
@@ -202,7 +206,7 @@ static void app_handle_tf_mounted()
     // 这样可以避免插卡后 WiFi 扫描/连接影响本地播放稳定性。
     LOGD("[应用] TF 卡挂载后已跳过 WiFi 重连");
 
-    if (!storage_catalog_v3_load_or_rebuild("/Music", "/System/music_index_v3.bin")) {
+    if (!storage_catalog_v3_load_or_rebuild("/Music", SystemPaths::kMusicIndexV3)) {
         LOGE("[应用] 目录 re加载 失败 after TF 已挂载");
         ui_request_refresh_now();
         return;

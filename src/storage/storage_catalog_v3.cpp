@@ -5,6 +5,7 @@
 #include "storage/storage_view_v3.h"
 #include "storage/storage_groups_v3.h"
 #include "storage/storage_scan_v3.h"
+#include "storage/system_paths.h"
 #include "utils/log.h"
 #include "app_diagnostics.h"
 
@@ -106,7 +107,7 @@ static bool rebuild_v3_native(
     StorageCatalogRebuildSummary* out_summary)
 {
     static constexpr const char* kManifestPath =
-        "/System/music_manifest_v1.bin";
+        SystemPaths::kMusicManifestV1;
 
     const uint32_t rebuild_started_ms = millis();
     const uint32_t rebuild_internal_start = (uint32_t)heap_caps_get_free_size(

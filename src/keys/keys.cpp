@@ -9,6 +9,7 @@
 #include "ui/ui.h"
 #include "player_control.h"
 #include "player_list_select.h"
+#include "player_source.h"
 #include "nfc/nfc_admin_state.h"
 #include "menu/quick_menu.h"
 #include "menu/quick_menu_page_nfc.h"
@@ -294,6 +295,21 @@ static void nfc_bind_popup_close()
 
 static void nfc_bind_popup_open()
 {
+    const PlayerSourceType source_type = player_source_type_get();
+    if (source_type == PlayerSourceType::NET_TRACK ||
+        source_type == PlayerSourceType::NET_RADIO) {
+        const char* source_name = source_type == PlayerSourceType::NET_TRACK
+            ? "NAS歌曲"
+            : "网络电台";
+        LOGW("[按键] NFC绑定已拒绝：当前来源=%s", source_name);
+        ui_show_track_change_popup("NFC绑定不可用",
+                                   source_type == PlayerSourceType::NET_TRACK
+                                     ? "NAS歌曲不支持绑定"
+                                     : "网络电台不支持绑定");
+        keys_sync_to_hw_state();
+        return;
+    }
+
     // 打开 NFC 选择弹窗后，关闭 X5 音量模式，避免两个中心弹窗互相打架。
     s_volume_fast_mode = false;
     s_nfc_bind_popup_active = true;

@@ -107,8 +107,8 @@ class ScannerTest(unittest.TestCase):
         self.assertEqual(first.track_count, 3)
         self.assertEqual(first.added, 3)
 
-        catalog = load_index(self.root / "System" / "music_index_v3.bin")
-        entries, manifest_crc, directories = load_manifest(self.root / "System" / "music_manifest_v1.bin")
+        catalog = load_index(self.root / "System" / "library" / "music_index_v3.bin")
+        entries, manifest_crc, directories = load_manifest(self.root / "System" / "library" / "music_manifest_v1.bin")
         self.assertEqual(len(entries), 3)
         self.assertGreaterEqual(len(directories), 3)
         self.assertTrue(any(item.dir_rel == "Artist A/Album A" for item in directories))
@@ -212,7 +212,7 @@ class FlatRootUltraFastTest(unittest.TestCase):
         first = scan_library(self.root)
         self.assertTrue(first.full_scan)
         entries, _, directories = load_manifest(
-            self.root / "System" / "music_manifest_v1.bin"
+            self.root / "System" / "library" / "music_manifest_v1.bin"
         )
         self.assertEqual(len(entries), 2)
         root_snapshot = next(item for item in directories if item.dir_rel == "")
@@ -220,8 +220,8 @@ class FlatRootUltraFastTest(unittest.TestCase):
         self.assertFalse(root_snapshot.has_subdirectories)
         self.assertEqual(root_snapshot.subtree_track_count, 2)
 
-        index_path = self.root / "System" / "music_index_v3.bin"
-        manifest_path = self.root / "System" / "music_manifest_v1.bin"
+        index_path = self.root / "System" / "library" / "music_index_v3.bin"
+        manifest_path = self.root / "System" / "library" / "music_manifest_v1.bin"
         old_index = index_path.read_bytes()
         old_manifest = manifest_path.read_bytes()
 

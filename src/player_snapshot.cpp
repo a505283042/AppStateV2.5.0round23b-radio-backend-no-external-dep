@@ -18,6 +18,7 @@
 #include "player_state.h"
 #include "storage/storage.h"
 #include "storage/storage_catalog_v3.h"
+#include "storage/system_paths.h"
 #include "ui/ui.h"
 #include "utils/log.h"
 
@@ -447,7 +448,7 @@ static bool snapshot_apply_default_cover()
     bool is_png = false;
     const bool ok = audio_service_fetch_cover(COVER_FILE_FALLBACK,
                                               "",
-                                              "/System/default_cover.jpg",
+                                              SystemPaths::kDefaultCover,
                                               0,
                                               0,
                                               &buf,

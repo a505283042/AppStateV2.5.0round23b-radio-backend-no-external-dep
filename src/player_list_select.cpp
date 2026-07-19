@@ -600,6 +600,19 @@ bool player_list_select_flush_persistent_state()
     return true;
 }
 
+int player_list_select_saved_net_track_index()
+{
+    list_select_sync_net_track_source();
+    list_select_load_net_track_position_from_nvs_once();
+
+    const int total = (int)net_music_catalog_count();
+    if (total <= 0 || s_last_net_track_list_idx < 0) {
+        return -1;
+    }
+
+    return list_select_clamp_index(s_last_net_track_list_idx, total);
+}
+
 bool player_list_select_enter_local_tracks()
 {
     if (!storage_catalog_v3_ready()) {

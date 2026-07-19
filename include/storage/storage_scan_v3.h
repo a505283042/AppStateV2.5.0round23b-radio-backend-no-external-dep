@@ -87,7 +87,7 @@ bool storage_scan_music_incremental_v3(
     StorageIncrementalScanStatsV3& out_stats,
     const MusicCatalogV3* reuse_catalog,
     const char* music_root = "/Music",
-    const char* manifest_path = "/System/music_manifest_v1.bin",
+    const char* manifest_path = "/System/library/music_manifest_v1.bin",
     bool force_full_scan = false,
     bool strict_verify = false,
     bool ultra_fast = false);

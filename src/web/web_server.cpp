@@ -2282,6 +2282,111 @@ static void web_handle_netmusic_page() {
   s_server.send_P(200, "text/html; charset=utf-8", WEBCTRL_NETMUSIC_HTML);
 }
 
+static int web_netmusic_hex_value(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return -1;
+}
+
+// 仅用于网页显示曲库文件夹名称；按 UTF-8 字节解码 URL 中的 %XX。
+static String web_netmusic_decode_url_segment(const String& encoded) {
+  String decoded;
+  (void)decoded.reserve(encoded.length());
+
+  for (size_t i = 0; i < encoded.length(); ++i) {
+    if (encoded[i] == '%' && i + 2 < encoded.length()) {
+      const int hi = web_netmusic_hex_value(encoded[i + 1]);
+      const int lo = web_netmusic_hex_value(encoded[i + 2]);
+      if (hi >= 0 && lo >= 0) {
+        decoded += static_cast<char>((hi << 4) | lo);
+        i += 2;
+        continue;
+      }
+    }
+    decoded += encoded[i];
+  }
+
+  return decoded;
+}
+
+static String web_netmusic_source_display_name(const NetMusicSourceInfo& source) {
+  String name = source.name;
+  name.trim();
+  if (name.length() && name != "NAS音乐") {
+    return name;
+  }
+
+  String folder = source.relative_path;
+  folder.replace('\\', '/');
+  while (folder.endsWith("/")) {
+    folder.remove(folder.length() - 1);
+  }
+
+  if (!folder.length()) {
+    // 兼容旧版单列表配置：base 已直接指向歌曲文件夹时，从 URL 末段提取名称。
+    folder = net_music_catalog_base_url();
+    const int query_pos = folder.indexOf('?');
+    if (query_pos >= 0) folder.remove(query_pos);
+    const int fragment_pos = folder.indexOf('#');
+    if (fragment_pos >= 0) folder.remove(fragment_pos);
+    while (folder.endsWith("/")) {
+      folder.remove(folder.length() - 1);
+    }
+  }
+
+  const int slash = folder.lastIndexOf('/');
+  if (slash >= 0) {
+    folder = folder.substring(slash + 1);
+  }
+  folder = web_netmusic_decode_url_segment(folder);
+  folder.trim();
+
+  if (folder.length()) return folder;
+  if (name.length()) return name;
+  return String("NAS音乐");
+}
+
+static void web_append_netmusic_sources_json(String& json) {
+  const uint8_t active_idx = net_music_catalog_active_source_index();
+  NetMusicSourceInfo active_source{};
+  String active_name = "NAS音乐";
+  if (net_music_catalog_source_get(active_idx, &active_source)) {
+    active_name = web_netmusic_source_display_name(active_source);
+  }
+
+  json += ",\"source_index\":";
+  json += String((unsigned)active_idx);
+
+  json += ",\"source_name\":\"";
+  json += web_json_escape(active_name);
+  json += "\"";
+
+  json += ",\"sources\":[";
+  bool first = true;
+  const uint8_t count = net_music_catalog_source_count();
+  for (uint8_t i = 0; i < count; ++i) {
+    NetMusicSourceInfo source{};
+    if (!net_music_catalog_source_get(i, &source) || !source.valid) {
+      continue;
+    }
+
+    if (!first) json += ",";
+    first = false;
+
+    json += "{\"idx\":";
+    json += String((unsigned)i);
+    json += ",\"name\":\"";
+    json += web_json_escape(web_netmusic_source_display_name(source));
+    json += "\",\"path\":\"";
+    json += web_json_escape(source.relative_path);
+    json += "\",\"list\":\"";
+    json += web_json_escape(source.list_name);
+    json += "\"}";
+  }
+  json += "]";
+}
+
 static void web_handle_radios() {
   web_send_radio_list_json();
 }
@@ -2347,6 +2452,8 @@ static void web_handle_netmusic() {
   json += ",\"base\":\"";
   json += web_json_escape(net_music_catalog_base_url());
   json += "\"";
+
+  web_append_netmusic_sources_json(json);
 
   json += ",\"error\":\"";
   json += web_json_escape(net_music_catalog_error());
@@ -2453,6 +2560,8 @@ static void web_handle_netmusic_search() {
   json += ",\"limit\":";
   json += String(limit);
 
+  web_append_netmusic_sources_json(json);
+
   json += ",\"error\":\"";
   json += web_json_escape(net_music_catalog_error());
   json += "\"";
@@ -2498,6 +2607,89 @@ static void web_handle_netmusic_search() {
   }
 
   json += "]}";
+
+  web_send_no_cache_headers();
+  s_server.send(200, "application/json; charset=utf-8", json);
+}
+
+static void web_handle_netmusic_source_select() {
+  if (!web_require_player_state()) return;
+
+  int requested_idx = -1;
+  if (!web_parse_int_arg("idx", requested_idx)) {
+    web_send_json_err("缺少 idx 参数");
+    return;
+  }
+
+  if (net_music_catalog_source_count() == 0 &&
+      !net_music_catalog_load_base()) {
+    web_send_json_err("NAS 曲库源配置尚未加载", 500);
+    return;
+  }
+
+  if (requested_idx < 0 ||
+      requested_idx >= (int)net_music_catalog_source_count()) {
+    web_send_json_err("NAS 歌曲文件夹不存在", 404);
+    return;
+  }
+
+  const uint8_t old_idx = net_music_catalog_active_source_index();
+  const uint8_t new_idx = static_cast<uint8_t>(requested_idx);
+  if (new_idx != old_idx) {
+    // 与实体菜单切换流程保持一致：先保存旧曲库位置，再释放旧列表和播放状态。
+    (void)player_list_select_flush_persistent_state();
+    (void)player_snapshot_save_to_nvs();
+
+    if (player_source_type_get() == PlayerSourceType::NET_TRACK) {
+      player_stop_net_track();
+    }
+
+    if (!net_music_catalog_select_source(new_idx)) {
+      web_send_json_err("NAS 歌曲文件夹切换失败", 500);
+      return;
+    }
+
+    // 每个曲库使用独立的播放快照，不继承上一文件夹的歌曲索引。
+    (void)player_snapshot_reload_net_context_for_active_source();
+  }
+
+  if (!net_music_catalog_load()) {
+    const String error = net_music_catalog_error();
+    String message = "NAS 歌曲列表加载失败";
+    if (error.length()) {
+      message += "：";
+      message += error;
+    }
+    web_send_json_err(message.c_str(), 500);
+    return;
+  }
+
+  const int total = (int)net_music_catalog_count();
+  int focus_idx = player_snapshot_resolve_net_track_index(
+      player_snapshot_net_track_index());
+  const char* focus_source = "snapshot";
+
+  if (focus_idx < 0 || focus_idx >= total) {
+    focus_idx = player_list_select_saved_net_track_index();
+    focus_source = "list";
+  }
+  if ((focus_idx < 0 || focus_idx >= total) && total > 0) {
+    focus_idx = 0;
+    focus_source = "default";
+  }
+
+  String json;
+  json.reserve(720);
+  json += "{\"ok\":true,\"message\":\"已切换 NAS 歌曲文件夹\"";
+  json += ",\"total\":";
+  json += String((unsigned long)total);
+  json += ",\"focus_idx\":";
+  json += String(focus_idx);
+  json += ",\"focus_source\":\"";
+  json += focus_source;
+  json += "\"";
+  web_append_netmusic_sources_json(json);
+  json += "}";
 
   web_send_no_cache_headers();
   s_server.send(200, "application/json; charset=utf-8", json);
@@ -2783,6 +2975,7 @@ static void web_setup_routes() {
   s_server.on("/api/radios", HTTP_GET, web_handle_radios);
   s_server.on("/api/netmusic", HTTP_GET, web_handle_netmusic);
   s_server.on("/api/netmusic/search", HTTP_GET, web_handle_netmusic_search);
+  s_server.on("/api/netmusic/source", HTTP_POST, web_handle_netmusic_source_select);
   s_server.on("/api/artist/detail", HTTP_GET, web_handle_artist_detail);
   s_server.on("/api/album/detail", HTTP_GET, web_handle_album_detail);
   s_server.on("/api/settings", HTTP_GET, web_handle_settings_get);

@@ -8,6 +8,7 @@
 
 #include "esp_heap_caps.h"
 #include "storage/storage_io.h"
+#include "storage/system_paths.h"
 #include "utils/log.h"
 
 extern SdFat sd;
@@ -944,7 +945,8 @@ bool storage_index_save_v3(const MusicCatalogV3& cat, const char* index_path)
     return false;
   }
 
-  sd.mkdir("/System");
+  sd.mkdir(SystemPaths::kRoot);
+  sd.mkdir(SystemPaths::kLibraryDir);
 
   const String final_path(index_path);
   const String tmp_path = final_path + ".tmp";

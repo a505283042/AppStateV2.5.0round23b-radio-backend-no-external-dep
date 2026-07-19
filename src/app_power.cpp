@@ -9,6 +9,7 @@
 #include "hal/ws2812_status.h"
 #include "menu/quick_menu.h"
 #include "nfc/nfc_binding.h"
+#include "storage/system_paths.h"
 #include "player_snapshot.h"
 #include "player_source.h"
 #include "player_list_select.h"
@@ -87,10 +88,10 @@ void app_power_save_and_shutdown()
     const bool web_ok = web_settings_save_if_dirty();
 
     // NFC 绑定在刷卡确认时只写内存并标记 dirty。
-    // 真正写 TF 前必须停止 AudioTask 读卡，避免播放中写 /System/nfc_map.txt 抢 SD 锁。
+    // 真正写 TF 前必须停止 AudioTask 读卡，避免播放中写 /System/config/nfc_map.txt 抢 SD 锁。
     audio_service_stop(true);
 
-    const bool nfc_ok = nfc_binding_flush_if_dirty("/System/nfc_map.txt");
+    const bool nfc_ok = nfc_binding_flush_if_dirty(SystemPaths::kNfcMap);
 
     LOGI("[电源] 保存 result snapshot=%d list=%d 网页=%d nfc=%d",
          snapshot_ok ? 1 : 0,

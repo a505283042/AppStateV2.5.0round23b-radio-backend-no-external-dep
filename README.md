@@ -25,7 +25,7 @@
 - 本地文件播放：`MP3`、`FLAC`
 - 电台播放：`HTTP MP3 stream`
 - NAS / HTTP 网络歌曲播放：
-  - 支持 `/System/net_music_base.txt` + `/System/net_music.txt`
+  - 支持 `/System/config/net_music_base.txt` + `/System/config/net_music_sources.txt`，并从 NAS 下载各目录的 `net_music.txt`
   - 支持 URL 编码后的 HTTP MP3 文件直链
   - 支持 1339+ 首网络歌曲 offset 索引
   - 不全量加载歌曲 URL，按 index seek 读取
@@ -42,7 +42,7 @@
   - MP3 内嵌 APIC
   - FLAC picture block
   - 外部封面兜底
-  - `/System/default_cover.jpg` 默认封面
+  - `/System/assets/default_cover.jpg` 默认封面
 - 播放模式：
   - 全部顺序 / 全部随机
   - 歌手顺序 / 歌手随机
@@ -202,7 +202,7 @@ Storage
 ├─ storage_scan_v3
 ├─ storage_builder_v3
 ├─ storage_groups_v3
-└─ net_music_catalog（读取 /System/net_music*.txt，建立行偏移 offset 索引）
+└─ net_music_catalog（从 NAS 下载 net_music.txt 到 PSRAM，并建立行偏移 offset 索引）
 
 UI / Web / NFC
 ├─ ui_*（圆屏渲染、封面缓存、列表页）
@@ -264,11 +264,11 @@ NAS 网络歌曲与网络电台一样复用 URLStream 和统一 MP3 核心，但
 3. 如果 TF 卡挂载成功：
    - 读取 TF 卡 CID
    - 生成当前卡的 snapshot key，例如 `snap_BE61B111`
-   - 读取 NFC 绑定表 `/System/nfc_map.txt`
-   - 加载或重建 V3 音乐索引 `/System/music_index_v3.bin`
-   - 加载电台列表 `/System/radio_list.txt`
-   - 加载 NAS 歌曲 base url `/System/net_music_base.txt`
-   - 扫描 NAS 歌曲列表 `/System/net_music.txt`，建立行偏移 offset 索引
+   - 读取 NFC 绑定表 `/System/config/nfc_map.txt`
+   - 加载或重建 V3 音乐索引 `/System/library/music_index_v3.bin`
+   - 加载电台列表 `/System/config/radio_list.txt`
+   - 加载 NAS 歌曲 base url `/System/config/net_music_base.txt`
+   - NAS 列表不在开机阶段预加载，进入 NAS 页面时才从 HTTP 下载并建立 offset 索引
    - 读取 WiFi 配置 `/System/config/wifi.conf`
 4. 如果开机无卡：
    - 系统仍继续启动
@@ -295,7 +295,7 @@ NAS 网络歌曲与网络电台一样复用 URLStream 和统一 MP3 核心，但
 NAS 歌曲索引加载成功时会出现：
 
 ```text
-[NETMUSIC] catalog loaded tracks=1339 offsets=1339 base=http://192.168.1.105:8080/music/ path=/System/net_music.txt
+[网络歌曲] 列表已加载：来源=音乐 数量=1327 内存=PSRAM
 [BOOT] Net music catalog loaded: 1339 tracks
 ```
 
@@ -314,25 +314,37 @@ NAS 歌曲索引加载成功时会出现：
     xxx.flac
 
 /System/
-    music_index_v3.bin
-    radio_list.txt
-    net_music_base.txt
-    net_music.txt
-    nfc_map.txt
-    default_cover.jpg
     /config/
         wifi.conf
+        web_settings.conf
+        radio_list.txt
+        net_music_base.txt
+        net_music_sources.txt
+        nfc_map.txt
+    /assets/
+        default_cover.jpg
+        net_cover_loading.jpg
+    /library/
+        music_index_v3.bin
+        music_manifest_v1.bin
+    /reports/
+        music_scan_report.json
+        music_scan_tracks.csv
+    /crash/
+        panic_summary.txt
+        panic_xxxxxxxx.txt
+        coredump_xxxxxxxx.bin
 ```
 
 ### 音乐目录
 
 - 默认扫描根目录：`/Music`
-- 启动时优先加载 `/System/music_index_v3.bin`
+- 启动时优先加载 `/System/library/music_index_v3.bin`
 - 若索引不存在或加载失败，会自动重扫 `/Music` 并重建索引
 
 ### 电台列表
 
-文件：`/System/radio_list.txt`
+文件：`/System/config/radio_list.txt`
 
 支持格式：
 
@@ -357,7 +369,7 @@ name|url|format|region|logo
 Base URL 文件：
 
 ```text
-/System/net_music_base.txt
+/System/config/net_music_base.txt
 ```
 
 内容只写一行，例如：
@@ -366,10 +378,10 @@ Base URL 文件：
 http://192.168.1.105:8080/music/
 ```
 
-歌曲列表文件：
+歌曲列表文件位于每个 NAS 曲库目录，例如：
 
 ```text
-/System/net_music.txt
+http://192.168.1.105:8080/music/音乐/net_music.txt
 ```
 
 格式：
@@ -418,7 +430,7 @@ Get-ChildItem $root -File -Recurse -Include *.mp3 | ForEach-Object {
 
 ### NFC 绑定表
 
-文件：`/System/nfc_map.txt`
+文件：`/System/config/nfc_map.txt`
 
 当前新格式：
 
@@ -463,7 +475,7 @@ password=87654321
 文件：
 
 ```text
-/System/default_cover.jpg
+/System/assets/default_cover.jpg
 ```
 
 用途：
@@ -687,7 +699,7 @@ index = (shuffle_start + shuffle_pos * shuffle_step) % track_count
 
 当前主线使用 **V3 catalog**：
 
-- 启动优先加载 `/System/music_index_v3.bin`
+- 启动优先加载 `/System/library/music_index_v3.bin`
 - 失败则重扫 `/Music`
 - 扫描结果重建并保存回 V3 索引
 
@@ -841,8 +853,8 @@ storage_unmount()
 NAS 歌曲音频数据来自 HTTP，但播放列表和 base url 来自 TF 卡：
 
 ```text
-/System/net_music_base.txt
-/System/net_music.txt
+/System/config/net_music_base.txt
+/System/config/net_music_sources.txt
 ```
 
 因此 TF 卡拔出后，NAS 歌曲当前流可能还能继续播放一段时间，但后续选歌、自动下一首、列表分页都依赖 TF 卡列表文件。
@@ -856,8 +868,8 @@ NAS 歌曲音频数据来自 HTTP，但播放列表和 base url 来自 TF 卡：
 
 TF 插回后：
 
-* 重新加载 `/System/net_music_base.txt`
-* 重新扫描 `/System/net_music.txt`
+* 重新加载 `/System/config/net_music_base.txt`
+* 按当前曲库源重新下载 NAS `net_music.txt`
 * 重建 offset 索引
 
 ### 正常失败码说明
@@ -932,7 +944,7 @@ HSPI Does not have default pins on ESP32S3
 ### NAS 歌曲列表内存策略
 
 NAS 歌曲列表不全量加载标题和 URL。  
-启动时只扫描 `/System/net_music.txt`，记录每一条有效记录的文件偏移：
+进入 NAS 列表时把远端 `net_music.txt` 下载到 PSRAM，并记录每一条有效记录的内存偏移：
 
 ```text
 offsets[0] = 第 1 行起始位置
@@ -1067,7 +1079,7 @@ pio device monitor
 ### NAS 歌曲索引加载
 
 ```text
-[NETMUSIC] catalog loaded tracks=1339 offsets=1339 base=http://192.168.1.105:8080/music/ path=/System/net_music.txt
+[网络歌曲] 列表已加载：来源=音乐 数量=1327 内存=PSRAM
 [BOOT] Net music catalog loaded: 1339 tracks
 ```
 
@@ -1152,7 +1164,7 @@ pio device monitor
 
 - 网络电台播放中插卡时，延迟加载本地 `music_index_v3.bin`，降低卡顿
 - 为网络电台增加独立 radio snapshot
-- 完善 `/System/default_cover.jpg` 与内置 NO COVER 兜底逻辑
+- 完善 `/System/assets/default_cover.jpg` 与内置 NO COVER 兜底逻辑
 - 降低无卡状态下周期 mount 的日志频率
 - 给 WiFi 默认策略增加配置项：开机开启 / 默认关闭 / 自动超时关闭
 - 给 NAS 歌曲增加时长字段，建议由 PC / NAS 侧脚本预生成，不在 ESP32 上逐首计算

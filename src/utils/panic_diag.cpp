@@ -8,6 +8,7 @@
 
 #include "storage/storage.h"
 #include "storage/storage_io.h"
+#include "storage/system_paths.h"
 #include "utils/log.h"
 
 #include "esp_err.h"
@@ -209,7 +210,8 @@ bool panic_diag_flush_to_sd(void)
         return false;
     }
 
-    sd.mkdir("/System");
+    sd.mkdir(SystemPaths::kRoot);
+    sd.mkdir(SystemPaths::kCrashDir);
 
     const esp_reset_reason_t reset_reason = esp_reset_reason();
     const bool abnormal = is_abnormal_reset(reset_reason);
@@ -238,8 +240,8 @@ bool panic_diag_flush_to_sd(void)
     }
 
     const uint32_t seq = next_panic_sequence();
-    snprintf(coredump_path, sizeof(coredump_path), "/System/coredump_%08lX.bin", (unsigned long)seq);
-    snprintf(panic_path, sizeof(panic_path), "/System/panic_%08lX.txt", (unsigned long)seq);
+    snprintf(coredump_path, sizeof(coredump_path), "/System/crash/coredump_%08lX.bin", (unsigned long)seq);
+    snprintf(panic_path, sizeof(panic_path), "/System/crash/panic_%08lX.txt", (unsigned long)seq);
 
 #if PANIC_DIAG_CORE_DUMP_TO_FLASH
     if (coredump_check == ESP_OK && coredump_size > 0) {
@@ -274,7 +276,7 @@ bool panic_diag_flush_to_sd(void)
         LOGE("[崩溃诊断] 写 panic 明细失败: %s", panic_path);
     }
 
-    File32 sum = sd.open("/System/panic_summary.txt", O_WRONLY | O_CREAT | O_APPEND);
+    File32 sum = sd.open(SystemPaths::kPanicSummary, O_WRONLY | O_CREAT | O_APPEND);
     if (sum) {
         write_summary(sum,
                       reset_reason,

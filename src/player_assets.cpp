@@ -15,8 +15,9 @@
 #include "audio/audio.h"
 #include "lyrics/lyrics.h"
 #include "utils/log.h"
+#include "storage/system_paths.h"
 
-static constexpr const char* kDefaultCoverPath = "/System/default_cover.jpg";
+static constexpr const char* kDefaultCoverPath = SystemPaths::kDefaultCover;
 
 #ifndef PLAYER_ASSET_TASK_PRIO // 播放器资源任务优先级
 #define PLAYER_ASSET_TASK_PRIO 1 // 播放器资源任务优先级，1 表示普通任务，0 表示实时任务
