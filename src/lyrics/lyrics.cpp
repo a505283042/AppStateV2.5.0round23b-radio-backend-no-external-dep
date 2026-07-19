@@ -1,4 +1,5 @@
 #include "lyrics/lyrics.h"
+#include "lyrics/lyrics_text_encoding.h"
 
 #ifndef LYRICS_SCROLL_POINTER_DEBUG_LOG
 #define LYRICS_SCROLL_POINTER_DEBUG_LOG 0
@@ -140,6 +141,38 @@ bool LyricsParser::parseOwnedBuffer(char* content, size_t len) {
     if (!content || len == 0) {
         if (content) free(content);
         return false;
+    }
+
+    const uint32_t encoding_t0 = millis();
+    LyricsTextNormalizeResult encoding_result{};
+    if (!lyrics_text_normalize_owned_buffer(
+            &content,
+            &len,
+            &encoding_result)) {
+        LOGW("[歌词] 编码转换失败：编码=%s 原始=%uB 目标=%uB",
+             lyrics_text_encoding_name(encoding_result.encoding),
+             (unsigned)encoding_result.source_bytes,
+             (unsigned)encoding_result.utf8_bytes);
+        free(content);
+        return false;
+    }
+
+    const uint32_t encoding_elapsed_ms = millis() - encoding_t0;
+    if (encoding_result.encoding == LyricsTextEncoding::Gb18030) {
+        LOGI("[歌词] 编码检测：GB18030 原始=%uB UTF8=%uB 替换=%u 耗时=%lums PSRAM=%d",
+             (unsigned)encoding_result.source_bytes,
+             (unsigned)encoding_result.utf8_bytes,
+             (unsigned)encoding_result.replacement_count,
+             (unsigned long)encoding_elapsed_ms,
+             encoding_result.buffer_in_psram ? 1 : 0);
+    } else if (encoding_result.stripped_bom) {
+        LOGD("[歌词] 编码检测：UTF-8 BOM 已移除 原始=%uB UTF8=%uB",
+             (unsigned)encoding_result.source_bytes,
+             (unsigned)encoding_result.utf8_bytes);
+    } else {
+        LOGD("[歌词] 编码检测：UTF-8 字节=%u PSRAM=%d",
+             (unsigned)encoding_result.utf8_bytes,
+             encoding_result.buffer_in_psram ? 1 : 0);
     }
 
     m_text_buf = content;
