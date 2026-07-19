@@ -845,6 +845,15 @@ bool player_control_try_auto_next(bool entered, bool started)
 
     const PlayerSourceState source = player_source_get();
 
+    AudioSeekStateSnapshot seek_state{};
+    if (audio_service_get_seek_state(&seek_state) && seek_state.seeking) {
+        // 跳转会清空旧 PCM 并可能重开 HTTP Range，此时进度短暂停止不是 EOF。
+        if (source.type == PlayerSourceType::NET_TRACK && source.net_track_idx >= 0) {
+            control_reset_net_track_eof_watch(source.net_track_idx);
+        }
+        return false;
+    }
+
     // NAS FLAC 由 HTTP Range 音源自行执行断流续传。续传期间保持当前歌曲，
     // 禁止播放器层因为 WiFi 短暂断开而提前 stop，也禁止误判为自然播放结束。
     if (source.type == PlayerSourceType::NET_TRACK &&

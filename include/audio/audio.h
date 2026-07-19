@@ -36,6 +36,8 @@ bool audio_play_stream_mp3_from_offset(const char* url, uint32_t start_offset, u
 bool audio_play_stream_flac(const char* url, uint32_t operation_id); // HTTP Range FLAC 文件
 void audio_loop();
 bool audio_is_playing();
+bool audio_is_seekable();
+bool audio_seek_ms(uint32_t target_ms, uint32_t* out_actual_ms);
 AudioPlaybackEndState audio_get_last_end_state();
 const char* audio_playback_end_reason_label(AudioPlaybackEndReason reason);
 

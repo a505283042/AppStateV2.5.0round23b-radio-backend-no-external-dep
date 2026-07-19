@@ -13,6 +13,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "utils/log.h"
@@ -31,6 +32,12 @@ static uint32_t s_operation_generation = 1;
 static uint32_t s_active_operation_id = 0;
 static uint32_t s_stream_opened_ms = 0;
 static uint32_t s_last_body_data_ms = 0;
+static uint32_t s_total_size = 0;
+static uint32_t s_current_offset = 0;
+static uint32_t s_audio_data_offset = 0;
+static uint32_t s_header_content_length = 0;
+static uint32_t s_header_content_range_total = 0;
+static bool s_header_accept_ranges = false;
 static char s_last_error[64] = {0};
 
 static void clear_source_error()
@@ -289,6 +296,9 @@ static String make_redirect_url(const ParsedUrl& current, const String& location
 
 static bool read_response_header(const ParsedUrl& current, int& status_code, String& location, uint32_t operation_id)
 {
+  s_header_content_length = 0;
+  s_header_content_range_total = 0;
+  s_header_accept_ranges = false;
   const uint32_t header_started_ms = millis();
   String line;
 
@@ -332,6 +342,18 @@ static bool read_response_header(const ParsedUrl& current, int& status_code, Str
 
       if (key == "location") {
         location = make_redirect_url(current, value);
+      } else if (key == "content-length") {
+        const uint64_t parsed = strtoull(value.c_str(), nullptr, 10);
+        if (parsed <= UINT32_MAX) s_header_content_length = static_cast<uint32_t>(parsed);
+      } else if (key == "content-range") {
+        const int slash = value.lastIndexOf('/');
+        if (slash >= 0 && slash + 1 < value.length()) {
+          const uint64_t parsed = strtoull(value.substring(slash + 1).c_str(), nullptr, 10);
+          if (parsed <= UINT32_MAX) s_header_content_range_total = static_cast<uint32_t>(parsed);
+        }
+      } else if (key == "accept-ranges") {
+        value.toLowerCase();
+        s_header_accept_ranges = value.indexOf("bytes") >= 0;
       } else if (key == "content-type") {
         LOGD("[电台] HTTP 内容类型：%s", value.c_str());
       } else if (key == "icy-name") {
@@ -467,7 +489,55 @@ static bool open_http_stream_once(const char* url, uint32_t start_offset, uint32
     return false;
   }
 
+  if (status_code == 206 && s_header_content_range_total > 0) {
+    s_total_size = s_header_content_range_total;
+  } else if (status_code == 200 && s_header_content_length > 0) {
+    s_total_size = s_header_content_length;
+  }
+  s_current_offset = start_offset;
+
   clear_source_error();
+  return true;
+}
+
+static bool reopen_http_at_offset(uint32_t absolute_offset)
+{
+  if (!s_open || s_active_operation_id == 0 || !operation_is_current(s_active_operation_id)) {
+    set_source_error("cancelled");
+    return false;
+  }
+  if (s_total_size == 0 || absolute_offset >= s_total_size) {
+    set_source_error("seek_out_of_range");
+    return false;
+  }
+
+  const uint32_t operation_id = s_active_operation_id;
+  String current_url = s_url;
+  bool ok = false;
+  for (int attempt = 0; attempt <= kMaxRedirects; ++attempt) {
+    String redirect_url;
+    ok = open_http_stream_once(current_url.c_str(), absolute_offset, operation_id, redirect_url);
+    if (ok) break;
+    if (redirect_url.length() == 0) break;
+    current_url = redirect_url;
+  }
+  if (!ok) return false;
+
+  s_url = current_url;
+  s_open = true;
+  s_active_operation_id = operation_id;
+  s_stream_opened_ms = millis();
+  const int available = g_client.available();
+  s_last_body_data_ms = available > 0 ? s_stream_opened_ms : 0;
+  publish_source_snapshot(true,
+                          g_client.connected() || available > 0,
+                          available <= 0,
+                          false,
+                          available > 0 ? static_cast<uint32_t>(available) : 0,
+                          available > 0);
+  LOGI("[NAS MP3] Range seek 已打开：offset=%lu total=%lu",
+       (unsigned long)absolute_offset,
+       (unsigned long)s_total_size);
   return true;
 }
 
@@ -547,6 +617,7 @@ static int http_source_read(void* ctx, uint8_t* dst, size_t bytes)
 
   const int n = client->read(dst, want);
   if (n > 0) {
+    s_current_offset += static_cast<uint32_t>(n);
     s_last_body_data_ms = millis();
     const int remaining = avail > n ? (avail - n) : 0;
     const bool transport_connected = client->connected() || remaining > 0;
@@ -601,6 +672,24 @@ static int http_source_read(void* ctx, uint8_t* dst, size_t bytes)
   return AUDIO_MP3_SOURCE_WOULD_BLOCK;
 }
 
+static bool http_source_seek(void* ctx, uint32_t absolute_offset)
+{
+  (void)ctx;
+  return reopen_http_at_offset(absolute_offset);
+}
+
+static uint32_t http_source_tell(void* ctx)
+{
+  (void)ctx;
+  return s_current_offset;
+}
+
+static uint32_t http_source_size(void* ctx)
+{
+  (void)ctx;
+  return s_total_size;
+}
+
 static void http_source_close_impl(void* ctx)
 {
   auto* client = static_cast<WiFiClient*>(ctx);
@@ -611,6 +700,9 @@ static void http_source_close_impl(void* ctx)
   s_active_operation_id = 0;
   s_stream_opened_ms = 0;
   s_last_body_data_ms = 0;
+  s_total_size = 0;
+  s_current_offset = 0;
+  s_audio_data_offset = 0;
   s_url = String();
   publish_source_snapshot(false, false, false, false, 0);
 }
@@ -705,6 +797,8 @@ bool audio_mp3_audiotools_source_open_from_offset(const char* url, uint32_t star
 {
   audio_mp3_audiotools_source_close();
   clear_source_error();
+  s_total_size = 0;
+  s_current_offset = start_offset;
   publish_source_snapshot(false, false, true, false, 0);
 
   if (!operation_is_current(operation_id)) {
@@ -759,6 +853,8 @@ bool audio_mp3_audiotools_source_open_from_offset(const char* url, uint32_t star
   s_open = true;
   s_active_operation_id = operation_id;
   s_url = current_url;
+  s_audio_data_offset = start_offset;
+  s_current_offset = start_offset;
   s_stream_opened_ms = millis();
 
   const int available = g_client.available();
@@ -778,11 +874,19 @@ bool audio_mp3_audiotools_source_open_from_offset(const char* url, uint32_t star
   out_source = AudioMp3Source{};
   out_source.ctx = &g_client;
   out_source.read = http_source_read;
+  out_source.seek = http_source_seek;
+  out_source.tell = http_source_tell;
+  out_source.size = http_source_size;
   out_source.close = http_source_close_impl;
   out_source.debug_name = s_url.c_str();
   out_source.is_stream = true;
+  out_source.audio_data_offset = s_audio_data_offset;
 
-  LOGD("[电台] HTTP 流打开成功：%s offset=%lu", s_url.c_str(), (unsigned long)start_offset);
+  LOGD("[电台] HTTP 流打开成功：%s offset=%lu total=%lu ranges=%d",
+       s_url.c_str(),
+       (unsigned long)start_offset,
+       (unsigned long)s_total_size,
+       s_header_accept_ranges ? 1 : 0);
   return true;
 }
 
@@ -800,6 +904,9 @@ void audio_mp3_audiotools_source_close()
   s_active_operation_id = 0;
   s_stream_opened_ms = 0;
   s_last_body_data_ms = 0;
+  s_total_size = 0;
+  s_current_offset = 0;
+  s_audio_data_offset = 0;
   s_url = String();
   publish_source_snapshot(false, false, false, false, 0);
 }

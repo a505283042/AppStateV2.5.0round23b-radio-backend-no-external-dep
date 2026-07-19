@@ -139,6 +139,12 @@ static void web_snapshot_reset_for_capture(WebPlayerSnapshot& snap) {
   snap.album.remove(0);
   snap.play_ms = 0;
   snap.total_ms = 0;
+  snap.seekable = false;
+  snap.seeking = false;
+  snap.seek_target_ms = 0;
+  snap.seek_actual_ms = 0;
+  snap.seek_result = "idle";
+  snap.seek_error.remove(0);
   snap.volume = 0;
   snap.mode = "unknown";
   snap.mode_label = "未知";
@@ -209,6 +215,15 @@ void web_snapshot_capture_into(WebPlayerSnapshot& snap) {
   snap.is_paused = audio_service_is_paused();
   snap.play_ms = audio_get_play_ms();
   snap.total_ms = audio_get_total_ms();
+  AudioSeekStateSnapshot seek_state{};
+  if (audio_service_get_seek_state(&seek_state)) {
+    snap.seekable = seek_state.seekable;
+    snap.seeking = seek_state.seeking;
+    snap.seek_target_ms = seek_state.target_ms;
+    snap.seek_actual_ms = seek_state.actual_ms;
+    snap.seek_result = audio_seek_result_label(seek_state.result);
+    snap.seek_error = seek_state.error;
+  }
   snap.volume = audio_output_route_get_user_volume();
   const play_mode_t play_mode = app_play_mode_get();
   snap.mode = web_mode_to_key(play_mode);
@@ -324,6 +339,8 @@ void web_snapshot_capture_into(WebPlayerSnapshot& snap) {
     snap.album = source.radio_region;
     snap.play_ms = 0;
     snap.total_ms = 0;
+    snap.seekable = false;
+    snap.seeking = false;
     snap.has_lyrics = false;
     snap.lyrics_loading = false;
     snap.current_lyric = "";

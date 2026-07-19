@@ -5,6 +5,7 @@
 #include <SdFat.h>
 #include <vector>
 #include <cstring>
+#include <cstdlib>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -1565,6 +1566,12 @@ static void web_handle_status() {
 
   json.field_uint("play_ms", snap.play_ms);
   json.field_uint("total_ms", snap.total_ms);
+  json.field_bool("seekable", snap.seekable);
+  json.field_bool("seeking", snap.seeking);
+  json.field_uint("seek_target_ms", snap.seek_target_ms);
+  json.field_uint("seek_actual_ms", snap.seek_actual_ms);
+  json.field_string("seek_result", snap.seek_result);
+  json.field_string("seek_error", snap.seek_error);
   const WebUiControlSnapshot ui_control =
       web_ui_control_snapshot_get();
 
@@ -2584,6 +2591,53 @@ static void web_handle_netmusic_return_local() {
   web_send_json_ok_simple("已返回本地播放");
 }
 
+static bool web_parse_seek_ms_arg(uint32_t& out_ms)
+{
+  String value = s_server.arg("ms");
+  if (value.length() == 0) value = s_server.arg("value");
+  value.trim();
+  if (value.length() == 0) return false;
+
+  char* end = nullptr;
+  const uint64_t parsed = strtoull(value.c_str(), &end, 10);
+  if (!end || *end != '\0' || parsed > UINT32_MAX) return false;
+  out_ms = static_cast<uint32_t>(parsed);
+  return true;
+}
+
+static void web_handle_seek()
+{
+  if (!web_require_player_state()) return;
+  if (player_source_type_get() == PlayerSourceType::NET_RADIO) {
+    web_send_json_err("网络电台不支持进度跳转");
+    return;
+  }
+
+  uint32_t target_ms = 0;
+  if (!web_parse_seek_ms_arg(target_ms)) {
+    web_send_json_err("缺少或无效的跳转参数 ms");
+    return;
+  }
+  if (!audio_service_is_seekable() || audio_get_total_ms() == 0) {
+    web_send_json_err("当前音源暂不支持进度跳转");
+    return;
+  }
+
+  uint32_t request_id = 0;
+  if (!audio_service_seek_ms_async(target_ms, &request_id)) {
+    web_send_json_err("音频任务繁忙，跳转请求未入队", 503);
+    return;
+  }
+
+  web_send_no_cache_headers();
+  String json = "{\"ok\":true,\"message\":\"seek_started\",\"request_id\":";
+  json += request_id;
+  json += ",\"target_ms\":";
+  json += target_ms;
+  json += "}";
+  s_server.send(200, "application/json; charset=utf-8", json);
+}
+
 static void web_handle_playpause() { if (!web_require_player_state()) return; player_toggle_play(PlayerToggleTrigger::Web); web_send_json_ok_simple(); }
 static void web_handle_next() { if (!web_require_player_state()) return; player_next_track(); web_send_json_ok_simple(); }
 static void web_handle_prev() { if (!web_require_player_state()) return; player_prev_track(); web_send_json_ok_simple(); }
@@ -2760,6 +2814,7 @@ static void web_setup_routes() {
   s_server.on("/api/netmusic/mode", HTTP_POST, web_handle_netmusic_mode);
   s_server.on("/api/netmusic/return-local", HTTP_POST, web_handle_netmusic_return_local);
   s_server.on("/api/playpause", HTTP_POST, web_handle_playpause);
+  s_server.on("/api/seek", HTTP_POST, web_handle_seek);
   s_server.on("/api/next", HTTP_POST, web_handle_next);
   s_server.on("/api/prev", HTTP_POST, web_handle_prev);
   s_server.on("/api/mode/toggle", HTTP_POST, web_handle_mode_toggle);

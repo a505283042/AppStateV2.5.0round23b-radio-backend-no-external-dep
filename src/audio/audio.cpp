@@ -553,6 +553,40 @@ void audio_loop()
 
 bool audio_is_playing() { return g_dec != DEC_NONE; }
 
+bool audio_is_seekable()
+{
+  if (g_dec == DEC_FLAC) return audio_flac_is_seekable();
+  if (g_dec == DEC_MP3) return audio_mp3_is_seekable() && audio_get_total_ms() > 0;
+  return false;
+}
+
+bool audio_seek_ms(uint32_t target_ms, uint32_t* out_actual_ms)
+{
+  if (out_actual_ms) *out_actual_ms = 0;
+  const uint32_t total_ms = audio_get_total_ms();
+  if (total_ms == 0 || g_dec == DEC_NONE) return false;
+
+  if (target_ms >= total_ms) {
+    target_ms = total_ms > 500 ? total_ms - 500 : 0;
+  }
+
+  uint32_t actual_ms = 0;
+  bool ok = false;
+  if (g_dec == DEC_FLAC) {
+    ok = audio_flac_seek_ms(target_ms, &actual_ms);
+  } else if (g_dec == DEC_MP3) {
+    ok = audio_mp3_seek_ms(target_ms, total_ms, &actual_ms);
+  }
+
+  if (!ok) return false;
+
+  audio_i2s_zero_dma_buffer();
+  audio_i2s_set_play_ms(actual_ms);
+  audio_clear_end_state_for_new_play();
+  if (out_actual_ms) *out_actual_ms = actual_ms;
+  return true;
+}
+
 // ===================== 软件音量（0~100%） =====================
 void audio_set_volume(uint8_t percent)
 {

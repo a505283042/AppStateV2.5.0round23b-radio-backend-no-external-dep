@@ -396,6 +396,58 @@ uint32_t audio_flac_get_total_ms()
   return s_total_ms;
 }
 
+bool audio_flac_is_seekable()
+{
+  return g_playing && g_flac && g_sr > 0 && g_flac->totalPCMFrameCount > 0;
+}
+
+bool audio_flac_seek_ms(uint32_t target_ms, uint32_t* out_actual_ms)
+{
+  if (out_actual_ms) *out_actual_ms = 0;
+  if (!audio_flac_is_seekable()) {
+    set_flac_error("seek_not_supported");
+    return false;
+  }
+
+  const uint64_t total_frames = g_flac->totalPCMFrameCount;
+  uint64_t target_frame = (static_cast<uint64_t>(target_ms) *
+                           static_cast<uint32_t>(g_sr)) / 1000ULL;
+  if (target_frame >= total_frames) {
+    target_frame = total_frames > 0 ? total_frames - 1 : 0;
+  }
+
+  // seek 前必须丢弃旧位置的 PCM，包括启动预填充和 I2S pending。
+  s_pending_off = 0;
+  s_pending_frames = 0;
+  s_pending_pcm = nullptr;
+  clear_prime_buffer();
+
+  if (drflac_seek_to_pcm_frame(g_flac, target_frame) == DRFLAC_FALSE) {
+    const char* source_error = source_last_error();
+    set_flac_error(source_error && *source_error
+        ? source_error
+        : "flac_seek_failed");
+    LOGW("[FLAC] 跳转失败：目标=%lums frame=%llu 来源=%s 错误=%s",
+         (unsigned long)target_ms,
+         (unsigned long long)target_frame,
+         s_source_kind == FlacSourceKind::HttpRange ? "NAS" : "本地",
+         s_last_error);
+    return false;
+  }
+
+  s_end_reason = AudioPlaybackEndReason::None;
+  clear_flac_error();
+  const uint32_t actual_ms = static_cast<uint32_t>(
+      (target_frame * 1000ULL) / static_cast<uint32_t>(g_sr));
+  if (out_actual_ms) *out_actual_ms = actual_ms;
+  LOGI("[FLAC] 跳转成功：目标=%lums 实际=%lums frame=%llu 来源=%s",
+       (unsigned long)target_ms,
+       (unsigned long)actual_ms,
+       (unsigned long long)target_frame,
+       s_source_kind == FlacSourceKind::HttpRange ? "NAS" : "本地");
+  return true;
+}
+
 const char* audio_flac_get_last_error()
 {
   if (s_last_error[0]) return s_last_error;

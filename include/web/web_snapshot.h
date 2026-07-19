@@ -21,6 +21,12 @@ struct WebPlayerSnapshot {
   String album;
   uint32_t play_ms = 0;
   uint32_t total_ms = 0;
+  bool seekable = false;
+  bool seeking = false;
+  uint32_t seek_target_ms = 0;
+  uint32_t seek_actual_ms = 0;
+  const char* seek_result = "idle";
+  String seek_error;
   uint8_t volume = 0;
   const char* mode = "unknown";            // 静态模式 key
   const char* mode_label = "未知";          // 静态模式文案

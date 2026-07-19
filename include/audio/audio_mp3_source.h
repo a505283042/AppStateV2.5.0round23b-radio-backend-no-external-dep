@@ -22,8 +22,14 @@ struct AudioMp3Source {
   // -2  : 错误
   int (*read)(void* ctx, uint8_t* dst, size_t bytes) = nullptr;
 
+  // 可寻址文件源提供以下回调；直播电台可保持为空。
+  bool (*seek)(void* ctx, uint32_t absolute_offset) = nullptr;
+  uint32_t (*tell)(void* ctx) = nullptr;
+  uint32_t (*size)(void* ctx) = nullptr;
+
   void (*close)(void* ctx) = nullptr;
 
   const char* debug_name = nullptr;
   bool is_stream = false;
+  uint32_t audio_data_offset = 0;
 };

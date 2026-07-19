@@ -42,6 +42,31 @@ struct AudioNetworkStateSnapshot {
   char error[96] = {0};
 };
 
+
+enum class AudioSeekResult : uint8_t {
+  Idle = 0,
+  InProgress,
+  Ok,
+  Unsupported,
+  InvalidTarget,
+  Failed,
+  Cancelled,
+};
+
+struct AudioSeekStateSnapshot {
+  bool seekable = false;
+  bool seeking = false;
+  uint32_t request_id = 0;
+  uint32_t target_ms = 0;
+  uint32_t actual_ms = 0;
+  uint32_t completed_at_ms = 0;
+  uint32_t revision = 0;
+  AudioSeekResult result = AudioSeekResult::Idle;
+  char error[64] = {0};
+};
+
+const char* audio_seek_result_label(AudioSeekResult result);
+
 // 启动音频专用任务（双核）：AudioTask 会独占 audio_* 接口并持续调用 audio_loop()
 void audio_service_start(void);
 
@@ -69,6 +94,12 @@ bool audio_service_get_network_state(AudioNetworkStateSnapshot* out_snapshot);
 bool audio_service_pause(bool wait = true);
 bool audio_service_resume(bool wait = true);
 bool audio_service_is_paused(void);
+
+// 统一进度跳转：本地 MP3/FLAC 与 NAS MP3/FLAC 均走 AudioTask 串行执行。
+bool audio_service_seek_ms(uint32_t target_ms, bool wait = true);
+bool audio_service_seek_ms_async(uint32_t target_ms, uint32_t* out_request_id = nullptr);
+bool audio_service_get_seek_state(AudioSeekStateSnapshot* out_snapshot);
+bool audio_service_is_seekable(void);
 
 // 音频输出硬件控制统一由 AudioTask 执行。
 bool audio_service_set_output_route(AudioOutputRoute route, bool wait = true);

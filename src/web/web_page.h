@@ -99,6 +99,8 @@ static const char WEBCTRL_INDEX_HTML[] PROGMEM = R"HTML(
     .volrow{display:flex;align-items:center;gap:12px;margin-top:8px}
     .volrow input[type=range]{flex:1}
     input[type=range]{accent-color:#79c0ff}
+    .seekbar{width:100%;margin-top:14px;cursor:pointer}
+    .seekbar:disabled{cursor:not-allowed;opacity:.45}
     .nettrack-only{display:none}
     body.nettrack-mode .nettrack-only{display:block}
     body.nettrack-mode .hide-when-nettrack{display:none!important}
@@ -139,7 +141,7 @@ static const char WEBCTRL_INDEX_HTML[] PROGMEM = R"HTML(
           <div class="title" id="title">-</div>
           <div class="sub" id="artist">-</div>
           <div class="sub" id="album">-</div>
-          <div class="bar"><div class="fill" id="progressFill"></div></div>
+          <input id="seekSlider" class="seekbar" type="range" min="0" max="0" value="0" step="250" disabled aria-label="播放进度">
           <div class="status" style="margin-top:8px">
             <div class="small" id="time">0:00 / 0:00</div>
             <div class="small" id="playState">-</div>
@@ -229,6 +231,9 @@ let pagePausedByVisibility = false;
 const LOCK_STORAGE_KEY = 'webctrl_page_locked';
 let pageLocked = false;
 let volumeLocked = true;
+let seekDragging = false;
+let seekOptimisticMs = null;
+let seekOptimisticUntil = 0;
 
 function getLockTargets(){
   return [
@@ -242,6 +247,7 @@ function getLockTargets(){
     document.getElementById('scanBtn'),
     document.getElementById('radioBackBtn'),
     document.getElementById('wifiInfoBtn'),
+    document.getElementById('seekSlider'),
     
     ...document.querySelectorAll('button.secondary[onclick="savePlayerState()"]')
   ].filter(Boolean);
@@ -646,8 +652,28 @@ function render(j){
   document.getElementById('volume').textContent=`${j.volume ?? 0}%`;
   document.getElementById('displayPos').textContent=(j.display_pos >=0 && j.display_total>0)?`${j.display_pos+1} / ${j.display_total}`:'-';
   document.getElementById('appState').textContent=`${j.app_state_label||j.app_state||'-'} · ${j.view_label||j.view||'-'}`;
-  document.getElementById('time').textContent=`${fmt(j.play_ms)} / ${fmt(j.total_ms)}`;
-  document.getElementById('playState').textContent=j.rescanning ? (j.can_cancel_scan ? '扫描中（可取消）' : '扫描中（取消中）') : (j.is_paused ? '已暂停' : (j.is_playing ? '播放中' : '已停止'));
+  const seekSlider=document.getElementById('seekSlider');
+  const totalMs=Math.max(0,Number(j.total_ms)||0);
+  if(j.seek_result==='ok' && seekOptimisticMs!==null &&
+     Math.abs((Number(j.play_ms)||0)-seekOptimisticMs)<3000){
+    seekOptimisticMs=null;
+    seekOptimisticUntil=0;
+  }
+  const optimisticActive=seekOptimisticMs!==null && Date.now()<seekOptimisticUntil;
+  const displayPlayMs=seekDragging || optimisticActive
+    ? Number(seekOptimisticMs||0)
+    : (j.seeking ? Number(j.seek_target_ms||j.play_ms||0) : Number(j.play_ms||0));
+  document.getElementById('time').textContent=`${fmt(displayPlayMs)} / ${fmt(totalMs)}`;
+  document.getElementById('playState').textContent=j.rescanning
+    ? (j.can_cancel_scan ? '扫描中（可取消）' : '扫描中（取消中）')
+    : (j.seeking ? '跳转中...' : (j.is_paused ? '已暂停' : (j.is_playing ? '播放中' : '已停止')));
+  if(seekSlider){
+    seekSlider.max=String(totalMs);
+    if(!seekDragging){ seekSlider.value=String(Math.max(0,Math.min(totalMs,displayPlayMs))); }
+    const isRadio=(j.source_type==='radio');
+    seekSlider.disabled=pageLocked || j.rescanning || j.seeking || isRadio || !j.seekable || totalMs<=0;
+    seekSlider.title=seekSlider.disabled ? '当前音源不可拖动进度' : '拖动后松开以跳转';
+  }
     if(j.show_wifi_info === false){
     document.getElementById('net').textContent = `${j.net_mode||'-'} · WiFi信息已隐藏`;
   }else{
@@ -657,7 +683,6 @@ function render(j){
   if(j.show_wifi_info !== undefined){
     updateWifiInfoButton(!!j.show_wifi_info);
   }
-  const total=Math.max(1,j.total_ms||0); const pct=Math.max(0,Math.min(100,Math.floor(((j.play_ms||0)*100)/total))); document.getElementById('progressFill').style.width=`${pct}%`;
   document.getElementById('scanBtn').textContent=j.scan_action_label || (j.rescanning ? '取消重扫' : '开始重扫');
   updateLyricsFromState(j);
   const slider=document.getElementById('volumeSlider'); if(document.activeElement !== slider){ slider.value=Number(j.volume ?? 0); }
@@ -738,6 +763,33 @@ async function savePlayerState(){
   }
   scheduleNext(500);
 }
+async function submitSeek(targetMs){
+  if(pageLocked || !lastStatus || !lastStatus.seekable || lastStatus.source_type==='radio') return;
+  const total=Math.max(0,Number(lastStatus.total_ms)||0);
+  if(total<=0) return;
+  const target=Math.max(0,Math.min(total,Math.round(Number(targetMs)||0)));
+  seekOptimisticMs=target;
+  seekOptimisticUntil=Date.now()+4000;
+  try{
+    const r=await fetch('/api/seek',{
+      method:'POST',
+      headers:{'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8'},
+      body:`ms=${encodeURIComponent(target)}`
+    });
+    const j=await r.json();
+    if(!j || !j.ok){
+      seekOptimisticMs=null;
+      seekOptimisticUntil=0;
+      alert((j && (j.message || j.error)) || '进度跳转失败');
+    }
+  }catch(e){
+    seekOptimisticMs=null;
+    seekOptimisticUntil=0;
+    alert('进度跳转请求失败');
+  }
+  scheduleNext(250);
+}
+
 function sendVolumeDebounced(v){
   if(pageLocked || volumeLocked) return;
   if(volumeTimer) clearTimeout(volumeTimer);
@@ -752,6 +804,24 @@ function sendVolumeDebounced(v){
     scheduleNext(500);
   },80);
 }
+const seekSlider=document.getElementById('seekSlider');
+seekSlider.addEventListener('pointerdown',()=>{ if(!seekSlider.disabled) seekDragging=true; });
+seekSlider.addEventListener('input',(e)=>{
+  if(e.target.disabled) return;
+  seekDragging=true;
+  seekOptimisticMs=Number(e.target.value||0);
+  seekOptimisticUntil=Date.now()+4000;
+  const total=lastStatus ? Number(lastStatus.total_ms||0) : Number(e.target.max||0);
+  document.getElementById('time').textContent=`${fmt(seekOptimisticMs)} / ${fmt(total)}`;
+});
+seekSlider.addEventListener('change',async(e)=>{
+  if(e.target.disabled) return;
+  const target=Number(e.target.value||0);
+  seekDragging=false;
+  await submitSeek(target);
+});
+seekSlider.addEventListener('pointercancel',()=>{ seekDragging=false; });
+
 const slider=document.getElementById('volumeSlider');
 slider.addEventListener('input',(e)=>{
   if(pageLocked || volumeLocked){

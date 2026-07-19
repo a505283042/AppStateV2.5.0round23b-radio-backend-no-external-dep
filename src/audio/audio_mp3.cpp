@@ -425,6 +425,117 @@ bool audio_mp3_start_source(const AudioMp3Source& source, const char* debug_name
   return true;
 }
 
+
+bool audio_mp3_is_seekable()
+{
+  return g_playing && g_source_active &&
+      g_source.seek && g_source.tell && g_source.size &&
+      g_source.size(g_source.ctx) > g_source.audio_data_offset;
+}
+
+static bool prepare_after_seek(uint32_t* out_source_offset)
+{
+  const size_t prefill_target = g_source_is_stream
+      ? kMp3StreamStartupPrefillBytes
+      : g_inbuf_capacity;
+  const uint32_t prefill_timeout = g_source_is_stream
+      ? kMp3StreamStartupPrefillTimeoutMs
+      : 0;
+
+  reset_decoder_state();
+  if (!fill_input_buffer(prefill_target, prefill_timeout) || g_inbuf_filled <= 0) {
+    return false;
+  }
+  if (!prepare_stream_first_frame()) {
+    return false;
+  }
+
+  g_playing = true;
+  s_mp3_active = true;
+  s_end_reason = AudioPlaybackEndReason::None;
+  set_last_error(nullptr);
+  if (out_source_offset && g_source.tell) {
+    const uint32_t tell = g_source.tell(g_source.ctx);
+    *out_source_offset = tell >= (uint32_t)g_inbuf_filled
+        ? tell - (uint32_t)g_inbuf_filled
+        : 0;
+  }
+  return true;
+}
+
+bool audio_mp3_seek_ms(uint32_t target_ms, uint32_t total_ms, uint32_t* out_actual_ms)
+{
+  if (out_actual_ms) *out_actual_ms = 0;
+  if (!audio_mp3_is_seekable() || total_ms == 0) {
+    set_last_error("seek_not_supported");
+    return false;
+  }
+
+  const uint32_t source_size = g_source.size(g_source.ctx);
+  const uint32_t audio_begin = g_source.audio_data_offset < source_size
+      ? g_source.audio_data_offset
+      : 0;
+  const uint32_t audio_bytes = source_size - audio_begin;
+  if (audio_bytes < 4) {
+    set_last_error("seek_source_too_small");
+    return false;
+  }
+
+  if (target_ms > total_ms) target_ms = total_ms;
+  uint64_t scaled = (uint64_t)audio_bytes * (uint64_t)target_ms;
+  uint32_t target_offset = audio_begin + (uint32_t)(scaled / total_ms);
+  if (target_offset >= source_size) target_offset = source_size - 1;
+
+  const uint32_t source_tell = g_source.tell(g_source.ctx);
+  const uint32_t rollback_offset = source_tell >= (uint32_t)g_inbuf_filled
+      ? source_tell - (uint32_t)g_inbuf_filled
+      : audio_begin;
+
+  // 清除旧位置的压缩数据和 PCM，seek 后重新同步第一帧。
+  s_pending_off = 0;
+  s_pending_frames = 0;
+  g_inbuf_filled = 0;
+  g_source_eof = false;
+
+  if (!g_source.seek(g_source.ctx, target_offset)) {
+    if (g_source_is_stream) {
+      set_http_source_error_or("stream_seek_failed");
+    } else {
+      set_last_error("file_seek_failed");
+    }
+    return false;
+  }
+
+  uint32_t synced_offset = target_offset;
+  if (!prepare_after_seek(&synced_offset)) {
+    const String seek_error = s_mp3_last_error;
+    LOGW("[MP3] 跳转后帧同步失败，尝试恢复原位置：target=%lu rollback=%lu 错误=%s",
+         (unsigned long)target_offset,
+         (unsigned long)rollback_offset,
+         seek_error.c_str());
+
+    if (g_source.seek(g_source.ctx, rollback_offset) && prepare_after_seek(nullptr)) {
+      set_last_error(seek_error.length() ? seek_error.c_str() : "seek_frame_sync_failed");
+    } else {
+      g_playing = false;
+      s_mp3_active = false;
+      set_last_error("seek_and_restore_failed");
+    }
+    return false;
+  }
+
+  // CBR 文件通常接近目标位置；无 Xing/VBRI 索引的 VBR 文件属于比例近似。
+  const uint32_t actual_ms = target_ms;
+  if (out_actual_ms) *out_actual_ms = actual_ms;
+  LOGI("[MP3] 跳转成功：目标=%lums 字节=%lu/%lu 同步位置=%lu 来源=%s",
+       (unsigned long)target_ms,
+       (unsigned long)target_offset,
+       (unsigned long)source_size,
+       (unsigned long)synced_offset,
+       g_source_is_stream ? "NAS" : "本地");
+  return true;
+}
+
 bool audio_mp3_is_active() { return s_mp3_active; }
 bool audio_mp3_is_stream_source() { return g_source_is_stream; }
 uint32_t audio_mp3_get_sample_rate() { return s_mp3_sample_rate; }

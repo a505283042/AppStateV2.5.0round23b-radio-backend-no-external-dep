@@ -28,6 +28,16 @@ void audio_i2s_reset_play_pos()
   portEXIT_CRITICAL(&s_pos_mux);
 }
 
+void audio_i2s_set_play_ms(uint32_t play_ms)
+{
+  portENTER_CRITICAL(&s_pos_mux);
+  const int sr = s_sample_rate;
+  s_frames_played = sr > 0
+      ? (static_cast<uint64_t>(play_ms) * static_cast<uint32_t>(sr)) / 1000ULL
+      : 0;
+  portEXIT_CRITICAL(&s_pos_mux);
+}
+
 uint32_t audio_i2s_get_play_ms()
 {
   portENTER_CRITICAL(&s_pos_mux);

@@ -64,6 +64,7 @@ enum AudioCmdType : uint8_t {
   CMD_SET_USER_VOLUME = 12,
   CMD_STEP_USER_VOLUME = 13,
   CMD_PLAY_STREAM_FLAC = 14,
+  CMD_SEEK_MS = 15,
 };
 
 struct AudioRequest {
@@ -75,6 +76,8 @@ struct AudioRequest {
   uint32_t cover_offset = 0;
   uint32_t cover_size = 0;
   uint32_t stream_start_offset = 0; // HTTP MP3 Range 起播偏移，0=普通起播
+  uint32_t seek_target_ms = 0;
+  uint32_t playback_revision = 0; // seek 必须与入队时的歌曲世代一致
   uint32_t network_operation_id = 0;
   bool stream_probe_audio_offset = false;
   AudioOutputRoute output_route = AudioOutputRoute::Speaker;
@@ -101,6 +104,7 @@ static QueueHandle_t s_q = nullptr;
 static TaskHandle_t  s_task = nullptr;
 static portMUX_TYPE s_request_mux = portMUX_INITIALIZER_UNLOCKED;
 static uint32_t s_next_request_id = 1;
+static uint32_t s_latest_seek_request_id = 0;
 
 // 以下运行状态只允许 AudioTask 写入。其他任务只能读取 s_state_snapshot。
 static bool s_task_ready = false;
@@ -108,17 +112,20 @@ static bool s_task_playing = false;
 static bool s_task_paused = false;
 static float s_task_fade_gain = 1.0f;
 static float s_task_last_fade_gain = 1.0f;
+static uint32_t s_task_playback_revision = 1;
 
 struct AudioStateSnapshot {
   bool ready = false;
   bool playing = false;
   bool paused = false;
   float fade_gain = 1.0f;
+  uint32_t playback_revision = 1;
 };
 
 static portMUX_TYPE s_state_mux = portMUX_INITIALIZER_UNLOCKED;
 static AudioStateSnapshot s_state_snapshot;
 static AudioNetworkStateSnapshot s_network_state_snapshot;
+static AudioSeekStateSnapshot s_seek_state_snapshot;
 static uint32_t s_task_network_request_id = 0;
 static AudioNetworkStartPhase s_task_network_start_phase = AudioNetworkStartPhase::Idle;
 static char s_task_network_error[96] = {0};
@@ -130,6 +137,82 @@ enum class AudioNetworkCodecKind : uint8_t {
 };
 
 static AudioNetworkCodecKind s_task_network_codec = AudioNetworkCodecKind::None;
+
+const char* audio_seek_result_label(AudioSeekResult result)
+{
+  switch (result) {
+    case AudioSeekResult::InProgress: return "in_progress";
+    case AudioSeekResult::Ok: return "ok";
+    case AudioSeekResult::Unsupported: return "unsupported";
+    case AudioSeekResult::InvalidTarget: return "invalid_target";
+    case AudioSeekResult::Failed: return "failed";
+    case AudioSeekResult::Cancelled: return "cancelled";
+    case AudioSeekResult::Idle:
+    default: return "idle";
+  }
+}
+
+static uint32_t audio_service_playback_revision_snapshot()
+{
+  portENTER_CRITICAL(&s_state_mux);
+  const uint32_t revision = s_state_snapshot.playback_revision;
+  portEXIT_CRITICAL(&s_state_mux);
+  return revision;
+}
+
+static void audio_task_advance_playback_revision()
+{
+  ++s_task_playback_revision;
+  if (s_task_playback_revision == 0) ++s_task_playback_revision;
+}
+
+static void audio_seek_request_mark_latest(uint32_t request_id)
+{
+  portENTER_CRITICAL(&s_request_mux);
+  s_latest_seek_request_id = request_id;
+  portEXIT_CRITICAL(&s_request_mux);
+}
+
+static bool audio_seek_request_is_latest(uint32_t request_id)
+{
+  portENTER_CRITICAL(&s_request_mux);
+  const bool latest = request_id != 0 && s_latest_seek_request_id == request_id;
+  portEXIT_CRITICAL(&s_request_mux);
+  return latest;
+}
+
+static void audio_seek_request_clear_if_latest(uint32_t request_id)
+{
+  portENTER_CRITICAL(&s_request_mux);
+  if (s_latest_seek_request_id == request_id) s_latest_seek_request_id = 0;
+  portEXIT_CRITICAL(&s_request_mux);
+}
+
+static void audio_task_publish_seek_state(bool seeking,
+                                          uint32_t request_id,
+                                          uint32_t target_ms,
+                                          uint32_t actual_ms,
+                                          AudioSeekResult result,
+                                          const char* error = nullptr)
+{
+  const uint32_t completed_at_ms = seeking ? 0 : millis();
+  portENTER_CRITICAL(&s_state_mux);
+  s_seek_state_snapshot.seekable = audio_is_seekable();
+  s_seek_state_snapshot.seeking = seeking;
+  s_seek_state_snapshot.request_id = request_id;
+  s_seek_state_snapshot.target_ms = target_ms;
+  s_seek_state_snapshot.actual_ms = actual_ms;
+  s_seek_state_snapshot.completed_at_ms = completed_at_ms;
+  s_seek_state_snapshot.result = result;
+  ++s_seek_state_snapshot.revision;
+  if (s_seek_state_snapshot.revision == 0) ++s_seek_state_snapshot.revision;
+  s_seek_state_snapshot.error[0] = '\0';
+  if (error && *error) {
+    strncpy(s_seek_state_snapshot.error, error, sizeof(s_seek_state_snapshot.error) - 1);
+    s_seek_state_snapshot.error[sizeof(s_seek_state_snapshot.error) - 1] = '\0';
+  }
+  portEXIT_CRITICAL(&s_state_mux);
+}
 
 #define PAUSE_FADE_STEP   0.05f   // 暂停时淡出，保持柔和
 #define PLAY_FADE_STEP    0.12f   // 开播/切歌时淡入，加快恢复正常音量
@@ -332,7 +415,9 @@ static void audio_task_publish_state()
   s_state_snapshot.playing = s_task_playing;
   s_state_snapshot.paused = s_task_paused;
   s_state_snapshot.fade_gain = s_task_fade_gain;
+  s_state_snapshot.playback_revision = s_task_playback_revision;
   s_network_state_snapshot = network_snapshot;
+  s_seek_state_snapshot.seekable = audio_is_seekable();
   portEXIT_CRITICAL(&s_state_mux);
 }
 
@@ -343,6 +428,23 @@ static AudioStateSnapshot audio_service_read_state_snapshot()
   snapshot = s_state_snapshot;
   portEXIT_CRITICAL(&s_state_mux);
   return snapshot;
+}
+
+bool audio_service_get_seek_state(AudioSeekStateSnapshot* out_snapshot)
+{
+  if (!out_snapshot) return false;
+  portENTER_CRITICAL(&s_state_mux);
+  *out_snapshot = s_seek_state_snapshot;
+  portEXIT_CRITICAL(&s_state_mux);
+  return true;
+}
+
+bool audio_service_is_seekable(void)
+{
+  portENTER_CRITICAL(&s_state_mux);
+  const bool seekable = s_seek_state_snapshot.seekable;
+  portEXIT_CRITICAL(&s_state_mux);
+  return seekable;
 }
 
 bool audio_service_get_network_state(AudioNetworkStateSnapshot* out_snapshot)
@@ -702,8 +804,11 @@ static void audio_task_entry(void*){
 
       if (cmd.type == CMD_STOP) {
         const uint32_t t_cmd = millis();
+        audio_task_advance_playback_revision();
+        audio_task_publish_state();
         s_task_network_codec = AudioNetworkCodecKind::None;
         audio_task_set_network_start_state(0, AudioNetworkStartPhase::Idle);
+        audio_task_publish_seek_state(false, 0, 0, 0, AudioSeekResult::Idle);
 
         audio_task_soft_stop_impl(true);
 
@@ -719,6 +824,9 @@ static void audio_task_entry(void*){
                  cmd.type == CMD_PLAY_STREAM_MP3 ||
                  cmd.type == CMD_PLAY_STREAM_FLAC) {
         const uint32_t t_cmd = millis();
+        audio_task_advance_playback_revision();
+        audio_task_publish_state();
+        audio_task_publish_seek_state(false, 0, 0, 0, AudioSeekResult::Idle);
 
         // 播放前先保持功放静音，避免切歌/开机瞬态打到喇叭。
         audio_task_keep_amp_safe_muted();
@@ -843,6 +951,107 @@ static void audio_task_entry(void*){
              (unsigned long)cmd.request_id);
 
         s_task_paused = false;
+      } else if (cmd.type == CMD_SEEK_MS) {
+        const uint32_t t_cmd = millis();
+        const uint32_t total_ms = audio_get_total_ms();
+        uint32_t target_ms = cmd.seek_target_ms;
+        uint32_t actual_ms = audio_get_play_ms();
+
+        if (!audio_seek_request_is_latest(cmd.request_id) ||
+            cmd.playback_revision != s_task_playback_revision) {
+          success = false;
+          audio_task_publish_seek_state(false,
+                                        cmd.request_id,
+                                        target_ms,
+                                        actual_ms,
+                                        AudioSeekResult::Cancelled,
+                                        "stale_seek_request");
+          LOGD("[音频] 跳转请求已取消：请求=%lu 请求世代=%lu 当前世代=%lu",
+               (unsigned long)cmd.request_id,
+               (unsigned long)cmd.playback_revision,
+               (unsigned long)s_task_playback_revision);
+        } else if (total_ms == 0 || !audio_is_seekable()) {
+          success = false;
+          audio_task_publish_seek_state(false,
+                                        cmd.request_id,
+                                        target_ms,
+                                        actual_ms,
+                                        AudioSeekResult::Unsupported,
+                                        "seek_not_supported");
+        } else {
+          if (target_ms >= total_ms) {
+            target_ms = total_ms > 500 ? total_ms - 500 : 0;
+          }
+
+          audio_task_publish_seek_state(true,
+                                        cmd.request_id,
+                                        target_ms,
+                                        actual_ms,
+                                        AudioSeekResult::InProgress);
+          audio_task_publish_state();
+
+          const bool remain_paused = s_task_paused;
+          const bool was_flac = audio_flac_is_active();
+          audio_task_keep_amp_safe_muted();
+          s_task_fade_gain = 0.0f;
+          s_task_last_fade_gain = 0.0f;
+          audio_i2s_zero_dma_buffer();
+
+          success = audio_seek_ms(target_ms, &actual_ms);
+          s_task_playing = audio_is_playing();
+
+          if (success) {
+            // FLAC 会预解码到软件缓冲；MP3 seek 已经准备好第一帧 pending PCM。
+            const uint32_t primed_ms = audio_prime_pcm_ms(PLAY_PREFILL_TARGET_MS,
+                                                           PLAY_PREFILL_MAX_LOOPS);
+            s_task_paused = remain_paused;
+            if (remain_paused) {
+              s_task_fade_gain = 0.0f;
+              s_task_last_fade_gain = 0.0f;
+              audio_task_keep_amp_safe_muted();
+            } else {
+              s_task_fade_gain = PLAY_START_GAIN;
+              s_task_last_fade_gain = PLAY_START_GAIN;
+              audio_task_unmute_amp_if_route_allows();
+            }
+            audio_task_publish_seek_state(false,
+                                          cmd.request_id,
+                                          target_ms,
+                                          actual_ms,
+                                          AudioSeekResult::Ok);
+            LOGI("[音频] 统一跳转成功：请求=%lu 目标=%lums 实际=%lums 预填=%lums 暂停=%d 耗时=%lums",
+                 (unsigned long)cmd.request_id,
+                 (unsigned long)target_ms,
+                 (unsigned long)actual_ms,
+                 (unsigned long)primed_ms,
+                 remain_paused ? 1 : 0,
+                 (unsigned long)(millis() - t_cmd));
+          } else {
+            s_task_paused = remain_paused;
+            if (s_task_playing && !remain_paused) {
+              s_task_fade_gain = PLAY_START_GAIN;
+              s_task_last_fade_gain = PLAY_START_GAIN;
+              audio_task_unmute_amp_if_route_allows();
+            } else {
+              audio_task_keep_amp_safe_muted();
+            }
+            const char* error = was_flac
+                ? audio_flac_get_last_error()
+                : audio_mp3_get_last_error();
+            audio_task_publish_seek_state(false,
+                                          cmd.request_id,
+                                          target_ms,
+                                          actual_ms,
+                                          AudioSeekResult::Failed,
+                                          error && *error ? error : "seek_failed");
+            LOGW("[音频] 统一跳转失败：请求=%lu 目标=%lums 错误=%s 耗时=%lums",
+                 (unsigned long)cmd.request_id,
+                 (unsigned long)target_ms,
+                 error && *error ? error : "seek_failed",
+                 (unsigned long)(millis() - t_cmd));
+          }
+        }
+        audio_seek_request_clear_if_latest(cmd.request_id);
       } else if (cmd.type == CMD_PAUSE) {
         // 暂停请求只改变 AudioTask 内部状态；淡出和最终静音在主循环中完成。
         if (audio_is_playing() || s_task_playing || s_task_paused) {
@@ -1089,6 +1298,9 @@ static uint32_t audio_request_timeout_ms(AudioCmdType type)
       return 12000;
     case CMD_PLAY_STREAM_FLAC:
       return 20000;
+    case CMD_SEEK_MS:
+      // NAS FLAC seek 可能遇到 Range 重连，同步调用预留足够等待时间。
+      return 45000;
     case CMD_FETCH_LYRICS:
       return 3000;
     case CMD_FETCH_COVER:
@@ -1384,6 +1596,37 @@ bool audio_service_pause(bool wait)
 bool audio_service_resume(bool wait)
 {
   return audio_service_dispatch_control(CMD_RESUME, false, AudioOutputRoute::Speaker, 0, wait);
+}
+
+static bool audio_service_queue_seek_request(uint32_t target_ms,
+                                             bool wait,
+                                             uint32_t* out_request_id)
+{
+  if (out_request_id) *out_request_id = 0;
+
+  AudioRequest* request = audio_request_new(wait);
+  if (!request) return false;
+  request->type = CMD_SEEK_MS;
+  request->seek_target_ms = target_ms;
+  request->playback_revision = audio_service_playback_revision_snapshot();
+
+  const uint32_t request_id = request->request_id;
+  audio_seek_request_mark_latest(request_id);
+  const bool ok = dispatch_request(request, wait);
+  if (ok && out_request_id) *out_request_id = request_id;
+  if (!ok) audio_seek_request_clear_if_latest(request_id);
+  audio_request_release(request);
+  return ok;
+}
+
+bool audio_service_seek_ms(uint32_t target_ms, bool wait)
+{
+  return audio_service_queue_seek_request(target_ms, wait, nullptr);
+}
+
+bool audio_service_seek_ms_async(uint32_t target_ms, uint32_t* out_request_id)
+{
+  return audio_service_queue_seek_request(target_ms, false, out_request_id);
 }
 
 bool audio_service_set_output_route(AudioOutputRoute route, bool wait)
