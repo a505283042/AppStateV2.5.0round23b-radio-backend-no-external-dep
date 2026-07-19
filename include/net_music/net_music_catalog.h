@@ -7,8 +7,9 @@
 /**
  * @brief NAS/HTTP 网络歌曲条目。
  *
- * 注意：encoded_path 是已经 URL 编码后的相对路径，
- * 不包含 base url。
+ * 注意：encoded_path 是历史字段名。
+ * net_music.txt 第二列既可以写 UTF-8 原始相对路径，也兼容旧的 %XX 编码路径；
+ * 不包含 base url，真正播放时统一生成合法 HTTP URL。
  */
 struct NetMusicItem {
   String title;
@@ -60,7 +61,7 @@ uint32_t net_music_catalog_count();
 /** 按全局 index 读取某一首歌，内部通过 offset seek，不全量加载列表。 */
 bool net_music_catalog_get(uint32_t idx, NetMusicItem* out);
 
-/** base_url + encoded_path，生成最终播放 URL。 */
+/** base_url + 路径；原始 UTF-8 路径会在这里编码，旧 %XX 路径不会二次编码。 */
 String net_music_catalog_build_url(const NetMusicItem& item);
 
 /** 当前 base url。 */

@@ -49,6 +49,105 @@ static void strip_utf8_bom(String& s) {
   }
 }
 
+static bool is_url_hex_digit(char c) {
+  return (c >= '0' && c <= '9') ||
+         (c >= 'a' && c <= 'f') ||
+         (c >= 'A' && c <= 'F');
+}
+
+static bool is_url_unreserved(uint8_t c) {
+  return (c >= 'a' && c <= 'z') ||
+         (c >= 'A' && c <= 'Z') ||
+         (c >= '0' && c <= '9') ||
+         c == '-' || c == '.' || c == '_' || c == '~';
+}
+
+static char url_hex_upper(uint8_t nibble) {
+  nibble &= 0x0F;
+  return nibble < 10
+      ? static_cast<char>('0' + nibble)
+      : static_cast<char>('A' + (nibble - 10));
+}
+
+// net_music.txt 第二列允许直接保存 UTF-8 原始路径。
+// 构建 HTTP URL 时才逐字节编码；已有的 %XX 路径保持原样，兼容旧列表。
+static size_t net_music_relative_path_start(const String& path) {
+  size_t start = 0;
+
+  while (start + 1 < path.length() &&
+         path[start] == '.' &&
+         (path[start + 1] == '/' || path[start + 1] == '\\')) {
+    start += 2;
+  }
+
+  while (start < path.length() &&
+         (path[start] == '/' || path[start] == '\\')) {
+    ++start;
+  }
+
+  return start;
+}
+
+static size_t encoded_net_music_path_length(const String& path,
+                                            size_t start) {
+  size_t encoded_len = 0;
+
+  for (size_t i = start; i < path.length(); ++i) {
+    const uint8_t c = static_cast<uint8_t>(path[i]);
+
+    if (c == '/' || c == '\\' || is_url_unreserved(c)) {
+      ++encoded_len;
+      continue;
+    }
+
+    if (c == '%' &&
+        i + 2 < path.length() &&
+        is_url_hex_digit(path[i + 1]) &&
+        is_url_hex_digit(path[i + 2])) {
+      encoded_len += 3;
+      i += 2;
+      continue;
+    }
+
+    encoded_len += 3;
+  }
+
+  return encoded_len;
+}
+
+static void append_encoded_net_music_path(String& url,
+                                          const String& path,
+                                          size_t start) {
+  for (size_t i = start; i < path.length(); ++i) {
+    const uint8_t c = static_cast<uint8_t>(path[i]);
+
+    if (c == '/' || c == '\\') {
+      url += '/';
+      continue;
+    }
+
+    if (is_url_unreserved(c)) {
+      url += static_cast<char>(c);
+      continue;
+    }
+
+    // 旧列表已经写成 %E4%B8%AD 时不要再次编码成 %25E4...。
+    if (c == '%' &&
+        i + 2 < path.length() &&
+        is_url_hex_digit(path[i + 1]) &&
+        is_url_hex_digit(path[i + 2])) {
+      url += '%';
+      url += path[i + 1];
+      url += path[i + 2];
+      i += 2;
+      continue;
+    }
+
+    url += '%';
+    url += url_hex_upper(c >> 4);
+    url += url_hex_upper(c);
+  }
+}
 
 
 static void free_remote_offsets() {
@@ -672,7 +771,24 @@ String net_music_catalog_build_url(const NetMusicItem& item) {
     return String();
   }
 
-  return s_base_url + item.encoded_path;
+  const size_t path_start =
+      net_music_relative_path_start(item.encoded_path);
+  if (path_start >= item.encoded_path.length()) {
+    return String();
+  }
+
+  const size_t encoded_len =
+      encoded_net_music_path_length(item.encoded_path, path_start);
+
+  String url;
+  if (!url.reserve(s_base_url.length() + encoded_len + 1)) {
+    s_error = "net_music_url_alloc_failed";
+    return String();
+  }
+
+  url += s_base_url;
+  append_encoded_net_music_path(url, item.encoded_path, path_start);
+  return url;
 }
 
 String net_music_catalog_base_url() {
