@@ -726,8 +726,11 @@ static bool control_poll_net_track_start()
         }
 
         control_reset_net_track_eof_watch(source.net_track_idx);
-        if (source.net_track_format == "mp3") {
-            net_music_embedded_cover_start(source.net_track_idx, source.net_track_url);
+        if (source.net_track_format == "mp3" ||
+            source.net_track_format == "flac") {
+            net_music_embedded_cover_start(source.net_track_idx,
+                                           source.net_track_url,
+                                           source.net_track_format);
         } else {
             net_music_embedded_cover_cancel();
         }
@@ -1231,7 +1234,7 @@ static bool control_play_net_track_index_impl(int idx, bool reset_shuffle)
 
 
     // MP3 后台会继续探测 APIC，因此先显示网络封面加载图。
-    // NAS FLAC 第一阶段暂不读取远程 PICTURE，直接使用默认封面。
+    // NAS FLAC 起播先使用默认封面，后台找到 PICTURE 后再无阻塞替换。
     if (item.format == "flac") {
         (void)control_apply_cover_file("/System/default_cover.jpg");
     } else if (!control_apply_cover_file("/System/net_cover_loading.jpg")) {

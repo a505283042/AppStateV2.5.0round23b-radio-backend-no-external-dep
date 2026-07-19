@@ -1748,11 +1748,13 @@ static void web_handle_cover_current() {
     int req_idx = source.net_track_idx;
     (void)web_parse_int_arg("idx", req_idx);
 
+    CoverSource cover_source = COVER_NONE;
     uint32_t cover_offset = 0;
     uint32_t cover_size = 0;
     String cover_rev;
     if (!net_music_embedded_cover_get_current(req_idx,
                                               source.net_track_url,
+                                              &cover_source,
                                               &cover_offset,
                                               &cover_size,
                                               &cover_rev)) {
@@ -1770,7 +1772,7 @@ static void web_handle_cover_current() {
     uint8_t* buf = nullptr;
     size_t len = 0;
     const bool ok = web_cover_cache_copy_bmp(req_idx,
-                                            COVER_MP3_APIC,
+                                            cover_source,
                                             source.net_track_url.c_str(),
                                             "",
                                             cover_offset,

@@ -375,17 +375,19 @@ void web_snapshot_capture_into(WebPlayerSnapshot& snap) {
 
     snap.total_ms = source.net_track_duration_ms;
 
+    CoverSource net_cover_source = COVER_NONE;
     uint32_t net_cover_offset = 0;
     uint32_t net_cover_size = 0;
     String net_cover_rev;
     const bool net_cover_known = net_music_embedded_cover_get_current(source.net_track_idx,
                                                                       source.net_track_url,
+                                                                      &net_cover_source,
                                                                       &net_cover_offset,
                                                                       &net_cover_size,
                                                                       &net_cover_rev);
     const bool net_cover_ready = net_cover_known &&
         web_cover_cache_has(source.net_track_idx,
-                            COVER_MP3_APIC,
+                            net_cover_source,
                             source.net_track_url.c_str(),
                             "",
                             net_cover_offset,

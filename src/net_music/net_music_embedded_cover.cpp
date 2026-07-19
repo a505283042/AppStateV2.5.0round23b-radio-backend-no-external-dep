@@ -10,6 +10,7 @@
 #include <string.h>
 #include <stdlib.h>
 
+#include "meta/meta_flac_cover.h"
 #include "meta/meta_id3_cover.h"
 #include "lyrics/lyrics.h"
 #include "player_source.h"
@@ -71,6 +72,7 @@ struct NetCoverRuntimeState {
   bool valid = false;
   int idx = -1;
   String url;
+  CoverSource cover_source = COVER_NONE;
   uint32_t offset = 0;
   uint32_t size = 0;
   String rev;
@@ -109,10 +111,15 @@ static uint32_t fnv1a_add_u32(uint32_t h, uint32_t v)
   return h;
 }
 
-static String make_runtime_cover_rev(int idx, const String& url, uint32_t offset, uint32_t size)
+static String make_runtime_cover_rev(int idx,
+                                     const String& url,
+                                     CoverSource cover_source,
+                                     uint32_t offset,
+                                     uint32_t size)
 {
   uint32_t h = 2166136261u;
   h = fnv1a_add_u32(h, (uint32_t)idx);
+  h = fnv1a_add_u32(h, (uint32_t)cover_source);
   h = fnv1a_add_u32(h, offset);
   h = fnv1a_add_u32(h, size);
   h = fnv1a_add_bytes(h, url.c_str());
@@ -129,13 +136,18 @@ static void clear_runtime_cover_state()
   s_runtime_cover.valid = false;
   s_runtime_cover.idx = -1;
   s_runtime_cover.url = String();
+  s_runtime_cover.cover_source = COVER_NONE;
   s_runtime_cover.offset = 0;
   s_runtime_cover.size = 0;
   s_runtime_cover.rev = String();
   xSemaphoreGive(mu);
 }
 
-static void set_runtime_cover_state(int idx, const String& url, uint32_t offset, uint32_t size)
+static void set_runtime_cover_state(int idx,
+                                    const String& url,
+                                    CoverSource cover_source,
+                                    uint32_t offset,
+                                    uint32_t size)
 {
   SemaphoreHandle_t mu = runtime_cover_mutex();
   if (!mu) return;
@@ -143,9 +155,14 @@ static void set_runtime_cover_state(int idx, const String& url, uint32_t offset,
   s_runtime_cover.valid = true;
   s_runtime_cover.idx = idx;
   s_runtime_cover.url = url;
+  s_runtime_cover.cover_source = cover_source;
   s_runtime_cover.offset = offset;
   s_runtime_cover.size = size;
-  s_runtime_cover.rev = make_runtime_cover_rev(idx, url, offset, size);
+  s_runtime_cover.rev = make_runtime_cover_rev(idx,
+                                                url,
+                                                cover_source,
+                                                offset,
+                                                size);
   xSemaphoreGive(mu);
 }
 
@@ -453,12 +470,12 @@ static bool http_range_get_exact(const String& url,
   return copied == len;
 }
 
-class HttpRangeId3Reader final : public Id3ByteReader {
+class HttpRangeCoverReader final : public Id3ByteReader, public FlacByteReader {
 public:
-  HttpRangeId3Reader(const String& url, uint32_t generation)
+  HttpRangeCoverReader(const String& url, uint32_t generation)
       : m_url(url), m_generation(generation) {}
 
-  ~HttpRangeId3Reader() override {
+  ~HttpRangeCoverReader() override {
     if (m_buf) {
       heap_caps_free(m_buf);
       m_buf = nullptr;
@@ -557,10 +574,13 @@ struct NetCoverJob {
   int idx = -1;
   uint32_t generation = 0;
   String url;
+  String format;
 };
 
 static bool fetch_remote_cover_image(const String& url,
-                                     const Mp3CoverLoc& loc,
+                                     uint32_t cover_offset,
+                                     uint32_t cover_size,
+                                     const String& cover_mime,
                                      uint32_t generation,
                                      uint8_t** out_buf,
                                      size_t* out_len,
@@ -571,38 +591,38 @@ static bool fetch_remote_cover_image(const String& url,
   if (out_is_png) *out_is_png = false;
 
   if (!out_buf || !out_len || !out_is_png) return false;
-  if (!loc.found || loc.size == 0 || loc.size > kMaxRemoteCoverBytes) {
-    LOGW("[网络封面] APIC size 无效 size=%lu", (unsigned long)loc.size);
+  if (cover_size == 0 || cover_size > kMaxRemoteCoverBytes) {
+    LOGW("[网络封面] 图片大小无效 size=%lu", (unsigned long)cover_size);
     return false;
   }
 
-  uint8_t* buf = static_cast<uint8_t*>(heap_caps_malloc(loc.size,
+  uint8_t* buf = static_cast<uint8_t*>(heap_caps_malloc(cover_size,
                                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-  if (!buf && loc.size <= kInternalFallbackMaxBytes) {
-    buf = static_cast<uint8_t*>(heap_caps_malloc(loc.size, MALLOC_CAP_8BIT));
+  if (!buf && cover_size <= kInternalFallbackMaxBytes) {
+    buf = static_cast<uint8_t*>(heap_caps_malloc(cover_size, MALLOC_CAP_8BIT));
   }
   if (!buf) {
-    if (loc.size > kInternalFallbackMaxBytes) {
-      LOGW("[网络封面] 图片缓冲 PSRAM 分配失败，禁止回落内部RAM size=%lu", (unsigned long)loc.size);
+    if (cover_size > kInternalFallbackMaxBytes) {
+      LOGW("[网络封面] 图片缓冲 PSRAM 分配失败，禁止回落内部RAM size=%lu", (unsigned long)cover_size);
     } else {
-      LOGW("[网络封面] 图片缓冲分配失败 size=%lu", (unsigned long)loc.size);
+      LOGW("[网络封面] 图片缓冲分配失败 size=%lu", (unsigned long)cover_size);
     }
     return false;
   }
 
   uint32_t copied = 0;
-  while (copied < loc.size) {
+  while (copied < cover_size) {
     if (generation != current_cover_generation()) {
       heap_caps_free(buf);
       return false;
     }
 
-    const uint32_t remain = loc.size - copied;
+    const uint32_t remain = cover_size - copied;
     const uint32_t chunk = remain > kHttpCoverChunkBytes ? kHttpCoverChunkBytes : remain;
     uint32_t got = 0;
 
     if (!http_range_get_exact(url,
-                              loc.offset + copied,
+                              cover_offset + copied,
                               chunk,
                               buf + copied,
                               &got,
@@ -615,68 +635,96 @@ static bool fetch_remote_cover_image(const String& url,
     vTaskDelay(1);
   }
 
-  const String mime_lower = loc.mime;
-  String mime = mime_lower;
+  String mime = cover_mime;
   mime.toLowerCase();
 
-  *out_is_png = mime.indexOf("png") >= 0 || is_png_buffer(buf, loc.size);
-  if (!*out_is_png && !is_jpg_buffer(buf, loc.size)) {
-    LOGW("[网络封面] 图片头不是 JPG/PNG，mime=%s", loc.mime.c_str());
+  *out_is_png = mime.indexOf("png") >= 0 || is_png_buffer(buf, cover_size);
+  if (!*out_is_png && !is_jpg_buffer(buf, cover_size)) {
+    LOGW("[网络封面] 图片头不是 JPG/PNG，mime=%s", cover_mime.c_str());
   }
 
   *out_buf = buf;
-  *out_len = loc.size;
+  *out_len = cover_size;
   return true;
 }
 
-static void process_net_cover_job(int idx, uint32_t generation, const String& url)
+static void process_net_cover_job(int idx,
+                                  uint32_t generation,
+                                  const String& url,
+                                  const String& format)
 {
   const uint32_t task_start_ms = millis();
 
   vTaskDelay(pdMS_TO_TICKS(kLyricsJobDelayMs));
-  if (!is_current_job(generation, idx, url)) {
-    return;
-  }
+  if (!is_current_job(generation, idx, url)) return;
 
+  // MP3 和 FLAC 都支持同目录同名 LRC，列表字段不需要额外增加歌词路径。
   (void)fetch_and_apply_same_dir_lrc(url, generation, idx);
 
   const uint32_t elapsed_ms = millis() - task_start_ms;
   if (elapsed_ms < kCoverJobDelayMs) {
     vTaskDelay(pdMS_TO_TICKS(kCoverJobDelayMs - elapsed_ms));
   }
+  if (!is_current_job(generation, idx, url)) return;
 
-  if (!is_current_job(generation, idx, url)) {
-    return;
+  String normalized_format = format;
+  normalized_format.trim();
+  normalized_format.toLowerCase();
+
+  CoverSource cover_source = COVER_NONE;
+  uint32_t cover_offset = 0;
+  uint32_t cover_size = 0;
+  String cover_mime;
+  const uint32_t started_ms = millis();
+  HttpRangeCoverReader reader(url, generation);
+
+  if (normalized_format == "flac") {
+    FlacCoverLoc loc;
+    if (!flac_find_picture_from_reader(reader, loc) || !loc.found) {
+      LOGD("[网络封面] 未找到 NAS FLAC 内嵌 PICTURE idx=%d", idx);
+      return;
+    }
+    if (loc.offset > UINT32_MAX || loc.size > UINT32_MAX) {
+      LOGW("[网络封面] FLAC PICTURE 偏移或大小超过32位 idx=%d", idx);
+      return;
+    }
+
+    cover_source = COVER_FLAC_PICTURE;
+    cover_offset = (uint32_t)loc.offset;
+    cover_size = (uint32_t)loc.size;
+    cover_mime = loc.mime;
+  } else {
+    Mp3CoverLoc loc;
+    if (!id3_find_apic_from_reader(reader, loc) || !loc.found) {
+      LOGD("[网络封面] 未找到 NAS MP3 内嵌 APIC idx=%d", idx);
+      return;
+    }
+
+    cover_source = COVER_MP3_APIC;
+    cover_offset = loc.offset;
+    cover_size = loc.size;
+    cover_mime = loc.mime;
   }
 
-  const uint32_t t0 = millis();
-  Mp3CoverLoc loc;
-  HttpRangeId3Reader reader(url, generation);
-
-  if (!id3_find_apic_from_reader(reader, loc) || !loc.found) {
-    LOGD("[网络封面] 未找到 NAS MP3 内嵌 APIC idx=%d", idx);
-    return;
-  }
-
-  if (!is_current_job(generation, idx, url)) {
-    return;
-  }
+  if (!is_current_job(generation, idx, url)) return;
 
   uint8_t* cover_buf = nullptr;
   size_t cover_len = 0;
   bool cover_is_png = false;
-
   if (!fetch_remote_cover_image(url,
-                                loc,
+                                cover_offset,
+                                cover_size,
+                                cover_mime,
                                 generation,
                                 &cover_buf,
                                 &cover_len,
                                 &cover_is_png)) {
     if (is_current_job(generation, idx, url)) {
-      LOGW("[网络封面] 下载 APIC 图片失败 idx=%d off=%lu size=%lu",
+      LOGW("[网络封面] 下载内嵌图片失败 idx=%d source=%u off=%lu size=%lu",
            idx,
-           (unsigned long)loc.offset,
-           (unsigned long)loc.size);
+           (unsigned)cover_source,
+           (unsigned long)cover_offset,
+           (unsigned long)cover_size);
     }
     return;
   }
@@ -686,30 +734,42 @@ static void process_net_cover_job(int idx, uint32_t generation, const String& ur
     return;
   }
 
-  const bool scaled_ok = ui_cover_scale_from_buffer(cover_buf, cover_len, cover_is_png);
+  const bool scaled_ok = ui_cover_scale_from_buffer(cover_buf,
+                                                     cover_len,
+                                                     cover_is_png);
   heap_caps_free(cover_buf);
 
   if (scaled_ok && is_current_job(generation, idx, url)) {
     const bool web_ok = ui_cover_store_current_web_cache(idx,
-                                                         COVER_MP3_APIC,
+                                                         cover_source,
                                                          url.c_str(),
                                                          "",
-                                                         loc.offset,
-                                                         loc.size);
+                                                         cover_offset,
+                                                         cover_size);
     if (web_ok) {
-      set_runtime_cover_state(idx, url, loc.offset, loc.size);
+      set_runtime_cover_state(idx,
+                              url,
+                              cover_source,
+                              cover_offset,
+                              cover_size);
     } else {
       LOGW("[网络封面] 网页封面缓存写入失败 idx=%d", idx);
     }
+
     ui_request_refresh_now();
-    LOGI("[网络封面] NAS 内嵌封面已应用 idx=%d size=%u png=%u web=%u 耗时=%lums",
+    LOGI("[网络封面] NAS 内嵌封面已应用 idx=%d format=%s source=%u size=%u png=%u web=%u 耗时=%lums",
          idx,
+         normalized_format.c_str(),
+         (unsigned)cover_source,
          (unsigned)cover_len,
          cover_is_png ? 1 : 0,
          web_ok ? 1 : 0,
-         (unsigned long)(millis() - t0));
+         (unsigned long)(millis() - started_ms));
   } else if (is_current_job(generation, idx, url)) {
-    LOGW("[网络封面] NAS 内嵌封面缩放失败 idx=%d size=%u", idx, (unsigned)cover_len);
+    LOGW("[网络封面] NAS 内嵌封面缩放失败 idx=%d format=%s size=%u",
+         idx,
+         normalized_format.c_str(),
+         (unsigned)cover_len);
   }
 }
 
@@ -736,9 +796,10 @@ static void net_cover_task_entry(void*)
     const int idx = job->idx;
     const uint32_t generation = job->generation;
     const String url = job->url;
+    const String format = job->format;
     delete job;
 
-    process_net_cover_job(idx, generation, url);
+    process_net_cover_job(idx, generation, url, format);
   }
 }
 
@@ -829,9 +890,11 @@ static void discard_pending_cover_job()
 
 }  // namespace
 
-void net_music_embedded_cover_start(int net_track_idx, const String& mp3_url)
+void net_music_embedded_cover_start(int net_track_idx,
+                                    const String& media_url,
+                                    const String& media_format)
 {
-  if (net_track_idx < 0 || !mp3_url.length()) {
+  if (net_track_idx < 0 || !media_url.length()) {
     return;
   }
 
@@ -850,7 +913,8 @@ void net_music_embedded_cover_start(int net_track_idx, const String& mp3_url)
 
   job->idx = net_track_idx;
   job->generation = generation;
-  job->url = mp3_url;
+  job->url = media_url;
+  job->format = media_format;
 
   // 队列长度固定为1：新请求先清理尚未开始的旧请求，只保留最新曲目。
   // 正在执行的旧请求通过 generation 在下一检查点主动退出，不会再创建额外任务。
@@ -875,7 +939,8 @@ void net_music_embedded_cover_cancel()
 }
 
 bool net_music_embedded_cover_get_current(int net_track_idx,
-                                          const String& mp3_url,
+                                          const String& media_url,
+                                          CoverSource* out_cover_source,
                                           uint32_t* out_offset,
                                           uint32_t* out_size,
                                           String* out_rev)
@@ -886,9 +951,11 @@ bool net_music_embedded_cover_get_current(int net_track_idx,
 
   const bool ok = s_runtime_cover.valid &&
                   s_runtime_cover.idx == net_track_idx &&
-                  s_runtime_cover.url == mp3_url &&
+                  s_runtime_cover.url == media_url &&
+                  s_runtime_cover.cover_source != COVER_NONE &&
                   s_runtime_cover.size > 0;
   if (ok) {
+    if (out_cover_source) *out_cover_source = s_runtime_cover.cover_source;
     if (out_offset) *out_offset = s_runtime_cover.offset;
     if (out_size) *out_size = s_runtime_cover.size;
     if (out_rev) *out_rev = s_runtime_cover.rev;
