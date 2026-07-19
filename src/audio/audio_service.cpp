@@ -15,6 +15,8 @@
 #include "audio/audio.h"
 #include "audio/audio_file.h"
 #include "audio/audio_mp3.h"
+#include "audio/audio_flac.h"
+#include "audio/audio_http_range_source.h"
 #include "audio/audio_mp3_source_audiotools.h"
 #include "audio/audio_i2s.h"
 #include "audio/audio_output_route.h"
@@ -61,6 +63,7 @@ enum AudioCmdType : uint8_t {
   CMD_SET_AMP_SHUTDOWN = 11,
   CMD_SET_USER_VOLUME = 12,
   CMD_STEP_USER_VOLUME = 13,
+  CMD_PLAY_STREAM_FLAC = 14,
 };
 
 struct AudioRequest {
@@ -119,6 +122,14 @@ static AudioNetworkStateSnapshot s_network_state_snapshot;
 static uint32_t s_task_network_request_id = 0;
 static AudioNetworkStartPhase s_task_network_start_phase = AudioNetworkStartPhase::Idle;
 static char s_task_network_error[96] = {0};
+
+enum class AudioNetworkCodecKind : uint8_t {
+  None = 0,
+  Mp3,
+  Flac,
+};
+
+static AudioNetworkCodecKind s_task_network_codec = AudioNetworkCodecKind::None;
 
 #define PAUSE_FADE_STEP   0.05f   // 暂停时淡出，保持柔和
 #define PLAY_FADE_STEP    0.12f   // 开播/切歌时淡入，加快恢复正常音量
@@ -246,35 +257,71 @@ static void audio_task_set_network_start_state(uint32_t request_id,
 static void audio_task_publish_state()
 {
   AudioNetworkStateSnapshot network_snapshot{};
-  AudioMp3HttpSourceSnapshot source_snapshot{};
-  (void)audio_mp3_audiotools_source_get_snapshot(&source_snapshot);
+  AudioMp3HttpSourceSnapshot mp3_source{};
+  AudioHttpRangeSourceSnapshot flac_source{};
+  (void)audio_mp3_audiotools_source_get_snapshot(&mp3_source);
+  (void)audio_http_range_source_get_snapshot(&flac_source);
+
+  const bool mp3_active = audio_mp3_is_active() && audio_mp3_is_stream_source();
+  const bool flac_active = audio_flac_is_active() && audio_flac_is_network_source();
 
   network_snapshot.start_request_id = s_task_network_request_id;
   network_snapshot.start_phase = s_task_network_start_phase;
-  network_snapshot.active = audio_mp3_is_active() && audio_mp3_is_stream_source();
-  network_snapshot.source_open = source_snapshot.open;
-  network_snapshot.transport_connected = source_snapshot.transport_connected;
-  network_snapshot.waiting_for_data = source_snapshot.waiting_for_data;
-  network_snapshot.eof = source_snapshot.eof;
-  network_snapshot.available_bytes = source_snapshot.available_bytes;
-  network_snapshot.last_data_ms = source_snapshot.last_data_ms;
+  network_snapshot.active = mp3_active || flac_active;
 
-  if (network_snapshot.active) {
-    network_snapshot.bitrate_kbps = audio_mp3_get_bitrate_kbps();
-    network_snapshot.sample_rate = audio_mp3_get_sample_rate();
-    network_snapshot.channels = audio_mp3_get_channels();
+  const bool flac_context =
+      s_task_network_codec == AudioNetworkCodecKind::Flac ||
+      flac_active || flac_source.open;
+
+  if (flac_context) {
+    network_snapshot.source_open = flac_source.open;
+    network_snapshot.transport_connected = flac_source.transport_connected;
+    network_snapshot.waiting_for_data = flac_source.waiting_for_data;
+    network_snapshot.reconnecting = flac_source.reconnecting;
+    network_snapshot.eof = flac_source.eof;
+    network_snapshot.reconnect_attempt = flac_source.retry_attempt;
+    network_snapshot.reconnect_delay_ms = flac_source.retry_delay_ms;
+    network_snapshot.available_bytes = flac_source.available_bytes;
+    network_snapshot.cached_bytes = flac_source.cached_bytes;
+    network_snapshot.transport_available_bytes = flac_source.transport_available_bytes;
+    network_snapshot.buffer_capacity_bytes = flac_source.cache_capacity_bytes;
+    network_snapshot.reconnect_attempt_count = flac_source.reconnect_attempt_count;
+    network_snapshot.reconnect_success_count = flac_source.reconnect_success_count;
+    network_snapshot.last_data_ms = flac_source.last_data_ms;
+    network_snapshot.sample_rate = audio_flac_get_sample_rate();
+    network_snapshot.channels = audio_flac_get_channels();
+
+    const uint32_t total_ms = audio_flac_get_total_ms();
+    if (total_ms > 0 && flac_source.total_size > 0) {
+      network_snapshot.bitrate_kbps = static_cast<uint32_t>(
+          (static_cast<uint64_t>(flac_source.total_size) * 8ULL) / total_ms);
+    }
+  } else {
+    network_snapshot.source_open = mp3_source.open;
+    network_snapshot.transport_connected = mp3_source.transport_connected;
+    network_snapshot.waiting_for_data = mp3_source.waiting_for_data;
+    network_snapshot.eof = mp3_source.eof;
+    network_snapshot.available_bytes = mp3_source.available_bytes;
+    network_snapshot.last_data_ms = mp3_source.last_data_ms;
+
+    if (mp3_active) {
+      network_snapshot.bitrate_kbps = audio_mp3_get_bitrate_kbps();
+      network_snapshot.sample_rate = audio_mp3_get_sample_rate();
+      network_snapshot.channels = audio_mp3_get_channels();
+    }
   }
 
-  // 只有网络请求仍处于生命周期内时才发布 MP3 网络错误。
-  // 显式停止或切回本地 FLAC 后，不能把上一条网络流的旧错误继续带到状态页。
+  // 只有网络请求仍处于生命周期内时才发布当前网络解码器错误。
   const bool network_context =
       s_task_network_start_phase != AudioNetworkStartPhase::Idle ||
-      source_snapshot.open ||
-      (audio_mp3_is_active() && audio_mp3_is_stream_source());
+      mp3_source.open || flac_source.open || mp3_active || flac_active;
 
+  const char* decoder_error = flac_context
+      ? audio_flac_get_last_error()
+      : audio_mp3_get_last_error();
   const char* error = s_task_network_error[0]
       ? s_task_network_error
-      : (network_context ? audio_mp3_get_last_error() : nullptr);
+      : (network_context ? decoder_error : nullptr);
   if (error && *error) {
     strncpy(network_snapshot.error, error, sizeof(network_snapshot.error) - 1);
     network_snapshot.error[sizeof(network_snapshot.error) - 1] = '\0';
@@ -305,6 +352,29 @@ bool audio_service_get_network_state(AudioNetworkStateSnapshot* out_snapshot)
   portENTER_CRITICAL(&s_state_mux);
   *out_snapshot = s_network_state_snapshot;
   portEXIT_CRITICAL(&s_state_mux);
+
+  // Range 续传发生在 dr_flac 的 read 回调内，AudioTask 此时可能暂时停留在
+  // audio_loop() 中，尚未回到主循环刷新服务快照。这里仅合并音源已经发布的
+  // 纯数值快照，不访问 WiFiClient，确保 UI/播放器能实时看到续传进度。
+  AudioHttpRangeSourceSnapshot flac_source{};
+  if (audio_http_range_source_get_snapshot(&flac_source) &&
+      (flac_source.open || flac_source.reconnecting)) {
+    out_snapshot->source_open = flac_source.open;
+    out_snapshot->transport_connected = flac_source.transport_connected;
+    out_snapshot->waiting_for_data = flac_source.waiting_for_data;
+    out_snapshot->reconnecting = flac_source.reconnecting;
+    out_snapshot->eof = flac_source.eof;
+    out_snapshot->reconnect_attempt = flac_source.retry_attempt;
+    out_snapshot->reconnect_delay_ms = flac_source.retry_delay_ms;
+    out_snapshot->available_bytes = flac_source.available_bytes;
+    out_snapshot->cached_bytes = flac_source.cached_bytes;
+    out_snapshot->transport_available_bytes = flac_source.transport_available_bytes;
+    out_snapshot->buffer_capacity_bytes = flac_source.cache_capacity_bytes;
+    out_snapshot->reconnect_attempt_count = flac_source.reconnect_attempt_count;
+    out_snapshot->reconnect_success_count = flac_source.reconnect_success_count;
+    out_snapshot->last_data_ms = flac_source.last_data_ms;
+  }
+
   return true;
 }
 
@@ -632,6 +702,7 @@ static void audio_task_entry(void*){
 
       if (cmd.type == CMD_STOP) {
         const uint32_t t_cmd = millis();
+        s_task_network_codec = AudioNetworkCodecKind::None;
         audio_task_set_network_start_state(0, AudioNetworkStartPhase::Idle);
 
         audio_task_soft_stop_impl(true);
@@ -644,7 +715,9 @@ static void audio_task_entry(void*){
         LOGD("[音频] 服务命令“停止”耗时=%lums 请求=%lu",
              (unsigned long)(t_done - t_cmd),
              (unsigned long)cmd.request_id);
-      } else if (cmd.type == CMD_PLAY || cmd.type == CMD_PLAY_STREAM_MP3) {
+      } else if (cmd.type == CMD_PLAY ||
+                 cmd.type == CMD_PLAY_STREAM_MP3 ||
+                 cmd.type == CMD_PLAY_STREAM_FLAC) {
         const uint32_t t_cmd = millis();
 
         // 播放前先保持功放静音，避免切歌/开机瞬态打到喇叭。
@@ -663,7 +736,12 @@ static void audio_task_entry(void*){
         audio_task_keep_amp_safe_muted();
 
         bool ok = false;
-        if (cmd.type == CMD_PLAY_STREAM_MP3) {
+        const bool is_network_mp3 = cmd.type == CMD_PLAY_STREAM_MP3;
+        const bool is_network_flac = cmd.type == CMD_PLAY_STREAM_FLAC;
+        if (is_network_mp3 || is_network_flac) {
+          s_task_network_codec = is_network_flac
+              ? AudioNetworkCodecKind::Flac
+              : AudioNetworkCodecKind::Mp3;
           if (!audio_mp3_audiotools_source_operation_is_current(cmd.network_operation_id)) {
             audio_task_set_network_start_state(cmd.request_id,
                                                AudioNetworkStartPhase::Cancelled,
@@ -672,29 +750,33 @@ static void audio_task_entry(void*){
             audio_task_set_network_start_state(cmd.request_id, AudioNetworkStartPhase::Connecting);
             audio_task_publish_state();
 
-            uint32_t start_offset = cmd.stream_start_offset;
-            if (cmd.stream_probe_audio_offset) {
-              uint32_t probed_offset = 0;
-              if (audio_mp3_audiotools_source_probe_audio_start_offset(cmd.path,
-                                                                         cmd.network_operation_id,
-                                                                         &probed_offset)) {
-                start_offset = probed_offset;
+            if (is_network_flac) {
+              ok = audio_play_stream_flac(cmd.path, cmd.network_operation_id);
+            } else {
+              uint32_t start_offset = cmd.stream_start_offset;
+              if (cmd.stream_probe_audio_offset) {
+                uint32_t probed_offset = 0;
+                if (audio_mp3_audiotools_source_probe_audio_start_offset(cmd.path,
+                                                                           cmd.network_operation_id,
+                                                                           &probed_offset)) {
+                  start_offset = probed_offset;
+                }
               }
-            }
 
-            if (audio_mp3_audiotools_source_operation_is_current(cmd.network_operation_id)) {
-              if (start_offset > 0) {
-                ok = audio_play_stream_mp3_from_offset(cmd.path,
-                                                       start_offset,
-                                                       cmd.network_operation_id);
-                if (!ok &&
-                    audio_mp3_audiotools_source_operation_is_current(cmd.network_operation_id)) {
-                  LOGW("[音频] Range 起播失败，回退普通 URL 起播 offset=%lu",
-                       (unsigned long)start_offset);
+              if (audio_mp3_audiotools_source_operation_is_current(cmd.network_operation_id)) {
+                if (start_offset > 0) {
+                  ok = audio_play_stream_mp3_from_offset(cmd.path,
+                                                         start_offset,
+                                                         cmd.network_operation_id);
+                  if (!ok &&
+                      audio_mp3_audiotools_source_operation_is_current(cmd.network_operation_id)) {
+                    LOGW("[音频] Range 起播失败，回退普通 URL 起播 offset=%lu",
+                         (unsigned long)start_offset);
+                    ok = audio_play_stream_mp3(cmd.path, cmd.network_operation_id);
+                  }
+                } else {
                   ok = audio_play_stream_mp3(cmd.path, cmd.network_operation_id);
                 }
-              } else {
-                ok = audio_play_stream_mp3(cmd.path, cmd.network_operation_id);
               }
             }
 
@@ -709,7 +791,9 @@ static void audio_task_entry(void*){
                                                  AudioNetworkStartPhase::Failed,
                                                  "wifi_disconnected");
             } else {
-              const char* start_error = audio_mp3_get_last_error();
+              const char* start_error = is_network_flac
+                  ? audio_flac_get_last_error()
+                  : audio_mp3_get_last_error();
               audio_task_set_network_start_state(cmd.request_id,
                                                  AudioNetworkStartPhase::Failed,
                                                  (start_error && *start_error)
@@ -718,6 +802,7 @@ static void audio_task_entry(void*){
             }
           }
         } else {
+          s_task_network_codec = AudioNetworkCodecKind::None;
           audio_task_set_network_start_state(0, AudioNetworkStartPhase::Idle);
           ok = audio_play(cmd.path);
         }
@@ -748,8 +833,11 @@ static void audio_task_entry(void*){
           s_task_last_fade_gain = 0.0f;
         }
 
+        const char* command_label = cmd.type == CMD_PLAY_STREAM_MP3
+            ? "play_stream_mp3"
+            : (cmd.type == CMD_PLAY_STREAM_FLAC ? "play_stream_flac" : "play");
         LOGD("[音频] 服务命令 %s 耗时=%lums 成功=%d 请求=%lu",
-             (cmd.type == CMD_PLAY_STREAM_MP3) ? "play_stream_mp3" : "play",
+             command_label,
              (unsigned long)(t_done - t_cmd),
              ok ? 1 : 0,
              (unsigned long)cmd.request_id);
@@ -938,11 +1026,12 @@ static void audio_task_entry(void*){
     } else if (!s_task_playing || s_task_paused) {
       vTaskDelay(10);
     } else {
-      // 网络 MP3 的 WiFiClient::available()/read 可能被 AudioTask 高频轮询，
-      // 如果这里只 taskYIELD，低优先级 IDLE0 仍然可能长期得不到运行，触发 task_wdt。
-      // 仅对网络 MP3 每轮让出 1 tick；本地 FLAC/MP3 仍保持原来的轻量 yield，
-      // 避免本地高码率解码被额外延时拖慢。
-      if (audio_mp3_is_active() && audio_mp3_is_stream_source()) {
+      // 网络 MP3/FLAC 都会访问 WiFiClient；每轮让出 1 tick，避免低优先级
+      // IDLE0 长期得不到运行而触发 task_wdt。本地文件保持轻量 yield。
+      const bool network_audio_active =
+          (audio_mp3_is_active() && audio_mp3_is_stream_source()) ||
+          (audio_flac_is_active() && audio_flac_is_network_source());
+      if (network_audio_active) {
         vTaskDelay(1);
       } else {
         taskYIELD();
@@ -998,6 +1087,8 @@ static uint32_t audio_request_timeout_ms(AudioCmdType type)
       return 5000;
     case CMD_PLAY_STREAM_MP3:
       return 12000;
+    case CMD_PLAY_STREAM_FLAC:
+      return 20000;
     case CMD_FETCH_LYRICS:
       return 3000;
     case CMD_FETCH_COVER:
@@ -1084,6 +1175,7 @@ bool audio_service_play(const char* path, bool wait)
 }
 
 static bool audio_service_queue_stream_request(const char* url,
+                                               AudioCmdType command_type,
                                                uint32_t start_offset,
                                                bool probe_audio_offset,
                                                bool wait,
@@ -1097,7 +1189,7 @@ static bool audio_service_queue_stream_request(const char* url,
 
   // 新操作编号会使上一条网络连接/读取路径尽快退出。
   const uint32_t operation_id = audio_mp3_audiotools_source_begin_operation();
-  request->type = CMD_PLAY_STREAM_MP3;
+  request->type = command_type;
   request->network_operation_id = operation_id;
   request->stream_start_offset = start_offset;
   request->stream_probe_audio_offset = probe_audio_offset;
@@ -1118,22 +1210,32 @@ static bool audio_service_queue_stream_request(const char* url,
 
 bool audio_service_play_stream_mp3(const char* url, bool wait)
 {
-  return audio_service_queue_stream_request(url, 0, false, wait, nullptr);
+  return audio_service_queue_stream_request(url, CMD_PLAY_STREAM_MP3, 0, false, wait, nullptr);
 }
 
 bool audio_service_play_stream_mp3_from_offset(const char* url, uint32_t start_offset, bool wait)
 {
-  return audio_service_queue_stream_request(url, start_offset, false, wait, nullptr);
+  return audio_service_queue_stream_request(url, CMD_PLAY_STREAM_MP3, start_offset, false, wait, nullptr);
 }
 
 bool audio_service_play_stream_mp3_async(const char* url, uint32_t* out_request_id)
 {
-  return audio_service_queue_stream_request(url, 0, false, false, out_request_id);
+  return audio_service_queue_stream_request(url, CMD_PLAY_STREAM_MP3, 0, false, false, out_request_id);
 }
 
 bool audio_service_play_stream_mp3_auto_offset_async(const char* url, uint32_t* out_request_id)
 {
-  return audio_service_queue_stream_request(url, 0, true, false, out_request_id);
+  return audio_service_queue_stream_request(url, CMD_PLAY_STREAM_MP3, 0, true, false, out_request_id);
+}
+
+bool audio_service_play_stream_flac_async(const char* url, uint32_t* out_request_id)
+{
+  return audio_service_queue_stream_request(url,
+                                            CMD_PLAY_STREAM_FLAC,
+                                            0,
+                                            false,
+                                            false,
+                                            out_request_id);
 }
 
 bool audio_service_stop(bool wait)

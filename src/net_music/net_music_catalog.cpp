@@ -723,7 +723,7 @@ static bool parse_line(const String& raw, NetMusicItem* out) {
   item.valid =
       item.title.length() > 0 &&
       item.encoded_path.length() > 0 &&
-      item.format == "mp3";
+      (item.format == "mp3" || item.format == "flac");
 
   *out = item;
   return item.valid;

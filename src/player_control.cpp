@@ -2,6 +2,7 @@
 #include <WiFi.h>
 #include <esp_system.h>
 #include <esp_heap_caps.h>
+#include <string.h>
 
 #include "audio/audio.h"
 #include "audio/audio_output_route.h"
@@ -570,6 +571,12 @@ static bool control_net_track_eof_watch_triggered(const PlayerSourceState& sourc
     if (!audio_service_is_playing()) return false;
 
     const uint32_t now = millis();
+    AudioNetworkStateSnapshot network{};
+    if (audio_service_get_network_state(&network) && network.reconnecting) {
+        // FLAC Range 续传期间播放进度会暂时停止，不能把它误判为文件自然结束。
+        s_net_track_eof_watch.last_change_ms = now;
+        return false;
+    }
     const uint32_t play_ms = audio_get_play_ms();
 
     // 优先使用 NET_TRACK 元数据里的时长；如果没有，再用 audio 层总时长。
@@ -709,18 +716,26 @@ static bool control_poll_net_track_start()
 
     if (network.start_phase == AudioNetworkStartPhase::Playing && network.active) {
         player_source_set_net_track_status(true, String("playing"), String());
-        audio_set_total_ms(source.net_track_duration_ms);
+        // 列表时长优先；FLAC 列表未提供时长时保留 dr_flac 从 STREAMINFO 得到的结果。
+        if (source.net_track_duration_ms > 0) {
+            audio_set_total_ms(source.net_track_duration_ms);
+        }
 
         if (s_net_track_start_pending.reset_shuffle && control_is_net_track_random_mode()) {
             control_reset_net_track_shuffle(source.net_track_idx);
         }
 
         control_reset_net_track_eof_watch(source.net_track_idx);
-        net_music_embedded_cover_start(source.net_track_idx, source.net_track_url);
+        if (source.net_track_format == "mp3") {
+            net_music_embedded_cover_start(source.net_track_idx, source.net_track_url);
+        } else {
+            net_music_embedded_cover_cancel();
+        }
 
-        LOGI("[网络歌曲] 异步起播完成 索引=%d 标题=%s 时长=%lums 请求=%lu URL=%s",
+        LOGI("[网络歌曲] 异步起播完成 索引=%d 标题=%s 格式=%s 时长=%lums 请求=%lu URL=%s",
              source.net_track_idx,
              source.net_track_title.c_str(),
+             source.net_track_format.c_str(),
              (unsigned long)source.net_track_duration_ms,
              (unsigned long)s_net_track_start_pending.request_id,
              source.net_track_url.c_str());
@@ -827,9 +842,34 @@ bool player_control_try_auto_next(bool entered, bool started)
 
     const PlayerSourceState source = player_source_get();
 
-    // 网络歌曲播放期间一旦 WiFi 断开，立即停止当前网络音频并锁定错误状态。
-    // 必须放在 s_user_paused 判断之前，否则“暂停后断网”会保留失效流，恢复时再次误触发自动下一首。
-    if (source.type == PlayerSourceType::NET_TRACK && WiFi.status() != WL_CONNECTED) {
+    // NAS FLAC 由 HTTP Range 音源自行执行断流续传。续传期间保持当前歌曲，
+    // 禁止播放器层因为 WiFi 短暂断开而提前 stop，也禁止误判为自然播放结束。
+    if (source.type == PlayerSourceType::NET_TRACK &&
+        source.net_track_format == "flac") {
+        AudioNetworkStateSnapshot network{};
+        if (audio_service_get_network_state(&network)) {
+            if (network.reconnecting) {
+                if (source.net_track_state != "reconnecting" || !source.net_track_active) {
+                    player_source_set_net_track_status(true, String("reconnecting"), String());
+                    ui_request_refresh_now();
+                }
+                return false;
+            }
+
+            if (source.net_track_state == "reconnecting" &&
+                network.active && audio_service_is_playing()) {
+                player_source_set_net_track_status(true, String("playing"), String());
+                control_reset_net_track_eof_watch(source.net_track_idx);
+                ui_request_refresh_now();
+            }
+        }
+    }
+
+    // MP3 仍保持原有策略：播放期间 WiFi 断开后立即停止并锁定错误状态。
+    // FLAC 不走这里，由 Range 音源完成 1/2/4/8/15 秒续传。
+    if (source.type == PlayerSourceType::NET_TRACK &&
+        source.net_track_format != "flac" &&
+        WiFi.status() != WL_CONNECTED) {
         if (audio_service_is_playing() || audio_service_is_paused()) {
             (void)audio_service_stop(true);
         }
@@ -864,12 +904,20 @@ bool player_control_try_auto_next(bool entered, bool started)
         bool should_advance = false;
 
         if (!audio_service_is_playing()) {
-            // 只有播放位置已经接近元数据总时长时，才把“停止”认定为自然播完。
-            // 中途断流、NAS 离线、HTTP socket 异常都停在当前曲目并显示错误，不能连续扫下一首。
-            if (!control_net_track_is_near_natural_end(source)) {
-                AudioNetworkStateSnapshot network{};
-                (void)audio_service_get_network_state(&network);
+            AudioNetworkStateSnapshot network{};
+            (void)audio_service_get_network_state(&network);
 
+            const bool flac_retry_exhausted =
+                source.net_track_format == "flac" &&
+                strcmp(network.error, "flac_reconnect_exhausted") == 0;
+
+            // NAS FLAC 已完成 1/2/4/8/15 秒全部续传尝试后，才允许跳过当前曲目。
+            // 其它中途断流仍停在当前歌曲并显示错误，避免网络故障时连续扫完整个列表。
+            if (flac_retry_exhausted) {
+                LOGW("[网络歌曲] NAS FLAC 续传失败达到上限，跳过当前歌曲：索引=%d",
+                     source.net_track_idx);
+                should_advance = true;
+            } else if (!control_net_track_is_near_natural_end(source)) {
                 const char* reason = "stream_interrupted";
                 if (network.error[0] != '\0') {
                     reason = network.error;
@@ -879,9 +927,9 @@ bool player_control_try_auto_next(bool entered, bool started)
 
                 control_latch_net_track_failure(source, reason);
                 return false;
+            } else {
+                should_advance = true;
             }
-
-            should_advance = true;
         } else if (control_net_track_eof_watch_triggered(source)) {
             // URLStream 对普通 HTTP 文件播完后可能不返回 EOF，
             // 这里主动停掉当前流，再切下一首。
@@ -1182,15 +1230,19 @@ static bool control_play_net_track_index_impl(int idx, bool reset_shuffle)
     audio_output_route_sync_ui_volume();
 
 
-    // NAS 播放起播时先显示网络封面加载图，避免继续显示上一首封面。
-    // 如果 /System/net_cover_loading.jpg 不存在，则回退默认封面。
-    if (!control_apply_cover_file("/System/net_cover_loading.jpg")) {
+    // MP3 后台会继续探测 APIC，因此先显示网络封面加载图。
+    // NAS FLAC 第一阶段暂不读取远程 PICTURE，直接使用默认封面。
+    if (item.format == "flac") {
+        (void)control_apply_cover_file("/System/default_cover.jpg");
+    } else if (!control_apply_cover_file("/System/net_cover_loading.jpg")) {
         (void)control_apply_cover_file("/System/default_cover.jpg");
     }
     ui_request_refresh_now();
 
     uint32_t request_id = 0;
-    const bool queued = audio_service_play_stream_mp3_auto_offset_async(url.c_str(), &request_id);
+    const bool queued = item.format == "flac"
+        ? audio_service_play_stream_flac_async(url.c_str(), &request_id)
+        : audio_service_play_stream_mp3_auto_offset_async(url.c_str(), &request_id);
     if (!queued || request_id == 0) {
         player_source_set_net_track_status(false, String("error"), String("queue_failed"));
         LOGW("[网络歌曲] 起播请求入队失败：索引=%d 标题=%s URL=%s",
@@ -1208,9 +1260,10 @@ static bool control_play_net_track_index_impl(int idx, bool reset_shuffle)
     s_net_track_start_pending.reset_shuffle = reset_shuffle;
 
     player_source_set_net_track_status(true, String("connecting"), String());
-    LOGI("[网络歌曲] 起播请求已入队：索引=%d 标题=%s 请求=%lu URL=%s",
+    LOGI("[网络歌曲] 起播请求已入队：索引=%d 标题=%s 格式=%s 请求=%lu URL=%s",
          idx,
          item.title.c_str(),
+         item.format.c_str(),
          (unsigned long)request_id,
          url.c_str());
     return true;

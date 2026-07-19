@@ -10,7 +10,7 @@
     [string]$SourcesOut = "$env:USERPROFILE\Desktop\net_music_sources.txt",
     [string]$ListName = "net_music.txt",
     [string]$Ffprobe = "ffprobe",
-    [string[]]$Extensions = @(".mp3"),
+    [string[]]$Extensions = @(".mp3", ".flac"),
     [string]$CacheRoot = "$env:LOCALAPPDATA\ESP32_NAS_Multi_Library_Generator",
     [switch]$ForceProbe,
     [switch]$NoPause
@@ -352,7 +352,7 @@ try {
     Set-Content -LiteralPath $logPath -Value ("NAS 多曲库列表生成日志 - " + (Get-Date -Format "yyyy-MM-dd HH:mm:ss")) -Encoding UTF8
 
     Write-Host "=============================================" -ForegroundColor Cyan
-    Write-Host " ESP32 NAS 多曲库列表生成器 v4（增量缓存）" -ForegroundColor Cyan
+    Write-Host " ESP32 NAS 多曲库列表生成器 v5（MP3 + FLAC 增量缓存）" -ForegroundColor Cyan
     Write-Host "=============================================" -ForegroundColor Cyan
     Write-Host ""
     Write-Log "父目录：$Root"

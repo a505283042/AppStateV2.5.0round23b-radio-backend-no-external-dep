@@ -2,9 +2,11 @@
 #include "audio/audio_flac.h"
 #include "audio/audio_i2s.h"
 #include "audio/audio_file.h"
+#include "audio/audio_http_range_source.h"
 #include "board/board_pins.h"
 #include "utils/log.h"
 #include <esp_heap_caps.h>
+#include <string.h>
 
 #define DR_FLAC_IMPLEMENTATION
 #include "../../lib/dr_libs/dr_flac.h"
@@ -14,11 +16,36 @@ static drflac* g_flac = nullptr;
 static bool g_playing = false;
 static int g_sr = 44100;
 static uint32_t g_ch = 2;
+static uint32_t s_total_ms = 0;
 static size_t s_pending_off = 0;
 static size_t s_pending_frames = 0;
 static const int16_t* s_pending_pcm = nullptr;
 static int s_last_sr = 0; // 上次设置的采样率（文件级 static，便于重置）
 static AudioPlaybackEndReason s_end_reason = AudioPlaybackEndReason::None;
+static char s_last_error[80] = {0};
+
+enum class FlacSourceKind : uint8_t {
+  None = 0,
+  LocalFile,
+  HttpRange,
+};
+
+static FlacSourceKind s_source_kind = FlacSourceKind::None;
+
+static void clear_flac_error()
+{
+  s_last_error[0] = '\0';
+}
+
+static void set_flac_error(const char* error)
+{
+  if (!error || !*error) {
+    clear_flac_error();
+    return;
+  }
+  strncpy(s_last_error, error, sizeof(s_last_error) - 1);
+  s_last_error[sizeof(s_last_error) - 1] = '\0';
+}
 
 static void set_end_reason_if_none(AudioPlaybackEndReason reason)
 {
@@ -80,55 +107,118 @@ static void clear_prime_buffer()
   }
 }
 
-static size_t on_read(void* user, void* bufferOut, size_t bytesToRead)
+static ssize_t source_read(void* buffer_out, size_t bytes_to_read)
 {
-  AudioFile* af = (AudioFile*)user;
-  if (!af) {
-    set_end_reason_if_none(AudioPlaybackEndReason::SourceIoError);
-    return 0;
+  if (s_source_kind == FlacSourceKind::LocalFile) {
+    return g_file.read(buffer_out, bytes_to_read);
   }
-
-  const ssize_t n = af->read(bufferOut, bytesToRead);
-  if (n < 0) {
-    set_end_reason_if_none(AudioPlaybackEndReason::SourceIoError);
-    return 0;
+  if (s_source_kind == FlacSourceKind::HttpRange) {
+    return audio_http_range_source_read(buffer_out, bytes_to_read);
   }
-  if (n == 0) {
-    return 0;
-  }
-  return (size_t)n;
+  return -1;
 }
 
-static drflac_bool32 on_seek(void* user, int offset, drflac_seek_origin origin)
+static bool source_seek(uint32_t absolute_offset)
 {
-  AudioFile* af = (AudioFile*)user;
-  // offset 是 int（可为负），不能直接转成 uint32_t；否则会发生溢出，seek 飞出文件范围。
-  const int64_t cur  = (int64_t)af->tell();
-  const int64_t size = (int64_t)af->size();
+  if (s_source_kind == FlacSourceKind::LocalFile) {
+    return g_file.seek(absolute_offset);
+  }
+  if (s_source_kind == FlacSourceKind::HttpRange) {
+    return audio_http_range_source_seek(absolute_offset);
+  }
+  return false;
+}
+
+static uint32_t source_tell()
+{
+  if (s_source_kind == FlacSourceKind::LocalFile) return g_file.tell();
+  if (s_source_kind == FlacSourceKind::HttpRange) return audio_http_range_source_tell();
+  return 0;
+}
+
+static uint32_t source_size()
+{
+  if (s_source_kind == FlacSourceKind::LocalFile) return g_file.size();
+  if (s_source_kind == FlacSourceKind::HttpRange) return audio_http_range_source_size();
+  return 0;
+}
+
+static bool source_had_io_error()
+{
+  if (s_source_kind == FlacSourceKind::LocalFile) return g_file.had_io_error();
+  if (s_source_kind == FlacSourceKind::HttpRange) return audio_http_range_source_had_io_error();
+  return true;
+}
+
+static void source_close()
+{
+  if (s_source_kind == FlacSourceKind::LocalFile) {
+    if (g_file.f) g_file.close();
+  } else if (s_source_kind == FlacSourceKind::HttpRange) {
+    audio_http_range_source_close();
+  }
+  s_source_kind = FlacSourceKind::None;
+}
+
+static const char* source_last_error()
+{
+  if (s_source_kind == FlacSourceKind::HttpRange) {
+    return audio_http_range_source_get_last_error();
+  }
+  return s_last_error;
+}
+
+static size_t on_read(void*, void* buffer_out, size_t bytes_to_read)
+{
+  const ssize_t count = source_read(buffer_out, bytes_to_read);
+  if (count < 0) {
+    const char* error = source_last_error();
+    set_flac_error(error && *error ? error : "flac_source_read_failed");
+    if (error && strcmp(error, "cancelled") == 0) {
+      set_end_reason_if_none(AudioPlaybackEndReason::Stopped);
+    } else {
+      set_end_reason_if_none(AudioPlaybackEndReason::SourceIoError);
+    }
+    return 0;
+  }
+  return static_cast<size_t>(count);
+}
+
+static drflac_bool32 on_seek(void*, int offset, drflac_seek_origin origin)
+{
+  // offset 是 int（可为负），不能直接转成 uint32_t；否则会发生溢出。
+  const int64_t current = static_cast<int64_t>(source_tell());
+  const int64_t size = static_cast<int64_t>(source_size());
   int64_t base = 0;
 
   switch (origin) {
-    case DRFLAC_SEEK_SET: base = 0;    break;
-    case DRFLAC_SEEK_CUR: base = cur;  break;
+    case DRFLAC_SEEK_SET: base = 0; break;
+    case DRFLAC_SEEK_CUR: base = current; break;
     case DRFLAC_SEEK_END: base = size; break;
     default: return DRFLAC_FALSE;
   }
 
-  int64_t target = base + (int64_t)offset;
+  int64_t target = base + static_cast<int64_t>(offset);
   if (target < 0) target = 0;
   if (target > size) target = size;
 
-  if (!af->seek((uint32_t)target)) {
-    set_end_reason_if_none(AudioPlaybackEndReason::SourceIoError);
+  if (!source_seek(static_cast<uint32_t>(target))) {
+    const char* error = source_last_error();
+    set_flac_error(error && *error ? error : "flac_source_seek_failed");
+    if (error && strcmp(error, "cancelled") == 0) {
+      set_end_reason_if_none(AudioPlaybackEndReason::Stopped);
+    } else {
+      set_end_reason_if_none(AudioPlaybackEndReason::SourceIoError);
+    }
     return DRFLAC_FALSE;
   }
   return DRFLAC_TRUE;
 }
 
-static drflac_bool32 on_tell(void* user, drflac_int64* pCursor)
+static drflac_bool32 on_tell(void*, drflac_int64* cursor)
 {
-  AudioFile* af = (AudioFile*)user;
-  *pCursor = (drflac_int64)af->tell();
+  if (!cursor) return DRFLAC_FALSE;
+  *cursor = static_cast<drflac_int64>(source_tell());
   return DRFLAC_TRUE;
 }
 
@@ -153,58 +243,109 @@ static uint32_t decode_one_chunk_to(int16_t* out_pcm)
   return frames_read;
 }
 
-bool audio_flac_start(SdFat& sd, const char* path)
+static bool finish_flac_start(const char* debug_name, uint32_t started_ms)
 {
-  audio_flac_stop();
-  s_end_reason = AudioPlaybackEndReason::None;
-  const uint32_t t0 = millis();
-  uint32_t t_after_open = t0;
-  uint32_t t_after_drflac_open = t0;
-  uint32_t t_after_meta = t0;
-
-  if (!g_file.open(sd, path)) {
-    LOGE("[FLAC] 打开失败：%s", path);
-    return false;
-  }
-  t_after_open = millis();
-
-  g_flac = drflac_open(on_read, on_seek, on_tell, &g_file, nullptr);
+  const uint32_t source_opened_ms = millis();
+  g_flac = drflac_open(on_read, on_seek, on_tell, nullptr, nullptr);
   if (!g_flac) {
-    LOGE("[FLAC] drflac 打开失败");
-    g_file.close();
+    const char* source_error = source_last_error();
+    set_flac_error(source_error && *source_error
+        ? source_error
+        : "flac_decoder_open_failed");
+    LOGE("[FLAC] dr_flac 打开失败：来源=%s 错误=%s",
+         debug_name ? debug_name : "<unknown>",
+         s_last_error);
+    source_close();
     return false;
   }
-  t_after_drflac_open = millis();
 
-  g_sr = (int)g_flac->sampleRate;
+  const uint32_t decoder_opened_ms = millis();
+  g_sr = static_cast<int>(g_flac->sampleRate);
   g_ch = g_flac->channels;
-  if (g_ch > 2 || g_ch == 0) {
-    LOGE("[FLAC] 不支持的声道数：%d", g_ch);
-    audio_flac_stop();
+  if (g_ch == 0 || g_ch > 2 || g_sr <= 0) {
+    set_flac_error("flac_format_unsupported");
+    LOGE("[FLAC] 不支持的格式：采样率=%d 声道=%u", g_sr, (unsigned)g_ch);
+    drflac_close(g_flac);
+    g_flac = nullptr;
+    source_close();
     return false;
   }
-  t_after_meta = millis();
-  s_last_sr = 0; // 重置采样率缓存，确保新文件一定会设置 I2S 时钟
+
+  if (g_flac->totalPCMFrameCount > 0) {
+    const uint64_t total_ms =
+        (static_cast<uint64_t>(g_flac->totalPCMFrameCount) * 1000ULL) /
+        static_cast<uint32_t>(g_sr);
+    s_total_ms = total_ms > UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(total_ms);
+  } else {
+    s_total_ms = 0;
+  }
+
+  s_last_sr = 0;
   g_playing = true;
   s_pending_pcm = nullptr;
   s_pending_off = 0;
   s_pending_frames = 0;
   clear_prime_buffer();
-  const auto& st = g_file.last_open_stats();
-  LOGD("[FLAC] 启动细节：等待锁=%lums 目录准备=%lums 目录缓存=%u 缓存原因=%s 文件打开=%lums 文件大小=%lums 打开=%lums drflac打开=%lums 元数据=%lums 总计=%lums 采样率=%d 声道=%u",
-       (unsigned long)st.lock_wait_ms,
-       (unsigned long)st.dir_prepare_ms,
-       (unsigned)st.used_dir_cache,
-       audio_file_dir_cache_reason_str(st.dir_cache_reason),
-       (unsigned long)st.file_open_ms,
-       (unsigned long)st.file_size_ms,
-       (unsigned long)(t_after_open - t0),
-       (unsigned long)(t_after_drflac_open - t_after_open),
-       (unsigned long)(t_after_meta - t_after_drflac_open),
-       (unsigned long)(t_after_meta - t0),
+  clear_flac_error();
+
+  LOGI("[FLAC] 启动成功：来源=%s 类型=%s 文件=%luB 采样率=%d 声道=%u 时长=%lums 源打开=%lums 解码器打开=%lums 总计=%lums",
+       debug_name ? debug_name : "<unknown>",
+       s_source_kind == FlacSourceKind::HttpRange ? "HTTP Range" : "本地",
+       (unsigned long)source_size(),
        g_sr,
-       (unsigned)g_ch);
+       (unsigned)g_ch,
+       (unsigned long)s_total_ms,
+       (unsigned long)(source_opened_ms - started_ms),
+       (unsigned long)(decoder_opened_ms - source_opened_ms),
+       (unsigned long)(decoder_opened_ms - started_ms));
   return true;
+}
+
+bool audio_flac_start(SdFat& sd, const char* path)
+{
+  audio_flac_stop();
+  s_end_reason = AudioPlaybackEndReason::None;
+  clear_flac_error();
+  s_total_ms = 0;
+  const uint32_t started_ms = millis();
+
+  if (!path || !g_file.open(sd, path)) {
+    set_flac_error("flac_file_open_failed");
+    LOGE("[FLAC] 本地文件打开失败：%s", path ? path : "<null>");
+    return false;
+  }
+
+  s_source_kind = FlacSourceKind::LocalFile;
+  return finish_flac_start(path, started_ms);
+}
+
+bool audio_flac_start_url(const char* url, uint32_t operation_id)
+{
+  audio_flac_stop();
+  s_end_reason = AudioPlaybackEndReason::None;
+  clear_flac_error();
+  s_total_ms = 0;
+  const uint32_t started_ms = millis();
+
+  if (!url || !*url) {
+    set_flac_error("invalid_url");
+    return false;
+  }
+
+  if (!audio_http_range_source_open(url, operation_id)) {
+    const char* source_error = audio_http_range_source_get_last_error();
+    set_flac_error(source_error && *source_error
+        ? source_error
+        : "flac_http_open_failed");
+    LOGE("[NAS FLAC] HTTP Range 音源打开失败：错误=%s URL=%s",
+         s_last_error,
+         url);
+    audio_http_range_source_close();
+    return false;
+  }
+
+  s_source_kind = FlacSourceKind::HttpRange;
+  return finish_flac_start(url, started_ms);
 }
 
 void audio_flac_stop()
@@ -220,13 +361,46 @@ void audio_flac_stop()
   clear_prime_buffer();
 
   if (g_flac) { drflac_close(g_flac); g_flac = nullptr; }
-  if (g_file.f) g_file.close();
+  source_close();
   g_playing = false;
+  s_total_ms = 0;
 }
 
 AudioPlaybackEndReason audio_flac_get_end_reason()
 {
   return s_end_reason;
+}
+
+bool audio_flac_is_active()
+{
+  return g_playing && g_flac != nullptr;
+}
+
+bool audio_flac_is_network_source()
+{
+  return s_source_kind == FlacSourceKind::HttpRange;
+}
+
+uint32_t audio_flac_get_sample_rate()
+{
+  return g_sr > 0 ? static_cast<uint32_t>(g_sr) : 0;
+}
+
+uint8_t audio_flac_get_channels()
+{
+  return static_cast<uint8_t>(g_ch);
+}
+
+uint32_t audio_flac_get_total_ms()
+{
+  return s_total_ms;
+}
+
+const char* audio_flac_get_last_error()
+{
+  if (s_last_error[0]) return s_last_error;
+  const char* source_error = source_last_error();
+  return source_error ? source_error : "";
 }
 
 uint32_t audio_flac_prime_pcm_ms(uint32_t target_ms, uint32_t max_chunks)
@@ -342,9 +516,9 @@ bool audio_flac_loop()
   uint32_t frames_read = decode_one_chunk_to(s_decode_pcm);
 
   if (frames_read == 0) {
-    if (g_file.had_io_error()) {
+    if (source_had_io_error()) {
       set_end_reason_if_none(AudioPlaybackEndReason::SourceIoError);
-    } else if (g_file.tell() >= g_file.size()) {
+    } else if (source_tell() >= source_size()) {
       set_end_reason_if_none(AudioPlaybackEndReason::NaturalEof);
     } else {
       set_end_reason_if_none(AudioPlaybackEndReason::DecodeError);
@@ -353,13 +527,14 @@ bool audio_flac_loop()
     if (s_end_reason == AudioPlaybackEndReason::NaturalEof) {
       LOGD("[FLAC] 播放结束：原因=%s 文件位置=%lu/%lu",
            audio_playback_end_reason_label(s_end_reason),
-           (unsigned long)g_file.tell(),
-           (unsigned long)g_file.size());
+           (unsigned long)source_tell(),
+           (unsigned long)source_size());
     } else {
-      LOGW("[FLAC] 播放异常结束：原因=%s 文件位置=%lu/%lu",
+      LOGW("[FLAC] 播放异常结束：原因=%s 文件位置=%lu/%lu 错误=%s",
            audio_playback_end_reason_label(s_end_reason),
-           (unsigned long)g_file.tell(),
-           (unsigned long)g_file.size());
+           (unsigned long)source_tell(),
+           (unsigned long)source_size(),
+           audio_flac_get_last_error());
     }
     audio_flac_stop();
     return false;

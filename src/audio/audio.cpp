@@ -514,6 +514,23 @@ bool audio_play_stream_mp3_from_offset(const char* url, uint32_t start_offset, u
   return ok;
 }
 
+bool audio_play_stream_flac(const char* url, uint32_t operation_id)
+{
+  audio_stop();
+  audio_clear_end_state_for_new_play();
+  audio_reset_play_pos();
+  audio_set_total_ms(0);
+  if (!url || !*url) return false;
+
+  LOGI("[音频] 播放 NAS FLAC：%s", url);
+  const bool ok = audio_flac_start_url(url, operation_id);
+  if (ok) {
+    g_dec = DEC_FLAC;
+    audio_set_total_ms(audio_flac_get_total_ms());
+  }
+  return ok;
+}
+
 void audio_loop()
 {
   if (g_dec == DEC_MP3) {

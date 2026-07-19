@@ -17,7 +17,7 @@ enum class AudioNetworkStartPhase : uint8_t {
 };
 
 // 网络音频状态由 AudioTask 统一采集并发布。
-// UI、Web 和播放器状态机只能读取该快照，禁止直接访问 WiFiClient 或 MP3 解码器内部状态。
+// UI、Web 和播放器状态机只能读取该快照，禁止直接访问 WiFiClient 或网络解码器内部状态。
 struct AudioNetworkStateSnapshot {
   uint32_t start_request_id = 0;
   AudioNetworkStartPhase start_phase = AudioNetworkStartPhase::Idle;
@@ -25,8 +25,16 @@ struct AudioNetworkStateSnapshot {
   bool source_open = false;
   bool transport_connected = false;
   bool waiting_for_data = false;
+  bool reconnecting = false;
   bool eof = false;
+  uint8_t reconnect_attempt = 0;
+  uint32_t reconnect_delay_ms = 0;
   uint32_t available_bytes = 0;
+  uint32_t cached_bytes = 0;
+  uint32_t transport_available_bytes = 0;
+  uint32_t buffer_capacity_bytes = 0;
+  uint32_t reconnect_attempt_count = 0;
+  uint32_t reconnect_success_count = 0;
   uint32_t last_data_ms = 0;
   uint32_t bitrate_kbps = 0;
   uint32_t sample_rate = 0;
@@ -46,6 +54,8 @@ bool audio_service_play_stream_mp3_from_offset(const char* url, uint32_t start_o
 // out_request_id 用于播放器状态机匹配本次连接结果。
 bool audio_service_play_stream_mp3_async(const char* url, uint32_t* out_request_id = nullptr);
 bool audio_service_play_stream_mp3_auto_offset_async(const char* url, uint32_t* out_request_id = nullptr);
+// NAS FLAC 使用 HTTP Range 可寻址音源。
+bool audio_service_play_stream_flac_async(const char* url, uint32_t* out_request_id = nullptr);
 
 bool audio_service_stop(bool wait);
 

@@ -1,5 +1,8 @@
-﻿1. 双击 Run_NAS_Multi_Library_Generator.cmd，不要直接双击 ps1。
-2. 把 ffprobe.exe 放到本文件夹，或者把 FFmpeg 的 bin 目录加入 PATH。
-3. 脚本默认扫描：\\192.168.1.105\麦田广告\Music
-4. 结果和错误日志位于桌面：net_music_sources.txt、net_music_generator.log。
-5. 每个 NAS 子文件夹中会生成自己的 net_music.txt。
+ESP32 NAS 多曲库列表生成器 v5
+
+1. 将 ffprobe.exe 放在本目录，或把 FFmpeg bin 加入 PATH。
+2. 双击 Run_NAS_Multi_Library_Generator_v5_FLAC.cmd。
+3. 默认同时扫描 .mp3 和 .flac。
+4. 输出格式：标题|原始中文相对路径|格式|歌手|专辑|时长毫秒。
+5. 未变化歌曲复用本地缓存，不重复执行 ffprobe。
+6. 固件需应用 NAS 原始 UTF-8 路径、多曲库和 NAS FLAC 补丁。
