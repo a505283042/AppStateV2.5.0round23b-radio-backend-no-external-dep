@@ -72,9 +72,10 @@ static const char* player_nfc_bind_type_label(NfcBindType type)
     }
 }
 
-static void player_show_nfc_scan_result_popup(const String& uid, const String& card_type)
+static void player_show_nfc_scan_result_popup(const String& uid,
+                                              const String& card_type,
+                                              PlayerSourceType source_type)
 {
-    const PlayerSourceType source_type = player_source_type_get();
     const bool network_source = source_type == PlayerSourceType::NET_TRACK ||
                                 source_type == PlayerSourceType::NET_RADIO;
 
@@ -100,7 +101,7 @@ static void player_show_nfc_scan_result_popup(const String& uid, const String& c
                                name,
                                true);
     } else {
-        String hint = "长按上一曲可绑定";
+        String hint = "按住旋钮+长按上一曲绑定";
         if (source_type == PlayerSourceType::NET_TRACK) {
             hint = "NAS播放时不能绑定";
         } else if (source_type == PlayerSourceType::NET_RADIO) {
@@ -844,11 +845,16 @@ void player_state_run(void)
         if (nfc_take_last_card_info(uid, card_type)) {
             Serial.printf("[播放器] NFC uid=%s type=%s\n", uid.c_str(), card_type.c_str());
 
-            // 无论是否已绑定，都先给用户一个刷卡结果反馈。
-            // 已绑定：显示 UID、卡类型、绑定类型和绑定名称；未绑定：提示可绑定。
-            player_show_nfc_scan_result_popup(uid, card_type);
+            // 先记住刷卡瞬间的来源，再执行绑定播放。网络绑定会立即切回本地，
+            // 因此弹窗必须在动作之后显示，同时使用动作前来源生成“回本地”提示。
+            const PlayerSourceType source_before_scan = player_source_type_get();
+            const bool handled = player_binding_try_handle_nfc_uid(uid);
 
-            if (!player_binding_try_handle_nfc_uid(uid)) {
+            player_show_nfc_scan_result_popup(uid,
+                                              card_type,
+                                              source_before_scan);
+
+            if (!handled) {
                 LOGI("[NFC] UID 未绑定：%s", uid.c_str());
             }
         }

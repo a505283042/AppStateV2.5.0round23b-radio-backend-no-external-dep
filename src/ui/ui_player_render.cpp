@@ -711,7 +711,7 @@ static void draw_nfc_bind_target_popup_overlay(LGFX_Sprite* dst)
 // NFC 刷卡结果 Overlay
 // =============================================================================
 
-static constexpr uint32_t NFC_SCAN_POPUP_DURATION_MS = 4200; // 弹窗时间3.2s
+static constexpr uint32_t NFC_SCAN_POPUP_DURATION_MS = 4200; // 弹窗时间 4.2 秒
 
 static bool s_nfc_scan_popup_visible = false;
 static bool s_nfc_scan_popup_dirty = false;
@@ -778,6 +778,140 @@ static String nfc_popup_fit_text_px(CanvasT* dst, String text, int max_w)
   }
 
   return out + ellipsis;
+}
+
+// =============================================================================
+// NFC 操作提示 Overlay
+// =============================================================================
+
+static constexpr uint32_t NFC_NOTICE_POPUP_DURATION_MS = 3200;
+
+static bool s_nfc_notice_popup_visible = false;
+static bool s_nfc_notice_popup_dirty = false;
+static uint32_t s_nfc_notice_popup_until_ms = 0;
+static String s_nfc_notice_popup_title;
+static String s_nfc_notice_popup_detail;
+
+struct NfcNoticePopupSnapshot {
+  bool visible = false;
+  String title;
+  String detail;
+};
+
+static bool nfc_notice_popup_update_active_locked(uint32_t now)
+{
+  if (!s_nfc_notice_popup_visible) {
+    return false;
+  }
+
+  if (static_cast<int32_t>(s_nfc_notice_popup_until_ms - now) > 0) {
+    return true;
+  }
+
+  s_nfc_notice_popup_visible = false;
+  s_nfc_notice_popup_dirty = true;
+  return false;
+}
+
+static NfcNoticePopupSnapshot nfc_notice_popup_snapshot(uint32_t now)
+{
+  NfcNoticePopupSnapshot snapshot{};
+  ui_lock();
+  snapshot.visible = nfc_notice_popup_update_active_locked(now);
+  if (snapshot.visible) {
+    snapshot.title = s_nfc_notice_popup_title;
+    snapshot.detail = s_nfc_notice_popup_detail;
+  }
+  ui_unlock();
+  return snapshot;
+}
+
+bool ui_nfc_notice_popup_is_visible()
+{
+  return nfc_notice_popup_snapshot(millis()).visible;
+}
+
+bool ui_nfc_notice_popup_consume_dirty()
+{
+  ui_lock();
+  const bool dirty = s_nfc_notice_popup_dirty;
+  s_nfc_notice_popup_dirty = false;
+  ui_unlock();
+  return dirty;
+}
+
+template <typename CanvasT>
+static void draw_nfc_notice_popup_canvas(CanvasT* dst)
+{
+  if (!dst) {
+    return;
+  }
+
+  const NfcNoticePopupSnapshot popup = nfc_notice_popup_snapshot(millis());
+  if (!popup.visible) {
+    return;
+  }
+
+  static constexpr int BOX_W = 200;
+  static constexpr int BOX_H = 66;
+  static constexpr int BOX_X = (240 - BOX_W) / 2;
+  static constexpr int BOX_Y = (240 - BOX_H) / 2;
+  static constexpr int BOX_R = 14;
+  static constexpr int TEXT_W = BOX_W - 20;
+
+  dst->fillRoundRect(BOX_X, BOX_Y, BOX_W, BOX_H, BOX_R, TFT_BLACK);
+  dst->drawRoundRect(BOX_X, BOX_Y, BOX_W, BOX_H, BOX_R, TFT_ORANGE);
+
+  dst->setFont(&g_font_cjk);
+  dst->setTextSize(1);
+  dst->setTextWrap(false);
+  dst->setTextDatum(middle_center);
+
+  dst->setTextColor(TFT_ORANGE, TFT_BLACK);
+  dst->drawString(nfc_popup_fit_text_px(dst, popup.title, TEXT_W),
+                  BOX_X + BOX_W / 2,
+                  BOX_Y + 22);
+
+  dst->setTextColor(TFT_WHITE, TFT_BLACK);
+  dst->drawString(nfc_popup_fit_text_px(dst, popup.detail, TEXT_W),
+                  BOX_X + BOX_W / 2,
+                  BOX_Y + 45);
+
+  dst->setTextDatum(top_left);
+}
+
+void ui_show_nfc_notice_popup(const char* title, const char* detail)
+{
+  String next_title = title ? String(title) : String("");
+  String next_detail = detail ? String(detail) : String("");
+  next_title.trim();
+  next_detail.trim();
+
+  if (next_title.isEmpty()) {
+    next_title = "NFC提示";
+  }
+  if (next_detail.isEmpty()) {
+    next_detail = "操作不可用";
+  }
+
+  ui_lock();
+  s_nfc_notice_popup_title = next_title;
+  s_nfc_notice_popup_detail = next_detail;
+  s_nfc_notice_popup_visible = true;
+  s_nfc_notice_popup_dirty = true;
+  s_nfc_notice_popup_until_ms = millis() + NFC_NOTICE_POPUP_DURATION_MS;
+  ui_unlock();
+  ui_request_refresh();
+}
+
+void ui_draw_nfc_notice_popup_on_tft_if_visible()
+{
+  draw_nfc_notice_popup_canvas(&tft);
+}
+
+static void draw_nfc_notice_popup_overlay(LGFX_Sprite* dst)
+{
+  draw_nfc_notice_popup_canvas(dst);
 }
 
 static bool nfc_scan_popup_update_active_locked(uint32_t now)
@@ -851,7 +985,7 @@ void ui_show_nfc_scan_popup(const String& uid,
     next_bind_type = bound ? String("已绑定") : String("未绑定");
   }
   if (!bound && next_bind_name.isEmpty()) {
-    next_bind_name = "长按上一曲可绑定";
+    next_bind_name = "按住旋钮+长按上一曲绑定";
   }
 
   ui_lock();
@@ -1273,6 +1407,7 @@ void cover_rotate_draw(float angle_deg)
   draw_volume_step_hint_overlay(dst);
   draw_seek_preview_overlay(dst);
   draw_nfc_bind_target_popup_overlay(dst);
+  draw_nfc_notice_popup_overlay(dst);
   draw_nfc_scan_popup_overlay(dst);
 
   // 将后帧推送到屏幕 (0, 0) 位置
@@ -2766,6 +2901,7 @@ void cover_panel_draw(float angle_deg)
   draw_volume_step_hint_overlay(dst);
   draw_seek_preview_overlay(dst);
   draw_nfc_bind_target_popup_overlay(dst);
+  draw_nfc_notice_popup_overlay(dst);
   draw_nfc_scan_popup_overlay(dst);
 
   prof_step_t0 = UI_PROF_T0();
@@ -2983,6 +3119,7 @@ void cover_info_draw()
   draw_volume_step_hint_overlay(dst);
   draw_seek_preview_overlay(dst);
   draw_nfc_bind_target_popup_overlay(dst);
+  draw_nfc_notice_popup_overlay(dst);
   draw_nfc_scan_popup_overlay(dst);
 
   // 8) 推屏
@@ -3019,7 +3156,9 @@ bool ui_draw_cover_for_track(const TrackInfo& t, bool force_redraw)
   }
 
   const bool nfc_overlay_visible =
-      ui_nfc_bind_target_popup_is_visible() || ui_nfc_scan_popup_is_visible();
+      ui_nfc_bind_target_popup_is_visible() ||
+      ui_nfc_notice_popup_is_visible() ||
+      ui_nfc_scan_popup_is_visible();
   if (nfc_overlay_visible) {
     const ui_player_view_t view = ui_get_view();
     if (view == UI_VIEW_COVER_PANEL) {

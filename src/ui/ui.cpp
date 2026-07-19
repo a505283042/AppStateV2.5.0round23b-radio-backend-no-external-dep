@@ -248,6 +248,37 @@ static inline TickType_t ui_period_ticks()
   return pdMS_TO_TICKS(1000 / UI_FPS_OTHER);
 }
 
+struct UiNfcOverlayRuntime {
+  bool bind_visible = false;
+  bool notice_visible = false;
+  bool scan_visible = false;
+  bool any_visible = false;
+  bool any_dirty = false;
+};
+
+static UiNfcOverlayRuntime ui_nfc_overlay_runtime_get()
+{
+  UiNfcOverlayRuntime state{};
+  state.bind_visible = ui_nfc_bind_target_popup_is_visible();
+  state.notice_visible = ui_nfc_notice_popup_is_visible();
+  state.scan_visible = ui_nfc_scan_popup_is_visible();
+  state.any_visible = state.bind_visible || state.notice_visible || state.scan_visible;
+
+  // 不能使用逻辑或直接串联 consume；逻辑或会短路，导致后续弹窗的 dirty 标志未被消费。
+  const bool bind_dirty = ui_nfc_bind_target_popup_consume_dirty();
+  const bool notice_dirty = ui_nfc_notice_popup_consume_dirty();
+  const bool scan_dirty = ui_nfc_scan_popup_consume_dirty();
+  state.any_dirty = bind_dirty || notice_dirty || scan_dirty;
+  return state;
+}
+
+static void ui_draw_nfc_overlays_on_tft()
+{
+  ui_draw_nfc_bind_target_popup_on_tft_if_visible();
+  ui_draw_nfc_notice_popup_on_tft_if_visible();
+  ui_draw_nfc_scan_popup_on_tft_if_visible();
+}
+
 static void ui_task_entry(void*)
 {
   for (;;) {
@@ -269,6 +300,8 @@ static void ui_task_entry(void*)
       s_rot_last_ms = now_ms;
       continue;
     }
+
+    const UiNfcOverlayRuntime nfc_overlay = ui_nfc_overlay_runtime_get();
 
     // 菜单计时由 loopTask/keys_update() 推进；UI 任务只负责绘制。
     // 播放源菜单打开列表时会保留 quick_menu active，方便 MODE 短按返回菜单；
@@ -300,6 +333,11 @@ static void ui_task_entry(void*)
       }
 
       if (!s_list_view_cache.active || s_list_view_cache.items.empty()) {
+        if (nfc_overlay.any_visible) {
+          ui_draw_lock();
+          ui_draw_nfc_overlays_on_tft();
+          ui_draw_unlock();
+        }
         continue;
       }
 
@@ -332,6 +370,11 @@ static void ui_task_entry(void*)
                                    s_list_view_cache.total,
                                    title);
 
+      // NFC 提示必须覆盖在列表页之上，否则列表每帧刷新会立刻把弹窗擦掉。
+      if (nfc_overlay.any_visible) {
+        ui_draw_nfc_overlays_on_tft();
+      }
+
       s_list_last_drawn_idx = s_list_view_cache.selected_idx;
       ui_draw_unlock();
       continue;
@@ -361,10 +404,21 @@ static void ui_task_entry(void*)
       // 菜单覆盖播放器期间暂停封面旋转时钟；菜单空闲且内容未变化时不进绘图锁，
       // 避免 NAS 播放时持续抢占 SPI/CPU。按键会主动唤醒 UI，因此空闲低频不会影响跟手性。
       s_rot_last_ms = now_ms;
-      if (ui_quick_menu_view_needs_draw()) {
+
+      // 弹窗消失后必须强制重画菜单底图，否则直接画在 TFT 上的弹窗会留下残影。
+      if (nfc_overlay.any_dirty && !nfc_overlay.any_visible) {
+        ui_quick_menu_view_reset();
+      }
+
+      if (ui_quick_menu_view_needs_draw() ||
+          nfc_overlay.any_visible ||
+          nfc_overlay.any_dirty) {
         const uint32_t draw_t0 = millis();
         ui_draw_lock();
         ui_draw_quick_menu();
+        if (nfc_overlay.any_visible) {
+          ui_draw_nfc_overlays_on_tft();
+        }
         ui_draw_unlock();
         const uint32_t draw_ms = millis() - draw_t0;
 #if APP_DIAG_UI_RUNTIME
@@ -472,12 +526,8 @@ static void ui_task_entry(void*)
       } else if (runtime.screen == UI_SCREEN_PLAYER) {
       // 播放器页但封面/帧缓冲还没 ready 时，会停留在启动或占位画面。
       // NFC 弹窗必须在这种“未开播/无封面”状态下也能显示，所以这里额外处理一次。
-      const bool nfc_bind_popup_visible = ui_nfc_bind_target_popup_is_visible();
-      const bool nfc_scan_popup_visible = ui_nfc_scan_popup_is_visible();
-      const bool nfc_bind_popup_dirty = ui_nfc_bind_target_popup_consume_dirty();
-      const bool nfc_scan_popup_dirty = ui_nfc_scan_popup_consume_dirty();
-      const bool nfc_popup_visible = nfc_bind_popup_visible || nfc_scan_popup_visible;
-      const bool nfc_popup_dirty = nfc_bind_popup_dirty || nfc_scan_popup_dirty;
+      const bool nfc_popup_visible = nfc_overlay.any_visible;
+      const bool nfc_popup_dirty = nfc_overlay.any_dirty;
       const bool placeholder_due =
           (s_player_enter_time > 0 && (now_ms - s_player_enter_time) > 5000 && !s_screen_cleared);
 
@@ -504,8 +554,7 @@ static void ui_task_entry(void*)
         }
 
         // 未开播/无封面时，NFC 弹窗直接画到 TFT 上，而不是等封面精灵路径。
-        ui_draw_nfc_bind_target_popup_on_tft_if_visible();
-        ui_draw_nfc_scan_popup_on_tft_if_visible();
+        ui_draw_nfc_overlays_on_tft();
         
         s_screen_cleared = true;
         ui_draw_unlock();

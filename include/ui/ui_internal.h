@@ -145,6 +145,11 @@ bool ui_nfc_bind_target_popup_is_visible();
 bool ui_nfc_bind_target_popup_consume_dirty();
 void ui_draw_nfc_bind_target_popup_on_tft_if_visible();
 
+/* NFC 操作提示弹窗：播放器、列表和快捷菜单都需要能绘制。 */
+bool ui_nfc_notice_popup_is_visible();
+bool ui_nfc_notice_popup_consume_dirty();
+void ui_draw_nfc_notice_popup_on_tft_if_visible();
+
 /* NFC 刷卡结果弹窗：播放器无封面/未开播占位页也需要能绘制。 */
 bool ui_nfc_scan_popup_is_visible();
 bool ui_nfc_scan_popup_consume_dirty();

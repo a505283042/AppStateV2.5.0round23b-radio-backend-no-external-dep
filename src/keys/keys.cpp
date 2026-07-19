@@ -302,10 +302,10 @@ static void nfc_bind_popup_open()
             ? "NAS歌曲"
             : "网络电台";
         LOGW("[按键] NFC绑定已拒绝：当前来源=%s", source_name);
-        ui_show_track_change_popup("NFC绑定不可用",
-                                   source_type == PlayerSourceType::NET_TRACK
-                                     ? "NAS歌曲不支持绑定"
-                                     : "网络电台不支持绑定");
+        ui_show_nfc_notice_popup("NFC绑定不可用",
+                                 source_type == PlayerSourceType::NET_TRACK
+                                   ? "NAS歌曲不支持绑定"
+                                   : "网络电台不支持绑定");
         keys_sync_to_hw_state();
         return;
     }
