@@ -10,6 +10,7 @@
 #include <string.h>
 #include <stdlib.h>
 
+#include "audio/audio_http_range_source.h"
 #include "meta/meta_flac_cover.h"
 #include "meta/meta_id3_cover.h"
 #include "lyrics/lyrics.h"
@@ -20,14 +21,19 @@
 namespace {
 
 static constexpr uint32_t kHttpRangeWindowBytes = 16 * 1024u;
-static constexpr uint32_t kHttpCoverChunkBytes = 8 * 1024u;
+static constexpr uint32_t kHttpReadChunkBytes = 8 * 1024u;
 static constexpr uint32_t kMaxRemoteCoverBytes = 512 * 1024u;
 static constexpr uint32_t kMaxRemoteLyricsBytes = 64 * 1024u;
 static constexpr uint32_t kRemoteLyricsChunkBytes = 512u;
 static constexpr size_t kInternalFallbackMaxBytes = 32 * 1024;
+/* FLAC 已使用独立网络预取环形缓冲，辅助资源恢复原有触发时间。
+ * 真正发生网络压力时，仍由下方缓存低水位保护主动暂停歌词或封面读取。 */
 static constexpr uint32_t kLyricsJobDelayMs = 250;
 static constexpr uint32_t kCoverJobDelayMs = 600;
-static constexpr uint32_t kHttpTimeoutMs = 5000;
+static constexpr uint32_t kFlacAuxActivePauseMs = 2500;
+static constexpr uint8_t kFlacAuxResumeCachePercent = 65;
+static constexpr uint8_t kFlacAuxLowCachePercent = 35;
+static constexpr uint32_t kHttpTimeoutMs = 8000;
 static constexpr uint16_t kCoverTaskStackBytes = 12288;
 static constexpr UBaseType_t kCoverTaskPrio = 1;
 static constexpr UBaseType_t kCoverTaskCore = 1;
@@ -178,6 +184,48 @@ static bool is_current_job(uint32_t generation, int idx, const String& url)
          source.net_track_url == url;
 }
 
+static bool flac_audio_cache_ready(uint8_t minimum_percent,
+                                   AudioHttpRangeSourceSnapshot* out_snapshot = nullptr)
+{
+  AudioHttpRangeSourceSnapshot snapshot{};
+  if (!audio_http_range_source_get_snapshot(&snapshot)) {
+    return true;
+  }
+  if (out_snapshot) *out_snapshot = snapshot;
+
+  // 当前不是 NAS FLAC，或音频文件已经全部预取完，不再需要限制辅助下载。
+  if (!snapshot.open || snapshot.eof || snapshot.prefetch_complete ||
+      snapshot.cache_capacity_bytes == 0) {
+    return true;
+  }
+
+  const uint32_t required =
+      (snapshot.cache_capacity_bytes * static_cast<uint32_t>(minimum_percent)) / 100u;
+  return snapshot.cached_bytes >= required && !snapshot.reconnecting;
+}
+
+static bool wait_for_flac_audio_budget(uint32_t generation,
+                                       uint8_t minimum_percent,
+                                       uint32_t timeout_ms)
+{
+  const uint32_t started_ms = millis();
+  for (;;) {
+    if (generation != current_cover_generation()) return false;
+    if (flac_audio_cache_ready(minimum_percent)) return true;
+    if ((uint32_t)(millis() - started_ms) >= timeout_ms) {
+      AudioHttpRangeSourceSnapshot snapshot{};
+      (void)flac_audio_cache_ready(minimum_percent, &snapshot);
+      LOGD("[网络封面] 等待 FLAC 音频缓存超时：缓存=%lu/%luB 目标=%u%% 重连=%u",
+           (unsigned long)snapshot.cached_bytes,
+           (unsigned long)snapshot.cache_capacity_bytes,
+           (unsigned)minimum_percent,
+           snapshot.reconnecting ? 1u : 0u);
+      return false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(20));
+  }
+}
+
 static bool is_png_buffer(const uint8_t* b, size_t len)
 {
   return len >= 8 &&
@@ -231,6 +279,7 @@ static char* alloc_remote_lyrics_buffer(size_t cap)
 
 static bool http_get_lrc_text(const String& lrc_url,
                               uint32_t generation,
+                              bool protect_flac_audio,
                               char** out_text,
                               size_t* out_len,
                               int* out_http_code)
@@ -305,6 +354,18 @@ static bool http_get_lrc_text(const String& lrc_url,
         copied += (size_t)got;
         last_data_ms = millis();
 
+        // LRC 虽然通常很小，也在 FLAC 缓存跌破低水位时立即让路。
+        if (protect_flac_audio &&
+            !flac_audio_cache_ready(kFlacAuxLowCachePercent) &&
+            !wait_for_flac_audio_budget(generation,
+                                        kFlacAuxResumeCachePercent,
+                                        kFlacAuxActivePauseMs)) {
+          LOGD("[网络歌词] 为保护 FLAC 连续播放，中止本次 LRC 下载");
+          free(buf);
+          http.end();
+          return false;
+        }
+
         if (content_len > 0 && copied >= (size_t)content_len) {
           break;
         }
@@ -339,7 +400,10 @@ static bool http_get_lrc_text(const String& lrc_url,
   return true;
 }
 
-static bool fetch_and_apply_same_dir_lrc(const String& mp3_url, uint32_t generation, int idx)
+static bool fetch_and_apply_same_dir_lrc(const String& mp3_url,
+                                              uint32_t generation,
+                                              int idx,
+                                              bool protect_flac_audio)
 {
   const String lrc_urls[] = {
     build_same_dir_sidecar_url(mp3_url, ".lrc"),
@@ -357,6 +421,7 @@ static bool fetch_and_apply_same_dir_lrc(const String& mp3_url, uint32_t generat
     const uint32_t t0 = millis();
     const bool ok = http_get_lrc_text(lrc_url,
                                       generation,
+                                      protect_flac_audio,
                                       &lyrics_text,
                                       &lyrics_len,
                                       &http_code);
@@ -401,13 +466,14 @@ static bool http_range_get_exact(const String& url,
                                  uint32_t len,
                                  uint8_t* dst,
                                  uint32_t* out_got,
-                                 uint32_t generation)
+                                 uint32_t generation,
+                                 bool protect_flac_audio = false)
 {
   if (out_got) *out_got = 0;
   if (!dst || len == 0) return false;
+  if (start > UINT32_MAX - (len - 1u)) return false;
   if (!WiFi.isConnected()) return false;
   if (generation != current_cover_generation()) return false;
-
   HTTPClient http;
   http.setTimeout(kHttpTimeoutMs);
   http.setReuse(false);
@@ -444,11 +510,24 @@ static bool http_range_get_exact(const String& url,
     const int avail = stream ? stream->available() : 0;
     if (avail > 0) {
       const uint32_t remain = len - copied;
-      const uint32_t want = (uint32_t)avail > remain ? remain : (uint32_t)avail;
+      uint32_t want = (uint32_t)avail > remain ? remain : (uint32_t)avail;
+      if (want > kHttpReadChunkBytes) want = kHttpReadChunkBytes;
       const int got = stream->readBytes(dst + copied, want);
       if (got > 0) {
         copied += (uint32_t)got;
         last_data_ms = millis();
+
+        // 完整封面仍使用同一个 HTTP Range 连接；只在音频缓存低水位时暂停读取，
+        // 等高优先级 FLAC 预取任务把环形缓冲补回安全水位。
+        if (protect_flac_audio && copied < len &&
+            !flac_audio_cache_ready(kFlacAuxLowCachePercent) &&
+            !wait_for_flac_audio_budget(generation,
+                                        kFlacAuxResumeCachePercent,
+                                        kFlacAuxActivePauseMs)) {
+          LOGD("[网络封面] 为保护 FLAC 连续播放，中止本次辅助 Range 下载");
+          http.end();
+          return false;
+        }
         continue;
       }
     }
@@ -472,8 +551,12 @@ static bool http_range_get_exact(const String& url,
 
 class HttpRangeCoverReader final : public Id3ByteReader, public FlacByteReader {
 public:
-  HttpRangeCoverReader(const String& url, uint32_t generation)
-      : m_url(url), m_generation(generation) {}
+  HttpRangeCoverReader(const String& url,
+                       uint32_t generation,
+                       bool protect_flac_audio)
+      : m_url(url),
+        m_generation(generation),
+        m_protect_flac_audio(protect_flac_audio) {}
 
   ~HttpRangeCoverReader() override {
     if (m_buf) {
@@ -553,7 +636,8 @@ private:
                               kHttpRangeWindowBytes,
                               m_buf,
                               &got,
-                              m_generation)) {
+                              m_generation,
+                              m_protect_flac_audio)) {
       return false;
     }
 
@@ -568,6 +652,7 @@ private:
   uint8_t* m_buf = nullptr;
   uint32_t m_window_start = 0;
   uint32_t m_window_len = 0;
+  bool m_protect_flac_audio = false;
 };
 
 struct NetCoverJob {
@@ -582,6 +667,7 @@ static bool fetch_remote_cover_image(const String& url,
                                      uint32_t cover_size,
                                      const String& cover_mime,
                                      uint32_t generation,
+                                     bool protect_flac_audio,
                                      uint8_t** out_buf,
                                      size_t* out_len,
                                      bool* out_is_png)
@@ -610,29 +696,18 @@ static bool fetch_remote_cover_image(const String& url,
     return false;
   }
 
-  uint32_t copied = 0;
-  while (copied < cover_size) {
-    if (generation != current_cover_generation()) {
-      heap_caps_free(buf);
-      return false;
-    }
-
-    const uint32_t remain = cover_size - copied;
-    const uint32_t chunk = remain > kHttpCoverChunkBytes ? kHttpCoverChunkBytes : remain;
-    uint32_t got = 0;
-
-    if (!http_range_get_exact(url,
-                              cover_offset + copied,
-                              chunk,
-                              buf + copied,
-                              &got,
-                              generation) || got != chunk) {
-      heap_caps_free(buf);
-      return false;
-    }
-
-    copied += got;
-    vTaskDelay(1);
+  // 完整图片只建立一次 Range 连接，避免 8KB 一次反复握手压垮旧版 DSM。
+  // http_range_get_exact() 内部仍按 8KB 读取，并依据 FLAC 缓存水位主动让路。
+  uint32_t got = 0;
+  if (!http_range_get_exact(url,
+                            cover_offset,
+                            cover_size,
+                            buf,
+                            &got,
+                            generation,
+                            protect_flac_audio) || got != cover_size) {
+    heap_caps_free(buf);
+    return false;
   }
 
   String mime = cover_mime;
@@ -654,12 +729,21 @@ static void process_net_cover_job(int idx,
                                   const String& format)
 {
   const uint32_t task_start_ms = millis();
+  String normalized_format = format;
+  normalized_format.trim();
+  normalized_format.toLowerCase();
+  const bool protect_flac_audio = normalized_format == "flac";
 
+  // FLAC 已有独立预取环形缓冲，歌词和封面沿用原来的触发时间；
+  // 下载过程中若缓存跌破低水位，再由读取循环暂停并让音频预取优先恢复。
   vTaskDelay(pdMS_TO_TICKS(kLyricsJobDelayMs));
   if (!is_current_job(generation, idx, url)) return;
 
   // MP3 和 FLAC 都支持同目录同名 LRC，列表字段不需要额外增加歌词路径。
-  (void)fetch_and_apply_same_dir_lrc(url, generation, idx);
+  (void)fetch_and_apply_same_dir_lrc(url,
+                                     generation,
+                                     idx,
+                                     protect_flac_audio);
 
   const uint32_t elapsed_ms = millis() - task_start_ms;
   if (elapsed_ms < kCoverJobDelayMs) {
@@ -667,16 +751,12 @@ static void process_net_cover_job(int idx,
   }
   if (!is_current_job(generation, idx, url)) return;
 
-  String normalized_format = format;
-  normalized_format.trim();
-  normalized_format.toLowerCase();
-
   CoverSource cover_source = COVER_NONE;
   uint32_t cover_offset = 0;
   uint32_t cover_size = 0;
   String cover_mime;
   const uint32_t started_ms = millis();
-  HttpRangeCoverReader reader(url, generation);
+  HttpRangeCoverReader reader(url, generation, protect_flac_audio);
 
   if (normalized_format == "flac") {
     FlacCoverLoc loc;
@@ -716,6 +796,7 @@ static void process_net_cover_job(int idx,
                                 cover_size,
                                 cover_mime,
                                 generation,
+                                protect_flac_audio,
                                 &cover_buf,
                                 &cover_len,
                                 &cover_is_png)) {

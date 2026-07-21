@@ -5,6 +5,7 @@
 #include <WiFiClient.h>
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include <freertos/task.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,22 +26,40 @@ static uint32_t s_range_open_count = 0;
 static bool s_open = false;
 static bool s_io_error = false;
 static bool s_eof = false;
+static bool s_prefetch_eof = false;
 static bool s_reconnecting = false;
+static bool s_transport_connected = false;
+static uint32_t s_transport_available_bytes = 0;
 static uint8_t s_retry_attempt = 0;
 static uint32_t s_retry_delay_ms = 0;
 static uint32_t s_reconnect_attempt_count = 0;
 static uint32_t s_reconnect_success_count = 0;
+static uint32_t s_transport_opened_ms = 0;
 static uint32_t s_last_body_data_ms = 0;
 static uint32_t s_waiting_since_ms = 0;
 static uint32_t s_last_wait_warning_ms = 0;
 static uint32_t s_last_buffer_diag_ms = 0;
 static char s_last_error[80] = {0};
 
-static uint8_t* s_cache = nullptr;
-static uint32_t s_cache_start = 0;
-static size_t s_cache_len = 0;
-static size_t s_cache_pos = 0;
+// FLAC 网络输入改为生产者/消费者模型：网络任务只写环形缓冲，AudioTask 只读。
+// 这样 NAS 或 Wi-Fi 的短时抖动不会直接阻塞 FLAC 解码回调。
+static uint8_t* s_ring = nullptr;
+static size_t s_ring_read = 0;
+static size_t s_ring_write = 0;
+static size_t s_ring_count = 0;
+static uint32_t s_ring_generation = 1;
 
+static TaskHandle_t s_prefetch_task = nullptr;
+static volatile bool s_stop_requested = false;
+static volatile bool s_seek_pending = false;
+static bool s_prefetch_running = false;
+static uint32_t s_seek_offset = 0;
+static uint32_t s_seek_request_id = 0;
+static uint32_t s_seek_completed_id = 0;
+static bool s_seek_result = false;
+
+static StaticSemaphore_t s_state_mu_buf;
+static SemaphoreHandle_t s_state_mu = nullptr;
 static portMUX_TYPE s_snapshot_mux = portMUX_INITIALIZER_UNLOCKED;
 static AudioHttpRangeSourceSnapshot s_snapshot;
 
@@ -50,12 +69,22 @@ constexpr uint32_t kConnectSliceMs = 500;
 constexpr uint32_t kConnectRetryDelayMs = 25;
 constexpr uint32_t kHeaderTimeoutMs = 6000;
 constexpr uint32_t kNoDataTimeoutMs = 12000;
-constexpr uint32_t kCacheBytes = 64 * 1024;
+constexpr uint32_t kRingBytes = 256 * 1024;
+constexpr uint32_t kStartupPrefillBytes = 96 * 1024;
+constexpr uint32_t kStartupMinimumBytes = 16 * 1024;
+constexpr uint32_t kStartupPrefillTimeoutMs = 6000;
+constexpr uint32_t kPrefetchTargetBytes = 224 * 1024;
+constexpr uint32_t kPrefetchReadChunkBytes = 8 * 1024;
+constexpr uint32_t kSeekTimeoutMs = 15000;
+constexpr uint32_t kStopTimeoutMs = 2500;  // 必须小于 AudioTask 的停止命令超时
+constexpr uint32_t kPrefetchTaskStackBytes = 8192;
+constexpr UBaseType_t kPrefetchTaskPrio = 4;
+constexpr BaseType_t kPrefetchTaskCore = 0;
 constexpr uint32_t kRetryDelaysMs[] = {1000, 2000, 4000, 8000, 15000};
 constexpr size_t kRetryDelayCount = sizeof(kRetryDelaysMs) / sizeof(kRetryDelaysMs[0]);
 constexpr uint32_t kRetryPollMs = 50;
 constexpr uint32_t kBufferDiagIntervalMs = 15000;
-constexpr uint32_t kWaitWarningThresholdMs = 2000;
+constexpr uint32_t kWaitWarningThresholdMs = 500;
 constexpr uint32_t kWaitWarningIntervalMs = 5000;
 constexpr int kMaxRedirects = 2;
 
@@ -78,6 +107,14 @@ struct HttpHeader {
   uint32_t range_total = 0;
   bool content_range_valid = false;
 };
+
+static SemaphoreHandle_t state_mutex()
+{
+  if (!s_state_mu) {
+    s_state_mu = xSemaphoreCreateMutexStatic(&s_state_mu_buf);
+  }
+  return s_state_mu;
+}
 
 static bool operation_is_current()
 {
@@ -131,105 +168,176 @@ static bool error_is_retryable(const char* error)
   return false;
 }
 
-static void update_wait_diagnostics(bool waiting_for_data,
+static void update_wait_diagnostics(bool source_open,
+                                    bool waiting_for_data,
                                     uint32_t cached_available,
-                                    uint32_t transport_available)
+                                    uint32_t transport_available,
+                                    uint32_t logical_pos,
+                                    uint32_t total_size,
+                                    uint32_t range_open_count,
+                                    uint32_t reconnect_success_count,
+                                    uint32_t reconnect_attempt_count,
+                                    bool reconnecting)
 {
   const uint32_t now = millis();
+  bool log_buffer = false;
+  bool log_wait = false;
+  uint32_t waited_ms = 0;
+
+  SemaphoreHandle_t mu = state_mutex();
+  if (!mu || xSemaphoreTake(mu, pdMS_TO_TICKS(50)) != pdTRUE) return;
+
   if (!waiting_for_data) {
     s_waiting_since_ms = 0;
   } else if (s_waiting_since_ms == 0) {
     s_waiting_since_ms = now;
   }
 
-  if (s_open &&
+  if (source_open &&
       (s_last_buffer_diag_ms == 0 ||
        (uint32_t)(now - s_last_buffer_diag_ms) >= kBufferDiagIntervalMs)) {
     s_last_buffer_diag_ms = now;
-    LOGD("[NAS FLAC] 缓冲状态：缓存=%lu/%luB TCP=%luB 位置=%lu/%lu Range=%lu 续传=%lu/%lu",
-         (unsigned long)cached_available,
-         (unsigned long)kCacheBytes,
-         (unsigned long)transport_available,
-         (unsigned long)s_logical_pos,
-         (unsigned long)s_total_size,
-         (unsigned long)s_range_open_count,
-         (unsigned long)s_reconnect_success_count,
-         (unsigned long)s_reconnect_attempt_count);
+    log_buffer = true;
   }
 
-  if (waiting_for_data && !s_reconnecting && s_waiting_since_ms != 0 &&
+  if (waiting_for_data && !reconnecting && s_waiting_since_ms != 0 &&
       (uint32_t)(now - s_waiting_since_ms) >= kWaitWarningThresholdMs &&
       (s_last_wait_warning_ms == 0 ||
        (uint32_t)(now - s_last_wait_warning_ms) >= kWaitWarningIntervalMs)) {
     s_last_wait_warning_ms = now;
-    LOGW("[NAS FLAC] 等待网络数据：已等待=%lums 缓存=%luB TCP=%luB 位置=%lu/%lu",
-         (unsigned long)(now - s_waiting_since_ms),
+    waited_ms = now - s_waiting_since_ms;
+    log_wait = true;
+  }
+  xSemaphoreGive(mu);
+
+  if (log_buffer) {
+    LOGD("[NAS FLAC] 环形缓冲状态：缓存=%lu/%luB TCP=%luB 位置=%lu/%lu Range=%lu 续传=%lu/%lu",
+         (unsigned long)cached_available,
+         (unsigned long)kRingBytes,
+         (unsigned long)transport_available,
+         (unsigned long)logical_pos,
+         (unsigned long)total_size,
+         (unsigned long)range_open_count,
+         (unsigned long)reconnect_success_count,
+         (unsigned long)reconnect_attempt_count);
+  }
+
+  if (log_wait) {
+    LOGW("[NAS FLAC] 环形缓冲耗尽，等待网络数据：已等待=%lums 缓存=%luB TCP=%luB 位置=%lu/%lu",
+         (unsigned long)waited_ms,
          (unsigned long)cached_available,
          (unsigned long)transport_available,
-         (unsigned long)s_logical_pos,
-         (unsigned long)s_total_size);
+         (unsigned long)logical_pos,
+         (unsigned long)total_size);
   }
 }
 
 static void publish_snapshot(bool waiting_for_data = false)
 {
-  const int client_available = s_client.available();
-  const uint32_t cached_available = s_cache_len > s_cache_pos
-      ? static_cast<uint32_t>(s_cache_len - s_cache_pos)
-      : 0;
-  const uint32_t transport_available = client_available > 0
-      ? static_cast<uint32_t>(client_available)
-      : 0;
+  bool open = false;
+  bool connected = false;
+  bool reconnecting = false;
+  bool eof = false;
+  bool prefetch_complete = false;
+  bool io_error = false;
+  uint8_t retry_attempt = 0;
+  uint32_t retry_delay_ms = 0;
+  uint32_t cached_available = 0;
+  uint32_t transport_available = 0;
+  uint32_t last_data_ms = 0;
+  uint32_t logical_pos = 0;
+  uint32_t total_size = 0;
+  uint32_t range_open_count = 0;
+  uint32_t reconnect_attempt_count = 0;
+  uint32_t reconnect_success_count = 0;
+
+  SemaphoreHandle_t mu = state_mutex();
+  if (!mu || xSemaphoreTake(mu, pdMS_TO_TICKS(100)) != pdTRUE) {
+    return;
+  }
+  open = s_open;
+  connected = s_transport_connected;
+  reconnecting = s_reconnecting;
+  eof = s_eof;
+  prefetch_complete = s_prefetch_eof;
+  io_error = s_io_error;
+  retry_attempt = s_retry_attempt;
+  retry_delay_ms = s_retry_delay_ms;
+  cached_available = static_cast<uint32_t>(s_ring_count);
+  transport_available = s_transport_available_bytes;
+  last_data_ms = s_last_body_data_ms;
+  logical_pos = s_logical_pos;
+  total_size = s_total_size;
+  range_open_count = s_range_open_count;
+  reconnect_attempt_count = s_reconnect_attempt_count;
+  reconnect_success_count = s_reconnect_success_count;
+  xSemaphoreGive(mu);
 
   AudioHttpRangeSourceSnapshot next{};
-  next.open = s_open;
-  next.transport_connected = s_client.connected() || client_available > 0;
-  next.waiting_for_data = waiting_for_data;
-  next.reconnecting = s_reconnecting;
-  next.eof = s_eof;
-  next.retry_attempt = s_retry_attempt;
-  next.retry_delay_ms = s_retry_delay_ms;
+  next.open = open;
+  next.transport_connected = connected;
+  const bool effective_waiting = waiting_for_data ||
+      (open && cached_available == 0 && !prefetch_complete && !io_error);
+  next.waiting_for_data = effective_waiting;
+  next.reconnecting = reconnecting;
+  next.eof = eof;
+  next.prefetch_complete = prefetch_complete;
+  next.retry_attempt = retry_attempt;
+  next.retry_delay_ms = retry_delay_ms;
   next.available_bytes = cached_available + transport_available;
   next.cached_bytes = cached_available;
   next.transport_available_bytes = transport_available;
-  next.cache_capacity_bytes = kCacheBytes;
-  next.last_data_ms = s_last_body_data_ms;
-  next.current_offset = s_logical_pos;
-  next.total_size = s_total_size;
-  next.range_open_count = s_range_open_count;
-  next.reconnect_attempt_count = s_reconnect_attempt_count;
-  next.reconnect_success_count = s_reconnect_success_count;
+  next.cache_capacity_bytes = kRingBytes;
+  next.last_data_ms = last_data_ms;
+  next.current_offset = logical_pos;
+  next.total_size = total_size;
+  next.range_open_count = range_open_count;
+  next.reconnect_attempt_count = reconnect_attempt_count;
+  next.reconnect_success_count = reconnect_success_count;
 
   portENTER_CRITICAL(&s_snapshot_mux);
   s_snapshot = next;
   portEXIT_CRITICAL(&s_snapshot_mux);
 
-  update_wait_diagnostics(waiting_for_data, cached_available, transport_available);
+  update_wait_diagnostics(open,
+                          effective_waiting,
+                          cached_available,
+                          transport_available,
+                          logical_pos,
+                          total_size,
+                          range_open_count,
+                          reconnect_success_count,
+                          reconnect_attempt_count,
+                          reconnecting);
 }
 
-static void reset_cache(uint32_t start_offset)
+static void reset_ring_locked(uint32_t start_offset)
 {
-  s_cache_start = start_offset;
-  s_cache_len = 0;
-  s_cache_pos = 0;
+  s_ring_read = 0;
+  s_ring_write = 0;
+  s_ring_count = 0;
+  ++s_ring_generation;
+  if (s_ring_generation == 0) s_ring_generation = 1;
+  s_logical_pos = start_offset;
+  s_eof = start_offset >= s_total_size && s_total_size != 0;
 }
 
-static bool ensure_cache()
+static bool ensure_ring()
 {
-  if (s_cache) return true;
+  if (s_ring) return true;
 
-  s_cache = static_cast<uint8_t*>(
-      heap_caps_malloc(kCacheBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-  if (!s_cache) {
+  s_ring = static_cast<uint8_t*>(
+      heap_caps_malloc(kRingBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (!s_ring) {
     set_error("flac_http_psram_alloc_failed");
-    LOGE("[NAS FLAC] HTTP Range PSRAM 缓冲分配失败：%luB",
-         (unsigned long)kCacheBytes);
+    LOGE("[NAS FLAC] HTTP 环形缓冲分配失败：%luB",
+         (unsigned long)kRingBytes);
     return false;
   }
 
-  LOGI("[NAS FLAC] HTTP Range 缓冲已分配：%luB PSRAM=%d",
-       (unsigned long)kCacheBytes,
-       esp_ptr_external_ram(s_cache) ? 1 : 0);
+  LOGI("[NAS FLAC] HTTP 环形缓冲已分配：%luB PSRAM=%d",
+       (unsigned long)kRingBytes,
+       esp_ptr_external_ram(s_ring) ? 1 : 0);
   return true;
 }
 
@@ -310,8 +418,12 @@ static bool read_line(String& line)
   const uint32_t started_ms = millis();
 
   while ((uint32_t)(millis() - started_ms) < kHeaderTimeoutMs) {
-    if (!operation_is_current()) {
+    if (s_stop_requested || !operation_is_current()) {
       set_error("cancelled");
+      return false;
+    }
+    if (s_seek_pending) {
+      set_error("seek_interrupted_transport");
       return false;
     }
     if (!WiFi.isConnected()) {
@@ -437,7 +549,6 @@ static bool content_type_supported(String content_type)
 
 static bool connect_once(const char* url,
                          uint32_t start_offset,
-                         bool preserve_buffer,
                          String& redirect_url,
                          String& resolved_url)
 {
@@ -452,7 +563,9 @@ static bool connect_once(const char* url,
 
   bool connected = false;
   const uint32_t started_ms = millis();
-  while (operation_is_current() &&
+  while (!s_stop_requested &&
+         !s_seek_pending &&
+         operation_is_current() &&
          WiFi.isConnected() &&
          (uint32_t)(millis() - started_ms) < kConnectTimeoutMs) {
     const uint32_t elapsed = millis() - started_ms;
@@ -548,36 +661,47 @@ static bool connect_once(const char* url,
     return false;
   }
 
+  SemaphoreHandle_t mu = state_mutex();
+  if (!mu || xSemaphoreTake(mu, pdMS_TO_TICKS(100)) != pdTRUE) {
+    set_error("flac_prefetch_mutex_failed");
+    s_client.stop();
+    return false;
+  }
   if (s_total_size != 0 && s_total_size != header.range_total) {
+    xSemaphoreGive(mu);
     set_error("http_file_size_changed");
     s_client.stop();
     return false;
   }
 
+  const int transport_available = s_client.available();
   s_total_size = header.range_total;
   s_network_pos = start_offset;
-  if (!preserve_buffer) {
-    s_logical_pos = start_offset;
-    reset_cache(start_offset);
-  }
+  s_transport_connected = true;
+  s_transport_available_bytes = transport_available > 0
+      ? static_cast<uint32_t>(transport_available)
+      : 0;
+  s_transport_opened_ms = millis();
   s_last_body_data_ms = 0;
-  s_eof = start_offset >= s_total_size;
+  s_prefetch_eof = start_offset >= s_total_size;
   ++s_range_open_count;
+  const uint32_t range_open_count = s_range_open_count;
+  xSemaphoreGive(mu);
+
   resolved_url = url;
   clear_error();
   publish_snapshot(true);
 
   LOGD("[NAS FLAC] Range 已打开：offset=%lu total=%lu type=%s 次数=%lu",
        (unsigned long)start_offset,
-       (unsigned long)s_total_size,
+       (unsigned long)header.range_total,
        header.content_type.c_str(),
-       (unsigned long)s_range_open_count);
+       (unsigned long)range_open_count);
   return true;
 }
 
 static bool open_range(const char* url,
-                       uint32_t start_offset,
-                       bool preserve_buffer = false)
+                       uint32_t start_offset)
 {
   String current_url(url ? url : "");
   for (int redirect = 0; redirect <= kMaxRedirects; ++redirect) {
@@ -585,7 +709,6 @@ static bool open_range(const char* url,
     String resolved_url;
     if (connect_once(current_url.c_str(),
                      start_offset,
-                     preserve_buffer,
                      redirect_url,
                      resolved_url)) {
       s_url = resolved_url;
@@ -599,17 +722,31 @@ static bool open_range(const char* url,
   return false;
 }
 
+
+static bool control_request_pending()
+{
+  return s_stop_requested || s_seek_pending || !operation_is_current();
+}
+
 static bool wait_before_retry(uint32_t delay_ms)
 {
   const uint32_t started_ms = millis();
   while ((uint32_t)(millis() - started_ms) < delay_ms) {
-    if (!operation_is_current()) {
+    if (s_stop_requested || !operation_is_current()) {
       set_error("cancelled");
+      return false;
+    }
+    if (s_seek_pending) {
+      set_error("seek_interrupted_reconnect");
       return false;
     }
 
     const uint32_t elapsed = millis() - started_ms;
-    s_retry_delay_ms = elapsed < delay_ms ? delay_ms - elapsed : 0;
+    SemaphoreHandle_t mu = state_mutex();
+    if (mu && xSemaphoreTake(mu, pdMS_TO_TICKS(50)) == pdTRUE) {
+      s_retry_delay_ms = elapsed < delay_ms ? delay_ms - elapsed : 0;
+      xSemaphoreGive(mu);
+    }
     publish_snapshot(true);
 
     const uint32_t remaining = elapsed < delay_ms ? delay_ms - elapsed : 0;
@@ -618,13 +755,29 @@ static bool wait_before_retry(uint32_t delay_ms)
     vTaskDelay(pdMS_TO_TICKS(slice));
   }
 
-  s_retry_delay_ms = 0;
-  return operation_is_current();
+  SemaphoreHandle_t mu = state_mutex();
+  if (mu && xSemaphoreTake(mu, pdMS_TO_TICKS(50)) == pdTRUE) {
+    s_retry_delay_ms = 0;
+    xSemaphoreGive(mu);
+  }
+  return !control_request_pending();
 }
 
 static bool retry_range_transport(const char* trigger_error)
 {
-  const uint32_t resume_offset = s_network_pos;
+  uint32_t resume_offset = 0;
+  uint32_t logical_pos = 0;
+  uint32_t cached_bytes = 0;
+  SemaphoreHandle_t mu = state_mutex();
+  if (!mu || xSemaphoreTake(mu, pdMS_TO_TICKS(100)) != pdTRUE) {
+    set_error("flac_prefetch_mutex_failed");
+    return false;
+  }
+  resume_offset = s_network_pos;
+  logical_pos = s_logical_pos;
+  cached_bytes = static_cast<uint32_t>(s_ring_count);
+  xSemaphoreGive(mu);
+
   char cause[80] = {0};
   if (trigger_error && *trigger_error) {
     strncpy(cause, trigger_error, sizeof(cause) - 1);
@@ -634,38 +787,51 @@ static bool retry_range_transport(const char* trigger_error)
 
   if (!error_is_retryable(cause)) {
     set_error(cause);
-    s_io_error = true;
+    if (mu && xSemaphoreTake(mu, pdMS_TO_TICKS(100)) == pdTRUE) {
+      s_io_error = true;
+      xSemaphoreGive(mu);
+    }
     return false;
   }
 
-  LOGW("[NAS FLAC] 网络中断：原因=%s 解码位置=%lu 网络位置=%lu 缓存=%luB",
+  LOGW("[NAS FLAC] 网络中断：原因=%s 解码位置=%lu 网络位置=%lu 环形缓存=%luB",
        cause,
-       (unsigned long)s_logical_pos,
+       (unsigned long)logical_pos,
        (unsigned long)resume_offset,
-       (unsigned long)(s_cache_len > s_cache_pos ? s_cache_len - s_cache_pos : 0));
+       (unsigned long)cached_bytes);
 
   s_client.stop();
-  s_reconnecting = true;
-  s_retry_attempt = 0;
-  s_retry_delay_ms = 0;
+  if (mu && xSemaphoreTake(mu, pdMS_TO_TICKS(100)) == pdTRUE) {
+    s_reconnecting = true;
+    s_transport_connected = false;
+    s_transport_available_bytes = 0;
+    s_retry_attempt = 0;
+    s_retry_delay_ms = 0;
+    xSemaphoreGive(mu);
+  }
   publish_snapshot(true);
 
   for (size_t i = 0; i < kRetryDelayCount; ++i) {
-    if (!operation_is_current()) {
-      set_error("cancelled");
-      s_reconnecting = false;
-      s_retry_attempt = 0;
-      s_retry_delay_ms = 0;
-      s_io_error = true;
+    if (control_request_pending()) {
+      if (s_stop_requested || !operation_is_current()) set_error("cancelled");
+      if (mu && xSemaphoreTake(mu, pdMS_TO_TICKS(100)) == pdTRUE) {
+        s_reconnecting = false;
+        s_retry_attempt = 0;
+        s_retry_delay_ms = 0;
+        xSemaphoreGive(mu);
+      }
       publish_snapshot(false);
       return false;
     }
 
-    s_retry_attempt = static_cast<uint8_t>(i + 1);
-    s_retry_delay_ms = kRetryDelaysMs[i];
-    ++s_reconnect_attempt_count;
+    if (mu && xSemaphoreTake(mu, pdMS_TO_TICKS(100)) == pdTRUE) {
+      s_retry_attempt = static_cast<uint8_t>(i + 1);
+      s_retry_delay_ms = kRetryDelaysMs[i];
+      ++s_reconnect_attempt_count;
+      xSemaphoreGive(mu);
+    }
     LOGW("[NAS FLAC] 准备 Range 续传：尝试=%u/%u 延迟=%lums offset=%lu 原因=%s",
-         (unsigned)s_retry_attempt,
+         (unsigned)(i + 1),
          (unsigned)kRetryDelayCount,
          (unsigned long)kRetryDelaysMs[i],
          (unsigned long)resume_offset,
@@ -673,29 +839,43 @@ static bool retry_range_transport(const char* trigger_error)
     publish_snapshot(true);
 
     if (!wait_before_retry(kRetryDelaysMs[i])) {
-      set_error("cancelled");
-      s_reconnecting = false;
-      s_retry_attempt = 0;
-      s_retry_delay_ms = 0;
-      s_io_error = true;
+      if (mu && xSemaphoreTake(mu, pdMS_TO_TICKS(100)) == pdTRUE) {
+        s_reconnecting = false;
+        s_retry_attempt = 0;
+        s_retry_delay_ms = 0;
+        xSemaphoreGive(mu);
+      }
       publish_snapshot(false);
       return false;
     }
 
-    if (open_range(s_url.c_str(), resume_offset, true)) {
-      ++s_reconnect_success_count;
-      s_reconnecting = false;
-      s_retry_attempt = 0;
-      s_retry_delay_ms = 0;
-      s_io_error = false;
+    if (open_range(s_url.c_str(), resume_offset)) {
+      if (mu && xSemaphoreTake(mu, pdMS_TO_TICKS(100)) == pdTRUE) {
+        ++s_reconnect_success_count;
+        s_reconnecting = false;
+        s_retry_attempt = 0;
+        s_retry_delay_ms = 0;
+        s_io_error = false;
+        xSemaphoreGive(mu);
+      }
       clear_error();
       LOGI("[NAS FLAC] Range 续传成功：offset=%lu 尝试=%u 总成功=%lu Range次数=%lu",
            (unsigned long)resume_offset,
            (unsigned)(i + 1),
            (unsigned long)s_reconnect_success_count,
            (unsigned long)s_range_open_count);
-      publish_snapshot(true);
+      publish_snapshot(false);
       return true;
+    }
+
+    if (s_seek_pending || s_stop_requested || !operation_is_current()) {
+      if (mu && xSemaphoreTake(mu, pdMS_TO_TICKS(100)) == pdTRUE) {
+        s_reconnecting = false;
+        s_retry_attempt = 0;
+        s_retry_delay_ms = 0;
+        xSemaphoreGive(mu);
+      }
+      return false;
     }
 
     const char* retry_error = s_last_error[0] ? s_last_error : "http_reconnect_failed";
@@ -711,112 +891,275 @@ static bool retry_range_transport(const char* trigger_error)
     if (!error_is_retryable(cause)) break;
   }
 
-  LOGE("[NAS FLAC] Range 续传失败达到上限：offset=%lu 尝试总数=%lu 最后错误=%s",
+  LOGE("[NAS FLAC] Range 续传失败达到上限：offset=%lu 最后错误=%s",
        (unsigned long)resume_offset,
-       (unsigned long)s_reconnect_attempt_count,
        cause);
   set_error("flac_reconnect_exhausted");
-  s_reconnecting = false;
-  s_retry_attempt = 0;
-  s_retry_delay_ms = 0;
-  s_io_error = true;
+  if (mu && xSemaphoreTake(mu, pdMS_TO_TICKS(100)) == pdTRUE) {
+    s_reconnecting = false;
+    s_retry_attempt = 0;
+    s_retry_delay_ms = 0;
+    s_io_error = true;
+    s_transport_connected = false;
+    s_transport_available_bytes = 0;
+    xSemaphoreGive(mu);
+  }
   publish_snapshot(false);
   return false;
 }
 
-static bool fill_cache(size_t minimum_bytes)
+static bool handle_seek_request()
 {
-  if (!s_open || !s_cache) return false;
-  if (s_logical_pos >= s_total_size) {
-    s_eof = true;
-    publish_snapshot(false);
-    return true;
+  uint32_t request_id = 0;
+  uint32_t offset = 0;
+  uint32_t total_size = 0;
+  SemaphoreHandle_t mu = state_mutex();
+  if (!mu || xSemaphoreTake(mu, pdMS_TO_TICKS(100)) != pdTRUE) return false;
+  if (!s_seek_pending) {
+    xSemaphoreGive(mu);
+    return false;
   }
 
-  reset_cache(s_logical_pos);
-  const size_t file_remaining = static_cast<size_t>(s_total_size - s_logical_pos);
-  if (minimum_bytes > file_remaining) minimum_bytes = file_remaining;
-  if (minimum_bytes > kCacheBytes) minimum_bytes = kCacheBytes;
+  request_id = s_seek_request_id;
+  offset = s_seek_offset;
+  total_size = s_total_size;
+  s_seek_pending = false;
+  s_reconnecting = false;
+  s_retry_attempt = 0;
+  s_retry_delay_ms = 0;
+  xSemaphoreGive(mu);
 
-  uint32_t wait_started_ms = millis();
-  while (s_cache_len < minimum_bytes) {
-    if (!operation_is_current()) {
-      set_error("cancelled");
-      s_io_error = true;
-      publish_snapshot(false);
-      return false;
+  s_client.stop();
+  bool ok = false;
+  if (offset == total_size) {
+    ok = true;
+    if (xSemaphoreTake(mu, pdMS_TO_TICKS(100)) == pdTRUE) {
+      s_network_pos = offset;
+      s_prefetch_eof = true;
+      s_transport_connected = false;
+      s_transport_available_bytes = 0;
+      xSemaphoreGive(mu);
     }
+  } else if (!s_stop_requested && operation_is_current()) {
+    ok = open_range(s_url.c_str(), offset);
+  }
+
+  if (xSemaphoreTake(mu, pdMS_TO_TICKS(100)) == pdTRUE) {
+    if (request_id == s_seek_request_id) {
+      s_seek_result = ok;
+      s_seek_completed_id = request_id;
+      s_io_error = !ok;
+      if (ok) s_eof = offset >= s_total_size;
+    }
+    xSemaphoreGive(mu);
+  }
+
+  if (!ok && !s_stop_requested && operation_is_current()) {
+    LOGW("[NAS FLAC] 跳转 Range 打开失败：offset=%lu 错误=%s",
+         (unsigned long)offset,
+         s_last_error[0] ? s_last_error : "unknown");
+  }
+  publish_snapshot(false);
+  return true;
+}
+
+static void prefetch_task_entry(void*)
+{
+  LOGI("[NAS FLAC] 预取任务已启动：缓冲=%luB 目标=%luB 栈=%lu 优先级=%u 核心=%d",
+       (unsigned long)kRingBytes,
+       (unsigned long)kPrefetchTargetBytes,
+       (unsigned long)kPrefetchTaskStackBytes,
+       (unsigned)kPrefetchTaskPrio,
+       (int)kPrefetchTaskCore);
+
+  SemaphoreHandle_t mu = state_mutex();
+  for (;;) {
+    if (s_stop_requested || !operation_is_current()) break;
+    if (handle_seek_request()) continue;
+
+    size_t ring_count = 0;
+    size_t ring_free = 0;
+    size_t write_index = 0;
+    uint32_t generation = 0;
+    uint32_t network_pos = 0;
+    uint32_t total_size = 0;
+    uint32_t last_data_ms = 0;
+    uint32_t opened_ms = 0;
+
+    if (!mu || xSemaphoreTake(mu, pdMS_TO_TICKS(100)) != pdTRUE) {
+      vTaskDelay(pdMS_TO_TICKS(1));
+      continue;
+    }
+    ring_count = s_ring_count;
+    ring_free = kRingBytes - s_ring_count;
+    write_index = s_ring_write;
+    generation = s_ring_generation;
+    network_pos = s_network_pos;
+    total_size = s_total_size;
+    last_data_ms = s_last_body_data_ms;
+    opened_ms = s_transport_opened_ms;
+    xSemaphoreGive(mu);
+
+    if (network_pos >= total_size && total_size != 0) {
+      s_client.stop();
+      if (xSemaphoreTake(mu, pdMS_TO_TICKS(100)) == pdTRUE) {
+        s_prefetch_eof = true;
+        s_transport_connected = false;
+        s_transport_available_bytes = 0;
+        xSemaphoreGive(mu);
+      }
+      publish_snapshot(false);
+      vTaskDelay(pdMS_TO_TICKS(3));
+      continue;
+    }
+
+    if (ring_count >= kPrefetchTargetBytes || ring_free == 0) {
+      const int available = s_client.available();
+      if (xSemaphoreTake(mu, pdMS_TO_TICKS(100)) == pdTRUE) {
+        s_transport_connected = s_client.connected() || available > 0;
+        s_transport_available_bytes = available > 0
+            ? static_cast<uint32_t>(available)
+            : 0;
+        xSemaphoreGive(mu);
+      }
+      publish_snapshot(false);
+      vTaskDelay(pdMS_TO_TICKS(3));
+      continue;
+    }
+
     if (!WiFi.isConnected()) {
       set_error("wifi_disconnected");
-      if (!retry_range_transport(s_last_error)) return false;
-      wait_started_ms = millis();
+      if (!retry_range_transport(s_last_error) && !s_seek_pending) break;
       continue;
     }
 
     const int available = s_client.available();
     if (available > 0) {
-      size_t want = kCacheBytes - s_cache_len;
-      if (static_cast<size_t>(available) < want) want = static_cast<size_t>(available);
-      const size_t remaining = static_cast<size_t>(s_total_size - s_network_pos);
-      if (remaining < want) want = remaining;
-      if (!want) break;
+      size_t want = static_cast<size_t>(available);
+      if (want > kPrefetchReadChunkBytes) want = kPrefetchReadChunkBytes;
+      if (want > ring_free) want = ring_free;
+      const size_t contiguous = kRingBytes - write_index;
+      if (want > contiguous) want = contiguous;
+      const size_t file_remaining = static_cast<size_t>(total_size - network_pos);
+      if (want > file_remaining) want = file_remaining;
 
-      const int read_count = s_client.read(s_cache + s_cache_len, want);
-      if (read_count > 0) {
-        s_cache_len += static_cast<size_t>(read_count);
-        s_network_pos += static_cast<uint32_t>(read_count);
-        s_last_body_data_ms = millis();
-        s_io_error = false;
-        publish_snapshot(false);
+      if (want > 0) {
+        const int got = s_client.read(s_ring + write_index, want);
+        if (got > 0) {
+          if (xSemaphoreTake(mu, pdMS_TO_TICKS(100)) == pdTRUE) {
+            if (generation == s_ring_generation && !s_seek_pending) {
+              s_ring_write = (s_ring_write + static_cast<size_t>(got)) % kRingBytes;
+              s_ring_count += static_cast<size_t>(got);
+              s_network_pos += static_cast<uint32_t>(got);
+              s_last_body_data_ms = millis();
+              s_prefetch_eof = s_network_pos >= s_total_size;
+              s_io_error = false;
+            }
+            const int remaining = s_client.available();
+            s_transport_connected = s_client.connected() || remaining > 0;
+            s_transport_available_bytes = remaining > 0
+                ? static_cast<uint32_t>(remaining)
+                : 0;
+            xSemaphoreGive(mu);
+          }
+          publish_snapshot(false);
+          continue;
+        }
+      }
+    }
+
+    const bool connected = s_client.connected() || s_client.available() > 0;
+    if (xSemaphoreTake(mu, pdMS_TO_TICKS(100)) == pdTRUE) {
+      s_transport_connected = connected;
+      const int pending = s_client.available();
+      s_transport_available_bytes = pending > 0
+          ? static_cast<uint32_t>(pending)
+          : 0;
+      xSemaphoreGive(mu);
+    }
+
+    if (!connected) {
+      if (network_pos >= total_size && total_size != 0) {
+        if (xSemaphoreTake(mu, pdMS_TO_TICKS(100)) == pdTRUE) {
+          s_prefetch_eof = true;
+          xSemaphoreGive(mu);
+        }
         continue;
       }
-    }
-
-    if (!s_client.connected() && s_client.available() <= 0) {
-      if (s_network_pos >= s_total_size) {
-        s_eof = true;
-        break;
-      }
       set_error("http_range_disconnected_early");
-      if (!retry_range_transport(s_last_error)) return false;
-      wait_started_ms = millis();
+      if (!retry_range_transport(s_last_error) && !s_seek_pending) break;
       continue;
     }
 
-    const uint32_t activity_base = s_last_body_data_ms
-        ? s_last_body_data_ms
-        : wait_started_ms;
-    if ((uint32_t)(millis() - activity_base) >= kNoDataTimeoutMs) {
+    const uint32_t activity_base = last_data_ms ? last_data_ms : opened_ms;
+    if (activity_base != 0 &&
+        (uint32_t)(millis() - activity_base) >= kNoDataTimeoutMs) {
       set_error("stream_no_data_timeout");
-      if (!retry_range_transport(s_last_error)) return false;
-      wait_started_ms = millis();
+      if (!retry_range_transport(s_last_error) && !s_seek_pending) break;
       continue;
     }
 
-    publish_snapshot(true);
+    publish_snapshot(false);
     vTaskDelay(pdMS_TO_TICKS(1));
   }
 
-  // 已满足本次读取后，顺手吸收 TCP 缓冲中已经到达的数据，不额外等待。
-  while (s_cache_len < kCacheBytes && s_network_pos < s_total_size) {
-    const int available = s_client.available();
-    if (available <= 0) break;
-
-    size_t want = kCacheBytes - s_cache_len;
-    if (static_cast<size_t>(available) < want) want = static_cast<size_t>(available);
-    const size_t remaining = static_cast<size_t>(s_total_size - s_network_pos);
-    if (remaining < want) want = remaining;
-    if (!want) break;
-
-    const int read_count = s_client.read(s_cache + s_cache_len, want);
-    if (read_count <= 0) break;
-    s_cache_len += static_cast<size_t>(read_count);
-    s_network_pos += static_cast<uint32_t>(read_count);
-    s_last_body_data_ms = millis();
+  s_client.stop();
+  if (mu && xSemaphoreTake(mu, pdMS_TO_TICKS(100)) == pdTRUE) {
+    s_prefetch_running = false;
+    s_transport_connected = false;
+    s_transport_available_bytes = 0;
+    s_reconnecting = false;
+    s_retry_attempt = 0;
+    s_retry_delay_ms = 0;
+    s_prefetch_task = nullptr;
+    xSemaphoreGive(mu);
+  } else {
+    s_prefetch_task = nullptr;
   }
-
   publish_snapshot(false);
-  return s_cache_len >= minimum_bytes;
+  LOGD("[NAS FLAC] 预取任务已退出");
+  vTaskDelete(nullptr);
+}
+
+static TaskHandle_t prefetch_task_handle()
+{
+  TaskHandle_t handle = nullptr;
+  SemaphoreHandle_t mu = state_mutex();
+  if (mu && xSemaphoreTake(mu, pdMS_TO_TICKS(50)) == pdTRUE) {
+    handle = s_prefetch_task;
+    xSemaphoreGive(mu);
+  }
+  return handle;
+}
+
+static bool start_prefetch_task()
+{
+  SemaphoreHandle_t mu = state_mutex();
+  if (!mu || xSemaphoreTake(mu, pdMS_TO_TICKS(100)) != pdTRUE) {
+    set_error("flac_prefetch_mutex_failed");
+    return false;
+  }
+  s_stop_requested = false;
+  s_prefetch_running = true;
+  xSemaphoreGive(mu);
+
+  const BaseType_t ok = xTaskCreatePinnedToCore(prefetch_task_entry,
+                                                "FlacNetTask",
+                                                kPrefetchTaskStackBytes,
+                                                nullptr,
+                                                kPrefetchTaskPrio,
+                                                &s_prefetch_task,
+                                                kPrefetchTaskCore);
+  if (ok != pdPASS || !s_prefetch_task) {
+    if (xSemaphoreTake(mu, pdMS_TO_TICKS(100)) == pdTRUE) {
+      s_prefetch_running = false;
+      xSemaphoreGive(mu);
+    }
+    set_error("flac_prefetch_task_create_failed");
+    LOGE("[NAS FLAC] 创建预取任务失败：返回值=%ld", (long)ok);
+    return false;
+  }
+  return true;
 }
 
 }  // namespace
@@ -825,180 +1168,419 @@ bool audio_http_range_source_open(const char* url, uint32_t operation_id)
 {
   audio_http_range_source_close();
   clear_error();
+
+  if (prefetch_task_handle()) {
+    set_error("flac_prefetch_stop_timeout");
+    return false;
+  }
+  if (!state_mutex()) {
+    set_error("flac_prefetch_mutex_failed");
+    return false;
+  }
+  if (!ensure_ring()) return false;
+
+  SemaphoreHandle_t mu = state_mutex();
+  if (xSemaphoreTake(mu, pdMS_TO_TICKS(100)) != pdTRUE) {
+    set_error("flac_prefetch_mutex_failed");
+    return false;
+  }
   s_operation_id = operation_id;
+  s_open = true;
   s_io_error = false;
   s_eof = false;
+  s_prefetch_eof = false;
   s_reconnecting = false;
+  s_transport_connected = false;
+  s_transport_available_bytes = 0;
   s_retry_attempt = 0;
   s_retry_delay_ms = 0;
   s_reconnect_attempt_count = 0;
   s_reconnect_success_count = 0;
+  s_transport_opened_ms = 0;
+  s_last_body_data_ms = 0;
   s_waiting_since_ms = 0;
   s_last_wait_warning_ms = 0;
   s_last_buffer_diag_ms = 0;
   s_total_size = 0;
+  s_network_pos = 0;
   s_range_open_count = 0;
+  s_seek_pending = false;
+  s_seek_offset = 0;
+  s_seek_request_id = 0;
+  s_seek_completed_id = 0;
+  s_seek_result = false;
+  reset_ring_locked(0);
+  xSemaphoreGive(mu);
 
   if (!operation_is_current()) {
     set_error("cancelled");
+    audio_http_range_source_close();
     return false;
   }
   if (!WiFi.isConnected()) {
     set_error("wifi_disconnected");
+    audio_http_range_source_close();
     return false;
   }
-  if (!ensure_cache()) return false;
 
-  s_open = true;
   if (!open_range(url, 0)) {
-    s_open = false;
-    s_io_error = true;
-    publish_snapshot(false);
+    if (xSemaphoreTake(mu, pdMS_TO_TICKS(100)) == pdTRUE) {
+      s_io_error = true;
+      xSemaphoreGive(mu);
+    }
+    audio_http_range_source_close();
     return false;
   }
 
-  LOGI("[NAS FLAC] HTTP Range 音源打开成功：size=%lu URL=%s",
-       (unsigned long)s_total_size,
+  if (!start_prefetch_task()) {
+    audio_http_range_source_close();
+    return false;
+  }
+
+  uint32_t total_size = 0;
+  if (xSemaphoreTake(mu, pdMS_TO_TICKS(100)) != pdTRUE) {
+    set_error("flac_prefetch_mutex_failed");
+    audio_http_range_source_close();
+    return false;
+  }
+  total_size = s_total_size;
+  xSemaphoreGive(mu);
+  const uint32_t target = total_size < kStartupPrefillBytes
+      ? total_size
+      : kStartupPrefillBytes;
+  const uint32_t wait_started_ms = millis();
+  uint32_t cached = 0;
+  bool prefetch_eof = false;
+  bool io_error = false;
+
+  for (;;) {
+    if (xSemaphoreTake(mu, pdMS_TO_TICKS(100)) != pdTRUE) {
+      set_error("flac_prefetch_mutex_failed");
+      audio_http_range_source_close();
+      return false;
+    }
+    cached = static_cast<uint32_t>(s_ring_count);
+    prefetch_eof = s_prefetch_eof;
+    io_error = s_io_error;
+    xSemaphoreGive(mu);
+    if (cached >= target || prefetch_eof || io_error) break;
+    if (!operation_is_current()) {
+      set_error("cancelled");
+      audio_http_range_source_close();
+      return false;
+    }
+    if ((uint32_t)(millis() - wait_started_ms) >= kStartupPrefillTimeoutMs) break;
+    publish_snapshot(true);
+    vTaskDelay(pdMS_TO_TICKS(2));
+  }
+
+  if (io_error || (cached == 0 && !prefetch_eof)) {
+    if (!s_last_error[0]) set_error("flac_prefetch_startup_failed");
+    LOGE("[NAS FLAC] 启动预取失败：缓存=%luB 目标=%luB 错误=%s",
+         (unsigned long)cached,
+         (unsigned long)target,
+         s_last_error);
+    audio_http_range_source_close();
+    return false;
+  }
+
+  if (cached < target && cached < kStartupMinimumBytes && !prefetch_eof) {
+    LOGW("[NAS FLAC] 启动预取未达到最低建议值：缓存=%luB 目标=%luB，继续起播",
+         (unsigned long)cached,
+         (unsigned long)target);
+  }
+
+  LOGI("[NAS FLAC] HTTP Range 音源打开成功：size=%lu 启动缓存=%lu/%luB URL=%s",
+       (unsigned long)total_size,
+       (unsigned long)cached,
+       (unsigned long)kRingBytes,
        s_url.c_str());
+  publish_snapshot(false);
   return true;
 }
 
 void audio_http_range_source_close()
 {
-  if (s_open && (s_reconnect_attempt_count > 0 || s_range_open_count > 1)) {
+  SemaphoreHandle_t mu = state_mutex();
+  bool was_open = false;
+  uint32_t range_count = 0;
+  uint32_t reconnect_attempts = 0;
+  uint32_t reconnect_successes = 0;
+  uint32_t logical_pos = 0;
+  uint32_t total_size = 0;
+
+  if (mu && xSemaphoreTake(mu, pdMS_TO_TICKS(100)) == pdTRUE) {
+    was_open = s_open;
+    range_count = s_range_open_count;
+    reconnect_attempts = s_reconnect_attempt_count;
+    reconnect_successes = s_reconnect_success_count;
+    logical_pos = s_logical_pos;
+    total_size = s_total_size;
+    s_stop_requested = true;
+    xSemaphoreGive(mu);
+  } else {
+    s_stop_requested = true;
+  }
+
+  const uint32_t wait_started_ms = millis();
+  while (prefetch_task_handle() &&
+         (uint32_t)(millis() - wait_started_ms) < kStopTimeoutMs) {
+    vTaskDelay(pdMS_TO_TICKS(2));
+  }
+
+  if (prefetch_task_handle()) {
+    set_error("flac_prefetch_stop_timeout");
+    if (mu && xSemaphoreTake(mu, pdMS_TO_TICKS(100)) == pdTRUE) {
+      s_io_error = true;
+      xSemaphoreGive(mu);
+    }
+    LOGE("[NAS FLAC] 预取任务停止超时，为避免跨任务操作 WiFiClient 暂不强制删除");
+    publish_snapshot(false);
+    return;
+  }
+
+  if (was_open && (reconnect_attempts > 0 || range_count > 1)) {
     LOGI("[NAS FLAC] Range 音源关闭统计：Range=%lu 续传尝试=%lu 成功=%lu 最终位置=%lu/%lu",
-         (unsigned long)s_range_open_count,
-         (unsigned long)s_reconnect_attempt_count,
-         (unsigned long)s_reconnect_success_count,
-         (unsigned long)s_logical_pos,
-         (unsigned long)s_total_size);
+         (unsigned long)range_count,
+         (unsigned long)reconnect_attempts,
+         (unsigned long)reconnect_successes,
+         (unsigned long)logical_pos,
+         (unsigned long)total_size);
   }
 
   s_client.stop();
   s_url = String();
-  s_operation_id = 0;
-  s_logical_pos = 0;
-  s_network_pos = 0;
-  s_total_size = 0;
-  s_range_open_count = 0;
-  s_open = false;
-  s_io_error = false;
-  s_eof = false;
-  s_reconnecting = false;
-  s_retry_attempt = 0;
-  s_retry_delay_ms = 0;
-  s_reconnect_attempt_count = 0;
-  s_reconnect_success_count = 0;
-  s_last_body_data_ms = 0;
-  s_waiting_since_ms = 0;
-  s_last_wait_warning_ms = 0;
-  s_last_buffer_diag_ms = 0;
-  reset_cache(0);
 
-  // 64KB PSRAM 缓冲在首次分配后常驻复用，避免连续切歌反复申请/释放造成碎片。
+  if (mu && xSemaphoreTake(mu, pdMS_TO_TICKS(100)) == pdTRUE) {
+    s_operation_id = 0;
+    s_logical_pos = 0;
+    s_network_pos = 0;
+    s_total_size = 0;
+    s_range_open_count = 0;
+    s_open = false;
+    s_io_error = false;
+    s_eof = false;
+    s_prefetch_eof = false;
+    s_reconnecting = false;
+    s_transport_connected = false;
+    s_transport_available_bytes = 0;
+    s_retry_attempt = 0;
+    s_retry_delay_ms = 0;
+    s_reconnect_attempt_count = 0;
+    s_reconnect_success_count = 0;
+    s_transport_opened_ms = 0;
+    s_last_body_data_ms = 0;
+    s_waiting_since_ms = 0;
+    s_last_wait_warning_ms = 0;
+    s_last_buffer_diag_ms = 0;
+    s_stop_requested = false;
+    s_seek_pending = false;
+    s_seek_offset = 0;
+    s_seek_request_id = 0;
+    s_seek_completed_id = 0;
+    s_seek_result = false;
+    reset_ring_locked(0);
+    xSemaphoreGive(mu);
+  }
+
+  // 256KB PSRAM 环形缓冲首次分配后常驻复用，避免连续切歌造成内存碎片。
   publish_snapshot(false);
 }
 
 ssize_t audio_http_range_source_read(void* dst, size_t bytes)
 {
   if (!dst || bytes == 0) return 0;
-  if (!s_open) {
-    set_error("source_not_open");
-    s_io_error = true;
+  SemaphoreHandle_t mu = state_mutex();
+  if (!mu) {
+    set_error("flac_prefetch_mutex_failed");
     return -1;
-  }
-  if (s_io_error) {
-    return -1;
-  }
-  if (s_logical_pos >= s_total_size) {
-    s_eof = true;
-    publish_snapshot(false);
-    return 0;
   }
 
   uint8_t* output = static_cast<uint8_t*>(dst);
   size_t copied = 0;
 
-  while (copied < bytes && s_logical_pos < s_total_size) {
-    if (s_cache_pos < s_cache_len) {
-      size_t available = s_cache_len - s_cache_pos;
-      size_t want = bytes - copied;
-      if (available < want) want = available;
-      memcpy(output + copied, s_cache + s_cache_pos, want);
-      copied += want;
-      s_cache_pos += want;
-      s_logical_pos += static_cast<uint32_t>(want);
-      continue;
-    }
+  while (copied < bytes) {
+    bool open = false;
+    bool io_error = false;
+    bool prefetch_eof = false;
+    bool eof = false;
+    size_t copied_now = 0;
 
-    const size_t remaining_request = bytes - copied;
-    if (!fill_cache(remaining_request)) {
+    if (xSemaphoreTake(mu, pdMS_TO_TICKS(100)) != pdTRUE) {
+      set_error("flac_prefetch_mutex_failed");
       return copied > 0 ? static_cast<ssize_t>(copied) : -1;
     }
-    if (s_cache_len == 0) break;
+
+    open = s_open;
+    io_error = s_io_error;
+    prefetch_eof = s_prefetch_eof;
+    eof = s_eof;
+
+    if (open && s_ring_count > 0) {
+      size_t want = bytes - copied;
+      if (want > kPrefetchReadChunkBytes) want = kPrefetchReadChunkBytes;
+      if (want > s_ring_count) want = s_ring_count;
+      const size_t contiguous = kRingBytes - s_ring_read;
+      if (want > contiguous) want = contiguous;
+
+      memcpy(output + copied, s_ring + s_ring_read, want);
+      s_ring_read = (s_ring_read + want) % kRingBytes;
+      s_ring_count -= want;
+      s_logical_pos += static_cast<uint32_t>(want);
+      s_eof = s_total_size != 0 && s_logical_pos >= s_total_size;
+      copied_now = want;
+    }
+    xSemaphoreGive(mu);
+
+    if (!open) {
+      set_error("source_not_open");
+      return copied > 0 ? static_cast<ssize_t>(copied) : -1;
+    }
+    if (copied_now > 0) {
+      copied += copied_now;
+      continue;
+    }
+    if (eof || prefetch_eof) {
+      publish_snapshot(false);
+      return static_cast<ssize_t>(copied);
+    }
+    if (io_error) {
+      return copied > 0 ? static_cast<ssize_t>(copied) : -1;
+    }
+    if (!operation_is_current()) {
+      set_error("cancelled");
+      return copied > 0 ? static_cast<ssize_t>(copied) : -1;
+    }
+
+    publish_snapshot(true);
+    vTaskDelay(pdMS_TO_TICKS(1));
   }
 
-  if (s_logical_pos >= s_total_size) s_eof = true;
   publish_snapshot(false);
   return static_cast<ssize_t>(copied);
 }
 
 bool audio_http_range_source_seek(uint32_t absolute_offset)
 {
-  if (!s_open || s_io_error || absolute_offset > s_total_size) {
-    if (!s_io_error) set_error("seek_out_of_range");
-    s_io_error = true;
+  SemaphoreHandle_t mu = state_mutex();
+  if (!mu || xSemaphoreTake(mu, pdMS_TO_TICKS(100)) != pdTRUE) {
+    set_error("flac_prefetch_mutex_failed");
     return false;
   }
 
-  if (absolute_offset == s_logical_pos) return true;
-
-  const uint32_t cache_end = s_cache_start + static_cast<uint32_t>(s_cache_len);
-  if (absolute_offset >= s_cache_start && absolute_offset <= cache_end) {
-    s_cache_pos = static_cast<size_t>(absolute_offset - s_cache_start);
-    s_logical_pos = absolute_offset;
-    s_eof = absolute_offset >= s_total_size;
-    publish_snapshot(false);
-    return true;
-  }
-
-  if (absolute_offset == s_total_size) {
-    s_client.stop();
-    s_logical_pos = absolute_offset;
-    s_network_pos = absolute_offset;
-    s_eof = true;
-    reset_cache(absolute_offset);
-    publish_snapshot(false);
-    return true;
-  }
-
-  if (!open_range(s_url.c_str(), absolute_offset)) {
-    s_io_error = true;
-    publish_snapshot(false);
+  if (!s_open || absolute_offset > s_total_size) {
+    set_error(!s_open ? "source_not_open" : "seek_out_of_range");
+    xSemaphoreGive(mu);
     return false;
   }
+  if (absolute_offset == s_logical_pos) {
+    xSemaphoreGive(mu);
+    return true;
+  }
 
-  return true;
+  // 向前跳转如果仍落在未消费环形缓冲中，只丢弃前面的字节，不重连 NAS。
+  if (absolute_offset > s_logical_pos) {
+    const uint32_t delta = absolute_offset - s_logical_pos;
+    if (delta <= s_ring_count) {
+      s_ring_read = (s_ring_read + static_cast<size_t>(delta)) % kRingBytes;
+      s_ring_count -= static_cast<size_t>(delta);
+      s_logical_pos = absolute_offset;
+      s_eof = absolute_offset >= s_total_size;
+      xSemaphoreGive(mu);
+      publish_snapshot(false);
+      return true;
+    }
+  }
+
+  ++s_seek_request_id;
+  if (s_seek_request_id == 0) s_seek_request_id = 1;
+  const uint32_t request_id = s_seek_request_id;
+  s_seek_offset = absolute_offset;
+  s_seek_pending = true;
+  s_seek_result = false;
+  s_io_error = false;
+  s_prefetch_eof = false;
+  s_transport_connected = false;
+  s_transport_available_bytes = 0;
+  s_network_pos = absolute_offset;
+  reset_ring_locked(absolute_offset);
+  xSemaphoreGive(mu);
+
+  const uint32_t started_ms = millis();
+  for (;;) {
+    bool completed = false;
+    bool result = false;
+    bool running = false;
+    if (xSemaphoreTake(mu, pdMS_TO_TICKS(100)) == pdTRUE) {
+      completed = s_seek_completed_id == request_id;
+      result = s_seek_result;
+      running = s_prefetch_running;
+      xSemaphoreGive(mu);
+    }
+    if (completed) {
+      publish_snapshot(false);
+      return result;
+    }
+    if (!running || !operation_is_current()) {
+      set_error("cancelled");
+      return false;
+    }
+    if ((uint32_t)(millis() - started_ms) >= kSeekTimeoutMs) {
+      set_error("flac_range_seek_timeout");
+      if (xSemaphoreTake(mu, pdMS_TO_TICKS(100)) == pdTRUE) {
+        s_io_error = true;
+        xSemaphoreGive(mu);
+      }
+      publish_snapshot(false);
+      return false;
+    }
+    publish_snapshot(true);
+    vTaskDelay(pdMS_TO_TICKS(2));
+  }
 }
 
 uint32_t audio_http_range_source_tell()
 {
-  return s_logical_pos;
+  uint32_t value = 0;
+  SemaphoreHandle_t mu = state_mutex();
+  if (mu && xSemaphoreTake(mu, pdMS_TO_TICKS(50)) == pdTRUE) {
+    value = s_logical_pos;
+    xSemaphoreGive(mu);
+  }
+  return value;
 }
 
 uint32_t audio_http_range_source_size()
 {
-  return s_total_size;
+  uint32_t value = 0;
+  SemaphoreHandle_t mu = state_mutex();
+  if (mu && xSemaphoreTake(mu, pdMS_TO_TICKS(50)) == pdTRUE) {
+    value = s_total_size;
+    xSemaphoreGive(mu);
+  }
+  return value;
 }
 
 bool audio_http_range_source_had_io_error()
 {
-  return s_io_error;
+  bool value = true;
+  SemaphoreHandle_t mu = state_mutex();
+  if (mu && xSemaphoreTake(mu, pdMS_TO_TICKS(50)) == pdTRUE) {
+    value = s_io_error;
+    xSemaphoreGive(mu);
+  }
+  return value;
 }
 
 bool audio_http_range_source_is_open()
 {
-  return s_open;
+  bool value = false;
+  SemaphoreHandle_t mu = state_mutex();
+  if (mu && xSemaphoreTake(mu, pdMS_TO_TICKS(50)) == pdTRUE) {
+    value = s_open;
+    xSemaphoreGive(mu);
+  }
+  return value;
 }
 
 const char* audio_http_range_source_get_last_error()

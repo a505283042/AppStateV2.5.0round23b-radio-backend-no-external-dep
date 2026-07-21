@@ -460,9 +460,9 @@ bool audio_service_get_network_state(AudioNetworkStateSnapshot* out_snapshot)
   *out_snapshot = s_network_state_snapshot;
   portEXIT_CRITICAL(&s_state_mux);
 
-  // Range 续传发生在 dr_flac 的 read 回调内，AudioTask 此时可能暂时停留在
-  // audio_loop() 中，尚未回到主循环刷新服务快照。这里仅合并音源已经发布的
-  // 纯数值快照，不访问 WiFiClient，确保 UI/播放器能实时看到续传进度。
+  // FLAC Range 预取与续传由 FlacNetTask 独立执行，AudioTask 可能尚未回到
+  // 主循环刷新服务快照。这里仅合并音源已经发布的纯数值快照，不访问
+  // WiFiClient，确保 UI/播放器能实时看到缓冲和续传进度。
   AudioHttpRangeSourceSnapshot flac_source{};
   if (audio_http_range_source_get_snapshot(&flac_source) &&
       (flac_source.open || flac_source.reconnecting)) {

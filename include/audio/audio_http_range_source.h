@@ -4,14 +4,15 @@
 #include <stdint.h>
 #include <sys/types.h>
 
-// HTTP Range 可寻址音源运行快照。只允许 AudioTask 调用读写接口；
-// UI、Web 和其它任务只能读取快照。
+// HTTP Range 可寻址音源运行快照。AudioTask 只调用公开读写接口，
+// 模块内部的 FlacNetTask 独占 WiFiClient 并持续预取；UI、Web 和其它任务只能读取快照。
 struct AudioHttpRangeSourceSnapshot {
   bool open = false;
   bool transport_connected = false;
   bool waiting_for_data = false;
   bool reconnecting = false;
   bool eof = false;
+  bool prefetch_complete = false;  // 网络端已把剩余文件全部写入环形缓冲
   uint8_t retry_attempt = 0;
   uint32_t retry_delay_ms = 0;
   uint32_t available_bytes = 0;
