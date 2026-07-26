@@ -20,6 +20,7 @@
 #include "player_snapshot.h"
 #include "player_state.h"
 #include "player_source.h"
+#include "lyrics/lyrics.h"
 #include "nfc/nfc_binding.h"
 #include "nfc/nfc_binding_commit.h"
 #include "player_binding.h"
@@ -95,6 +96,92 @@ static void web_ui_volume_locked_set(bool locked)
     }
   }
   portEXIT_CRITICAL(&s_web_ui_control_mux);
+}
+
+static uint32_t web_status_token_add_u32(uint32_t hash, uint32_t value)
+{
+  for (uint8_t i = 0; i < 4; ++i) {
+    hash ^= static_cast<uint8_t>((value >> (i * 8)) & 0xFF);
+    hash *= 16777619u;
+  }
+  return hash;
+}
+
+static uint32_t web_status_token_add_bytes(uint32_t hash, const char* text)
+{
+  if (!text) return hash;
+  const uint8_t* p = reinterpret_cast<const uint8_t*>(text);
+  while (*p) {
+    hash ^= *p++;
+    hash *= 16777619u;
+  }
+  return hash;
+}
+
+/**
+ * @brief 生成不包含播放时间的网页状态版本号。
+ *
+ * 播放时间由浏览器本地单调时钟连续推进；只有歌曲、暂停、跳转、音量、
+ * 歌词、封面等真正状态变化时，才需要重新拉取完整 /api/status。
+ */
+static uint32_t web_status_state_token(const WebUiControlSnapshot& ui_control,
+                                       AudioSeekStateSnapshot* out_seek = nullptr,
+                                       AppRescanState* out_rescan = nullptr)
+{
+  const AppRescanState rescan = app_rescan_state_get();
+  const AppPlayModeSnapshot play_mode = app_play_mode_snapshot_get();
+  const PlayerSourceRuntimeState source = player_source_runtime_get();
+  const WebRuntimeSettings settings = web_settings_get();
+
+  AudioSeekStateSnapshot seek{};
+  (void)audio_service_get_seek_state(&seek);
+
+  AudioNetworkStateSnapshot network{};
+  (void)audio_service_get_network_state(&network);
+
+  uint32_t hash = 2166136261u;
+  hash = web_status_token_add_u32(hash, audio_service_playback_revision());
+  hash = web_status_token_add_u32(hash, seek.revision);
+  hash = web_status_token_add_u32(hash, static_cast<uint32_t>(g_app_state));
+  hash = web_status_token_add_u32(hash, rescan.rescanning ? 1u : 0u);
+  hash = web_status_token_add_u32(hash, rescan.abort_requested ? 1u : 0u);
+  hash = web_status_token_add_u32(hash, audio_service_is_playing() ? 1u : 0u);
+  hash = web_status_token_add_u32(hash, audio_service_is_paused() ? 1u : 0u);
+  hash = web_status_token_add_u32(hash, audio_service_is_seekable() ? 1u : 0u);
+  hash = web_status_token_add_u32(hash, audio_get_total_ms());
+  hash = web_status_token_add_u32(hash, audio_output_route_get_user_volume());
+  hash = web_status_token_add_u32(hash, play_mode.revision);
+  hash = web_status_token_add_u32(hash, static_cast<uint32_t>(play_mode.mode));
+  hash = web_status_token_add_u32(hash, static_cast<uint32_t>(ui_get_view()));
+  hash = web_status_token_add_u32(hash, static_cast<uint32_t>(source.type));
+  hash = web_status_token_add_u32(hash, source.radio_active ? 1u : 0u);
+  hash = web_status_token_add_u32(hash, source.net_track_active ? 1u : 0u);
+  hash = web_status_token_add_u32(hash, static_cast<uint32_t>(player_state_current_index()));
+  hash = web_status_token_add_u32(hash, ui_control.revision);
+
+  hash = web_status_token_add_u32(hash, static_cast<uint32_t>(settings.refresh_preset));
+  hash = web_status_token_add_u32(hash, static_cast<uint32_t>(settings.lyric_sync_mode));
+  hash = web_status_token_add_u32(hash, settings.show_next_lyric ? 1u : 0u);
+  hash = web_status_token_add_u32(hash, settings.show_cover ? 1u : 0u);
+  hash = web_status_token_add_u32(hash, settings.web_cover_spin ? 1u : 0u);
+  hash = web_status_token_add_u32(hash, settings.show_wifi_info ? 1u : 0u);
+
+  hash = web_status_token_add_u32(hash, g_lyricsDisplay.hasLyrics() ? 1u : 0u);
+  hash = web_status_token_add_u32(hash, g_lyricsDisplay.getCurrentLyricStartTime());
+  hash = web_status_token_add_u32(hash, g_lyricsDisplay.getNextLyricStartTime());
+  hash = web_status_token_add_u32(hash, g_lyricsDisplay.getFollowingLyricStartTime());
+  hash = web_status_token_add_u32(hash, web_cover_cache_revision());
+
+  hash = web_status_token_add_u32(hash, static_cast<uint32_t>(network.start_phase));
+  hash = web_status_token_add_u32(hash, network.active ? 1u : 0u);
+  hash = web_status_token_add_u32(hash, network.waiting_for_data ? 1u : 0u);
+  hash = web_status_token_add_u32(hash, network.reconnecting ? 1u : 0u);
+  hash = web_status_token_add_u32(hash, network.eof ? 1u : 0u);
+  hash = web_status_token_add_bytes(hash, network.error);
+
+  if (out_seek) *out_seek = seek;
+  if (out_rescan) *out_rescan = rescan;
+  return hash == 0 ? 1 : hash;
 }
 
 static bool web_start_task_try_reserve()
@@ -1577,6 +1664,8 @@ static void web_handle_status() {
 
   json.field_uint("volume", snap.volume);
   json.field_bool("volume_locked", ui_control.volume_locked);
+  json.field_uint("playback_revision", audio_service_playback_revision());
+  json.field_uint("state_token", web_status_state_token(ui_control));
 
   json.field_string("mode", snap.mode);
   json.field_string("mode_label", snap.mode_label);
@@ -1648,6 +1737,65 @@ static void web_handle_status() {
   if (!json.finish()) {
     web_abort_client();
   }
+}
+
+static void web_handle_status_check() {
+  const WebUiControlSnapshot ui_control = web_ui_control_snapshot_get();
+  AudioSeekStateSnapshot seek{};
+  AppRescanState rescan{};
+  const uint32_t state_token =
+      web_status_state_token(ui_control, &seek, &rescan);
+
+  bool has_client_token = false;
+  uint32_t client_token = 0;
+  if (s_server.hasArg("token")) {
+    const String value = s_server.arg("token");
+    char* end = nullptr;
+    const unsigned long parsed = strtoul(value.c_str(), &end, 10);
+    if (end && end != value.c_str() && *end == '\0') {
+      client_token = static_cast<uint32_t>(parsed);
+      has_client_token = true;
+    }
+  }
+
+  const WebRuntimeSettings settings = web_settings_get();
+  uint32_t next_check_ms = web_refresh_preset_poll_ms(settings.refresh_preset);
+  if (rescan.rescanning) {
+    next_check_ms = min<uint32_t>(next_check_ms, WEBCTRL_STATUS_POLL_SCAN_MS);
+  }
+
+  String json;
+  json.reserve(360);
+  json += "{\"ok\":true";
+  json += ",\"changed\":";
+  json += (!has_client_token || client_token != state_token) ? "true" : "false";
+  json += ",\"state_token\":";
+  json += String(static_cast<unsigned long>(state_token));
+  json += ",\"playback_revision\":";
+  json += String(static_cast<unsigned long>(audio_service_playback_revision()));
+  json += ",\"play_ms\":";
+  json += String(static_cast<unsigned long>(audio_get_play_ms()));
+  json += ",\"total_ms\":";
+  json += String(static_cast<unsigned long>(audio_get_total_ms()));
+  json += ",\"is_playing\":";
+  json += audio_service_is_playing() ? "true" : "false";
+  json += ",\"is_paused\":";
+  json += audio_service_is_paused() ? "true" : "false";
+  json += ",\"rescanning\":";
+  json += rescan.rescanning ? "true" : "false";
+  json += ",\"seeking\":";
+  json += seek.seeking ? "true" : "false";
+  json += ",\"seek_target_ms\":";
+  json += String(static_cast<unsigned long>(seek.target_ms));
+  json += ",\"source_type\":\"";
+  json += player_source_type_key(player_source_type_get());
+  json += "\"";
+  json += ",\"next_check_ms\":";
+  json += String(static_cast<unsigned long>(next_check_ms));
+  json += "}";
+
+  web_send_no_cache_headers();
+  s_server.send(200, "application/json; charset=utf-8", json);
 }
 
 static bool web_is_remote_image_url(const String& s) {
@@ -2387,6 +2535,45 @@ static void web_append_netmusic_sources_json(String& json) {
   json += "]";
 }
 
+struct WebNetMusicFocus {
+  int idx = -1;
+  const char* source = "none";
+};
+
+static WebNetMusicFocus web_resolve_netmusic_focus(uint32_t total) {
+  WebNetMusicFocus focus{};
+  const PlayerSourceState source = player_source_get();
+
+  if (source.type == PlayerSourceType::NET_TRACK &&
+      source.net_track_idx >= 0 &&
+      static_cast<uint32_t>(source.net_track_idx) < total) {
+    focus.idx = source.net_track_idx;
+    focus.source = "playing";
+    return focus;
+  }
+
+  const int snapshot_idx = player_snapshot_resolve_net_track_index(
+      player_snapshot_net_track_index());
+  if (snapshot_idx >= 0 && static_cast<uint32_t>(snapshot_idx) < total) {
+    focus.idx = snapshot_idx;
+    focus.source = "snapshot";
+    return focus;
+  }
+
+  const int list_idx = player_list_select_saved_net_track_index();
+  if (list_idx >= 0 && static_cast<uint32_t>(list_idx) < total) {
+    focus.idx = list_idx;
+    focus.source = "list";
+    return focus;
+  }
+
+  if (total > 0) {
+    focus.idx = 0;
+    focus.source = "default";
+  }
+  return focus;
+}
+
 static void web_handle_radios() {
   web_send_radio_list_json();
 }
@@ -2425,6 +2612,12 @@ static void web_handle_netmusic() {
   if (limit > 50) limit = 50;
 
   const uint32_t total = net_music_catalog_count();
+  const WebNetMusicFocus focus = web_resolve_netmusic_focus(total);
+  const bool locate_saved =
+      s_server.hasArg("locate") && s_server.arg("locate") == "saved";
+  if (locate_saved && focus.idx >= 0) {
+    offset = (focus.idx / limit) * limit;
+  }
   const uint32_t start = (uint32_t)offset;
 
   uint32_t end = start + (uint32_t)limit;
@@ -2448,6 +2641,19 @@ static void web_handle_netmusic() {
 
   json += ",\"limit\":";
   json += String(limit);
+
+  json += ",\"focus_idx\":";
+  json += String(focus.idx);
+  json += ",\"focus_source\":\"";
+  json += focus.source;
+  json += "\"";
+
+  const PlayerSourceState current_source = player_source_get();
+  const int playing_idx = current_source.type == PlayerSourceType::NET_TRACK
+      ? current_source.net_track_idx
+      : -1;
+  json += ",\"playing_idx\":";
+  json += String(playing_idx);
 
   json += ",\"base\":\"";
   json += web_json_escape(net_music_catalog_base_url());
@@ -2665,18 +2871,10 @@ static void web_handle_netmusic_source_select() {
   }
 
   const int total = (int)net_music_catalog_count();
-  int focus_idx = player_snapshot_resolve_net_track_index(
-      player_snapshot_net_track_index());
-  const char* focus_source = "snapshot";
-
-  if (focus_idx < 0 || focus_idx >= total) {
-    focus_idx = player_list_select_saved_net_track_index();
-    focus_source = "list";
-  }
-  if ((focus_idx < 0 || focus_idx >= total) && total > 0) {
-    focus_idx = 0;
-    focus_source = "default";
-  }
+  const WebNetMusicFocus focus =
+      web_resolve_netmusic_focus(static_cast<uint32_t>(total));
+  const int focus_idx = focus.idx;
+  const char* focus_source = focus.source;
 
   String json;
   json.reserve(720);
@@ -2968,6 +3166,7 @@ static void web_setup_routes() {
   s_server.on("/settings", HTTP_GET, web_handle_settings_page);
   s_server.on("/favicon.ico", HTTP_GET, web_handle_favicon);
   s_server.on("/api/status", HTTP_GET, web_handle_status);
+  s_server.on("/api/status/check", HTTP_GET, web_handle_status_check);
   s_server.on("/api/artists", HTTP_GET, web_handle_artists);
   s_server.on("/api/albums", HTTP_GET, web_handle_albums);
   s_server.on("/api/artist/search_song", HTTP_GET, web_handle_artist_song_search);

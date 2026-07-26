@@ -32,3 +32,6 @@ bool web_cover_cache_store_from_sprite(int track_idx,
                                        LGFX_Sprite& spr);
 
 void web_cover_cache_clear();
+
+/** 获取网页封面缓存版本号；缓存写入或清空时递增，供轻量状态校验使用。 */
+uint32_t web_cover_cache_revision();

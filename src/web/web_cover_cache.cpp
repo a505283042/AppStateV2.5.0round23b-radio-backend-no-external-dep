@@ -30,6 +30,17 @@ static WebCoverBmpSlot s_slots[2];
 static StaticSemaphore_t s_mu_buf;
 static SemaphoreHandle_t s_mu = nullptr;
 
+// 轻量状态接口只读取版本号，不触碰BMP数据和缓存互斥锁。
+static portMUX_TYPE s_revision_mux = portMUX_INITIALIZER_UNLOCKED;
+static uint32_t s_revision = 1;
+
+static void web_cover_cache_bump_revision() {
+  portENTER_CRITICAL(&s_revision_mux);
+  ++s_revision;
+  if (s_revision == 0) ++s_revision;
+  portEXIT_CRITICAL(&s_revision_mux);
+}
+
 static SemaphoreHandle_t web_cover_cache_mutex() {
   if (!s_mu) {
     s_mu = xSemaphoreCreateMutexStatic(&s_mu_buf);
@@ -327,6 +338,7 @@ bool web_cover_cache_store_from_sprite(int track_idx,
   s_slots[slot].last_touch_ms = millis();
 
   xSemaphoreGive(mu);
+  web_cover_cache_bump_revision();
 
   LOGD("[网页封面] 就绪 歌曲=%d 字节=%u", track_idx, (unsigned)bmp_len);
   return true;
@@ -340,4 +352,12 @@ void web_cover_cache_clear() {
   for (int i = 0; i < 2; ++i) free_slot(s_slots[i]);
 
   xSemaphoreGive(mu);
+  web_cover_cache_bump_revision();
+}
+
+uint32_t web_cover_cache_revision() {
+  portENTER_CRITICAL(&s_revision_mux);
+  const uint32_t revision = s_revision;
+  portEXIT_CRITICAL(&s_revision_mux);
+  return revision;
 }

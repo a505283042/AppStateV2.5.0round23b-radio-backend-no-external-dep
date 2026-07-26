@@ -211,8 +211,10 @@ static const char WEBCTRL_INDEX_HTML[] PROGMEM = R"HTML(
 
 <script>
 let POLL_MS = 1000;
-const MIN_STATUS_POLL_MS = 1500;
-const STATUS_POLL_JITTER_MS = 700;
+const MIN_STATUS_CHECK_MS = 350;
+const STATUS_POLL_JITTER_MS = 180;
+const LOCAL_CLOCK_TICK_MS = 250;
+const FORCE_FULL_STATUS_MS = 10000;
 let LYRIC_WAIT_POLL_THRESHOLD_MS = 150;
 let lastCoverTrack = '';
 let pollTimer = null;
@@ -225,6 +227,17 @@ let currentPollMs = POLL_MS;
 let nextPollAt = Date.now() + POLL_MS;
 let lastStatus = null;
 let lastStatusAt = 0;
+let lastFullStatusAt = 0;
+let lastStateToken = 0;
+let localClockTimer = null;
+let playClockBaseMs = 0;
+let playClockBaseAt = performance.now();
+let playClockTotalMs = 0;
+let playClockPlaying = false;
+let playClockPaused = false;
+let playClockRescanning = false;
+let playClockSeeking = false;
+let playClockRevision = 0;
 let coverToggleBusy = false;
 let pageActive = !document.hidden;
 let pagePausedByVisibility = false;
@@ -361,14 +374,72 @@ function scheduleNext(ms){
     return;
   }
 
-  const baseDelay = Math.max(MIN_STATUS_POLL_MS, Number(ms) || POLL_MS);
+  const baseDelay = Math.max(MIN_STATUS_CHECK_MS, Number(ms) || POLL_MS);
   const delay = baseDelay + Math.floor(Math.random() * STATUS_POLL_JITTER_MS);
   if(pollTimer) clearTimeout(pollTimer);
   nextPollAt = Date.now() + delay;
-  pollTimer = setTimeout(fetchStatus, delay);
+  pollTimer = setTimeout(pollStatus, delay);
 }
 function fmt(ms){ const s=Math.max(0,Math.floor((ms||0)/1000)); const m=Math.floor(s/60); const r=s%60; return `${m}:${String(r).padStart(2,'0')}`; }
-function estimatePlayMs(snap){ let play=Number(snap?.play_ms)||0; if(snap&&snap.is_playing&&!snap.is_paused&&!snap.rescanning){ play += Math.max(0, Date.now()-lastStatusAt);} return play; }
+function currentPlayClockMs(now = performance.now()){
+  let play = Number(playClockBaseMs) || 0;
+  if(playClockPlaying && !playClockPaused && !playClockRescanning && !playClockSeeking){
+    play += Math.max(0, now - playClockBaseAt);
+  }
+  if(playClockTotalMs > 0) play = Math.min(play, playClockTotalMs);
+  return Math.max(0, play);
+}
+function syncPlayClock(snap, force = false){
+  if(!snap) return;
+  const now = performance.now();
+  const serverMs = Math.max(0, Number(snap.seeking ? (snap.seek_target_ms || snap.play_ms) : snap.play_ms) || 0);
+  const previousMs = currentPlayClockMs(now);
+  const revision = Number(snap.playback_revision) || 0;
+  const changedRunState = revision !== playClockRevision ||
+    !!snap.is_playing !== playClockPlaying ||
+    !!snap.is_paused !== playClockPaused ||
+    !!snap.rescanning !== playClockRescanning ||
+    !!snap.seeking !== playClockSeeking;
+  const drift = serverMs - previousMs;
+  let correctedMs = serverMs;
+  if(!force && !changedRunState && Math.abs(drift) < 500){
+    // 小误差只吸收四分之一，避免网络校验让网页时间来回跳动。
+    correctedMs = previousMs + drift * 0.25;
+  }
+  playClockBaseMs = Math.max(0, correctedMs);
+  playClockBaseAt = now;
+  if(typeof snap.total_ms !== 'undefined'){
+    playClockTotalMs = Math.max(0, Number(snap.total_ms) || 0);
+  }
+  playClockPlaying = !!snap.is_playing;
+  playClockPaused = !!snap.is_paused;
+  playClockRescanning = !!snap.rescanning;
+  playClockSeeking = !!snap.seeking;
+  playClockRevision = revision;
+}
+function estimatePlayMs(){ return currentPlayClockMs(); }
+function updateLocalClockUi(){
+  if(!lastStatus) return;
+  const totalMs = Math.max(0, Number(lastStatus.total_ms) || playClockTotalMs || 0);
+  const optimisticActive = seekOptimisticMs !== null && Date.now() < seekOptimisticUntil;
+  const displayMs = seekDragging || optimisticActive
+    ? Number(seekOptimisticMs || 0)
+    : currentPlayClockMs();
+  const timeNode = document.getElementById('time');
+  if(timeNode) timeNode.textContent = `${fmt(displayMs)} / ${fmt(totalMs)}`;
+  const seekSlider = document.getElementById('seekSlider');
+  if(seekSlider && !seekDragging){
+    seekSlider.value = String(Math.max(0, Math.min(totalMs, displayMs)));
+  }
+}
+function startLocalClock(){
+  if(localClockTimer) clearInterval(localClockTimer);
+  localClockTimer = setInterval(updateLocalClockUi, LOCAL_CLOCK_TICK_MS);
+  updateLocalClockUi();
+}
+function stopLocalClock(){
+  if(localClockTimer){ clearInterval(localClockTimer); localClockTimer = null; }
+}
 function abortStatusFetch(){
   if(statusController){
     try{ statusController.abort(); }catch(e){}
@@ -408,7 +479,7 @@ function scheduleLyricTransition(j){
   if(!j || !j.has_lyrics || !j.is_playing || j.is_paused || j.rescanning) return;
   const nextStart = Number(j.next_lyric_start_ms) || 0;
   if(nextStart <= 0 || !j.next_lyric || !j.next_lyric.length) return;
-  const msToLyric = nextStart - estimatePlayMs(j);
+  const msToLyric = nextStart - estimatePlayMs();
   if(msToLyric <= 0) return;
   const msToPoll = Math.max(0, nextPollAt - Date.now());
   if(msToPoll >= msToLyric && (msToPoll - msToLyric) <= LYRIC_WAIT_POLL_THRESHOLD_MS){ return; }
@@ -426,52 +497,109 @@ function scheduleLyricTransition(j){
 }
 async function fetchStatus(){
   if(!pageActive) return;
-
   if(inFlight){
     if(statusFetchStartedAt && Date.now() - statusFetchStartedAt > 10000){
       abortStatusFetch();
     }else{
-      scheduleNext(1500);
+      scheduleNext(500);
       return;
     }
   }
 
   inFlight = true;
   statusFetchStartedAt = Date.now();
-
   const controller = new AbortController();
   statusController = controller;
   const timeoutId = setTimeout(() => controller.abort(), 8000);
 
   try{
-    const r = await fetch(`/api/status?t=${Date.now()}`, {
-      cache:'no-store',
-      signal: controller.signal
-    });
+    const r = await fetch(`/api/status?t=${Date.now()}`, {cache:'no-store', signal:controller.signal});
     const j = await r.json();
     lastStatusAt = Date.now();
+    lastFullStatusAt = lastStatusAt;
+    lastStateToken = Number(j.state_token) || 0;
+    syncPlayClock(j, false);
     lastStatus = j;
     syncVolumeLockFromStatus(j);
     applyNetTrackMode(j);
     render(j);
-    currentPollMs = Math.max(120, Number(j.next_poll_ms) || POLL_MS);
+    currentPollMs = Math.max(MIN_STATUS_CHECK_MS, Number(j.next_poll_ms) || POLL_MS);
     if(Number(j.refresh_poll_ms) > 0) POLL_MS = Number(j.refresh_poll_ms);
     if(Number(j.lyric_wait_poll_threshold_ms) > 0) LYRIC_WAIT_POLL_THRESHOLD_MS = Number(j.lyric_wait_poll_threshold_ms);
     const lyricThreshold = (typeof j.lyric_wait_poll_threshold_ms !== 'undefined' && Number(j.lyric_wait_poll_threshold_ms) > 0) ? Number(j.lyric_wait_poll_threshold_ms) : LYRIC_WAIT_POLL_THRESHOLD_MS;
-    document.getElementById('pollInfo').textContent = `刷新：${currentPollMs} ms / 歌词：${j.lyric_sync_mode_label||'平衡'} / 阈值：${lyricThreshold}ms`;
-    scheduleNext(currentPollMs); scheduleLyricTransition(j);
+    document.getElementById('pollInfo').textContent = `时间：本地250ms / 状态校验：${currentPollMs}ms / 歌词：${j.lyric_sync_mode_label||'平衡'} / 阈值：${lyricThreshold}ms`;
+    scheduleLyricTransition(j);
+    scheduleNext(currentPollMs);
   }catch(e){
     document.getElementById('net').textContent = e.name === 'AbortError' ? '网页请求超时，正在重试' : '网页状态获取失败';
     scheduleNext(Math.max(POLL_MS, 3000));
   }finally{
     clearTimeout(timeoutId);
-    if(statusController === controller){
-      statusController = null;
-    }
+    if(statusController === controller) statusController = null;
     inFlight = false;
     statusFetchStartedAt = 0;
   }
 }
+
+async function fetchStatusCheck(){
+  if(!pageActive || !lastStatus){
+    await fetchStatus();
+    return;
+  }
+  if(inFlight){
+    scheduleNext(500);
+    return;
+  }
+
+  inFlight = true;
+  statusFetchStartedAt = Date.now();
+  const controller = new AbortController();
+  statusController = controller;
+  const timeoutId = setTimeout(() => controller.abort(), 5000);
+  let needFull = false;
+
+  try{
+    const r = await fetch(`/api/status/check?token=${encodeURIComponent(lastStateToken)}&t=${Date.now()}`, {cache:'no-store', signal:controller.signal});
+    const j = await r.json();
+    lastStatusAt = Date.now();
+    syncPlayClock(j, false);
+    if(lastStatus){
+      lastStatus.play_ms = Number(j.play_ms) || 0;
+      lastStatus.total_ms = Math.max(0, Number(j.total_ms) || 0);
+      lastStatus.is_playing = !!j.is_playing;
+      lastStatus.is_paused = !!j.is_paused;
+      lastStatus.rescanning = !!j.rescanning;
+      lastStatus.seeking = !!j.seeking;
+      lastStatus.seek_target_ms = Number(j.seek_target_ms) || 0;
+      lastStatus.playback_revision = Number(j.playback_revision) || 0;
+    }
+    updateLocalClockUi();
+    currentPollMs = Math.max(MIN_STATUS_CHECK_MS, Number(j.next_check_ms) || currentPollMs || POLL_MS);
+    needFull = !!j.changed || (Date.now() - lastFullStatusAt >= FORCE_FULL_STATUS_MS);
+    if(!needFull){
+      lastStateToken = Number(j.state_token) || lastStateToken;
+      scheduleNext(currentPollMs);
+    }
+  }catch(e){
+    scheduleNext(Math.max(POLL_MS, 2500));
+  }finally{
+    clearTimeout(timeoutId);
+    if(statusController === controller) statusController = null;
+    inFlight = false;
+    statusFetchStartedAt = 0;
+  }
+
+  if(needFull) await fetchStatus();
+}
+
+async function pollStatus(){
+  if(!lastStatus || Date.now() - lastFullStatusAt >= FORCE_FULL_STATUS_MS){
+    await fetchStatus();
+  }else{
+    await fetchStatusCheck();
+  }
+}
+
 function pausePagePolling(){
   pageActive = false;
   pagePausedByVisibility = true;
@@ -482,11 +610,13 @@ function pausePagePolling(){
   }
 
   clearLyricTimer();
+  stopLocalClock();
   abortStatusFetch();
 }
 
 function resumePagePolling(){
   pageActive = true;
+  startLocalClock();
 
   if(pagePausedByVisibility){
     pagePausedByVisibility = false;
@@ -662,7 +792,7 @@ function render(j){
   const optimisticActive=seekOptimisticMs!==null && Date.now()<seekOptimisticUntil;
   const displayPlayMs=seekDragging || optimisticActive
     ? Number(seekOptimisticMs||0)
-    : (j.seeking ? Number(j.seek_target_ms||j.play_ms||0) : Number(j.play_ms||0));
+    : currentPlayClockMs();
   document.getElementById('time').textContent=`${fmt(displayPlayMs)} / ${fmt(totalMs)}`;
   document.getElementById('playState').textContent=j.rescanning
     ? (j.can_cancel_scan ? '扫描中（可取消）' : '扫描中（取消中）')
@@ -865,6 +995,7 @@ if(netCardInit){
   netCardInit.style.display = 'none';
 }
 
+startLocalClock();
 setTimeout(fetchStatus, 200 + Math.floor(Math.random() * 900));
 </script>
 </body>
@@ -2926,13 +3057,23 @@ function renderNetMusicItems(items){
   }
 }
 
-async function loadNetMusic(){
+async function loadNetMusic(options = {}){
   searchMode = false;
+  const locateSaved = options.locateSaved === true;
   try{
-    const r = await fetch(`/api/netmusic?offset=${offset}&limit=${limit}`, {cache:'no-store'});
+    const locateArg = locateSaved ? '&locate=saved' : '';
+    const r = await fetch(`/api/netmusic?offset=${offset}&limit=${limit}${locateArg}`, {cache:'no-store'});
     const j = await r.json();
 
     total = j.total || 0;
+    if(locateSaved){
+      offset = Math.max(0, Number(j.offset) || 0);
+      focusedIdx = Number.isInteger(j.focus_idx) ? j.focus_idx : -1;
+      autoLocatePending = focusedIdx >= 0;
+    }
+    if(Number.isInteger(j.playing_idx)){
+      currentIdx = j.playing_idx;
+    }
     if(offset >= total && total > 0){
       offset = Math.max(0, total - limit);
     }
@@ -3110,39 +3251,6 @@ function changeLimit(){
   loadNetMusic();
 }
 
-function goToPage(){
-  if(searchMode) return;
-  const input = document.getElementById('pageInput');
-  const page = parseInt(input && input.value ? input.value : '0', 10);
-  if(!page || page < 1){
-    alert('请输入有效页码');
-    return;
-  }
-  const pageTotal = total > 0 ? Math.ceil(total / limit) : 0;
-  if(page > pageTotal){
-    alert(`最大页码为 ${pageTotal}`);
-    return;
-  }
-  offset = (page - 1) * limit;
-  loadNetMusic();
-}
-
-function goToIndex(){
-  if(searchMode) return;
-  const input = document.getElementById('indexInput');
-  const idx = parseInt(input && input.value ? input.value : '0', 10);
-  if(!idx || idx < 1){
-    alert('请输入有效序号');
-    return;
-  }
-  if(idx > total){
-    alert(`最大序号为 ${total}`);
-    return;
-  }
-  offset = idx - 1;
-  loadNetMusic();
-}
-
 async function focusCurrentPlaying(){
   const status = await loadStatus();
 
@@ -3203,10 +3311,9 @@ document.addEventListener('DOMContentLoaded', () => {
 loadStatus().then((status) => {
   if(status && status.source_type === 'net_track' && Number.isInteger(status.net_track_idx) && status.net_track_idx >= 0){
     currentIdx = status.net_track_idx;
-    focusedIdx = currentIdx;
-    offset = Math.floor(currentIdx / limit) * limit;
   }
-  return loadNetMusic();
+  // 首次进入由后端按“当前播放 → NVS快照 → 列表保存位置”定位并返回正确分页。
+  return loadNetMusic({locateSaved:true});
 });
 
 setInterval(loadStatus, 2000);
