@@ -77,9 +77,9 @@ bool audio_i2s_init(int bck, int ws, int dout, int sample_rate)
     cfg.channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT;
     cfg.communication_format = I2S_COMM_FORMAT_STAND_I2S; // ✅ Philips I2S
     cfg.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
-    // FLAC 部分歌曲单次解码会超过 23ms 实时长度，I2S 需要更大的 DMA 余量吸收抖动。
-    // 16 * 512 stereo frames 约 185ms 缓冲，比原 12 * 512 更稳，内部 RAM 占用仍可控。
-    cfg.dma_buf_count = 16;
+    // 96kHz/24bit FLAC 偶发解码块会超过 42.7ms 实时预算，增加 DMA 余量吸收短时峰值。
+    // 20 * 512 stereo frames：96kHz 下约 106.7ms；比 16 组额外占用约 8KB DMA RAM。
+    cfg.dma_buf_count = 20;
     cfg.dma_buf_len = 512;
     cfg.use_apll = true;          // ✅ PCM5102A 通常更稳
     cfg.tx_desc_auto_clear = true;

@@ -49,6 +49,8 @@ static constexpr uint32_t kAudioTaskStackBytes = 10240; // 音频任务栈大小
 #define AUDIO_CMD_QUEUE_LEN 4
 #endif
 
+static constexpr size_t kAudioExtendedPathMax = 4096;
+
 enum AudioCmdType : uint8_t {
   CMD_PLAY = 1,
   CMD_STOP = 2,
@@ -69,8 +71,9 @@ enum AudioCmdType : uint8_t {
 
 struct AudioRequest {
   AudioCmdType type;
-  char path[AUDIO_CMD_PATH_MAX];       // play / lyrics / embedded cover audio path
+  char path[AUDIO_CMD_PATH_MAX];       // 常规路径内联缓冲
   char cover_path[AUDIO_CMD_PATH_MAX]; // fallback cover file path
+  char* extended_path = nullptr;        // 超长 NAS URL / UTF-8 路径，按需动态分配
 
   CoverSource cover_source = COVER_NONE;
   uint32_t cover_offset = 0;
@@ -99,6 +102,56 @@ struct AudioRequest {
   uint32_t request_id = 0;
   uint8_t refs = 1; // 调用方持有一个引用，入队成功后 AudioTask 再持有一个引用
 };
+
+static const char* audio_request_path(const AudioRequest& request)
+{
+  return request.extended_path ? request.extended_path : request.path;
+}
+
+static bool audio_request_set_path(AudioRequest* request, const char* value)
+{
+  if (!request || !value) return false;
+
+  if (request->extended_path) {
+    free(request->extended_path);
+    request->extended_path = nullptr;
+  }
+
+  const size_t len = strlen(value);
+  if (len > kAudioExtendedPathMax) {
+    request->path[0] = '\0';
+    LOGE("[音频] 路径过长，拒绝入队：长度=%u 上限=%u 请求=%lu",
+         (unsigned)len,
+         (unsigned)kAudioExtendedPathMax,
+         (unsigned long)request->request_id);
+    return false;
+  }
+  if (len < sizeof(request->path)) {
+    memcpy(request->path, value, len + 1);
+    return true;
+  }
+
+  // 百分号编码后的长文件名很容易超过 512B；优先放 PSRAM，避免静默截断成无效 URL。
+  char* allocated = static_cast<char*>(ps_malloc(len + 1));
+  if (!allocated) {
+    allocated = static_cast<char*>(malloc(len + 1));
+  }
+  if (!allocated) {
+    request->path[0] = '\0';
+    LOGE("[音频] 分配长路径失败：长度=%u 请求=%lu",
+         (unsigned)len,
+         (unsigned long)request->request_id);
+    return false;
+  }
+
+  memcpy(allocated, value, len + 1);
+  request->path[0] = '\0';
+  request->extended_path = allocated;
+  LOGI("[音频] 长路径使用动态缓冲：长度=%u 请求=%lu",
+       (unsigned)len,
+       (unsigned long)request->request_id);
+  return true;
+}
 
 static QueueHandle_t s_q = nullptr;
 static TaskHandle_t  s_task = nullptr;
@@ -265,6 +318,10 @@ static void audio_request_destroy(AudioRequest* request)
   if (!request) return;
 
   // 调用方成功接管结果后会把对应指针清空；未接管的结果在这里兜底释放。
+  if (request->extended_path) {
+    free(request->extended_path);
+    request->extended_path = nullptr;
+  }
   if (request->result_text) {
     free(request->result_text);
     request->result_text = nullptr;
@@ -651,8 +708,8 @@ static bool audio_task_fetch_cover_impl(AudioRequest& request) {
     path = request.cover_path;
     offset = 0;
   } else if ((request.cover_source == COVER_MP3_APIC || request.cover_source == COVER_FLAC_PICTURE) &&
-             request.cover_size > 0 && request.path[0]) {
-    path = request.path;
+             request.cover_size > 0 && audio_request_path(request)[0]) {
+    path = audio_request_path(request);
     size = request.cover_size;
     offset = request.cover_offset;
   } else {
@@ -805,6 +862,7 @@ static void audio_task_entry(void*){
       }
 
       AudioRequest& cmd = *request;
+      const char* cmd_path = audio_request_path(cmd);
       bool success = true;
 
       if (cmd.type == CMD_STOP) {
@@ -864,12 +922,12 @@ static void audio_task_entry(void*){
             audio_task_publish_state();
 
             if (is_network_flac) {
-              ok = audio_play_stream_flac(cmd.path, cmd.network_operation_id);
+              ok = audio_play_stream_flac(cmd_path, cmd.network_operation_id);
             } else {
               uint32_t start_offset = cmd.stream_start_offset;
               if (cmd.stream_probe_audio_offset) {
                 uint32_t probed_offset = 0;
-                if (audio_mp3_audiotools_source_probe_audio_start_offset(cmd.path,
+                if (audio_mp3_audiotools_source_probe_audio_start_offset(cmd_path,
                                                                            cmd.network_operation_id,
                                                                            &probed_offset)) {
                   start_offset = probed_offset;
@@ -878,17 +936,17 @@ static void audio_task_entry(void*){
 
               if (audio_mp3_audiotools_source_operation_is_current(cmd.network_operation_id)) {
                 if (start_offset > 0) {
-                  ok = audio_play_stream_mp3_from_offset(cmd.path,
+                  ok = audio_play_stream_mp3_from_offset(cmd_path,
                                                          start_offset,
                                                          cmd.network_operation_id);
                   if (!ok &&
                       audio_mp3_audiotools_source_operation_is_current(cmd.network_operation_id)) {
                     LOGW("[音频] Range 起播失败，回退普通 URL 起播 offset=%lu",
                          (unsigned long)start_offset);
-                    ok = audio_play_stream_mp3(cmd.path, cmd.network_operation_id);
+                    ok = audio_play_stream_mp3(cmd_path, cmd.network_operation_id);
                   }
                 } else {
-                  ok = audio_play_stream_mp3(cmd.path, cmd.network_operation_id);
+                  ok = audio_play_stream_mp3(cmd_path, cmd.network_operation_id);
                 }
               }
             }
@@ -917,7 +975,7 @@ static void audio_task_entry(void*){
         } else {
           s_task_network_codec = AudioNetworkCodecKind::None;
           audio_task_set_network_start_state(0, AudioNetworkStartPhase::Idle);
-          ok = audio_play(cmd.path);
+          ok = audio_play(cmd_path);
         }
         const uint32_t t_done = millis();
         success = ok;
@@ -1138,7 +1196,7 @@ static void audio_task_entry(void*){
              (unsigned long)cmd.request_id);
       } else if (cmd.type == CMD_FETCH_TOTAL_MS) {
         const uint32_t t_cmd = millis();
-        const bool ok = audio_task_fetch_total_ms_impl(cmd.path, &cmd.result_total_ms);
+        const bool ok = audio_task_fetch_total_ms_impl(cmd_path, &cmd.result_total_ms);
         const uint32_t t_done = millis();
         success = ok;
         LOGD("[音频] 服务命令“读取总时长”：耗时=%lums 成功=%d 总时长=%u 请求=%lu",
@@ -1148,7 +1206,7 @@ static void audio_task_entry(void*){
              (unsigned long)cmd.request_id);
       } else if (cmd.type == CMD_FETCH_LYRICS) {
         const uint32_t t_cmd = millis();
-        const bool ok = audio_task_fetch_lyrics_impl(cmd.path, &cmd.result_text, &cmd.result_text_len);
+        const bool ok = audio_task_fetch_lyrics_impl(cmd_path, &cmd.result_text, &cmd.result_text_len);
         const uint32_t t_done = millis();
         success = ok;
         LOGD("[音频] 服务命令“读取歌词”：耗时=%lums 成功=%d 字节=%u 请求=%lu",
@@ -1383,8 +1441,10 @@ bool audio_service_play(const char* path, bool wait)
   AudioRequest* request = audio_request_new(wait);
   if (!request) return false;
   request->type = CMD_PLAY;
-  strncpy(request->path, path, sizeof(request->path) - 1);
-  request->path[sizeof(request->path) - 1] = '\0';
+  if (!audio_request_set_path(request, path)) {
+    audio_request_release(request);
+    return false;
+  }
 
   const bool ok = dispatch_request(request, wait);
   audio_request_release(request); // 释放调用方引用
@@ -1410,8 +1470,13 @@ static bool audio_service_queue_stream_request(const char* url,
   request->network_operation_id = operation_id;
   request->stream_start_offset = start_offset;
   request->stream_probe_audio_offset = probe_audio_offset;
-  strncpy(request->path, url, sizeof(request->path) - 1);
-  request->path[sizeof(request->path) - 1] = '\0';
+  if (!audio_request_set_path(request, url)) {
+    if (audio_mp3_audiotools_source_operation_is_current(operation_id)) {
+      audio_mp3_audiotools_source_cancel_operation();
+    }
+    audio_request_release(request);
+    return false;
+  }
 
   const uint32_t request_id = request->request_id;
   const bool ok = dispatch_request(request, wait);
@@ -1488,8 +1553,10 @@ bool audio_service_fetch_total_ms(const char* path, uint32_t* out_total_ms, bool
   AudioRequest* request = audio_request_new(true);
   if (!request) return false;
   request->type = CMD_FETCH_TOTAL_MS;
-  strncpy(request->path, path, sizeof(request->path) - 1);
-  request->path[sizeof(request->path) - 1] = '\0';
+  if (!audio_request_set_path(request, path)) {
+    audio_request_release(request);
+    return false;
+  }
 
   const bool ok = dispatch_request(request, true);
   if (ok) {
@@ -1513,8 +1580,10 @@ bool audio_service_fetch_lyrics(const char* path, char** out_text, size_t* out_l
   AudioRequest* request = audio_request_new(true);
   if (!request) return false;
   request->type = CMD_FETCH_LYRICS;
-  strncpy(request->path, path, sizeof(request->path) - 1);
-  request->path[sizeof(request->path) - 1] = '\0';
+  if (!audio_request_set_path(request, path)) {
+    audio_request_release(request);
+    return false;
+  }
 
   const bool ok = dispatch_request(request, true);
   if (ok) {
@@ -1553,9 +1622,9 @@ bool audio_service_fetch_cover(CoverSource cover_source,
   request->cover_source = cover_source;
   request->cover_offset = cover_offset;
   request->cover_size = cover_size;
-  if (audio_path) {
-    strncpy(request->path, audio_path, sizeof(request->path) - 1);
-    request->path[sizeof(request->path) - 1] = '\0';
+  if (audio_path && !audio_request_set_path(request, audio_path)) {
+    audio_request_release(request);
+    return false;
   }
   if (cover_path) {
     strncpy(request->cover_path, cover_path, sizeof(request->cover_path) - 1);

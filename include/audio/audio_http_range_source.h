@@ -25,6 +25,13 @@ struct AudioHttpRangeSourceSnapshot {
   uint32_t range_open_count = 0;
   uint32_t reconnect_attempt_count = 0;
   uint32_t reconnect_success_count = 0;
+
+  // 以下为累计诊断计数；每次打开新音源、识别出 FLAC 规格后重新归零。
+  // reader_wait_total_us 表示解码读取回调真正等待网络生产者的时间。
+  uint32_t reader_wait_count = 0;
+  uint64_t reader_wait_total_us = 0;
+  uint32_t low_watermark_count = 0;
+  uint32_t min_cached_bytes = 0;
 };
 
 // 打开支持 HTTP Range 的文件。当前第一阶段只支持 http://。
@@ -41,6 +48,16 @@ bool audio_http_range_source_is_open();
 
 // 最近一次稳定错误码，调用方不得释放。
 const char* audio_http_range_source_get_last_error();
+
+// FLAC 解码器打开后补充流规格。高码率或高采样率文件会提高后台预取水位，
+// 但不会延后歌词、封面任务，也不会阻塞等待缓存填满。
+void audio_http_range_source_set_flac_profile(uint32_t average_bitrate_kbps,
+                                               uint32_t sample_rate,
+                                               uint8_t bits_per_sample);
+
+// 开播软件预填充完成后重新开始播放期诊断，排除解码器打开和启动填充阶段的零缓存。
+// 正式版本关闭详细诊断时该函数为空操作，不增加播放热路径开销。
+void audio_http_range_source_reset_playback_diagnostics();
 
 // 只读取缓存快照，不访问 WiFiClient。
 bool audio_http_range_source_get_snapshot(AudioHttpRangeSourceSnapshot* out_snapshot);

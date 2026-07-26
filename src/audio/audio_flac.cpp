@@ -5,9 +5,17 @@
 #include "audio/audio_http_range_source.h"
 #include "board/board_pins.h"
 #include "utils/log.h"
+#include "app_diagnostics.h"
 #include <esp_heap_caps.h>
+#if APP_DIAG_NAS_FLAC_PERFORMANCE
+#include <esp_timer.h>
+#endif
 #include <string.h>
 
+// 项目仅使用自定义读写回调播放原生 FLAC；关闭未使用接口和逐帧 CRC，降低高规格文件解码开销。
+#define DR_FLAC_NO_STDIO
+#define DR_FLAC_NO_OGG
+#define DR_FLAC_NO_CRC
 #define DR_FLAC_IMPLEMENTATION
 #include "../../lib/dr_libs/dr_flac.h"
 
@@ -54,10 +62,31 @@ static void set_end_reason_if_none(AudioPlaybackEndReason reason)
   }
 }
 
-// FLAC 每次解码 1024 frames，44.1k 下约 23ms。
-static constexpr uint32_t FLAC_BUFFER_FRAMES = 1024;
+// FLAC 批量解码 4096 frames，减少 dr_flac 调用次数和 bitstream 边界切换。
+// 44.1kHz 下约 92ms 音频，配合 NAS 环形缓存可降低解码调度压力。
+static constexpr uint32_t FLAC_BUFFER_FRAMES = 4096;
 static constexpr uint32_t FLAC_PCM_SAMPLES_PER_CHUNK = FLAC_BUFFER_FRAMES * 2 + 64;
 static int16_t s_decode_pcm[FLAC_PCM_SAMPLES_PER_CHUNK]; // stereo buffer + 安全边距
+
+// 码率用于网络预取配置；真正的单块实时预算由采样率决定。
+static uint32_t s_average_bitrate_kbps = 0;
+static uint32_t s_pcm_bitrate_kbps = 0;
+
+#if APP_DIAG_NAS_FLAC_PERFORMANCE
+static constexpr uint32_t kDecodeDiagSummaryIntervalMs = 5000;
+static constexpr uint32_t kDecodeOverrunLogIntervalMs = 2000;
+static uint32_t s_decode_diag_started_ms = 0;
+static uint32_t s_decode_diag_last_overrun_log_ms = 0;
+static uint32_t s_decode_diag_samples = 0;
+static uint32_t s_decode_diag_overruns = 0;
+static uint64_t s_decode_diag_total_us = 0;
+static uint64_t s_decode_diag_source_wait_us = 0;
+static uint32_t s_decode_diag_source_wait_chunks = 0;
+static uint32_t s_decode_diag_last_reader_wait_count = 0;
+static uint32_t s_decode_diag_last_low_watermark_count = 0;
+static uint32_t s_decode_diag_max_us = 0;
+static uint32_t s_decode_diag_max_load_percent = 0;
+#endif
 
 // 开播前软件 PCM 缓冲：只预解码，不写 I2S。
 // 之前直接预填 I2S DMA 时，I2S 硬件会在功放静音期间把开头音频播放掉，
@@ -222,10 +251,138 @@ static drflac_bool32 on_tell(void*, drflac_int64* cursor)
   return DRFLAC_TRUE;
 }
 
+static void reset_decode_diagnostics()
+{
+#if APP_DIAG_NAS_FLAC_PERFORMANCE
+  s_decode_diag_started_ms = millis();
+  s_decode_diag_last_overrun_log_ms = 0;
+  s_decode_diag_samples = 0;
+  s_decode_diag_overruns = 0;
+  s_decode_diag_total_us = 0;
+  s_decode_diag_source_wait_us = 0;
+  s_decode_diag_source_wait_chunks = 0;
+  s_decode_diag_last_reader_wait_count = 0;
+  s_decode_diag_last_low_watermark_count = 0;
+  s_decode_diag_max_us = 0;
+  s_decode_diag_max_load_percent = 0;
+
+  if (s_source_kind == FlacSourceKind::HttpRange) {
+    AudioHttpRangeSourceSnapshot snapshot{};
+    if (audio_http_range_source_get_snapshot(&snapshot)) {
+      s_decode_diag_last_reader_wait_count = snapshot.reader_wait_count;
+      s_decode_diag_last_low_watermark_count = snapshot.low_watermark_count;
+    }
+  }
+#endif
+}
+
+static uint32_t pcm_duration_us(uint32_t frames)
+{
+  if (g_sr <= 0 || frames == 0) return 0;
+  const uint64_t value = (static_cast<uint64_t>(frames) * 1000000ULL) /
+                         static_cast<uint32_t>(g_sr);
+  return value > UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(value);
+}
+
+#if APP_DIAG_NAS_FLAC_PERFORMANCE
+static void log_network_decode_performance(uint32_t frames_read,
+                                             uint32_t decode_us,
+                                             uint32_t source_wait_us,
+                                             const AudioHttpRangeSourceSnapshot& snapshot)
+{
+  if (s_source_kind != FlacSourceKind::HttpRange || frames_read == 0) return;
+
+  const uint32_t audio_us = pcm_duration_us(frames_read);
+  const uint32_t pure_decode_us = decode_us > source_wait_us
+      ? decode_us - source_wait_us
+      : 0;
+  const uint32_t load_percent = audio_us > 0
+      ? static_cast<uint32_t>((static_cast<uint64_t>(decode_us) * 100ULL) / audio_us)
+      : 0;
+  ++s_decode_diag_samples;
+  s_decode_diag_total_us += decode_us;
+  s_decode_diag_source_wait_us += source_wait_us;
+  if (source_wait_us > 0) ++s_decode_diag_source_wait_chunks;
+  if (decode_us > s_decode_diag_max_us) s_decode_diag_max_us = decode_us;
+  if (load_percent > s_decode_diag_max_load_percent) s_decode_diag_max_load_percent = load_percent;
+  if (audio_us > 0 && decode_us >= audio_us) ++s_decode_diag_overruns;
+
+  const uint32_t now = millis();
+  const bool overrun = audio_us > 0 && decode_us >= audio_us;
+  if (overrun && (s_decode_diag_last_overrun_log_ms == 0 ||
+      (uint32_t)(now - s_decode_diag_last_overrun_log_ms) >= kDecodeOverrunLogIntervalMs)) {
+    s_decode_diag_last_overrun_log_ms = now;
+    LOGW("[NAS FLAC] 解码超过实时预算：总计=%lu.%03lums 网络等待=%lu.%03lums 纯解码约=%lu.%03lums 音频=%lu.%03lums 负载=%lu%% frames=%lu 缓存=%lu/%luB",
+         (unsigned long)(decode_us / 1000U), (unsigned long)(decode_us % 1000U),
+         (unsigned long)(source_wait_us / 1000U), (unsigned long)(source_wait_us % 1000U),
+         (unsigned long)(pure_decode_us / 1000U), (unsigned long)(pure_decode_us % 1000U),
+         (unsigned long)(audio_us / 1000U), (unsigned long)(audio_us % 1000U),
+         (unsigned long)load_percent, (unsigned long)frames_read,
+         (unsigned long)snapshot.cached_bytes,
+         (unsigned long)snapshot.cache_capacity_bytes);
+  }
+
+  if (s_decode_diag_started_ms == 0) s_decode_diag_started_ms = now;
+  if ((uint32_t)(now - s_decode_diag_started_ms) < kDecodeDiagSummaryIntervalMs) return;
+
+  const uint32_t avg_total_us = s_decode_diag_samples > 0
+      ? static_cast<uint32_t>(s_decode_diag_total_us / s_decode_diag_samples) : 0;
+  const uint32_t avg_wait_us = s_decode_diag_samples > 0
+      ? static_cast<uint32_t>(s_decode_diag_source_wait_us / s_decode_diag_samples) : 0;
+  const uint32_t avg_pure_us = avg_total_us > avg_wait_us
+      ? avg_total_us - avg_wait_us
+      : 0;
+  const uint32_t wait_ratio = s_decode_diag_total_us > 0
+      ? static_cast<uint32_t>((s_decode_diag_source_wait_us * 100ULL) / s_decode_diag_total_us)
+      : 0;
+  const uint32_t wait_events = snapshot.reader_wait_count >= s_decode_diag_last_reader_wait_count
+      ? snapshot.reader_wait_count - s_decode_diag_last_reader_wait_count
+      : snapshot.reader_wait_count;
+  const uint32_t low_water_events = snapshot.low_watermark_count >= s_decode_diag_last_low_watermark_count
+      ? snapshot.low_watermark_count - s_decode_diag_last_low_watermark_count
+      : snapshot.low_watermark_count;
+  const uint32_t free_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  const uint32_t largest_internal = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  LOGI("[NAS FLAC性能] 平均总计=%lu.%03lums 纯解码约=%lu.%03lums 网络等待均值=%lu.%03lums 等待占比=%lu%% 等待块=%lu/%lu 等待事件=%lu 低水位=%lu 最低缓存=%luB 峰值=%lu.%03lums 超预算=%lu/%lu 负载峰值=%lu%% 当前缓存=%lu/%luB RAM=%lu 最大连续=%lu",
+       (unsigned long)(avg_total_us / 1000U), (unsigned long)(avg_total_us % 1000U),
+       (unsigned long)(avg_pure_us / 1000U), (unsigned long)(avg_pure_us % 1000U),
+       (unsigned long)(avg_wait_us / 1000U), (unsigned long)(avg_wait_us % 1000U),
+       (unsigned long)wait_ratio,
+       (unsigned long)s_decode_diag_source_wait_chunks,
+       (unsigned long)s_decode_diag_samples,
+       (unsigned long)wait_events,
+       (unsigned long)low_water_events,
+       (unsigned long)snapshot.min_cached_bytes,
+       (unsigned long)(s_decode_diag_max_us / 1000U), (unsigned long)(s_decode_diag_max_us % 1000U),
+       (unsigned long)s_decode_diag_overruns, (unsigned long)s_decode_diag_samples,
+       (unsigned long)s_decode_diag_max_load_percent,
+       (unsigned long)snapshot.cached_bytes, (unsigned long)snapshot.cache_capacity_bytes,
+       (unsigned long)free_internal, (unsigned long)largest_internal);
+
+  s_decode_diag_started_ms = now;
+  s_decode_diag_samples = 0;
+  s_decode_diag_overruns = 0;
+  s_decode_diag_total_us = 0;
+  s_decode_diag_source_wait_us = 0;
+  s_decode_diag_source_wait_chunks = 0;
+  s_decode_diag_last_reader_wait_count = snapshot.reader_wait_count;
+  s_decode_diag_last_low_watermark_count = snapshot.low_watermark_count;
+  s_decode_diag_max_us = 0;
+  s_decode_diag_max_load_percent = 0;
+}
+#endif
+
 static uint32_t decode_one_chunk_to(int16_t* out_pcm)
 {
   if (!g_playing || !g_flac || !out_pcm) return 0;
 
+#if APP_DIAG_NAS_FLAC_PERFORMANCE
+  AudioHttpRangeSourceSnapshot before_snapshot{};
+  if (s_source_kind == FlacSourceKind::HttpRange) {
+    (void)audio_http_range_source_get_snapshot(&before_snapshot);
+  }
+  const int64_t decode_start_us = esp_timer_get_time();
+#endif
   uint32_t frames_read = 0;
   if (g_ch == 2) {
     frames_read = drflac_read_pcm_frames_s16(g_flac, FLAC_BUFFER_FRAMES, out_pcm);
@@ -240,6 +397,26 @@ static uint32_t decode_one_chunk_to(int16_t* out_pcm)
       }
     }
   }
+
+#if APP_DIAG_NAS_FLAC_PERFORMANCE
+  const int64_t decode_elapsed_us = esp_timer_get_time() - decode_start_us;
+  const uint32_t decode_cost_us = decode_elapsed_us > 0
+      ? (decode_elapsed_us > UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(decode_elapsed_us))
+      : 0;
+
+  if (s_source_kind == FlacSourceKind::HttpRange) {
+    AudioHttpRangeSourceSnapshot after_snapshot{};
+    (void)audio_http_range_source_get_snapshot(&after_snapshot);
+    const uint64_t wait_delta = after_snapshot.reader_wait_total_us >= before_snapshot.reader_wait_total_us
+        ? after_snapshot.reader_wait_total_us - before_snapshot.reader_wait_total_us
+        : after_snapshot.reader_wait_total_us;
+    const uint32_t source_wait_us = wait_delta > UINT32_MAX
+        ? UINT32_MAX
+        : static_cast<uint32_t>(wait_delta);
+    log_network_decode_performance(frames_read, decode_cost_us, source_wait_us, after_snapshot);
+  }
+#endif
+
   return frames_read;
 }
 
@@ -280,6 +457,19 @@ static bool finish_flac_start(const char* debug_name, uint32_t started_ms)
     s_total_ms = 0;
   }
 
+  const uint32_t file_size = source_size();
+  s_average_bitrate_kbps = (file_size > 0 && s_total_ms > 0)
+      ? static_cast<uint32_t>((static_cast<uint64_t>(file_size) * 8ULL) / s_total_ms)
+      : 0;
+  s_pcm_bitrate_kbps = static_cast<uint32_t>(
+      (static_cast<uint64_t>(g_sr) * static_cast<uint32_t>(g_ch) *
+       static_cast<uint32_t>(g_flac->bitsPerSample)) / 1000ULL);
+  if (s_source_kind == FlacSourceKind::HttpRange) {
+    audio_http_range_source_set_flac_profile(s_average_bitrate_kbps,
+                                             static_cast<uint32_t>(g_sr),
+                                             g_flac->bitsPerSample);
+  }
+
   s_last_sr = 0;
   g_playing = true;
   s_pending_pcm = nullptr;
@@ -287,17 +477,33 @@ static bool finish_flac_start(const char* debug_name, uint32_t started_ms)
   s_pending_frames = 0;
   clear_prime_buffer();
   clear_flac_error();
+  reset_decode_diagnostics();
 
-  LOGI("[FLAC] 启动成功：来源=%s 类型=%s 文件=%luB 采样率=%d 声道=%u 时长=%lums 源打开=%lums 解码器打开=%lums 总计=%lums",
+  const uint32_t chunk_audio_us = pcm_duration_us(FLAC_BUFFER_FRAMES);
+  LOGI("[FLAC] 启动成功：来源=%s 类型=%s 文件=%luB 采样率=%d 位深=%u 声道=%u 最大块=%u 平均码率=%luKbps 原始PCM=%luKbps 解码块预算=%lu.%03lums 时长=%lums 源打开=%lums 解码器打开=%lums 总计=%lums",
        debug_name ? debug_name : "<unknown>",
        s_source_kind == FlacSourceKind::HttpRange ? "HTTP Range" : "本地",
-       (unsigned long)source_size(),
+       (unsigned long)file_size,
        g_sr,
+       (unsigned)g_flac->bitsPerSample,
        (unsigned)g_ch,
+       (unsigned)g_flac->maxBlockSizeInPCMFrames,
+       (unsigned long)s_average_bitrate_kbps,
+       (unsigned long)s_pcm_bitrate_kbps,
+       (unsigned long)(chunk_audio_us / 1000U),
+       (unsigned long)(chunk_audio_us % 1000U),
        (unsigned long)s_total_ms,
        (unsigned long)(source_opened_ms - started_ms),
        (unsigned long)(decoder_opened_ms - source_opened_ms),
        (unsigned long)(decoder_opened_ms - started_ms));
+
+  if (s_source_kind == FlacSourceKind::HttpRange &&
+      (s_average_bitrate_kbps >= 2500 || g_sr >= 88200 || g_flac->bitsPerSample >= 24)) {
+    LOGI("[NAS FLAC] 高规格流：码率=%luKbps 采样率=%dHz 位深=%u；4096帧实时预算=%lu.%03lums，已启用发布优化、高水位预取和I2S抗抖动",
+         (unsigned long)s_average_bitrate_kbps, g_sr, (unsigned)g_flac->bitsPerSample,
+         (unsigned long)(chunk_audio_us / 1000U),
+         (unsigned long)(chunk_audio_us % 1000U));
+  }
   return true;
 }
 
@@ -364,6 +570,9 @@ void audio_flac_stop()
   source_close();
   g_playing = false;
   s_total_ms = 0;
+  s_average_bitrate_kbps = 0;
+  s_pcm_bitrate_kbps = 0;
+  reset_decode_diagnostics();
 }
 
 AudioPlaybackEndReason audio_flac_get_end_reason()
@@ -469,6 +678,10 @@ uint32_t audio_flac_prime_pcm_ms(uint32_t target_ms, uint32_t max_chunks)
 
   if (!ensure_prime_buffer()) {
     clear_prime_buffer();
+    if (s_source_kind == FlacSourceKind::HttpRange) {
+      audio_http_range_source_reset_playback_diagnostics();
+    }
+    reset_decode_diagnostics();
     return 0;
   }
 
@@ -506,6 +719,12 @@ uint32_t audio_flac_prime_pcm_ms(uint32_t target_ms, uint32_t max_chunks)
   }
 
   const uint32_t primed_ms = (g_sr > 0) ? ((total_frames * 1000UL) / (uint32_t)g_sr) : 0;
+  if (s_source_kind == FlacSourceKind::HttpRange) {
+    // 启动阶段会主动消费网络缓存；从预填充结束后再统计最低缓存，避免固定显示0B。
+    audio_http_range_source_reset_playback_diagnostics();
+  }
+  // 详细诊断开启时，开播后的首个统计窗口不再包含软件预解码阶段。
+  reset_decode_diagnostics();
   LOGD("[FLAC] 启动软件预填充：时长=%lums 块=%lu 帧=%lu 耗时=%lums 最大解码=%lums",
        (unsigned long)primed_ms,
        (unsigned long)chunks,
