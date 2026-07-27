@@ -2393,7 +2393,6 @@ static const char WEBCTRL_ARTISTS_HTML[] PROGMEM = R"HTML(
     <div class="card top">
       <div>
         <div class="sectionTitle">歌手页</div>
-        <div class="muted" id="statusText">加载中...</div>
       </div>
       <div class="nav" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:12px">
         <a class="secondary" href="/">控制页</a>
@@ -2568,7 +2567,6 @@ const $ = id => document.getElementById(id);
     }
     songSearchTimer = setTimeout(()=>{
       fetchArtistSongSearch().catch(e=>{
-        $('statusText').textContent = '搜索失败';
         alert(e.message || '搜索失败');
       });
     }, 220);
@@ -2670,7 +2668,6 @@ const $ = id => document.getElementById(id);
     allItems = j.items || [];
     initialScrollDone = false;
 
-    $('statusText').textContent = `当前歌曲歌手：${currentTrackArtist || '-'}；当前模式：${j.mode_label || '-'}`;
     renderList(); 
   }
 
@@ -2786,7 +2783,7 @@ const $ = id => document.getElementById(id);
 
   updateSearchModeUi();
   loadArtists().catch(e=>{
-    $('statusText').textContent='加载失败';
+    $('countText').textContent='加载失败';
     alert(e.message||'加载失败');
   });
  
@@ -2909,7 +2906,6 @@ static const char WEBCTRL_ALBUMS_HTML[] PROGMEM = R"HTML(
     <div class="card top">
       <div>
         <div class="sectionTitle">专辑页</div>
-        <div class="muted" id="statusText">加载中...</div>
       </div>
       <div class="nav" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:12px">
         <a class="secondary" href="/">控制页</a>
@@ -3084,7 +3080,6 @@ const $ = id => document.getElementById(id);
     }
     songSearchTimer = setTimeout(()=>{
       fetchAlbumSongSearch().catch(e=>{
-        $('statusText').textContent = '搜索失败';
         alert(e.message || '搜索失败');
       });
     }, 220);
@@ -3192,7 +3187,6 @@ const $ = id => document.getElementById(id);
     allItems = j.items || [];
     initialScrollDone = false;
 
-    $('statusText').textContent = `当前歌曲专辑：${currentTrackAlbum || '-'} / ${currentTrackArtist || '-'}；当前模式：${j.mode_label || '-'}`;
     renderList(); 
   }
 
@@ -3307,7 +3301,7 @@ const $ = id => document.getElementById(id);
   });
 
   updateSearchModeUi();
-  loadAlbums().catch(e=>{ $('statusText').textContent='加载失败'; alert(e.message||'加载失败'); });
+  loadAlbums().catch(e=>{ $('countText').textContent='加载失败'; alert(e.message||'加载失败'); });
  
  // 悬浮回到顶部按钮功能，对专辑列表和窗口都生效
   const scrollToTopBtn = document.createElement('button');

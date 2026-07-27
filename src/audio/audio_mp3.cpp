@@ -75,7 +75,9 @@ static int g_inbuf_filled = 0;
 static bool g_playing = false;
 static int g_sr = 44100;
 
-static int16_t g_pcm[MINIMP3_MAX_SAMPLES_PER_FRAME * 2]; // stereo interleaved (预留双声道空间)
+// MINIMP3_MAX_SAMPLES_PER_FRAME 已包含双声道一帧的最大样本数（1152 * 2）。
+// 单声道原地扩展时最大也只写到 2304 个样本，不需要再额外乘 2。
+static int16_t g_pcm[MINIMP3_MAX_SAMPLES_PER_FRAME];
 static size_t s_pending_off = 0;
 static size_t s_pending_frames = 0;
 static int s_channels = 2; // 当前声道数
