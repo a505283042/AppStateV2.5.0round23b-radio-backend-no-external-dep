@@ -37,10 +37,6 @@ struct WebRuntimeSettings {
   // false 时，下次开机不自动连接 STA，也不启动 AP fallback。
   bool wifi_enabled = true;
 
-  // 是否在屏幕 / Web 状态里显示 WiFi 信息。
-  // 这只是显示开关，不影响 WiFi 本身。
-  bool show_wifi_info = true;
-
   // HALL_OUT 霍尔输入总开关。
   // 关闭后 GPIO9 仍保持输入，但不再控制播放 / 暂停。
   bool hall_control_enabled = true;

@@ -1,7 +1,8 @@
 #include <Arduino.h>
 #include <SdFat.h>
 #include <freertos/FreeRTOS.h>
-#include <freertos/semphr.h>
+#include <esp_heap_caps.h>
+#include <esp32-hal-psram.h>
 
 #include "board/board_pins.h"
 #include "storage/storage.h"      // 你如果能拿到 SdFat sd 也行
@@ -25,8 +26,6 @@ static enum { DEC_NONE, DEC_MP3, DEC_FLAC } g_dec = DEC_NONE;
 // 音频运行态由 AudioTask、资源任务、UI 和 Web 共同访问，统一通过短临界区发布。
 static portMUX_TYPE s_runtime_state_mux = portMUX_INITIALIZER_UNLOCKED;
 static AudioRuntimeSnapshot s_runtime_state{};
-static StaticSemaphore_t s_probe_buf_mutex_storage{};
-static SemaphoreHandle_t s_probe_buf_mutex = nullptr;
 static portMUX_TYPE s_end_state_mux = portMUX_INITIALIZER_UNLOCKED;
 static AudioPlaybackEndState s_end_state;
 
@@ -206,7 +205,12 @@ static uint32_t sniff_mp3_total_ms(SdFat& sd, const char* path)
   (void)sd;
   uint32_t ms = 0;
   AudioFile f;
-  bool buf_mutex_taken = false;
+  static constexpr size_t kProbeScanBytes = 4096;
+  static constexpr size_t kProbeHeadBytes = 256;
+  static constexpr size_t kProbeBufferBytes = kProbeScanBytes + kProbeHeadBytes;
+  uint8_t* probe_buffer = nullptr;
+  uint8_t* buf = nullptr;
+  uint8_t* head = nullptr;
   uint32_t fileSize = 0;
   uint32_t tailCut = 0;
   uint32_t skip = 0;
@@ -235,18 +239,25 @@ static uint32_t sniff_mp3_total_ms(SdFat& sd, const char* path)
   const uint8_t* p = nullptr;
   const uint8_t* q = nullptr;
 
-  if (s_probe_buf_mutex == nullptr) {
-    // 总时长探测会复用静态读取缓冲，使用静态互斥量避免运行期堆分配。
-    s_probe_buf_mutex =
-        xSemaphoreCreateMutexStatic(&s_probe_buf_mutex_storage);
-    if (s_probe_buf_mutex == nullptr) {
-      LOGE("[音频] 创建总时长探测互斥量失败");
-      return 0;
-    }
+  // 总时长探测并非常驻热路径，读取缓冲按需申请并优先放入PSRAM，
+  // 避免原先4096B+256B静态数组长期占用内部RAM。
+  if (psramFound()) {
+    probe_buffer = static_cast<uint8_t*>(heap_caps_malloc(
+        kProbeBufferBytes,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
   }
-
-  if (xSemaphoreTake(s_probe_buf_mutex, pdMS_TO_TICKS(500)) != pdTRUE) goto cleanup;
-  buf_mutex_taken = true;
+  if (!probe_buffer) {
+    probe_buffer = static_cast<uint8_t*>(heap_caps_malloc(
+        kProbeBufferBytes,
+        MALLOC_CAP_8BIT));
+  }
+  if (!probe_buffer) {
+    LOGW("[音频] 总时长探测缓冲申请失败：需要=%uB",
+         static_cast<unsigned>(kProbeBufferBytes));
+    goto cleanup;
+  }
+  buf = probe_buffer;
+  head = probe_buffer + kProbeScanBytes;
 
   if (!f.open(sd, path)) goto cleanup;
 
@@ -264,16 +275,15 @@ static uint32_t sniff_mp3_total_ms(SdFat& sd, const char* path)
   if (skip > 0 && skip < fileSize) f.seek(skip);
   else f.seek(0);
 
-  static uint8_t buf[4096];
   base = f.tell();
   framePos = 0;
   hdr = 0;
   found = false;
 
   for (int blk = 0; blk < 64; ++blk) {
-    uint32_t pos = base + blk * (uint32_t)sizeof(buf);
+    uint32_t pos = base + blk * static_cast<uint32_t>(kProbeScanBytes);
     f.seek(pos);
-    int n = f.read(buf, sizeof(buf));
+    int n = f.read(buf, kProbeScanBytes);
     if (n < 4) break;
 
     for (int i = 0; i <= n - 4; ++i) {
@@ -307,8 +317,7 @@ static uint32_t sniff_mp3_total_ms(SdFat& sd, const char* path)
   xingOff = 4 + (prot ? 0 : 2) + sideinfo;
 
   f.seek(framePos);
-  static uint8_t head[256];
-  hn = f.read(head, sizeof(head));
+  hn = f.read(head, kProbeHeadBytes);
   if (hn > (int)(xingOff + 16)) {
     p = head + xingOff;
     if ((p[0]=='X'&&p[1]=='i'&&p[2]=='n'&&p[3]=='g') || (p[0]=='I'&&p[1]=='n'&&p[2]=='f'&&p[3]=='o')) {
@@ -335,7 +344,10 @@ static uint32_t sniff_mp3_total_ms(SdFat& sd, const char* path)
 
 cleanup:
   f.close();
-  if (buf_mutex_taken) xSemaphoreGive(s_probe_buf_mutex);
+  if (probe_buffer) {
+    heap_caps_free(probe_buffer);
+    probe_buffer = nullptr;
+  }
   return ms;
 }
 

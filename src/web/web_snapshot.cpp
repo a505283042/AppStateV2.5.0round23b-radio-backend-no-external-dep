@@ -153,11 +153,6 @@ static void web_snapshot_reset_for_capture(WebPlayerSnapshot& snap) {
   snap.display_pos = -1;
   snap.display_total = 0;
   snap.current_group_idx = -1;
-  snap.net_mode.remove(0);
-  snap.ip.remove(0);
-  snap.wifi_name.remove(0);
-  snap.hostname.remove(0);
-  snap.wifi_source.remove(0);
   snap.can_cancel_scan = false;
   snap.scan_action_label = "开始重扫";
 
@@ -190,14 +185,8 @@ static void web_snapshot_reset_for_capture(WebPlayerSnapshot& snap) {
   snap.radio_backend.remove(0);
   snap.radio_bitrate = 0;
 
-  snap.net_track_active = false;
   snap.net_track_idx = -1;
   snap.net_track_title.remove(0);
-  snap.net_track_url.remove(0);
-  snap.net_track_format.remove(0);
-  snap.net_track_artist.remove(0);
-  snap.net_track_album.remove(0);
-  snap.net_track_duration_ms = 0;
   snap.net_track_state.remove(0);
   snap.net_track_error.remove(0);
   snap.next_poll_ms = 0;
@@ -232,8 +221,6 @@ void web_snapshot_capture_into(WebPlayerSnapshot& snap) {
   snap.view = web_view_to_key(ui_get_view());
   snap.view_label = web_view_to_label(ui_get_view());
   const WebRuntimeSettings ws = web_settings_get();
-  snap.wifi_name = "-";
-  snap.hostname = WEBCTRL_HOSTNAME_DEFAULT;
   snap.show_next_lyric = ws.show_next_lyric;
   snap.show_cover = ws.show_cover;
   snap.web_cover_spin = ws.web_cover_spin;
@@ -314,14 +301,8 @@ void web_snapshot_capture_into(WebPlayerSnapshot& snap) {
   snap.radio_backend = source.radio_backend;
   snap.radio_bitrate = source.radio_bitrate;
 
-  snap.net_track_active = source.net_track_active;
   snap.net_track_idx = source.net_track_idx;
   snap.net_track_title = source.net_track_title;
-  snap.net_track_url = source.net_track_url;
-  snap.net_track_format = source.net_track_format;
-  snap.net_track_artist = source.net_track_artist;
-  snap.net_track_album = source.net_track_album;
-  snap.net_track_duration_ms = source.net_track_duration_ms;
   snap.net_track_state = source.net_track_state;
   snap.net_track_error = source.net_track_error;
 

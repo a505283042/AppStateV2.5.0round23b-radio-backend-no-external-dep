@@ -112,16 +112,10 @@ static const char WEBCTRL_FEEDBACK_JS[] PROGMEM = R"JS(
 
   function syncHapticToggle(){
     const toggle = document.querySelector('[data-web-feedback-haptic-toggle]');
-    const status = document.getElementById('webHapticSupport');
     const supported = hapticSupported();
     if(toggle){
       toggle.checked = hapticEnabled && supported;
       toggle.disabled = !supported;
-    }
-    if(status){
-      status.textContent = supported
-        ? '视觉反馈始终开启；这里可关闭手机浏览器的轻振动。'
-        : '视觉反馈始终开启；当前浏览器未提供振动接口。';
     }
   }
 
@@ -220,6 +214,7 @@ static const char WEBCTRL_INDEX_HTML[] PROGMEM = R"HTML(
     .media.noCover{grid-template-columns:112px 1fr}
     .cover{width:112px;height:112px;border-radius:14px;background:#2a2a2a;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#8e8e8e;font-size:13px;cursor:pointer;user-select:none}
     .cover img{width:100%;height:100%;object-fit:cover;display:block}
+    .cover-hint{width:112px;margin-top:7px;color:#888;font-size:12px;text-align:center;line-height:1.3}
     .cover.rotate{border-radius:50%;padding:4px;background:#202020}
     .cover.rotate img{border-radius:50%}
     .cover.spin img{animation:webCoverSpin 12s linear infinite}
@@ -292,6 +287,10 @@ static const char WEBCTRL_INDEX_HTML[] PROGMEM = R"HTML(
     .web-lock-toast.show{opacity:1;transform:translate(-50%,0)}
     .nettrack-only{display:none}
     body.nettrack-mode .nettrack-only{display:block}
+    .battery-summary-main{font-size:22px;font-weight:800;font-variant-numeric:tabular-nums}
+    .battery-summary-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-top:12px}
+    .battery-summary-grid .v{font-size:14px;word-break:break-word}
+    @media(max-width:560px){.battery-summary-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
     body.nettrack-mode .hide-when-nettrack{display:none!important}
   </style>
 </head>
@@ -305,7 +304,6 @@ static const char WEBCTRL_INDEX_HTML[] PROGMEM = R"HTML(
             <button id="lockBtn" class="secondary" type="button" style="padding:8px 12px;font-size:13px">锁定</button>
           </h1>
         </div>
-        <div class="small" id="pollInfo">刷新：加载中...</div>
       </div>
       <div class="nav" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:12px">
         <a class="linkbtn secondary" href="/artists" style="padding:10px 12px;font-size:14px">歌手页</a>
@@ -321,7 +319,7 @@ static const char WEBCTRL_INDEX_HTML[] PROGMEM = R"HTML(
       <div class="media" id="mediaBox">
         <div>
           <div class="cover" id="coverBox"><span id="coverFallback">无封面</span><img id="coverImg" alt="封面" decoding="async" loading="eager" style="display:none"></div>
-          <div class="small" style="margin-top:8px;text-align:center">点击封面：切换显示样式</div>
+          <div class="cover-hint">点击封面切换视图</div>
         </div>
         <div>
           <div class="title" id="title">-</div>
@@ -389,6 +387,23 @@ static const char WEBCTRL_INDEX_HTML[] PROGMEM = R"HTML(
         <button class="secondary" onclick="nasControl('/api/netmusic/return-local')">返回本地播放</button>
       </div>
     </div>
+
+    <div class="card" id="batterySummaryCard">
+      <div class="status">
+        <div>
+          <div class="k">电池</div>
+          <div class="battery-summary-main" id="batterySummaryMain">正在读取...</div>
+        </div>
+        <div class="small" id="batterySummaryState">-</div>
+      </div>
+      <div class="bar"><div class="fill" id="batterySummaryFill"></div></div>
+      <div class="battery-summary-grid">
+        <div><div class="k">电压</div><div class="v" id="batterySummaryVoltage">-</div></div>
+        <div><div class="k">电流</div><div class="v" id="batterySummaryCurrent">-</div></div>
+        <div><div class="k">预计续航</div><div class="v" id="batterySummaryRuntime">-</div></div>
+        <div><div class="k">剩余容量</div><div class="v" id="batterySummaryCapacity">-</div></div>
+      </div>
+    </div>
   </div>
 
 <script>
@@ -397,6 +412,7 @@ const MIN_STATUS_CHECK_MS = 350;
 const STATUS_POLL_JITTER_MS = 180;
 const LOCAL_CLOCK_TICK_MS = 250;
 const FORCE_FULL_STATUS_MS = 10000;
+const BATTERY_SUMMARY_POLL_MS = 5000;
 let LYRIC_WAIT_POLL_THRESHOLD_MS = 150;
 let lastCoverTrack = '';
 let pollTimer = null;
@@ -404,6 +420,7 @@ let lyricTimer = null;
 let volumeTimer = null;
 let inFlight = false;
 let statusController = null;
+let batterySummaryInFlight = false;
 let statusFetchStartedAt = 0;
 let currentPollMs = POLL_MS;
 let nextPollAt = Date.now() + POLL_MS;
@@ -662,6 +679,70 @@ function updateLocalClockUi(){
     seekSlider.value = String(Math.max(0, Math.min(totalMs, displayMs)));
   }
 }
+function formatBatteryVoltage(mv){
+  const value = Number(mv) || 0;
+  return value > 0 ? `${(value / 1000).toFixed(2)}V` : '-';
+}
+function formatBatteryCurrent(ma){
+  const value = Number(ma);
+  if(!Number.isFinite(value)) return '-';
+  return `${value > 0 ? '+' : ''}${Math.round(value)}mA`;
+}
+function formatBatteryRuntime(b){
+  if(!b) return '-';
+  const minutes = Math.max(0, Number(b.runtime_minutes) || 0);
+  if(b.runtime_ready && minutes > 0){
+    if(minutes >= 24 * 60) return '超过24小时';
+    if(minutes < 60) return `约${minutes}分钟`;
+    return `约${Math.floor(minutes / 60)}时${minutes % 60}分`;
+  }
+  return b.runtime_label || '-';
+}
+function batteryPowerStateLabel(b){
+  if(!b || !b.valid) return '电量计未就绪';
+  if(b.power_state === 'charging') return '充电中';
+  if(b.power_state === 'external_power') return '外接电源';
+  return '电池供电';
+}
+function renderBatterySummary(payload){
+  const b = payload && payload.battery ? payload.battery : null;
+  const main = document.getElementById('batterySummaryMain');
+  const state = document.getElementById('batterySummaryState');
+  const fill = document.getElementById('batterySummaryFill');
+  if(!b || !b.valid){
+    main.textContent = '电量未知';
+    state.textContent = b && b.runtime_label ? b.runtime_label : '读取失败';
+    fill.style.width = '0%';
+    document.getElementById('batterySummaryVoltage').textContent = '-';
+    document.getElementById('batterySummaryCurrent').textContent = '-';
+    document.getElementById('batterySummaryRuntime').textContent = '-';
+    document.getElementById('batterySummaryCapacity').textContent = '-';
+    return;
+  }
+  const percent = Math.max(0, Math.min(100, Number(b.percent) || 0));
+  main.textContent = `${percent}%`;
+  state.textContent = batteryPowerStateLabel(b);
+  fill.style.width = `${percent}%`;
+  document.getElementById('batterySummaryVoltage').textContent = formatBatteryVoltage(b.voltage_mv);
+  document.getElementById('batterySummaryCurrent').textContent = formatBatteryCurrent(b.current_ma);
+  document.getElementById('batterySummaryRuntime').textContent = formatBatteryRuntime(b);
+  const remaining = Number(b.remaining_capacity_mah) || 0;
+  const total = Number(b.full_charge_capacity_mah) || Number(b.design_capacity_mah) || 0;
+  document.getElementById('batterySummaryCapacity').textContent = total > 0
+    ? `${remaining}/${total}mAh`
+    : (remaining > 0 ? `${remaining}mAh` : '-');
+}
+async function fetchBatterySummary(){
+  if(batterySummaryInFlight || document.hidden) return;
+  batterySummaryInFlight = true;
+  try{
+    const r = await fetch('/api/system/diagnostics?scope=battery', {cache:'no-store'});
+    const j = await r.json();
+    if(j && j.ok) renderBatterySummary(j);
+  }catch(e){}
+  finally{ batterySummaryInFlight = false; }
+}
+
 function startLocalClock(){
   if(localClockTimer) clearInterval(localClockTimer);
   localClockTimer = setInterval(updateLocalClockUi, LOCAL_CLOCK_TICK_MS);
@@ -757,7 +838,6 @@ async function fetchStatus(){
     if(Number(j.refresh_poll_ms) > 0) POLL_MS = Number(j.refresh_poll_ms);
     if(Number(j.lyric_wait_poll_threshold_ms) > 0) LYRIC_WAIT_POLL_THRESHOLD_MS = Number(j.lyric_wait_poll_threshold_ms);
     const lyricThreshold = (typeof j.lyric_wait_poll_threshold_ms !== 'undefined' && Number(j.lyric_wait_poll_threshold_ms) > 0) ? Number(j.lyric_wait_poll_threshold_ms) : LYRIC_WAIT_POLL_THRESHOLD_MS;
-    document.getElementById('pollInfo').textContent = `时间：本地250ms / 状态校验：${currentPollMs}ms / 歌词：${j.lyric_sync_mode_label||'平衡'} / 阈值：${lyricThreshold}ms`;
     scheduleLyricTransition(j);
     scheduleNext(currentPollMs);
   }catch(e){
@@ -847,6 +927,7 @@ function pausePagePolling(){
 function resumePagePolling(){
   pageActive = true;
   startLocalClock();
+  fetchBatterySummary();
 
   if(pagePausedByVisibility){
     pagePausedByVisibility = false;
@@ -1190,6 +1271,8 @@ if(netCardInit){
 
 startLocalClock();
 setTimeout(fetchStatus, 200 + Math.floor(Math.random() * 900));
+setTimeout(fetchBatterySummary, 700);
+setInterval(fetchBatterySummary, BATTERY_SUMMARY_POLL_MS);
 </script>
 </body>
 </html>
@@ -1207,10 +1290,22 @@ static const char WEBCTRL_SETTINGS_HTML[] PROGMEM = R"HTML(
     body{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:#111;color:#eee}
     .wrap{max-width:760px;margin:0 auto;padding:16px}
     .card{background:#1b1b1b;border-radius:16px;padding:16px;margin-bottom:12px;box-shadow:0 4px 18px rgba(0,0,0,.25)}
+    details.card{padding:0;overflow:hidden}
+    details.card>summary{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:16px;cursor:pointer;font-size:20px;font-weight:800;list-style:none;user-select:none}
+    details.card>summary::-webkit-details-marker{display:none}
+    details.card>summary::after{content:'›';font-size:28px;line-height:1;color:#aaa;transform:rotate(0deg);transition:transform .16s ease}
+    details.card[open]>summary{border-bottom:1px solid #303030}
+    details.card[open]>summary::after{transform:rotate(90deg)}
+    .setting-body{padding:16px}
     .row{display:grid;grid-template-columns:1fr auto;gap:12px;align-items:center;margin-bottom:12px}
     label{font-size:15px}
     input[type=number],select{width:180px;padding:10px;border-radius:10px;border:1px solid #444;background:#111;color:#eee}
     input[type=checkbox]{transform:scale(1.2)}
+    input[type=range]{width:180px;accent-color:#2f6feb}
+    details.card[hidden]{display:none}
+    .status-value{font-weight:700;text-align:right;word-break:break-word}
+    .range-box{display:flex;align-items:center;gap:10px}
+    .range-value{min-width:42px;text-align:right;font-variant-numeric:tabular-nums}
     button,a{border:none;border-radius:12px;padding:12px 14px;background:#2f6feb;color:#fff;font-size:15px;font-weight:600;text-decoration:none;display:inline-flex;align-items:center;justify-content:center}
     a.secondary,button.secondary{background:#444}
     button.warn{background:#9a6700}
@@ -1222,6 +1317,10 @@ static const char WEBCTRL_SETTINGS_HTML[] PROGMEM = R"HTML(
     .weekday-fields{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin:8px 0 12px}
     .weekday-fields label{font-size:14px;color:#ddd;display:inline-flex;gap:6px;align-items:center}
     .muted{color:#aaa;font-size:14px}
+    .diag-group{margin-top:16px;padding-top:4px;border-top:1px solid #303030}
+    .diag-group:first-child{margin-top:0;border-top:none}
+    .diag-title{font-size:13px;font-weight:800;color:#79c0ff;letter-spacing:.04em;margin:0 0 10px}
+    .diag-value{font-weight:700;text-align:right;word-break:break-word;font-variant-numeric:tabular-nums}
   </style>
 </head>
 <body>
@@ -1233,8 +1332,9 @@ static const char WEBCTRL_SETTINGS_HTML[] PROGMEM = R"HTML(
       <h2>网页设置</h2>
     </div>
 
-    <div class="card">
-      <h2>时间与闹钟</h2>
+    <details class="card">
+      <summary>时间与闹钟</summary>
+      <div class="setting-body">
       <div class="row"><label>当前时间</label><div id="rtcTimeText">-</div></div>
       <div class="row"><label>闹钟状态</label><div id="alarmEnabledText">-</div></div>
       <div class="row"><label>下次触发</label><div id="alarmNextText">-</div></div>
@@ -1282,10 +1382,12 @@ static const char WEBCTRL_SETTINGS_HTML[] PROGMEM = R"HTML(
         <button class="secondary" onclick="disableAlarm()">关闭</button>
         <button class="danger" onclick="deleteAlarm()">删除</button>
       </div>
-    </div>
+      </div>
+    </details>
 
-    <div class="card">
-      <h2>网页显示</h2>
+    <details class="card">
+      <summary>网页显示</summary>
+      <div class="setting-body">
       <div class="row"><label>页面刷新</label>
         <select id="refresh_preset">
           <option value="power">省电</option>
@@ -1304,10 +1406,16 @@ static const char WEBCTRL_SETTINGS_HTML[] PROGMEM = R"HTML(
       <div class="row"><label>网页封面</label><input id="show_cover" type="checkbox"></div>
       <div class="row"><label>封面旋转</label><input id="web_cover_spin" type="checkbox"></div>
       <div class="row"><label>按键振动</label><input id="web_haptic_feedback" data-web-feedback-haptic-toggle type="checkbox"></div>
-    </div>
+      <div class="actions">
+        <button onclick="saveWebDisplaySettings()">保存显示设置</button>
+        <button class="secondary" onclick="loadSettings()">重新读取</button>
+      </div>
+      </div>
+    </details>
 
-    <div class="card">
-      <h2>设备设置</h2>
+    <details class="card">
+      <summary>设备设置</summary>
+      <div class="setting-body">
       <div class="row"><label>显示类型</label>
         <select id="device_view">
           <option value="info">歌词信息</option>
@@ -1336,18 +1444,118 @@ static const char WEBCTRL_SETTINGS_HTML[] PROGMEM = R"HTML(
         </select>
       </div>
       <div class="actions">
-        <button onclick="saveSettings()">保存设置</button>
+        <button onclick="saveDeviceSettings()">保存设备设置</button>
         <button class="secondary" onclick="loadSettings()">重新读取</button>
       </div>
-    </div>
-
-    <div class="card">
-      <h2>本地曲库维护</h2>
-      <div class="row"><label>扫描状态</label><div id="scanStatusText">正在读取...</div></div>
-      <div class="actions">
-        <button class="warn" id="settingsScanBtn" onclick="toggleMusicScan()">开始重扫</button>
       </div>
-    </div>
+    </details>
+
+    <details class="card" id="audioOutputCard">
+      <summary>音频输出</summary>
+      <div class="setting-body">
+        <div class="row"><label>输出路径</label>
+          <select id="audio_output_route">
+            <option value="headphone">耳机</option>
+            <option value="speaker">功放</option>
+            <option value="bluetooth">蓝牙</option>
+          </select>
+        </div>
+        <div class="row"><label>当前状态</label><div class="status-value" id="audioOutputStatusText">正在读取...</div></div>
+        <div class="actions">
+          <button id="audioOutputApplyBtn" onclick="applyAudioOutputRoute()">应用路径</button>
+          <button class="secondary" onclick="loadAudioOutputStatus(true)">刷新</button>
+        </div>
+      </div>
+    </details>
+
+    <details class="card" id="speakerSettingsCard" hidden>
+      <summary>功放设置</summary>
+      <div class="setting-body">
+        <div class="row"><label>功放状态</label><div class="status-value" id="ampPowerText">-</div></div>
+        <div class="row"><label>功放静音</label><input id="amp_muted" type="checkbox"></div>
+        <div class="actions">
+          <button id="ampMuteApplyBtn" onclick="applyAmpMute()">应用静音</button>
+        </div>
+      </div>
+    </details>
+
+    <details class="card" id="bluetoothSettingsCard" hidden>
+      <summary>蓝牙设置</summary>
+      <div class="setting-body">
+        <div class="row"><label>蓝牙电源</label><div class="status-value" id="btPowerText">-</div></div>
+        <div class="row"><label>连接状态</label><div class="status-value" id="btLinkText">-</div></div>
+        <div class="row"><label>设备名称</label><div class="status-value" id="btDeviceText">-</div></div>
+        <div class="row"><label>蓝牙音量</label>
+          <div class="range-box">
+            <input id="bt_volume" type="range" min="0" max="100" step="1" oninput="syncBtVolumeText()" onchange="applyBtVolume()">
+            <span class="range-value" id="btVolumeText">0%</span>
+          </div>
+        </div>
+        <div class="actions">
+          <button class="secondary" id="btQueryBtn" onclick="queryBtDevice()">刷新设备</button>
+          <button id="btPairBtn" onclick="pairBluetooth()">蓝牙配对</button>
+          <button class="danger" id="btRestartBtn" onclick="restartBluetooth()">重启模块</button>
+        </div>
+      </div>
+    </details>
+
+    <details class="card" id="systemDiagnosticsCard" ontoggle="handleSystemDiagnosticsToggle()">
+      <summary>系统诊断</summary>
+      <div class="setting-body">
+        <div class="diag-group">
+          <div class="diag-title">电池</div>
+          <div class="row"><label>电量</label><div class="diag-value" id="diagBatteryPercent">-</div></div>
+          <div class="row"><label>电压 / 电流</label><div class="diag-value" id="diagBatteryElectrical">-</div></div>
+          <div class="row"><label>供电状态</label><div class="diag-value" id="diagBatteryPower">-</div></div>
+          <div class="row"><label>预计续航</label><div class="diag-value" id="diagBatteryRuntime">-</div></div>
+          <div class="row"><label>容量 / 健康度</label><div class="diag-value" id="diagBatteryCapacity">-</div></div>
+        </div>
+        <div class="diag-group">
+          <div class="diag-title">内存</div>
+          <div class="row"><label>内部 RAM</label><div class="diag-value" id="diagInternalRam">-</div></div>
+          <div class="row"><label>DMA RAM</label><div class="diag-value" id="diagDmaRam">-</div></div>
+          <div class="row"><label>PSRAM</label><div class="diag-value" id="diagPsram">-</div></div>
+          <div class="row"><label>历史最低堆</label><div class="diag-value" id="diagMinHeap">-</div></div>
+        </div>
+        <div class="diag-group">
+          <div class="diag-title">任务栈余量</div>
+          <div class="row"><label>音频 / UI</label><div class="diag-value" id="diagTaskAudioUi">-</div></div>
+          <div class="row"><label>资源 / FLAC预取</label><div class="diag-value" id="diagTaskAssetFlac">-</div></div>
+          <div class="row"><label>主循环 / 运行监控</label><div class="diag-value" id="diagTaskLoopRuntime">-</div></div>
+          <div class="row"><label>曲库重扫</label><div class="diag-value" id="diagTaskRescan">-</div></div>
+        </div>
+        <div class="diag-group">
+          <div class="diag-title">硬件与系统</div>
+          <div class="row"><label>固件 / 运行时间</label><div class="diag-value" id="diagFirmwareUptime">-</div></div>
+          <div class="row"><label>I²C / MCP23017</label><div class="diag-value" id="diagI2cMcp">-</div></div>
+          <div class="row"><label>BQ27441 / RTC</label><div class="diag-value" id="diagBqRtc">-</div></div>
+          <div class="row"><label>网络</label><div class="diag-value" id="diagNetwork">-</div></div>
+          <div class="row"><label>音频</label><div class="diag-value" id="diagAudio">-</div></div>
+        </div>
+        <div class="actions">
+          <button class="secondary" onclick="loadSystemDiagnostics(false)">立即刷新</button>
+        </div>
+        <div class="muted" id="diagUpdatedText">未读取</div>
+      </div>
+    </details>
+
+    <details class="card">
+      <summary>本地曲库维护</summary>
+      <div class="setting-body">
+        <div class="row"><label>扫描状态</label><div id="scanStatusText">正在读取...</div></div>
+        <div class="row"><label>重扫模式</label>
+          <select id="scanMode">
+            <option value="ultra">超快速目录</option>
+            <option value="fast" selected>快速增量</option>
+            <option value="strict">严格增量</option>
+            <option value="full">强制全量</option>
+          </select>
+        </div>
+        <div class="actions">
+          <button class="warn" id="settingsScanBtn" onclick="toggleMusicScan()">开始重扫</button>
+        </div>
+      </div>
+    </details>
   </div>
 
 <script>
@@ -1363,11 +1571,349 @@ async function fetchWithTimeout(url, options={}, timeoutMs=3500){
 
 let settingsRescanning = false;
 let scanStatusBusy = false;
+let audioOutputBusy = false;
+let btDeviceAutoQueryPending = false;
+let lastAudioOutputStatus = null;
+let systemDiagnosticsBusy = false;
+let lastSystemDiagnosticsAt = 0;
+
+function btDeviceStateLabel(state){
+  const labels = {
+    unknown:'未查询',
+    querying:'查询中',
+    connected:'已连接',
+    connected_no_identity:'无名称记录',
+    not_connected:'未连接',
+    timeout:'查询超时',
+    parse_error:'解析失败'
+  };
+  return labels[state] || '未知';
+}
+
+function setAudioOutputBusy(busy){
+  audioOutputBusy = !!busy;
+  ['audioOutputApplyBtn','ampMuteApplyBtn','btQueryBtn','btPairBtn','btRestartBtn']
+    .forEach(id=>{
+      const el = document.getElementById(id);
+      if(el) el.disabled = audioOutputBusy;
+    });
+  const route = document.getElementById('audio_output_route');
+  if(route) route.disabled = audioOutputBusy;
+  const amp = document.getElementById('amp_muted');
+  if(amp) amp.disabled = audioOutputBusy || !(lastAudioOutputStatus && lastAudioOutputStatus.can_amp_control);
+  const volume = document.getElementById('bt_volume');
+  if(volume) volume.disabled = audioOutputBusy || !(lastAudioOutputStatus && lastAudioOutputStatus.can_bt_control);
+}
+
+function syncBtVolumeText(){
+  const slider = document.getElementById('bt_volume');
+  const text = document.getElementById('btVolumeText');
+  if(slider && text) text.textContent = `${slider.value}%`;
+}
+
+function renderAudioOutputStatus(j){
+  lastAudioOutputStatus = j;
+  const routeKey = j.route || 'speaker';
+  const route = document.getElementById('audio_output_route');
+  if(route && !audioOutputBusy) route.value = routeKey;
+
+  const status = document.getElementById('audioOutputStatusText');
+  const routeLabels = {headphone:'耳机', speaker:'功放', bluetooth:'蓝牙'};
+  if(status) status.textContent = j.bt_restart_in_progress ? '蓝牙重启中' : (routeLabels[routeKey] || '-');
+
+  const speakerCard = document.getElementById('speakerSettingsCard');
+  const bluetoothCard = document.getElementById('bluetoothSettingsCard');
+  if(speakerCard) speakerCard.hidden = routeKey !== 'speaker';
+  if(bluetoothCard) bluetoothCard.hidden = routeKey !== 'bluetooth';
+
+  const ampPower = document.getElementById('ampPowerText');
+  if(ampPower){
+    ampPower.textContent = !j.amp_shutdown_known
+      ? '读取失败'
+      : (j.amp_shutdown ? '关断' : '工作');
+  }
+  const ampMute = document.getElementById('amp_muted');
+  if(ampMute) ampMute.checked = !!j.amp_muted;
+
+  const btPower = document.getElementById('btPowerText');
+  if(btPower) btPower.textContent = j.bt_restart_in_progress ? '重启中' : (j.bt_power ? '已开启' : '已关闭');
+  const btLink = document.getElementById('btLinkText');
+  if(btLink){
+    btLink.textContent = !j.bt_power
+      ? '未上电'
+      : (!j.bt_link_known ? '读取失败' : (j.bt_linked ? '已连接' : '未连接'));
+  }
+  const btDevice = document.getElementById('btDeviceText');
+  if(btDevice){
+    btDevice.textContent = j.bt_device_name || j.bt_device_mac || btDeviceStateLabel(j.bt_device_state);
+  }
+  const btVolume = document.getElementById('bt_volume');
+  if(btVolume && document.activeElement !== btVolume) btVolume.value = String(Number(j.user_volume || 0));
+  syncBtVolumeText();
+
+  setAudioOutputBusy(audioOutputBusy);
+  const ampApply = document.getElementById('ampMuteApplyBtn');
+  if(ampApply) ampApply.disabled = audioOutputBusy || !j.can_amp_control;
+  const btQuery = document.getElementById('btQueryBtn');
+  if(btQuery) btQuery.disabled = audioOutputBusy || !j.can_bt_query;
+  ['btPairBtn','btRestartBtn'].forEach(id=>{
+    const el = document.getElementById(id);
+    if(el) el.disabled = audioOutputBusy || !j.can_bt_control;
+  });
+
+  if(routeKey === 'bluetooth' && j.bt_linked &&
+     (j.bt_device_state === 'unknown' || j.bt_device_state === 'not_connected') &&
+     !btDeviceAutoQueryPending && !audioOutputBusy){
+    btDeviceAutoQueryPending = true;
+    queryBtDevice(true).finally(()=>{
+      setTimeout(()=>{ btDeviceAutoQueryPending = false; }, 5000);
+    });
+  }
+}
+
+async function loadAudioOutputStatus(silent=false){
+  try{
+    const r = await fetch('/api/audio-output/status', {cache:'no-store'});
+    const j = await r.json();
+    if(j && j.ok) renderAudioOutputStatus(j);
+    else if(!silent) alert((j && j.message) || '音频输出状态读取失败');
+  }catch(e){
+    if(!silent) alert('音频输出状态读取失败');
+  }
+}
+
+async function postAudioOutput(url, params={}){
+  const body = new URLSearchParams(params).toString();
+  const r = await fetchWithTimeout(url, {
+    method:'POST',
+    headers:{'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8'},
+    body
+  }, 5000);
+  return r.json();
+}
+
+async function refreshAudioOutputAfterAction(){
+  await new Promise(resolve=>setTimeout(resolve, 350));
+  await loadAudioOutputStatus(true);
+  setTimeout(()=>loadAudioOutputStatus(true), 1000);
+}
+
+async function applyAudioOutputRoute(){
+  if(audioOutputBusy) return;
+  const select = document.getElementById('audio_output_route');
+  const target = select ? select.value : 'speaker';
+  const labels = {headphone:'耳机', speaker:'功放', bluetooth:'蓝牙'};
+  if(lastAudioOutputStatus && lastAudioOutputStatus.route === target) return;
+  if(!confirm(`确认切换音频输出到“${labels[target] || target}”？`)){
+    if(lastAudioOutputStatus && select) select.value = lastAudioOutputStatus.route;
+    return;
+  }
+  setAudioOutputBusy(true);
+  try{
+    const j = await postAudioOutput('/api/audio-output/route', {route:target});
+    if(!j || !j.ok) alert((j && j.message) || '输出路径切换失败');
+  }catch(e){
+    alert('输出路径切换失败');
+  }finally{
+    setAudioOutputBusy(false);
+    await refreshAudioOutputAfterAction();
+  }
+}
+
+async function applyAmpMute(){
+  if(audioOutputBusy) return;
+  const enabled = document.getElementById('amp_muted').checked;
+  setAudioOutputBusy(true);
+  try{
+    const j = await postAudioOutput('/api/audio-output/amp-mute', {enabled:enabled ? '1' : '0'});
+    if(!j || !j.ok) alert((j && j.message) || '功放静音设置失败');
+  }catch(e){
+    alert('功放静音设置失败');
+  }finally{
+    setAudioOutputBusy(false);
+    await refreshAudioOutputAfterAction();
+  }
+}
+
+async function queryBtDevice(auto=false){
+  if(audioOutputBusy && !auto) return;
+  if(!auto) setAudioOutputBusy(true);
+  try{
+    const j = await postAudioOutput('/api/audio-output/bluetooth/query');
+    if(!j || !j.ok){
+      if(!auto) alert((j && j.message) || '蓝牙设备查询失败');
+      return;
+    }
+    setTimeout(()=>loadAudioOutputStatus(true), 500);
+    setTimeout(()=>loadAudioOutputStatus(true), 1500);
+  }catch(e){
+    if(!auto) alert('蓝牙设备查询失败');
+  }finally{
+    if(!auto) setAudioOutputBusy(false);
+  }
+}
+
+async function applyBtVolume(){
+  if(audioOutputBusy) return;
+  const value = document.getElementById('bt_volume').value;
+  setAudioOutputBusy(true);
+  try{
+    const j = await postAudioOutput('/api/audio-output/bluetooth/volume', {value});
+    if(!j || !j.ok) alert((j && j.message) || '蓝牙音量设置失败');
+  }catch(e){
+    alert('蓝牙音量设置失败');
+  }finally{
+    setAudioOutputBusy(false);
+    await refreshAudioOutputAfterAction();
+  }
+}
+
+async function pairBluetooth(){
+  if(audioOutputBusy || !confirm('确认发送蓝牙配对按键？')) return;
+  setAudioOutputBusy(true);
+  try{
+    const j = await postAudioOutput('/api/audio-output/bluetooth/pair');
+    alert(j && j.ok ? '已发送配对按键' : ((j && j.message) || '蓝牙配对操作失败'));
+  }catch(e){
+    alert('蓝牙配对操作失败');
+  }finally{
+    setAudioOutputBusy(false);
+    await refreshAudioOutputAfterAction();
+  }
+}
+
+async function restartBluetooth(){
+  if(audioOutputBusy || !confirm('确认重启蓝牙模块？')) return;
+  setAudioOutputBusy(true);
+  try{
+    const j = await postAudioOutput('/api/audio-output/bluetooth/restart');
+    if(!j || !j.ok) alert((j && j.message) || '蓝牙重启失败');
+  }catch(e){
+    alert('蓝牙重启失败');
+  }finally{
+    setAudioOutputBusy(false);
+    await refreshAudioOutputAfterAction();
+  }
+}
+
+
+function diagSetText(id, text){
+  const el = document.getElementById(id);
+  if(el) el.textContent = text;
+}
+function diagFormatBytes(value){
+  const n = Math.max(0, Number(value) || 0);
+  if(n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(2)}MB`;
+  if(n >= 1024) return `${Math.round(n / 1024)}KB`;
+  return `${n}B`;
+}
+function diagFormatDuration(ms){
+  let seconds = Math.floor((Number(ms) || 0) / 1000);
+  const days = Math.floor(seconds / 86400); seconds %= 86400;
+  const hours = Math.floor(seconds / 3600); seconds %= 3600;
+  const minutes = Math.floor(seconds / 60);
+  if(days > 0) return `${days}天${hours}时`;
+  if(hours > 0) return `${hours}时${minutes}分`;
+  return `${minutes}分${seconds % 60}秒`;
+}
+function diagFormatRuntime(b){
+  const minutes = Math.max(0, Number(b && b.runtime_minutes) || 0);
+  if(b && b.runtime_ready && minutes > 0){
+    if(minutes >= 1440) return '超过24小时';
+    if(minutes < 60) return `约${minutes}分钟`;
+    return `约${Math.floor(minutes / 60)}时${minutes % 60}分`;
+  }
+  return (b && b.runtime_label) || '-';
+}
+function diagPowerLabel(b){
+  if(!b || !b.valid) return '不可用';
+  if(b.power_state === 'charging') return '充电中';
+  if(b.power_state === 'external_power') return '外接电源';
+  return '电池供电';
+}
+function diagStack(value){
+  const n = Number(value) || 0;
+  return n > 0 ? `${n}B` : '未运行';
+}
+function renderSystemDiagnostics(j){
+  const b = j.battery || {};
+  const memory = j.memory || {};
+  const tasks = j.tasks || {};
+  const hardware = j.hardware || {};
+  const network = j.network || {};
+  const system = j.system || {};
+  const audio = j.audio || {};
+
+  diagSetText('diagBatteryPercent', b.valid ? `${Number(b.percent) || 0}%` : '未知');
+  diagSetText('diagBatteryElectrical', b.valid
+    ? `${formatDiagVoltage(b.voltage_mv)} / ${formatDiagCurrent(b.current_ma)}`
+    : '-');
+  diagSetText('diagBatteryPower', `${diagPowerLabel(b)} · BQ ${b.bq_ready ? 'OK' : 'ERR'}`);
+  diagSetText('diagBatteryRuntime', diagFormatRuntime(b));
+  const remaining = Number(b.remaining_capacity_mah) || 0;
+  const capacity = Number(b.full_charge_capacity_mah) || Number(b.design_capacity_mah) || 0;
+  diagSetText('diagBatteryCapacity', `${capacity > 0 ? `${remaining}/${capacity}mAh` : '-'} · SOH ${Number(b.state_of_health_percent) || 0}%`);
+
+  diagSetText('diagInternalRam', `${diagFormatBytes(memory.internal_free)} / 最大连续 ${diagFormatBytes(memory.internal_largest)}`);
+  diagSetText('diagDmaRam', `${diagFormatBytes(memory.dma_free)} / 最大连续 ${diagFormatBytes(memory.dma_largest)}`);
+  diagSetText('diagPsram', memory.psram_ready
+    ? `${diagFormatBytes(memory.psram_free)} / ${diagFormatBytes(memory.psram_total)}`
+    : '无');
+  diagSetText('diagMinHeap', diagFormatBytes(memory.heap_min_free));
+
+  diagSetText('diagTaskAudioUi', `${diagStack(tasks.audio)} / ${diagStack(tasks.ui)}`);
+  diagSetText('diagTaskAssetFlac', `${diagStack(tasks.asset)} / ${diagStack(tasks.flac_prefetch)}`);
+  diagSetText('diagTaskLoopRuntime', `${diagStack(tasks.loop)} / ${diagStack(tasks.runtime)}`);
+  diagSetText('diagTaskRescan', diagStack(tasks.rescan));
+
+  diagSetText('diagFirmwareUptime', `${system.firmware || '-'} / ${diagFormatDuration(system.uptime_ms)}`);
+  diagSetText('diagI2cMcp', `${hardware.i2c_ready ? 'OK' : 'ERR'} ${Math.round((Number(hardware.i2c_clock_hz) || 0) / 1000)}kHz / ${hardware.mcp23017_ready ? 'OK' : 'ERR'}`);
+  diagSetText('diagBqRtc', `${hardware.bq27441_ready ? 'OK' : 'ERR'} / ${hardware.rtc_ready ? (hardware.rtc_status || 'OK') : 'ERR'}`);
+  const rssi = Number(network.rssi_dbm) || 0;
+  diagSetText('diagNetwork', network.connected
+    ? `${network.mode || '-'} · ${network.ip || '-'}${rssi ? ` · ${rssi}dBm` : ''}`
+    : '未连接');
+  const routeLabels = {headphone:'耳机', speaker:'功放', bluetooth:'蓝牙'};
+  diagSetText('diagAudio', `${routeLabels[audio.route] || '-'} · 音量${Number(audio.volume) || 0}% · ${audio.playing ? (audio.paused ? '暂停' : '播放') : '停止'}`);
+  diagSetText('diagUpdatedText', '已刷新');
+}
+function formatDiagVoltage(mv){
+  const n = Number(mv) || 0;
+  return n > 0 ? `${(n / 1000).toFixed(2)}V` : '-';
+}
+function formatDiagCurrent(ma){
+  const n = Number(ma);
+  return Number.isFinite(n) ? `${n > 0 ? '+' : ''}${Math.round(n)}mA` : '-';
+}
+async function loadSystemDiagnostics(silent=true){
+  if(systemDiagnosticsBusy) return;
+  systemDiagnosticsBusy = true;
+  try{
+    const r = await fetchWithTimeout('/api/system/diagnostics', {cache:'no-store'}, 4000);
+    const j = await r.json();
+    if(j && j.ok){
+      lastSystemDiagnosticsAt = Date.now();
+      renderSystemDiagnostics(j);
+    }else if(!silent){
+      alert((j && j.message) || '系统诊断读取失败');
+    }
+  }catch(e){
+    diagSetText('diagUpdatedText', '读取失败');
+    if(!silent) alert('系统诊断读取失败');
+  }finally{
+    systemDiagnosticsBusy = false;
+  }
+}
+function handleSystemDiagnosticsToggle(){
+  const card = document.getElementById('systemDiagnosticsCard');
+  if(card && card.open) loadSystemDiagnostics(true);
+}
 
 function renderMusicScanStatus(rescanning){
   settingsRescanning = !!rescanning;
   const text = document.getElementById('scanStatusText');
   const btn = document.getElementById('settingsScanBtn');
+  const mode = document.getElementById('scanMode');
   if(text){
     text.textContent = settingsRescanning
       ? '正在扫描（再次点击可请求取消）'
@@ -1377,6 +1923,9 @@ function renderMusicScanStatus(rescanning){
     btn.textContent = settingsRescanning ? '取消重扫' : '开始重扫';
     btn.className = settingsRescanning ? 'danger' : 'warn';
     btn.disabled = scanStatusBusy;
+  }
+  if(mode){
+    mode.disabled = settingsRescanning || scanStatusBusy;
   }
 }
 
@@ -1396,15 +1945,27 @@ async function refreshMusicScanStatus(){
 async function toggleMusicScan(){
   if(scanStatusBusy) return;
 
+  const modeSelect = document.getElementById('scanMode');
+  const mode = modeSelect ? modeSelect.value : 'fast';
+  const modeLabel = modeSelect && modeSelect.selectedOptions.length
+    ? modeSelect.selectedOptions[0].textContent
+    : '快速增量';
   const message = settingsRescanning
-    ? '确认请求取消当前曲库重扫？'
-    : '确认开始重扫本地曲库？';
+    ? '确认取消当前曲库重扫？'
+    : (mode === 'full'
+        ? '强制全量会重建全部索引，确认开始？'
+        : `确认开始“${modeLabel}”重扫？`);
   if(!confirm(message)) return;
 
   scanStatusBusy = true;
   renderMusicScanStatus(settingsRescanning);
   try{
-    const r = await fetchWithTimeout('/api/scan', {method:'POST'}, 5000);
+    const options = {method:'POST'};
+    if(!settingsRescanning){
+      options.headers = {'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8'};
+      options.body = new URLSearchParams({mode}).toString();
+    }
+    const r = await fetchWithTimeout('/api/scan', options, 5000);
     const j = await r.json();
     if(!j || !j.ok){
       alert((j && (j.message || j.error)) || '重扫操作失败');
@@ -1441,20 +2002,8 @@ function syncStatusLedUi(){
   const enabled = document.getElementById('status_led_enabled').checked;
   document.getElementById('status_led_brightness').disabled = !enabled;
 }
-async function saveSettings(){
-  const params = new URLSearchParams();
-  params.set('refresh_preset', document.getElementById('refresh_preset').value);
-  params.set('lyric_sync_mode', document.getElementById('lyric_sync_mode').value);
-  params.set('show_next_lyric', document.getElementById('show_next_lyric').checked ? '1' : '0');
-  params.set('show_cover', document.getElementById('show_cover').checked ? '1' : '0');
-  params.set('web_cover_spin', document.getElementById('web_cover_spin').checked ? '1' : '0');
-  params.set('device_view', document.getElementById('device_view').value);
-  params.set('screen_enabled', document.getElementById('screen_enabled').checked ? '1' : '0');
-  params.set('sleep_timer_minutes', document.getElementById('sleep_timer_minutes').value);
-  params.set('hall_control_enabled', document.getElementById('hall_control_enabled').checked ? '1' : '0');
-  params.set('solenoid_enabled', document.getElementById('solenoid_enabled').checked ? '1' : '0');
-  params.set('status_led_enabled', document.getElementById('status_led_enabled').checked ? '1' : '0');
-  params.set('status_led_brightness', document.getElementById('status_led_brightness').value);
+async function postSettings(params, successText){
+  params.set('persist', '1');
   try{
     const r = await fetchWithTimeout('/api/settings', {
       method:'POST',
@@ -1462,9 +2011,40 @@ async function saveSettings(){
       body:params.toString()
     }, 3500);
     const j = await r.json();
-    alert(j && j.ok ? '保存成功' : ((j && j.message) ? j.message : '保存失败'));
-  }catch(e){ alert('保存失败'); }
+    alert(j && j.ok ? successText : ((j && j.message) ? j.message : '保存失败'));
+    return !!(j && j.ok);
+  }catch(e){
+    alert('保存失败');
+    return false;
+  }
 }
+
+async function saveWebDisplaySettings(){
+  const params = new URLSearchParams();
+  params.set('refresh_preset', document.getElementById('refresh_preset').value);
+  params.set('lyric_sync_mode', document.getElementById('lyric_sync_mode').value);
+  params.set('show_next_lyric', document.getElementById('show_next_lyric').checked ? '1' : '0');
+  params.set('show_cover', document.getElementById('show_cover').checked ? '1' : '0');
+  params.set('web_cover_spin', document.getElementById('web_cover_spin').checked ? '1' : '0');
+  const haptic = document.getElementById('web_haptic_feedback');
+  if(haptic && window.webButtonFeedback){
+    window.webButtonFeedback.setHapticEnabled(haptic.checked);
+  }
+  await postSettings(params, '显示设置已保存');
+}
+
+async function saveDeviceSettings(){
+  const params = new URLSearchParams();
+  params.set('device_view', document.getElementById('device_view').value);
+  params.set('screen_enabled', document.getElementById('screen_enabled').checked ? '1' : '0');
+  params.set('sleep_timer_minutes', document.getElementById('sleep_timer_minutes').value);
+  params.set('hall_control_enabled', document.getElementById('hall_control_enabled').checked ? '1' : '0');
+  params.set('solenoid_enabled', document.getElementById('solenoid_enabled').checked ? '1' : '0');
+  params.set('status_led_enabled', document.getElementById('status_led_enabled').checked ? '1' : '0');
+  params.set('status_led_brightness', document.getElementById('status_led_brightness').value);
+  await postSettings(params, '设备设置已保存');
+}
+
 let rtcClockBaseMs = 0;
 let rtcClockClientMs = 0;
 
@@ -1712,13 +2292,22 @@ async function deleteAlarm(){
 
 refreshClockAlarmStatus();
 loadSettings();
+loadAudioOutputStatus(true);
 refreshMusicScanStatus();
 
 // RTC时间只定期向设备校准一次，页面显示由浏览器每秒递增，避免“当前时间”看起来不走。
 setInterval(updateRtcClockDisplay, 1000);
 setInterval(loadRtcStatus, 60000);
 setInterval(()=>{
-  if(!document.hidden) refreshMusicScanStatus();
+  if(!document.hidden){
+    refreshMusicScanStatus();
+    loadAudioOutputStatus(true);
+    const diagnosticsCard = document.getElementById('systemDiagnosticsCard');
+    if(diagnosticsCard && diagnosticsCard.open &&
+       Date.now() - lastSystemDiagnosticsAt >= 5000){
+      loadSystemDiagnostics(true);
+    }
+  }
 }, 2000);
 </script>
 </body>
@@ -2786,15 +3375,24 @@ static const char WEBCTRL_NFC_HTML[] PROGMEM = R"HTML(
     .chip{padding:8px 12px;border-radius:999px;background:#2c2c2c;color:#ddd;cursor:pointer;border:none;font-size:14px}
     .chip.active{background:#2f6feb;color:#fff}
     .list{display:flex;flex-direction:column;gap:10px}
-    .item{padding:14px;border:1px solid #2e2e2e;border-radius:14px;background:#151515}
-    .itemHead{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}
-    .badge{display:inline-flex;align-items:center;justify-content:center;padding:4px 10px;border-radius:999px;font-size:12px;font-weight:700}
+    details.item{padding:0;border:1px solid #2e2e2e;border-radius:14px;background:#151515;overflow:hidden}
+    details.item>summary{display:flex;justify-content:space-between;gap:12px;align-items:center;padding:14px;cursor:pointer;list-style:none;user-select:none}
+    details.item>summary::-webkit-details-marker{display:none}
+    details.item>summary::after{content:'›';flex:0 0 auto;font-size:24px;color:#999;transform:rotate(0deg);transition:transform .16s ease}
+    details.item[open]>summary{border-bottom:1px solid #2e2e2e}
+    details.item[open]>summary::after{transform:rotate(90deg)}
+    .itemSummaryMain{min-width:0;display:flex;align-items:center;gap:10px;flex:1}
+    .itemSummaryText{min-width:0;flex:1}
+    .itemSummaryName{font-size:17px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .itemSummaryMeta{font-size:12px;color:#999;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .itemDetails{padding:14px}
+    .detailRow{display:grid;grid-template-columns:76px minmax(0,1fr);gap:10px;margin-bottom:10px;align-items:start}
+    .detailLabel{font-size:13px;color:#999}
+    .detailValue{font-size:13px;color:#ddd;word-break:break-all}
+    .badge{display:inline-flex;align-items:center;justify-content:center;padding:4px 10px;border-radius:999px;font-size:12px;font-weight:700;flex:0 0 auto}
     .badge.track{background:#224a8a;color:#cfe3ff}
     .badge.artist{background:#245b3d;color:#d5ffe6}
     .badge.album{background:#5a3978;color:#f0dcff}
-    .uid{font-size:12px;color:#aaa;word-break:break-all}
-    .name{font-size:18px;font-weight:700;margin-top:10px}
-    .key{font-size:13px;color:#bdbdbd;margin-top:6px;word-break:break-all}
     .rowActions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
     .empty{padding:30px 12px;text-align:center;color:#999}
     .summary{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}
@@ -2811,12 +3409,13 @@ static const char WEBCTRL_NFC_HTML[] PROGMEM = R"HTML(
     <div class="card top">
       <div>
         <div class="sectionTitle">NFC 绑定管理</div>
-        <div class="muted" id="statusText">加载中...</div>
       </div>
       <div class="actions">
         <a class="secondary" href="/">控制页</a>
         <a class="secondary" href="/artists">歌手页</a>
         <a class="secondary" href="/albums">专辑页</a>
+        <a class="secondary" href="/netmusic">NAS页</a>
+        <a class="secondary" href="/settings">网页设置</a>
         <button onclick="loadBindings()">刷新</button>
       </div>
     </div>
@@ -2836,7 +3435,6 @@ static const char WEBCTRL_NFC_HTML[] PROGMEM = R"HTML(
     <div class="card">
       <div class="summary">
         <div class="muted" id="countText">-</div>
-        <div class="small">列表读取自当前内存绑定表</div>
       </div>
       <div class="list" id="bindingList" style="margin-top:12px"></div>
     </div>
@@ -2847,6 +3445,22 @@ const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>'"]/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 let allBindings = [];
 let currentFilter = 'all';
+const openBindingUids = new Set();
+
+function encodedUid(uid){
+  return encodeURIComponent(String(uid || ''));
+}
+function shortUid(uid){
+  const text = String(uid || '');
+  if(text.length <= 18) return text || '-';
+  return `${text.slice(0, 8)}…${text.slice(-8)}`;
+}
+function bindingTargetLabel(type){
+  if(type === 'track') return '歌曲路径';
+  if(type === 'artist') return '歌手名称';
+  if(type === 'album') return '专辑名称';
+  return '目标键值';
+}
 
 function bindTypeLabel(type){
   if(type === 'track') return '单曲';
@@ -2892,33 +3506,46 @@ function renderBindings(){
     return;
   }
 
-  box.innerHTML = items.map(x => `
-    <div class="item">
-      <div class="itemHead">
-        <span class="badge ${bindTypeClass(x.type)}">${esc(bindTypeLabel(x.type))}</span>
-        <div class="uid">UID：${esc(x.uid || '-')}</div>
-      </div>
-      <div class="name">${esc(x.display || '-')}</div>
-      <div class="key">${esc(x.key || '-')}</div>
-      <div class="rowActions">
-        <button class="secondary" onclick="testPlay('${esc(x.uid || '')}')">测试播放</button>
-        <button class="warn" onclick="deleteBinding('${esc(x.uid || '')}','${esc(x.display || '')}')">删除绑定</button>
-      </div>
-    </div>
-  `).join('');
+  box.innerHTML = items.map(x => {
+    const uid = String(x.uid || '');
+    const uidToken = encodedUid(uid);
+    const isOpen = openBindingUids.has(uid);
+    return `
+      <details class="item" data-binding-uid="${esc(uidToken)}"${isOpen ? ' open' : ''}>
+        <summary>
+          <div class="itemSummaryMain">
+            <span class="badge ${bindTypeClass(x.type)}">${esc(bindTypeLabel(x.type))}</span>
+            <div class="itemSummaryText">
+              <div class="itemSummaryName">${esc(x.display || '-')}</div>
+              <div class="itemSummaryMeta">#${Number(x.index || 0) || '-'} · UID ${esc(shortUid(uid))}</div>
+            </div>
+          </div>
+        </summary>
+        <div class="itemDetails">
+          <div class="detailRow"><div class="detailLabel">绑定序号</div><div class="detailValue">#${Number(x.index || 0) || '-'}</div></div>
+          <div class="detailRow"><div class="detailLabel">绑定类型</div><div class="detailValue">${esc(bindTypeLabel(x.type))}</div></div>
+          <div class="detailRow"><div class="detailLabel">完整 UID</div><div class="detailValue">${esc(uid || '-')}</div></div>
+          <div class="detailRow"><div class="detailLabel">显示名称</div><div class="detailValue">${esc(x.display || '-')}</div></div>
+          <div class="detailRow"><div class="detailLabel">${esc(bindingTargetLabel(x.type))}</div><div class="detailValue">${esc(x.key || '-')}</div></div>
+          <div class="rowActions">
+            <button class="secondary" data-binding-action="test" data-binding-uid="${esc(uidToken)}">测试播放</button>
+            <button class="warn" data-binding-action="delete" data-binding-uid="${esc(uidToken)}">删除绑定</button>
+          </div>
+        </div>
+      </details>`;
+  }).join('');
 }
 
 async function loadBindings(){
-  $('statusText').textContent = '加载中...';
+  $('countText').textContent = '加载中...';
   try{
     const r = await fetch('/api/nfc/bindings', {cache:'no-store'});
     const j = await r.json();
     if(!j.ok) throw new Error(j.message || '加载失败');
     allBindings = j.items || [];
-    $('statusText').textContent = `已加载 ${allBindings.length} 条绑定`;
     renderBindings();
   }catch(e){
-    $('statusText').textContent = '加载失败';
+    $('countText').textContent = '加载失败';
     alert(e.message || '加载失败');
   }
 }
@@ -2956,6 +3583,30 @@ async function testPlay(uid){
     alert('测试播放失败');
   }
 }
+
+$('bindingList').addEventListener('toggle', event => {
+  const details = event.target.closest('details[data-binding-uid]');
+  if(!details) return;
+  const uid = decodeURIComponent(details.dataset.bindingUid || '');
+  if(details.open) openBindingUids.add(uid);
+  else openBindingUids.delete(uid);
+}, true);
+
+$('bindingList').addEventListener('click', event => {
+  const button = event.target.closest('button[data-binding-action]');
+  if(!button) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const uid = decodeURIComponent(button.dataset.bindingUid || '');
+  if(button.dataset.bindingAction === 'test'){
+    testPlay(uid);
+    return;
+  }
+  if(button.dataset.bindingAction === 'delete'){
+    const entry = allBindings.find(x => String(x.uid || '') === uid);
+    deleteBinding(uid, entry ? entry.display : '');
+  }
+});
 
 $('searchInput').addEventListener('input', renderBindings);
 loadBindings();
@@ -3016,7 +3667,6 @@ static const char WEBCTRL_RADIOS_HTML[] PROGMEM = R"HTML(
     <div class="topbar">
       <div>
         <div style="font-size:22px;font-weight:800">网络电台</div>
-        <div class="muted">网络电台功能已上线 - 支持电台目录浏览与实时状态显示</div>
       </div>
       <div class="nav" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:12px">
         <a class="secondary" href="/">控制页</a>
@@ -3137,7 +3787,6 @@ static const char WEBCTRL_NETMUSIC_HTML[] PROGMEM = R"HTML(
     <div class="topbar">
       <div>
         <div style="font-size:22px;font-weight:800">NAS音乐</div>
-        <div class="muted">通过 NAS 的 net_music.txt 按需分页读取，不全量加载到网页</div>
       </div>
       <div class="nav" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:12px">
         <a class="secondary" href="/">控制页</a>

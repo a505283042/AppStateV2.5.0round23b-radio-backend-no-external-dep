@@ -35,11 +35,6 @@ struct WebPlayerSnapshot {
   int display_pos = -1;
   int display_total = 0;
   int current_group_idx = -1;
-  String net_mode;
-  String ip;
-  String wifi_name;         // 当前连接的 Wi‑Fi 名称；AP 模式下显示热点名
-  String hostname;
-  String wifi_source;        // 调试字段，当前 Wi‑Fi 来源：config_file / ap_fallback
   bool can_cancel_scan = false;
   const char* scan_action_label = "开始重扫";
 
@@ -74,14 +69,8 @@ struct WebPlayerSnapshot {
   String radio_backend;
   uint32_t radio_bitrate = 0;
 
-  bool net_track_active = false;
   int net_track_idx = -1;
   String net_track_title;
-  String net_track_url;
-  String net_track_format;
-  String net_track_artist;
-  String net_track_album;
-  uint32_t net_track_duration_ms = 0;
   String net_track_state;
   String net_track_error;
 

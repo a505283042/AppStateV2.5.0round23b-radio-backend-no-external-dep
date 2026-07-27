@@ -8,6 +8,8 @@
 #include <cstdlib>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <esp_heap_caps.h>
+#include <esp32-hal-psram.h>
 
 #include "app_state.h"
 #include "app_power.h"
@@ -44,6 +46,11 @@
 #include "web/web_cover_cache.h"
 #include "hal/pcf85063.h"
 #include "hal/board_hw_control.h"
+#include "hal/bq27441.h"
+#include "hal/i2c_bus_lock.h"
+#include "hal/mcp23017_u3.h"
+#include "hal/bluetooth_restart_controller.h"
+#include "hal/bt62sp_uart_debug.h"
 #include "hal/ws2812_status.h"
 
 extern SdFat sd;
@@ -67,8 +74,6 @@ static TaskHandle_t s_web_start_task = nullptr;
 static bool s_web_start_in_progress = false;
 static portMUX_TYPE s_web_start_task_mux = portMUX_INITIALIZER_UNLOCKED;
 static bool s_ap_mode = false;
-static String s_hostname_runtime = WEBCTRL_HOSTNAME_DEFAULT;
-static String s_wifi_source = "ap_fallback";
 
 // Web 音量锁由状态页和控制接口共同访问，统一通过短临界区读取和发布。
 struct WebUiControlSnapshot {
@@ -166,7 +171,6 @@ static uint32_t web_status_state_token(const WebUiControlSnapshot& ui_control,
   hash = web_status_token_add_u32(hash, settings.show_next_lyric ? 1u : 0u);
   hash = web_status_token_add_u32(hash, settings.show_cover ? 1u : 0u);
   hash = web_status_token_add_u32(hash, settings.web_cover_spin ? 1u : 0u);
-  hash = web_status_token_add_u32(hash, settings.show_wifi_info ? 1u : 0u);
 
   hash = web_status_token_add_u32(hash, g_lyricsDisplay.hasLyrics() ? 1u : 0u);
   hash = web_status_token_add_u32(hash, g_lyricsDisplay.getCurrentLyricStartTime());
@@ -444,8 +448,8 @@ static void web_send_no_cache_headers();
 
 // /api/status 是网页最高频的接口。旧实现每次创建约 3KB String，
 // 并通过大量 String 临时对象拼接，长时间轮询会增加内部堆碎片。
-// 这里使用一个常驻的 1KB 缓冲区分块输出，响应大小不再决定临时堆峰值。
-static constexpr size_t kWebStatusJsonChunkReserve = 1024;
+// 这里使用与刷新阈值一致的常驻缓冲区分块输出，避免额外保留未使用容量。
+static constexpr size_t kWebStatusJsonChunkReserve = 768;
 static constexpr size_t kWebStatusJsonFlushAt = 768;
 static String s_web_status_json_chunk;
 static WebPlayerSnapshot s_web_status_snapshot;
@@ -632,7 +636,6 @@ static bool web_settings_persistent_core_changed(const WebRuntimeSettings& old_c
   return old_cfg.refresh_preset != new_cfg.refresh_preset
       || old_cfg.lyric_sync_mode != new_cfg.lyric_sync_mode
       || old_cfg.wifi_enabled != new_cfg.wifi_enabled
-      || old_cfg.show_wifi_info != new_cfg.show_wifi_info
       || old_cfg.hall_control_enabled != new_cfg.hall_control_enabled
       || old_cfg.solenoid_enabled != new_cfg.solenoid_enabled
       || old_cfg.status_led_enabled != new_cfg.status_led_enabled
@@ -683,14 +686,6 @@ static String web_ip_string() {
   if (s_ap_mode) return WiFi.softAPIP().toString();
   if (WiFi.status() == WL_CONNECTED) return WiFi.localIP().toString();
   return String("0.0.0.0");
-}
-static String web_wifi_name_string() {
-  if (s_ap_mode) return String(WEBCTRL_AP_SSID);
-  if (WiFi.status() == WL_CONNECTED) {
-    const String ssid = WiFi.SSID();
-    if (ssid.length()) return ssid;
-  }
-  return String("-");
 }
 static const char* web_net_mode_cstr() {
   if (s_ap_mode) return "AP";
@@ -819,7 +814,7 @@ static bool web_try_connect_one(const WebWifiNetwork& n, const String& hostname)
     if (WiFi.status() == WL_CONNECTED) {
       WiFi.setSleep(false);
       LOGI("[网页] STA 已连接，IP=%s", WiFi.localIP().toString().c_str());
-      s_ap_mode = false; s_wifi_source = "config_file"; s_hostname_runtime = hostname;
+      s_ap_mode = false;
       return true;
     }
     delay(200);
@@ -835,7 +830,6 @@ static bool web_try_connect_sta_from_config() {
   if (WiFi.status() == WL_CONNECTED) {
     WiFi.setSleep(false);
     s_ap_mode = false;
-    s_wifi_source = "existing_sta";
     LOGD("[网页] 复用已有 STA 连接，IP=%s", WiFi.localIP().toString().c_str());
     quick_menu_request_refresh();
     return true;
@@ -858,7 +852,7 @@ static bool web_start_ap_fallback() {
   const bool ok = WiFi.softAP(WEBCTRL_AP_SSID, WEBCTRL_AP_PASS);
   if (!ok) { LOGE("[网页] AP 启动失败"); return false; }
   WiFi.setSleep(false);
-  s_ap_mode = true; s_wifi_source = "ap_fallback"; s_hostname_runtime = WEBCTRL_HOSTNAME_DEFAULT;
+  s_ap_mode = true;
   LOGI("[网页] AP 已就绪：SSID=%s IP=%s", WEBCTRL_AP_SSID, WiFi.softAPIP().toString().c_str());
   return true;
 }
@@ -1207,7 +1201,6 @@ static void web_handle_settings_get() {
   json += ",\"show_next_lyric\":"; json += (ws.show_next_lyric ? "true" : "false");
   json += ",\"show_cover\":"; json += (ws.show_cover ? "true" : "false");
   json += ",\"web_cover_spin\":"; json += (ws.web_cover_spin ? "true" : "false");
-  json += ",\"show_wifi_info\":"; json += (ws.show_wifi_info ? "true" : "false");
   json += ",\"hall_control_enabled\":"; json += (ws.hall_control_enabled ? "true" : "false");
   json += ",\"solenoid_enabled\":"; json += (ws.solenoid_enabled ? "true" : "false");
   json += ",\"status_led_enabled\":"; json += (ws.status_led_enabled ? "true" : "false");
@@ -1241,7 +1234,6 @@ static void web_handle_settings_post() {
   ws.show_next_lyric = web_parse_bool(s_server.arg("show_next_lyric"), ws.show_next_lyric);
   ws.show_cover = web_parse_bool(s_server.arg("show_cover"), ws.show_cover);
   ws.web_cover_spin = web_parse_bool(s_server.arg("web_cover_spin"), ws.web_cover_spin);
-  ws.show_wifi_info = web_parse_bool(s_server.arg("show_wifi_info"), ws.show_wifi_info);
   ws.hall_control_enabled = web_parse_bool(s_server.arg("hall_control_enabled"), ws.hall_control_enabled);
   ws.solenoid_enabled = web_parse_bool(s_server.arg("solenoid_enabled"), ws.solenoid_enabled);
   ws.status_led_enabled = web_parse_bool(s_server.arg("status_led_enabled"), ws.status_led_enabled);
@@ -1299,7 +1291,8 @@ static void web_handle_settings_post() {
     app_power_sleep_timer_set_minutes(sleep_timer_minutes);
   }
 
-  const bool need_immediate_save = web_settings_persistent_core_changed(old_ws, ws);
+  const bool force_persist = web_parse_bool(s_server.arg("persist"), false);
+  const bool need_immediate_save = force_persist || web_settings_persistent_core_changed(old_ws, ws);
   web_settings_set(ws);
 
   if (old_ws.solenoid_enabled && !ws.solenoid_enabled) {
@@ -1320,6 +1313,399 @@ static void web_handle_settings_post() {
 
   // 网页显示开关立即生效，关机前统一写入 NVS。
   web_send_json_ok_simple(web_settings_is_dirty() ? "settings_deferred" : "settings_unchanged");
+}
+
+static const char* web_audio_output_route_key(AudioOutputRoute route)
+{
+  switch (route) {
+    case AudioOutputRoute::HeadphoneOnly: return "headphone";
+    case AudioOutputRoute::BluetoothTx:   return "bluetooth";
+    case AudioOutputRoute::Speaker:
+    default:                              return "speaker";
+  }
+}
+
+static const char* web_bt_device_state_key(Bt62spConnectedDeviceState state)
+{
+  switch (state) {
+    case Bt62spConnectedDeviceState::Querying:            return "querying";
+    case Bt62spConnectedDeviceState::Connected:           return "connected";
+    case Bt62spConnectedDeviceState::ConnectedNoIdentity: return "connected_no_identity";
+    case Bt62spConnectedDeviceState::NotConnected:        return "not_connected";
+    case Bt62spConnectedDeviceState::Timeout:             return "timeout";
+    case Bt62spConnectedDeviceState::ParseError:          return "parse_error";
+    case Bt62spConnectedDeviceState::Unknown:
+    default:                                               return "unknown";
+  }
+}
+
+static void web_send_audio_output_status_json()
+{
+  const AudioOutputRouteSnapshot route = audio_output_route_snapshot_get();
+  const BluetoothRestartSnapshot restart = bluetooth_restart_snapshot_get();
+  const bool bt_power = board_hw_get_bt_power();
+
+  bool amp_muted = board_hw_get_amp_mute();
+  bool amp_mute_known = false;
+  bool amp_shutdown = board_hw_get_amp_shutdown();
+  bool amp_shutdown_known = false;
+  if (route.route == AudioOutputRoute::Speaker) {
+    amp_mute_known = board_hw_read_amp_mute(&amp_muted);
+    amp_shutdown_known = board_hw_read_amp_shutdown(&amp_shutdown);
+  }
+
+  bool bt_linked = false;
+  const bool bt_link_known = bt_power && board_hw_read_bt_link(&bt_linked);
+  const Bt62spConnectedDeviceSnapshot device =
+      bt62sp_uart_debug_connected_device_snapshot_get();
+
+  String json;
+  json.reserve(768);
+  json += "{\"ok\":true";
+  json += ",\"route\":\"";
+  json += web_audio_output_route_key(route.route);
+  json += "\"";
+  json += ",\"route_label\":\"";
+  json += web_json_escape(String(audio_output_route_label()));
+  json += "\"";
+  json += ",\"route_revision\":";
+  json += String((unsigned long)route.revision);
+  json += ",\"user_volume\":";
+  json += String((unsigned)audio_output_route_get_user_volume());
+
+  json += ",\"amp_mute_known\":";
+  json += amp_mute_known ? "true" : "false";
+  json += ",\"amp_muted\":";
+  json += amp_muted ? "true" : "false";
+  json += ",\"amp_shutdown_known\":";
+  json += amp_shutdown_known ? "true" : "false";
+  json += ",\"amp_shutdown\":";
+  json += amp_shutdown ? "true" : "false";
+
+  json += ",\"bt_power\":";
+  json += bt_power ? "true" : "false";
+  json += ",\"bt_link_known\":";
+  json += bt_link_known ? "true" : "false";
+  json += ",\"bt_linked\":";
+  json += bt_linked ? "true" : "false";
+  json += ",\"bt_device_state\":\"";
+  json += web_bt_device_state_key(device.state);
+  json += "\"";
+  json += ",\"bt_device_name\":\"";
+  json += web_json_escape(String(device.name));
+  json += "\"";
+  json += ",\"bt_device_mac\":\"";
+  json += web_json_escape(String(device.mac));
+  json += "\"";
+  json += ",\"bt_device_revision\":";
+  json += String((unsigned long)device.revision);
+
+  json += ",\"bt_restart_in_progress\":";
+  json += restart.in_progress ? "true" : "false";
+  json += ",\"bt_restart_result\":";
+  json += String((unsigned)restart.last_result);
+  json += ",\"can_amp_control\":";
+  json += (route.route == AudioOutputRoute::Speaker && !restart.in_progress) ? "true" : "false";
+  json += ",\"can_bt_control\":";
+  json += (route.route == AudioOutputRoute::BluetoothTx && bt_power && !restart.in_progress)
+      ? "true" : "false";
+  json += ",\"can_bt_query\":";
+  json += (route.route == AudioOutputRoute::BluetoothTx && bt_power && bt_link_known
+           && bt_linked && !restart.in_progress)
+      ? "true" : "false";
+  json += "}";
+
+  web_send_no_cache_headers();
+  s_server.send(200, "application/json; charset=utf-8", json);
+}
+
+static void web_handle_audio_output_status()
+{
+  web_send_audio_output_status_json();
+}
+
+static void web_handle_audio_output_route()
+{
+  if (bluetooth_restart_is_in_progress()) {
+    web_send_json_err("蓝牙正在重启，暂不能切换输出路径", 409);
+    return;
+  }
+
+  String key = web_trim_copy(s_server.arg("route"));
+  key.toLowerCase();
+
+  bool accepted = false;
+  if (key == "headphone") {
+    accepted = audio_output_route_select_headphone_only();
+  } else if (key == "speaker") {
+    accepted = audio_output_route_select_speaker();
+  } else if (key == "bluetooth") {
+    accepted = audio_output_route_select_bluetooth_tx();
+  } else {
+    web_send_json_err("音频输出路径无效", 400);
+    return;
+  }
+
+  if (!accepted) {
+    web_send_json_err("音频任务繁忙，输出路径切换未入队", 503);
+    return;
+  }
+  web_send_json_ok_simple("route_switch_queued");
+}
+
+static void web_handle_audio_output_amp_mute()
+{
+  if (!audio_output_route_is_speaker()) {
+    web_send_json_err("当前不是功放输出路径", 409);
+    return;
+  }
+  const bool enabled = web_parse_bool(s_server.arg("enabled"), board_hw_get_amp_mute());
+  if (!audio_output_route_set_amp_mute(enabled)) {
+    web_send_json_err("音频任务繁忙，功放静音请求未入队", 503);
+    return;
+  }
+  web_send_json_ok_simple("amp_mute_queued");
+}
+
+static bool web_require_bluetooth_output(bool require_link = false)
+{
+  if (!audio_output_route_is_bluetooth_tx()) {
+    web_send_json_err("当前不是蓝牙输出路径", 409);
+    return false;
+  }
+  if (bluetooth_restart_is_in_progress()) {
+    web_send_json_err("蓝牙模块正在重启", 409);
+    return false;
+  }
+  if (!board_hw_get_bt_power()) {
+    web_send_json_err("蓝牙模块未上电", 409);
+    return false;
+  }
+  if (require_link) {
+    bool linked = false;
+    if (!board_hw_read_bt_link(&linked)) {
+      web_send_json_err("蓝牙连接状态读取失败", 500);
+      return false;
+    }
+    if (!linked) {
+      web_send_json_err("当前没有已连接蓝牙设备", 409);
+      return false;
+    }
+  }
+  return true;
+}
+
+static void web_handle_audio_output_bt_query()
+{
+  if (!web_require_bluetooth_output(true)) return;
+  if (!bt62sp_uart_debug_request_connected_device_query()) {
+    web_send_json_err("蓝牙命令繁忙，设备查询未入队", 503);
+    return;
+  }
+  web_send_json_ok_simple("device_query_queued");
+}
+
+static void web_handle_audio_output_bt_volume()
+{
+  if (!web_require_bluetooth_output(false)) return;
+  String value = web_trim_copy(s_server.arg("value"));
+  if (!value.length()) {
+    web_send_json_err("缺少蓝牙音量参数 value", 400);
+    return;
+  }
+  const int volume = value.toInt();
+  if (volume < 0 || volume > 100) {
+    web_send_json_err("蓝牙音量必须在0到100之间", 400);
+    return;
+  }
+  if (!audio_output_route_set_user_volume(static_cast<uint8_t>(volume))) {
+    web_send_json_err("音频任务繁忙，蓝牙音量请求未入队", 503);
+    return;
+  }
+  ui_volume_key_pressed();
+  web_send_json_ok_simple("bluetooth_volume_queued");
+}
+
+static void web_handle_audio_output_bt_pair()
+{
+  if (!web_require_bluetooth_output(false)) return;
+  if (!board_hw_pulse_bt_switch(200)) {
+    web_send_json_err("蓝牙配对按键操作失败", 500);
+    return;
+  }
+  web_send_json_ok_simple("pair_pulse_sent");
+}
+
+static void web_handle_audio_output_bt_restart()
+{
+  if (!web_require_bluetooth_output(false)) return;
+  if (!bluetooth_restart_request(BluetoothRestartPolicy::RequireBluetoothTxRoute)) {
+    web_send_json_err("蓝牙重启请求失败", 503);
+    return;
+  }
+  web_send_json_ok_simple("bluetooth_restart_started");
+}
+
+static uint32_t web_task_stack_free_bytes(TaskHandle_t handle)
+{
+  if (!handle) return 0;
+  return static_cast<uint32_t>(uxTaskGetStackHighWaterMark(handle));
+}
+
+static const char* web_battery_power_state_key(const BatteryUiStatus& battery)
+{
+  if (!battery.valid) return "unavailable";
+  if (battery.charging) return "charging";
+  if (battery.external_power_good) return "external_power";
+  return "discharging";
+}
+
+static void web_append_battery_diagnostics_json(String& json,
+                                                const BatteryUiStatus& battery,
+                                                uint32_t now_ms)
+{
+  const uint32_t age_ms = battery.updated_ms != 0
+      ? static_cast<uint32_t>(now_ms - battery.updated_ms)
+      : 0;
+  const bool runtime_ready =
+      battery.runtime_estimate_state == BatteryRuntimeEstimateState::Ready ||
+      battery.runtime_estimate_state == BatteryRuntimeEstimateState::BluetoothEstimated;
+
+  json += "\"battery\":{";
+  json += "\"valid\":";
+  json += battery.valid ? "true" : "false";
+  json += ",\"percent\":" + String(static_cast<unsigned>(battery.percent));
+  json += ",\"voltage_mv\":" + String(static_cast<unsigned long>(battery.mv_battery));
+  json += ",\"current_ma\":" + String(static_cast<int>(battery.average_current_ma));
+  json += ",\"remaining_capacity_mah\":" + String(static_cast<unsigned>(battery.remaining_capacity_mah));
+  json += ",\"full_charge_capacity_mah\":" + String(static_cast<unsigned>(battery.full_charge_capacity_mah));
+  json += ",\"design_capacity_mah\":" + String(static_cast<unsigned>(battery.design_capacity_mah));
+  json += ",\"state_of_health_percent\":" + String(static_cast<unsigned>(battery.state_of_health_percent));
+  json += ",\"charging\":";
+  json += battery.charging ? "true" : "false";
+  json += ",\"external_power_good\":";
+  json += battery.external_power_good ? "true" : "false";
+  json += ",\"power_state\":\"";
+  json += web_battery_power_state_key(battery);
+  json += "\"";
+  json += ",\"runtime_ready\":";
+  json += runtime_ready ? "true" : "false";
+  json += ",\"runtime_minutes\":" + String(static_cast<unsigned long>(battery.estimated_runtime_minutes));
+  json += ",\"runtime_state\":" + String(static_cast<unsigned>(battery.runtime_estimate_state));
+  json += ",\"runtime_label\":\"";
+  json += web_json_escape(String(board_hw_battery_runtime_state_label(battery.runtime_estimate_state)));
+  json += "\"";
+  json += ",\"estimated_discharge_current_ma\":" + String(static_cast<unsigned>(battery.estimated_discharge_current_ma));
+  json += ",\"sample_age_ms\":" + String(static_cast<unsigned long>(age_ms));
+  json += ",\"bq_ready\":";
+  json += bq27441_is_ready() ? "true" : "false";
+  json += ",\"bq_i2c_error\":" + String(static_cast<unsigned>(bq27441_last_i2c_error()));
+  json += "}";
+}
+
+static void web_handle_system_diagnostics()
+{
+  const uint32_t now_ms = millis();
+  const BatteryUiStatus battery = board_hw_get_battery_status_cached();
+  String scope = web_trim_copy(s_server.arg("scope"));
+  scope.toLowerCase();
+  const bool battery_only = scope == "battery";
+
+  String json;
+  json.reserve(battery_only ? 760 : 2600);
+  json += "{\"ok\":true,\"sample_ms\":";
+  json += String(static_cast<unsigned long>(now_ms));
+  json += ",";
+  web_append_battery_diagnostics_json(json, battery, now_ms);
+
+  if (!battery_only) {
+    const uint32_t internal_free =
+        heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    const uint32_t internal_largest =
+        heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    const uint32_t dma_free =
+        heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+    const uint32_t dma_largest =
+        heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+    const bool psram_ready = psramFound();
+    const bool wifi_connected = s_ap_mode || WiFi.status() == WL_CONNECTED;
+    const int32_t wifi_rssi = (!s_ap_mode && WiFi.status() == WL_CONNECTED)
+        ? WiFi.RSSI()
+        : 0;
+
+    json += ",\"system\":{";
+    json += "\"firmware\":\"2.5.0\"";
+    json += ",\"uptime_ms\":" + String(static_cast<unsigned long>(now_ms));
+    json += ",\"app_state\":" + String(static_cast<unsigned>(g_app_state));
+    json += "}";
+
+    json += ",\"memory\":{";
+    json += "\"heap_free\":" + String(static_cast<unsigned long>(ESP.getFreeHeap()));
+    json += ",\"heap_min_free\":" + String(static_cast<unsigned long>(ESP.getMinFreeHeap()));
+    json += ",\"internal_free\":" + String(static_cast<unsigned long>(internal_free));
+    json += ",\"internal_largest\":" + String(static_cast<unsigned long>(internal_largest));
+    json += ",\"dma_free\":" + String(static_cast<unsigned long>(dma_free));
+    json += ",\"dma_largest\":" + String(static_cast<unsigned long>(dma_largest));
+    json += ",\"psram_ready\":";
+    json += psram_ready ? "true" : "false";
+    json += ",\"psram_free\":" + String(static_cast<unsigned long>(psram_ready ? ESP.getFreePsram() : 0));
+    json += ",\"psram_total\":" + String(static_cast<unsigned long>(psram_ready ? ESP.getPsramSize() : 0));
+    json += "}";
+
+    json += ",\"tasks\":{";
+    json += "\"audio\":" + String(static_cast<unsigned long>(web_task_stack_free_bytes(audio_service_get_task_handle())));
+    json += ",\"ui\":" + String(static_cast<unsigned long>(web_task_stack_free_bytes(ui_get_task_handle())));
+    json += ",\"loop\":" + String(static_cast<unsigned long>(web_task_stack_free_bytes(xTaskGetHandle("loopTask"))));
+    json += ",\"runtime\":" + String(static_cast<unsigned long>(web_task_stack_free_bytes(xTaskGetHandle("RuntimeMon"))));
+    json += ",\"asset\":" + String(static_cast<unsigned long>(web_task_stack_free_bytes(xTaskGetHandle("PlayerAssetTask"))));
+    json += ",\"flac_prefetch\":" + String(static_cast<unsigned long>(web_task_stack_free_bytes(xTaskGetHandle("FlacNetTask"))));
+    json += ",\"rescan\":" + String(static_cast<unsigned long>(web_task_stack_free_bytes(xTaskGetHandle("rescan_v3"))));
+    json += "}";
+
+    json += ",\"hardware\":{";
+    json += "\"i2c_ready\":";
+    json += i2c_bus_is_ready() ? "true" : "false";
+    json += ",\"i2c_clock_hz\":" + String(static_cast<unsigned long>(i2c_bus_clock_hz()));
+    json += ",\"i2c_generation\":" + String(static_cast<unsigned long>(i2c_bus_generation()));
+    json += ",\"mcp23017_ready\":";
+    json += mcp23017_u3_is_ready() ? "true" : "false";
+    json += ",\"bq27441_ready\":";
+    json += bq27441_is_ready() ? "true" : "false";
+    json += ",\"rtc_ready\":";
+    json += pcf85063_is_ready() ? "true" : "false";
+    json += ",\"rtc_status\":\"";
+    json += web_json_escape(String(pcf85063_is_ready() ? pcf85063_status_label() : "ERR"));
+    json += "\"";
+    json += "}";
+
+    json += ",\"network\":{";
+    json += "\"connected\":";
+    json += wifi_connected ? "true" : "false";
+    json += ",\"mode\":\"";
+    json += web_net_mode_cstr();
+    json += "\"";
+    json += ",\"ip\":\"";
+    json += web_json_escape(web_ip_string());
+    json += "\"";
+    json += ",\"rssi_dbm\":" + String(static_cast<long>(wifi_rssi));
+    json += "}";
+
+    const AudioOutputRoute route = audio_output_route_get();
+    json += ",\"audio\":{";
+    json += "\"route\":\"";
+    json += web_audio_output_route_key(route);
+    json += "\"";
+    json += ",\"volume\":" + String(static_cast<unsigned>(audio_output_route_get_user_volume()));
+    json += ",\"playing\":";
+    json += audio_service_is_playing() ? "true" : "false";
+    json += ",\"paused\":";
+    json += audio_service_is_paused() ? "true" : "false";
+    json += "}";
+  }
+
+  json += "}";
+  web_send_no_cache_headers();
+  s_server.send(200, "application/json; charset=utf-8", json);
 }
 
 static void web_append_rtc_json_fields(String& json, const Pcf85063Status& st) {
@@ -1726,11 +2112,6 @@ static void web_handle_rtc_alarm_clear() {
 static void web_handle_status() {
   web_snapshot_capture_into(s_web_status_snapshot);
   WebPlayerSnapshot& snap = s_web_status_snapshot;
-  snap.net_mode = web_net_mode_cstr();
-  snap.ip = web_ip_string();
-  snap.wifi_name = web_wifi_name_string();
-  snap.hostname = s_hostname_runtime;
-  snap.wifi_source = s_wifi_source;
 
   const WebRuntimeSettings ws = web_settings_get();
 
@@ -1793,12 +2174,6 @@ static void web_handle_status() {
   json.field_int("display_total", snap.display_total);
   json.field_int("current_group_idx", snap.current_group_idx);
 
-  json.field_string("net_mode", snap.net_mode);
-  json.field_string("ip", snap.ip);
-  json.field_string("wifi_name", snap.wifi_name);
-  json.field_string("hostname", snap.hostname);
-  json.field_string("wifi_source", snap.wifi_source);
-
   json.field_bool("can_cancel_scan", snap.can_cancel_scan);
   json.field_string("scan_action_label", snap.scan_action_label);
 
@@ -1811,7 +2186,6 @@ static void web_handle_status() {
   json.field_bool("show_next_lyric", snap.show_next_lyric);
   json.field_bool("show_cover", snap.show_cover);
   json.field_bool("web_cover_spin", snap.web_cover_spin);
-  json.field_bool("show_wifi_info", ws.show_wifi_info);
 
   json.field_string("lyric_sync_mode", web_lyric_sync_mode_key(ws.lyric_sync_mode));
   json.field_string("lyric_sync_mode_label", web_lyric_sync_mode_label(ws.lyric_sync_mode));
@@ -1840,14 +2214,8 @@ static void web_handle_status() {
   json.field_string("radio_backend", snap.radio_backend);
   json.field_uint("radio_bitrate", snap.radio_bitrate);
 
-  json.field_bool("net_track_active", snap.net_track_active);
   json.field_int("net_track_idx", snap.net_track_idx);
   json.field_string("net_track_title", snap.net_track_title);
-  json.field_string("net_track_url", snap.net_track_url);
-  json.field_string("net_track_format", snap.net_track_format);
-  json.field_string("net_track_artist", snap.net_track_artist);
-  json.field_string("net_track_album", snap.net_track_album);
-  json.field_uint("net_track_duration_ms", snap.net_track_duration_ms);
   json.field_string("net_track_state", snap.net_track_state);
   json.field_string("net_track_error", snap.net_track_error);
 
@@ -2302,6 +2670,10 @@ static void web_handle_nfc_bindings() {
     if (i > 0) json += ",";
 
     json += "{";
+
+    json += "\"index\":";
+    json += String(i + 1);
+    json += ",";
 
     json += "\"uid\":\"";
     json += web_json_escape(entry.uid);
@@ -3260,19 +3632,6 @@ static void web_handle_scan() {
                         : "rescan_fast_started")));
 }
 
-static void web_handle_wifiinfo_toggle() {
-  WebRuntimeSettings ws = web_settings_get();
-  ws.show_wifi_info = !ws.show_wifi_info;
-  web_settings_set(ws);
-  
-  String json; json.reserve(80);
-  json += "{\"ok\":true";
-  json += ",\"show_wifi_info\":"; json += (ws.show_wifi_info ? "true" : "false");
-  json += "}";
-  web_send_no_cache_headers();
-  s_server.send(200, "application/json; charset=utf-8", json);
-}
-
 static void web_setup_routes() {
   s_server.on("/", HTTP_GET, web_handle_root);
   s_server.on("/artists", HTTP_GET, web_handle_artists_page);
@@ -3297,6 +3656,14 @@ static void web_setup_routes() {
   s_server.on("/api/album/detail", HTTP_GET, web_handle_album_detail);
   s_server.on("/api/settings", HTTP_GET, web_handle_settings_get);
   s_server.on("/api/settings", HTTP_POST, web_handle_settings_post);
+  s_server.on("/api/audio-output/status", HTTP_GET, web_handle_audio_output_status);
+  s_server.on("/api/audio-output/route", HTTP_POST, web_handle_audio_output_route);
+  s_server.on("/api/audio-output/amp-mute", HTTP_POST, web_handle_audio_output_amp_mute);
+  s_server.on("/api/audio-output/bluetooth/query", HTTP_POST, web_handle_audio_output_bt_query);
+  s_server.on("/api/audio-output/bluetooth/volume", HTTP_POST, web_handle_audio_output_bt_volume);
+  s_server.on("/api/audio-output/bluetooth/pair", HTTP_POST, web_handle_audio_output_bt_pair);
+  s_server.on("/api/audio-output/bluetooth/restart", HTTP_POST, web_handle_audio_output_bt_restart);
+  s_server.on("/api/system/diagnostics", HTTP_GET, web_handle_system_diagnostics);
   s_server.on("/api/rtc/status", HTTP_GET, web_handle_rtc_status);
   s_server.on("/api/rtc/time", HTTP_POST, web_handle_rtc_set_time);
   s_server.on("/api/alarm/status", HTTP_GET, web_handle_alarm_status);
@@ -3334,7 +3701,6 @@ static void web_setup_routes() {
   s_server.on("/api/ui/volume_lock", HTTP_POST, web_handle_volume_lock);
   s_server.on("/api/state/save", HTTP_POST, web_handle_state_save);
   s_server.on("/api/scan", HTTP_POST, web_handle_scan);
-  s_server.on("/api/wifiinfo/toggle", HTTP_POST, web_handle_wifiinfo_toggle);
   s_server.onNotFound([](){ web_send_json_err("not_found", 404); });
 }
 
@@ -3386,8 +3752,6 @@ bool web_server_switch_wifi_from_config()
     LOGI("[网页] 尝试切换到 WiFi：%s", nets[idx].ssid.c_str());
     if (web_try_connect_one(nets[idx], hostname)) {
       s_ap_mode = false;
-      s_wifi_source = "config_switch";
-      s_hostname_runtime = hostname;
 
       if (!s_started) {
         web_server_start_async();

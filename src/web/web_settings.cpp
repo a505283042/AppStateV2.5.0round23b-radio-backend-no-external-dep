@@ -20,7 +20,6 @@ static bool web_settings_equal(const WebRuntimeSettings& a, const WebRuntimeSett
       && a.show_cover == b.show_cover
       && a.web_cover_spin == b.web_cover_spin
       && a.wifi_enabled == b.wifi_enabled
-      && a.show_wifi_info == b.show_wifi_info
       && a.hall_control_enabled == b.hall_control_enabled
       && a.solenoid_enabled == b.solenoid_enabled
       && a.status_led_enabled == b.status_led_enabled
@@ -175,7 +174,6 @@ bool web_settings_load() {
   loaded.show_cover = pref.getBool("show_cover", loaded.show_cover);
   loaded.web_cover_spin = pref.getBool("cover_spin", loaded.web_cover_spin);
   loaded.wifi_enabled = pref.getBool("wifi_en", loaded.wifi_enabled);
-  loaded.show_wifi_info = pref.getBool("wifi_info", loaded.show_wifi_info);
   loaded.hall_control_enabled = pref.getBool("hall_en", loaded.hall_control_enabled);
   loaded.solenoid_enabled = pref.getBool("sol_en", loaded.solenoid_enabled);
   loaded.status_led_enabled = pref.getBool("led_en", loaded.status_led_enabled);
@@ -225,7 +223,6 @@ bool web_settings_save() {
                && pref.putBool("show_cover", snapshot.show_cover)
                && pref.putBool("cover_spin", snapshot.web_cover_spin)
                && pref.putBool("wifi_en", snapshot.wifi_enabled)
-               && pref.putBool("wifi_info", snapshot.show_wifi_info)
                && pref.putBool("hall_en", snapshot.hall_control_enabled)
                && pref.putBool("sol_en", snapshot.solenoid_enabled)
                && pref.putBool("led_en", snapshot.status_led_enabled)

@@ -7,7 +7,6 @@
 
 #include "web/web_server.h"
 #include "web/web_config.h"
-#include "web/web_settings.h"
 
 namespace {
 
@@ -101,19 +100,6 @@ const char* value_wifi_name()
     return "-";
 }
 
-const char* value_show_wifi_info()
-{
-    return bool_label(web_settings_get().show_wifi_info);
-}
-
-bool action_toggle_show_wifi_info()
-{
-    WebRuntimeSettings ws = web_settings_get();
-    ws.show_wifi_info = !ws.show_wifi_info;
-    web_settings_set(ws);
-    return web_settings_save();
-}
-
 bool action_retry_wifi()
 {
     return web_server_retry_sta_from_config();
@@ -131,7 +117,6 @@ const QuickMenuItem NETWORK_ITEMS[] = {
     {"当前IP", QuickMenuItemType::Status, QuickMenuPage::Network, "", value_current_ip, nullptr, true, false},
     {"网络名", QuickMenuItemType::Status, QuickMenuPage::Network, "", value_wifi_name, nullptr, true, false},
     {"切换WiFi", QuickMenuItemType::Action, QuickMenuPage::Network, "", value_execute, action_switch_wifi, true, false},
-    {"显示WiFi信息", QuickMenuItemType::Toggle, QuickMenuPage::Network, "", value_show_wifi_info, action_toggle_show_wifi_info, true, false},
     {"重连WiFi", QuickMenuItemType::Action, QuickMenuPage::Network, "", value_execute, action_retry_wifi, true, false},    
     {"返回", QuickMenuItemType::Back, QuickMenuPage::Root, "", nullptr, nullptr, true, false},
 };
