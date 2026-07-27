@@ -34,11 +34,16 @@ bool audio_output_route_is_headphone_only();
 bool audio_output_route_is_speaker();
 bool audio_output_route_is_bluetooth_tx();
 
-/** @brief 面向用户显示/调节的音量。蓝牙发射模式下返回 BT62SP 模块音量。 */
+/**
+ * @brief 面向用户显示/调节的逻辑音量。
+ *
+ * 蓝牙发射模式下保持 0..100 连续语义；UART 边界会把逻辑 1..100 映射到
+ * BT62SP 可听硬件区间 4..100，逻辑 0 映射为硬件静音 0。
+ */
 uint8_t audio_output_route_get_user_volume();
 /** @brief 普通耳机/功放路线音量；蓝牙发射时返回进入蓝牙前保存的播放器音量。 */
 uint8_t audio_output_route_get_normal_volume();
-/** @brief 设置面向用户的音量。蓝牙发射模式下只调 BT62SP，播放器输入固定安全值。 */
+/** @brief 设置面向用户的逻辑音量。蓝牙发射模式下只调 BT62SP，播放器输入固定安全值。 */
 bool audio_output_route_set_user_volume(uint8_t value);
 /** @brief 按步进调整面向用户的音量。 */
 bool audio_output_route_step_user_volume(int delta);
@@ -46,7 +51,7 @@ bool audio_output_route_step_user_volume(int delta);
 void audio_output_route_sync_ui_volume();
 /** @brief 蓝牙发射模式下固定送入 BT62SP 模拟输入的播放器音量。 */
 uint8_t audio_output_route_bluetooth_tx_player_fixed_volume();
-/** @brief 当前缓存的 BT62SP 蓝牙发射音量。 */
+/** @brief 当前缓存的 BT62SP 蓝牙发射逻辑音量，而不是 UART 硬件值。 */
 uint8_t audio_output_route_bluetooth_tx_volume();
 /** @brief 是否已完成蓝牙发射音量初始化（NVS 保存值或首次默认值）。 */
 bool audio_output_route_bluetooth_tx_volume_known();
