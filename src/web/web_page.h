@@ -3,12 +3,195 @@
 #include <pgmspace.h>
 #include "web/web_config.h"
 
+static const char WEBCTRL_FEEDBACK_JS[] PROGMEM = R"JS(
+(() => {
+  'use strict';
+
+  const STORAGE_KEY = 'webctrl_haptic_feedback';
+  const TARGET_SELECTOR = 'button,a[href],.chip';
+  const pressedByPointer = new Map();
+  let hapticEnabled = true;
+
+  function installStyle(){
+    if(document.getElementById('webButtonFeedbackStyle')) return;
+    const style = document.createElement('style');
+    style.id = 'webButtonFeedbackStyle';
+    style.textContent = `
+      button,a[href],.chip{
+        -webkit-tap-highlight-color:transparent;
+        touch-action:manipulation;
+        transition:transform .08s ease,filter .12s ease,box-shadow .12s ease,opacity .12s ease;
+      }
+      .webfb-pressed{
+        transform:scale(.965)!important;
+        filter:brightness(1.18);
+        box-shadow:0 0 0 2px rgba(121,192,255,.38),inset 0 2px 7px rgba(0,0,0,.28)!important;
+      }
+      .webfb-ack{animation:webfbAck .22s ease-out;}
+      .webfb-success{animation:webfbSuccess .34s ease-out;}
+      .webfb-error{animation:webfbError .34s ease-out;}
+      @keyframes webfbAck{
+        0%{box-shadow:0 0 0 0 rgba(121,192,255,.62)}
+        100%{box-shadow:0 0 0 8px rgba(121,192,255,0)}
+      }
+      @keyframes webfbSuccess{
+        0%{box-shadow:0 0 0 0 rgba(63,185,80,.72)}
+        100%{box-shadow:0 0 0 9px rgba(63,185,80,0)}
+      }
+      @keyframes webfbError{
+        0%{box-shadow:0 0 0 0 rgba(248,81,73,.75)}
+        100%{box-shadow:0 0 0 9px rgba(248,81,73,0)}
+      }
+      button:disabled,.webfb-disabled,[aria-disabled="true"]{
+        transform:none!important;
+        filter:none!important;
+        box-shadow:none!important;
+      }
+      @media (prefers-reduced-motion:reduce){
+        button,a[href],.chip{transition:none!important}
+        .webfb-ack,.webfb-success,.webfb-error{animation:none!important}
+      }
+    `;
+    document.head.appendChild(style);
+  }
+
+  function readHapticEnabled(){
+    try{
+      const stored = localStorage.getItem(STORAGE_KEY);
+      return stored === null ? true : stored !== '0';
+    }catch(e){
+      return true;
+    }
+  }
+
+  function writeHapticEnabled(enabled){
+    hapticEnabled = !!enabled;
+    try{
+      localStorage.setItem(STORAGE_KEY, hapticEnabled ? '1' : '0');
+    }catch(e){}
+    syncHapticToggle();
+  }
+
+  function hapticSupported(){
+    return typeof navigator.vibrate === 'function';
+  }
+
+  function vibrate(durationMs=10){
+    if(!hapticEnabled || !hapticSupported()) return false;
+    try{
+      return navigator.vibrate(Math.max(1, Math.min(30, Number(durationMs) || 10))) === true;
+    }catch(e){
+      return false;
+    }
+  }
+
+  function targetFromEvent(event){
+    const target = event && event.target;
+    if(!(target instanceof Element)) return null;
+    const el = target.closest(TARGET_SELECTOR);
+    if(!el) return null;
+    if(el.matches('button:disabled,[aria-disabled="true"],.webfb-disabled')) return null;
+    return el;
+  }
+
+  function restartAnimation(el, className, durationMs){
+    if(!el) return;
+    el.classList.remove(className);
+    void el.offsetWidth;
+    el.classList.add(className);
+    window.setTimeout(() => el.classList.remove(className), durationMs);
+  }
+
+  function releasePointer(pointerId, acknowledge){
+    const el = pressedByPointer.get(pointerId);
+    if(!el) return;
+    pressedByPointer.delete(pointerId);
+    el.classList.remove('webfb-pressed');
+    if(acknowledge) restartAnimation(el, 'webfb-ack', 240);
+  }
+
+  function syncHapticToggle(){
+    const toggle = document.querySelector('[data-web-feedback-haptic-toggle]');
+    const status = document.getElementById('webHapticSupport');
+    const supported = hapticSupported();
+    if(toggle){
+      toggle.checked = hapticEnabled && supported;
+      toggle.disabled = !supported;
+    }
+    if(status){
+      status.textContent = supported
+        ? '视觉反馈始终开启；这里可关闭手机浏览器的轻振动。'
+        : '视觉反馈始终开启；当前浏览器未提供振动接口。';
+    }
+  }
+
+  function init(){
+    installStyle();
+    hapticEnabled = readHapticEnabled();
+    syncHapticToggle();
+
+    const toggle = document.querySelector('[data-web-feedback-haptic-toggle]');
+    if(toggle){
+      toggle.addEventListener('change', () => writeHapticEnabled(toggle.checked));
+    }
+  }
+
+  document.addEventListener('pointerdown', event => {
+    if(event.button !== undefined && event.button !== 0) return;
+    const el = targetFromEvent(event);
+    if(!el) return;
+    pressedByPointer.set(event.pointerId, el);
+    el.classList.add('webfb-pressed');
+    if(event.pointerType === 'touch' || event.pointerType === 'pen') vibrate(10);
+  }, true);
+
+  document.addEventListener('pointerup', event => releasePointer(event.pointerId, true), true);
+  document.addEventListener('pointercancel', event => releasePointer(event.pointerId, false), true);
+
+  document.addEventListener('keydown', event => {
+    if(event.repeat || (event.key !== 'Enter' && event.key !== ' ')) return;
+    const el = targetFromEvent(event);
+    if(el) el.classList.add('webfb-pressed');
+  }, true);
+
+  document.addEventListener('keyup', event => {
+    if(event.key !== 'Enter' && event.key !== ' ') return;
+    const el = targetFromEvent(event);
+    if(!el) return;
+    el.classList.remove('webfb-pressed');
+    restartAnimation(el, 'webfb-ack', 240);
+  }, true);
+
+  document.addEventListener('visibilitychange', () => {
+    if(!document.hidden) return;
+    pressedByPointer.forEach(el => el.classList.remove('webfb-pressed'));
+    pressedByPointer.clear();
+  });
+
+  window.webButtonFeedback = {
+    isHapticEnabled: () => hapticEnabled,
+    setHapticEnabled: writeHapticEnabled,
+    vibrate,
+    acknowledge: el => restartAnimation(el, 'webfb-ack', 240),
+    success: el => restartAnimation(el, 'webfb-success', 360),
+    error: el => restartAnimation(el, 'webfb-error', 360)
+  };
+
+  if(document.readyState === 'loading'){
+    document.addEventListener('DOMContentLoaded', init, {once:true});
+  }else{
+    init();
+  }
+})();
+)JS";
+
 static const char WEBCTRL_INDEX_HTML[] PROGMEM = R"HTML(
 <!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <script src="/web-feedback.js" defer></script>
   <title>ESP32S3 播放器控制</title>
   <style>
     body{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:#111;color:#eee}
@@ -23,8 +206,11 @@ static const char WEBCTRL_INDEX_HTML[] PROGMEM = R"HTML(
     .v{font-size:16px;font-weight:600;margin-top:2px}
     .bar{height:10px;background:#333;border-radius:999px;overflow:hidden;margin-top:10px}
     .fill{height:100%;width:0;background:#79c0ff}
-    .controls{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
-    .controls2{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:10px}
+    .control-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+    .control-grid + .control-grid{margin-top:10px}
+    .control-grid.two{grid-template-columns:repeat(2,minmax(0,1fr))}
+    .control-grid.one{grid-template-columns:minmax(0,1fr)}
+    .control-grid button{width:100%;min-width:0;min-height:48px;padding:12px 8px;line-height:1.25;white-space:normal}
     button,.linkbtn{border:none;border-radius:12px;padding:14px 10px;background:#2f6feb;color:#fff;font-size:16px;font-weight:600;text-decoration:none;display:inline-flex;align-items:center;justify-content:center}
     button.secondary,.linkbtn.secondary{background:#444}
     button.warn{background:#a04040}
@@ -101,11 +287,12 @@ static const char WEBCTRL_INDEX_HTML[] PROGMEM = R"HTML(
     input[type=range]{accent-color:#79c0ff}
     .seekbar{width:100%;margin-top:14px;cursor:pointer}
     .seekbar:disabled{cursor:not-allowed;opacity:.45}
+    .web-lock-disabled,[data-page-lock-target="1"][aria-disabled="true"]{opacity:.45!important;cursor:not-allowed!important}
+    .web-lock-toast{position:fixed;left:50%;bottom:calc(24px + env(safe-area-inset-bottom));z-index:9999;max-width:calc(100vw - 32px);padding:11px 16px;border-radius:999px;background:rgba(180,35,24,.96);color:#fff;font-size:14px;font-weight:700;box-shadow:0 8px 28px rgba(0,0,0,.38);opacity:0;transform:translate(-50%,12px);pointer-events:none;transition:opacity .16s ease,transform .16s ease}
+    .web-lock-toast.show{opacity:1;transform:translate(-50%,0)}
     .nettrack-only{display:none}
     body.nettrack-mode .nettrack-only{display:block}
     body.nettrack-mode .hide-when-nettrack{display:none!important}
-    .nettrack-controls{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
-    .nettrack-controls button{min-width:92px}
   </style>
 </head>
 <body>
@@ -117,7 +304,6 @@ static const char WEBCTRL_INDEX_HTML[] PROGMEM = R"HTML(
             <span>ESP32S3 播放器</span>
             <button id="lockBtn" class="secondary" type="button" style="padding:8px 12px;font-size:13px">锁定</button>
           </h1>
-          <div class="muted" id="net">连接中...</div>
         </div>
         <div class="small" id="pollInfo">刷新：加载中...</div>
       </div>
@@ -176,34 +362,30 @@ static const char WEBCTRL_INDEX_HTML[] PROGMEM = R"HTML(
     </div>
 
     <div class="card hide-when-nettrack" id="mainControlCard">
-      <div class="controls">
+      <div class="control-grid">
         <button class="secondary" id="prevBtn" onclick="handlePrev()">上一首</button>
         <button id="playPauseBtn" onclick="sendCmd('/api/playpause')">播放/暂停</button>
         <button class="secondary" id="nextBtn" onclick="handleNext()">下一首</button>
       </div>
-      <div class="controls2" id="modeRow">
+      <div class="control-grid" id="modeRow">
         <button class="secondary" id="modeToggleBtn" onclick="sendCmd('/api/mode/toggle')">顺序/随机</button>
         <button class="secondary" id="modeCategoryBtn" onclick="sendCmd('/api/mode/category')">全部/歌手/专辑</button>
-        <button class="warn" id="scanBtn" onclick="sendCmd('/api/scan')">开始重扫</button>
+        <button class="secondary" id="saveStateBtn" onclick="savePlayerState()">保存当前状态</button>
       </div>
-      <div class="controls2" style="grid-template-columns:1fr 1fr">
-        <button class="secondary" id="radioBackBtn" style="display:none" onclick="returnFromRadio()">返回音乐播放</button>
-        <button class="secondary" onclick="savePlayerState()">保存当前状态</button>
-        <button class="secondary" id="wifiInfoBtn" onclick="toggleWifiInfo()">隐藏WiFi信息</button>
-        <div></div>
+      <div class="control-grid one" id="radioBackRow" style="display:none">
+        <button class="secondary" id="radioBackBtn" onclick="returnFromRadio()">返回音乐播放</button>
       </div>
       <div class="small" style="margin-top:8px">保存到设备内部 NVS：音量、当前歌曲、播放模式、当前分组与视图</div>
     </div>
 
     <div class="card nettrack-only" id="netTrackControlCard">
-      <div style="font-size:18px;font-weight:800">NAS 播放控制</div>
-      <div class="muted" id="netTrackNow">-</div>
-
-      <div class="nettrack-controls">
-        <button onclick="nasControl('/api/netmusic/prev')">上一首</button>
+      <div class="control-grid">
+        <button class="secondary" onclick="nasControl('/api/netmusic/prev')">上一首</button>
         <button onclick="nasControl('/api/netmusic/toggle')">播放/暂停</button>
-        <button onclick="nasControl('/api/netmusic/next')">下一首</button>
-        <button onclick="nasControl('/api/netmusic/mode')" id="netTrackModeBtn">顺序/随机</button>
+        <button class="secondary" onclick="nasControl('/api/netmusic/next')">下一首</button>
+      </div>
+      <div class="control-grid two">
+        <button class="secondary" onclick="nasControl('/api/netmusic/mode')" id="netTrackModeBtn">顺序/随机</button>
         <button class="secondary" onclick="nasControl('/api/netmusic/return-local')">返回本地播放</button>
       </div>
     </div>
@@ -251,19 +433,55 @@ let seekOptimisticUntil = 0;
 function getLockTargets(){
   return [
     ...document.querySelectorAll('.nav a'),
+    ...document.querySelectorAll('#mainControlCard button, #netTrackControlCard button'),
     document.getElementById('coverBox'),
-    document.getElementById('prevBtn'),
-    document.getElementById('playPauseBtn'),
-    document.getElementById('nextBtn'),
-    document.getElementById('modeToggleBtn'),
-    document.getElementById('modeCategoryBtn'),
-    document.getElementById('scanBtn'),
-    document.getElementById('radioBackBtn'),
-    document.getElementById('wifiInfoBtn'),
-    document.getElementById('seekSlider'),
-    
-    ...document.querySelectorAll('button.secondary[onclick="savePlayerState()"]')
+    document.getElementById('volumeLockBtn'),
+    document.getElementById('seekSlider')
   ].filter(Boolean);
+}
+
+let pageLockNoticeTimer = null;
+let pageLockNoticeLastAt = 0;
+
+function showPageLockedNotice(){
+  const now = performance.now();
+  if(now - pageLockNoticeLastAt < 350) return;
+  pageLockNoticeLastAt = now;
+
+  let toast = document.getElementById('pageLockToast');
+  if(!toast){
+    toast = document.createElement('div');
+    toast.id = 'pageLockToast';
+    toast.className = 'web-lock-toast';
+    toast.setAttribute('role', 'status');
+    toast.setAttribute('aria-live', 'polite');
+    document.body.appendChild(toast);
+  }
+
+  toast.textContent = '网页已锁定，请先点击右上角“解锁”';
+  toast.classList.remove('show');
+  void toast.offsetWidth;
+  toast.classList.add('show');
+  if(pageLockNoticeTimer) clearTimeout(pageLockNoticeTimer);
+  pageLockNoticeTimer = setTimeout(() => toast.classList.remove('show'), 1500);
+}
+
+function lockedTargetFromEvent(event){
+  const target = event && event.target;
+  if(!(target instanceof Element)) return null;
+  return target.closest('[data-page-lock-target="1"]');
+}
+
+function interceptLockedControl(event){
+  if(!pageLocked) return;
+  if(event.type === 'keydown' && event.key !== 'Enter' && event.key !== ' ') return;
+
+  const target = lockedTargetFromEvent(event);
+  if(!target) return;
+
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  showPageLockedNotice();
 }
 
 function applyLockState(){
@@ -277,19 +495,30 @@ function applyLockState(){
   targets.forEach(el => {
     if(!el) return;
 
-    if(el.tagName === 'BUTTON' || el.tagName === 'INPUT'){
-      el.disabled = pageLocked;
+    el.dataset.pageLockTarget = '1';
+    el.classList.toggle('web-lock-disabled', pageLocked);
+    el.classList.toggle('webfb-disabled', pageLocked);
+
+    if(pageLocked){
+      el.setAttribute('aria-disabled', 'true');
     }else{
-      el.style.pointerEvents = pageLocked ? 'none' : '';
-      el.style.opacity = pageLocked ? '0.45' : '';
+      el.removeAttribute('aria-disabled');
+    }
+
+    // 滑块仍使用原生 disabled 阻止拖动；按钮和链接保留事件入口，
+    // 由捕获阶段统一拦截并提示“网页已锁定”。
+    if(el.tagName === 'INPUT'){
+      if(pageLocked){
+        if(!Object.prototype.hasOwnProperty.call(el.dataset, 'lockWasDisabled')){
+          el.dataset.lockWasDisabled = el.disabled ? '1' : '0';
+        }
+        el.disabled = true;
+      }else if(Object.prototype.hasOwnProperty.call(el.dataset, 'lockWasDisabled')){
+        el.disabled = el.dataset.lockWasDisabled === '1';
+        delete el.dataset.lockWasDisabled;
+      }
     }
   });
-
-  const coverBox = document.getElementById('coverBox');
-  if(coverBox){
-    coverBox.style.pointerEvents = pageLocked ? 'none' : '';
-    coverBox.style.opacity = '';
-  }
 
   applyVolumeLockState();
 }
@@ -312,6 +541,7 @@ function togglePageLock(){
   pageLocked = !pageLocked;
   applyLockState();
   saveLockState();
+  if(lastStatus) render(lastStatus);
 }
 
 function applyVolumeLockState(){
@@ -641,14 +871,16 @@ function updateCover(j){
   const rotateView=(j.view==='rotate');
   const coverPanelView=(j.view==='cover_panel');
   const allowCover = j.show_cover !== false;
+  // 网页封面旋转由独立设置控制，不再依赖设备当前显示视图。
   const allowSpin = j.web_cover_spin !== false;
+  const spinActive = allowSpin && !!j.is_playing && !j.is_paused && !j.rescanning;
   const base = j.cover_url && j.cover_url.length ? j.cover_url : '';
 
   // 封面区域保持原有布局，只是控制图片显示
   media.classList.toggle('noCover', !allowCover);
   if(!allowCover){ 
-    // 不显示封面图片，但保持封面区域
-    box.classList.remove('coverPanel','coverReady');
+    // 不显示封面图片，但保持封面区域。
+    box.classList.remove('rotate','spin','coverPanel','coverReady');
     img.style.display='none';
     img.removeAttribute('src');
     fallback.style.display='block';
@@ -656,9 +888,10 @@ function updateCover(j){
     return; 
   }
 
-  box.classList.toggle('rotate', rotateView);
+  // 普通视图开启旋转时也使用圆形唱片样式；封面面板自身已有圆形图片。
+  box.classList.toggle('rotate', rotateView || (allowSpin && !coverPanelView));
   box.classList.toggle('coverPanel', coverPanelView);
-  box.classList.toggle('spin', (rotateView || coverPanelView) && allowSpin && !!j.is_playing && !j.is_paused && !j.rescanning);
+  box.classList.toggle('spin', spinActive);
 
   const coverLoading = !!j.cover_loading;
 
@@ -736,20 +969,6 @@ function applyNetTrackMode(j){
     netCard.style.display = isNetTrack ? 'block' : 'none';
   }
 
-  const now = document.getElementById('netTrackNow');
-  if(now){
-    if(isNetTrack){
-      const title = j.net_track_title || j.title || '-';
-      const artist = j.net_track_artist && j.net_track_artist !== 'NAS'
-        ? ` · ${j.net_track_artist}`
-        : '';
-      const idx = Number.isInteger(j.net_track_idx) ? `#${j.net_track_idx + 1}` : '';
-      now.textContent = `${idx} ${title}${artist}`;
-    }else{
-      now.textContent = '-';
-    }
-  }
-
   const modeBtn = document.getElementById('netTrackModeBtn');
   if(modeBtn){
     const mode = j && j.mode ? j.mode : '';
@@ -804,16 +1023,6 @@ function render(j){
     seekSlider.disabled=pageLocked || j.rescanning || j.seeking || isRadio || !j.seekable || totalMs<=0;
     seekSlider.title=seekSlider.disabled ? '当前音源不可拖动进度' : '拖动后松开以跳转';
   }
-    if(j.show_wifi_info === false){
-    document.getElementById('net').textContent = `${j.net_mode||'-'} · WiFi信息已隐藏`;
-  }else{
-    document.getElementById('net').textContent = `${j.net_mode||'-'} · ${j.ip||'-'} · ${j.wifi_name||'-'}`;
-  }
-
-  if(j.show_wifi_info !== undefined){
-    updateWifiInfoButton(!!j.show_wifi_info);
-  }
-  document.getElementById('scanBtn').textContent=j.scan_action_label || (j.rescanning ? '取消重扫' : '开始重扫');
   updateLyricsFromState(j);
   const slider=document.getElementById('volumeSlider'); if(document.activeElement !== slider){ slider.value=Number(j.volume ?? 0); }
 
@@ -822,17 +1031,15 @@ function render(j){
   const prevBtn = document.getElementById('prevBtn');
   const nextBtn = document.getElementById('nextBtn');
   const modeRow = document.getElementById('modeRow');
-  const scanBtn = document.getElementById('scanBtn');
 
   prevBtn.textContent = isRadio ? '上一电台' : '上一首';
   nextBtn.textContent = isRadio ? '下一电台' : '下一首';
 
   modeRow.style.display = isRadio ? 'none' : 'grid';
-  scanBtn.style.display = isRadio ? 'none' : 'inline-flex';
 
-  const radioBackBtn = document.getElementById('radioBackBtn');
-  if (radioBackBtn) {
-    radioBackBtn.style.display = isRadio ? 'inline-flex' : 'none';
+  const radioBackRow = document.getElementById('radioBackRow');
+  if (radioBackRow) {
+    radioBackRow.style.display = isRadio ? 'grid' : 'none';
   }
 
   updateCover(j);
@@ -845,25 +1052,6 @@ async function handlePrev(){
 async function handleNext(){
   if(pageLocked) return;
   await sendCmd('/api/next');
-}
-
-async function toggleWifiInfo(){
-  if(pageLocked) return;
-  try{
-    const r = await fetch('/api/wifiinfo/toggle', {method:'POST'});
-    const j = await r.json();
-    if(j && j.ok && j.show_wifi_info !== undefined) {
-      updateWifiInfoButton(j.show_wifi_info);
-    }
-  }catch(e){}
-  scheduleNext(500);
-}
-
-function updateWifiInfoButton(showWifiInfo) {
-  const btn = document.getElementById('wifiInfoBtn');
-  if(btn) {
-    btn.textContent = showWifiInfo ? '隐藏WiFi信息' : '显示WiFi信息';
-  }
 }
 
 async function sendCmd(path){
@@ -978,6 +1166,11 @@ slider.addEventListener('change',(e)=>{
   const v = Number(e.target.value || 0);
   sendVolumeDebounced(v);
 });
+// 捕获阶段先于按钮反馈脚本和 onclick 执行。锁定时不缩放、不振动、不发请求，只显示提示。
+document.addEventListener('pointerdown', interceptLockedControl, true);
+document.addEventListener('click', interceptLockedControl, true);
+document.addEventListener('keydown', interceptLockedControl, true);
+
 document.getElementById('coverBox').addEventListener('click',toggleViewFromCover);
 document.getElementById('lockBtn').addEventListener('click', togglePageLock);
 document.getElementById('volumeLockBtn').addEventListener('click', toggleVolumeLock);
@@ -1008,6 +1201,7 @@ static const char WEBCTRL_SETTINGS_HTML[] PROGMEM = R"HTML(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <script src="/web-feedback.js" defer></script>
   <title>网页设置</title>
   <style>
     body{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:#111;color:#eee}
@@ -1019,6 +1213,7 @@ static const char WEBCTRL_SETTINGS_HTML[] PROGMEM = R"HTML(
     input[type=checkbox]{transform:scale(1.2)}
     button,a{border:none;border-radius:12px;padding:12px 14px;background:#2f6feb;color:#fff;font-size:15px;font-weight:600;text-decoration:none;display:inline-flex;align-items:center;justify-content:center}
     a.secondary,button.secondary{background:#444}
+    button.warn{background:#9a6700}
     button.danger{background:#b42318}
     .actions{display:flex;gap:10px;flex-wrap:wrap}
     .time-fields{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:12px 0}
@@ -1036,7 +1231,6 @@ static const char WEBCTRL_SETTINGS_HTML[] PROGMEM = R"HTML(
         <a class="secondary" href="/">返回控制页</a>
       </div>
       <h2>网页设置</h2>
-      <div class="muted">设置会保存到设备内部配置区（更稳定）</div>
     </div>
 
     <div class="card">
@@ -1048,7 +1242,7 @@ static const char WEBCTRL_SETTINGS_HTML[] PROGMEM = R"HTML(
         <button onclick="syncRtcFromBrowser()">校准时间</button>
         <button class="secondary" onclick="refreshClockAlarmStatus()">刷新</button>
       </div>
-      <div class="muted" id="rtcStatusText">首次使用闹钟前，请先校准时间。</div>
+      <div class="muted" id="rtcStatusText">未读取</div>
 
       <div class="time-fields">
         <label>闹钟时间</label>
@@ -1091,26 +1285,67 @@ static const char WEBCTRL_SETTINGS_HTML[] PROGMEM = R"HTML(
     </div>
 
     <div class="card">
-      <div class="row"><label>页面刷新速度</label>
+      <h2>网页显示</h2>
+      <div class="row"><label>页面刷新</label>
         <select id="refresh_preset">
-          <option value="power">省流量 / 省电</option>
+          <option value="power">省电</option>
           <option value="balanced">平衡</option>
           <option value="smooth">流畅</option>
         </select>
       </div>
-      <div class="row"><label>歌词更新时间策略</label>
+      <div class="row"><label>歌词同步</label>
         <select id="lyric_sync_mode">
-          <option value="precise">精准优先</option>
+          <option value="precise">精准</option>
           <option value="balanced">平衡</option>
-          <option value="follow_poll">等轮询优先</option>
+          <option value="follow_poll">省流量</option>
         </select>
       </div>
-      <div class="row"><label>显示下一句歌词</label><input id="show_next_lyric" type="checkbox"></div>
-      <div class="row"><label>显示封面</label><input id="show_cover" type="checkbox"></div>
-      <div class="row"><label>旋转视图时网页封面旋转</label><input id="web_cover_spin" type="checkbox"></div>
+      <div class="row"><label>下一句歌词</label><input id="show_next_lyric" type="checkbox"></div>
+      <div class="row"><label>网页封面</label><input id="show_cover" type="checkbox"></div>
+      <div class="row"><label>封面旋转</label><input id="web_cover_spin" type="checkbox"></div>
+      <div class="row"><label>按键振动</label><input id="web_haptic_feedback" data-web-feedback-haptic-toggle type="checkbox"></div>
+    </div>
+
+    <div class="card">
+      <h2>设备设置</h2>
+      <div class="row"><label>显示类型</label>
+        <select id="device_view">
+          <option value="info">歌词信息</option>
+          <option value="rotate">旋转封面</option>
+          <option value="cover_panel">封面面板</option>
+        </select>
+      </div>
+      <div class="row"><label>屏幕</label><input id="screen_enabled" type="checkbox"></div>
+      <div class="row"><label>睡眠关机</label>
+        <select id="sleep_timer_minutes">
+          <option value="0">关闭</option>
+          <option value="15">15分钟</option>
+          <option value="30">30分钟</option>
+          <option value="60">60分钟</option>
+          <option value="90">90分钟</option>
+        </select>
+      </div>
+      <div class="row"><label>霍尔控制</label><input id="hall_control_enabled" type="checkbox"></div>
+      <div class="row"><label>电磁铁</label><input id="solenoid_enabled" type="checkbox"></div>
+      <div class="row"><label>状态灯</label><input id="status_led_enabled" type="checkbox" onchange="syncStatusLedUi()"></div>
+      <div class="row"><label>状态灯亮度</label>
+        <select id="status_led_brightness">
+          <option value="low">低</option>
+          <option value="medium">中</option>
+          <option value="high">高</option>
+        </select>
+      </div>
       <div class="actions">
         <button onclick="saveSettings()">保存设置</button>
         <button class="secondary" onclick="loadSettings()">重新读取</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>本地曲库维护</h2>
+      <div class="row"><label>扫描状态</label><div id="scanStatusText">正在读取...</div></div>
+      <div class="actions">
+        <button class="warn" id="settingsScanBtn" onclick="toggleMusicScan()">开始重扫</button>
       </div>
     </div>
   </div>
@@ -1126,6 +1361,62 @@ async function fetchWithTimeout(url, options={}, timeoutMs=3500){
   }
 }
 
+let settingsRescanning = false;
+let scanStatusBusy = false;
+
+function renderMusicScanStatus(rescanning){
+  settingsRescanning = !!rescanning;
+  const text = document.getElementById('scanStatusText');
+  const btn = document.getElementById('settingsScanBtn');
+  if(text){
+    text.textContent = settingsRescanning
+      ? '正在扫描（再次点击可请求取消）'
+      : '空闲';
+  }
+  if(btn){
+    btn.textContent = settingsRescanning ? '取消重扫' : '开始重扫';
+    btn.className = settingsRescanning ? 'danger' : 'warn';
+    btn.disabled = scanStatusBusy;
+  }
+}
+
+async function refreshMusicScanStatus(){
+  try{
+    const r = await fetch('/api/status/check?token=0', {cache:'no-store'});
+    const j = await r.json();
+    if(j && j.ok){
+      renderMusicScanStatus(!!j.rescanning);
+    }
+  }catch(e){
+    const text = document.getElementById('scanStatusText');
+    if(text) text.textContent = '状态读取失败';
+  }
+}
+
+async function toggleMusicScan(){
+  if(scanStatusBusy) return;
+
+  const message = settingsRescanning
+    ? '确认请求取消当前曲库重扫？'
+    : '确认开始重扫本地曲库？';
+  if(!confirm(message)) return;
+
+  scanStatusBusy = true;
+  renderMusicScanStatus(settingsRescanning);
+  try{
+    const r = await fetchWithTimeout('/api/scan', {method:'POST'}, 5000);
+    const j = await r.json();
+    if(!j || !j.ok){
+      alert((j && (j.message || j.error)) || '重扫操作失败');
+    }
+  }catch(e){
+    alert('重扫请求失败');
+  }finally{
+    scanStatusBusy = false;
+    setTimeout(refreshMusicScanStatus, 300);
+  }
+}
+
 async function loadSettings(){
   try{
     const r = await fetch('/api/settings', {cache:'no-store'});
@@ -1136,7 +1427,19 @@ async function loadSettings(){
     document.getElementById('show_next_lyric').checked = !!j.show_next_lyric;
     document.getElementById('show_cover').checked = !!j.show_cover;
     document.getElementById('web_cover_spin').checked = !!j.web_cover_spin;
+    document.getElementById('device_view').value = j.device_view || 'info';
+    document.getElementById('screen_enabled').checked = !!j.screen_enabled;
+    document.getElementById('sleep_timer_minutes').value = String(j.sleep_timer_minutes || 0);
+    document.getElementById('hall_control_enabled').checked = !!j.hall_control_enabled;
+    document.getElementById('solenoid_enabled').checked = !!j.solenoid_enabled;
+    document.getElementById('status_led_enabled').checked = !!j.status_led_enabled;
+    document.getElementById('status_led_brightness').value = j.status_led_brightness || 'medium';
+    syncStatusLedUi();
   }catch(e){}
+}
+function syncStatusLedUi(){
+  const enabled = document.getElementById('status_led_enabled').checked;
+  document.getElementById('status_led_brightness').disabled = !enabled;
 }
 async function saveSettings(){
   const params = new URLSearchParams();
@@ -1145,6 +1448,13 @@ async function saveSettings(){
   params.set('show_next_lyric', document.getElementById('show_next_lyric').checked ? '1' : '0');
   params.set('show_cover', document.getElementById('show_cover').checked ? '1' : '0');
   params.set('web_cover_spin', document.getElementById('web_cover_spin').checked ? '1' : '0');
+  params.set('device_view', document.getElementById('device_view').value);
+  params.set('screen_enabled', document.getElementById('screen_enabled').checked ? '1' : '0');
+  params.set('sleep_timer_minutes', document.getElementById('sleep_timer_minutes').value);
+  params.set('hall_control_enabled', document.getElementById('hall_control_enabled').checked ? '1' : '0');
+  params.set('solenoid_enabled', document.getElementById('solenoid_enabled').checked ? '1' : '0');
+  params.set('status_led_enabled', document.getElementById('status_led_enabled').checked ? '1' : '0');
+  params.set('status_led_brightness', document.getElementById('status_led_brightness').value);
   try{
     const r = await fetchWithTimeout('/api/settings', {
       method:'POST',
@@ -1402,10 +1712,14 @@ async function deleteAlarm(){
 
 refreshClockAlarmStatus();
 loadSettings();
+refreshMusicScanStatus();
 
 // RTC时间只定期向设备校准一次，页面显示由浏览器每秒递增，避免“当前时间”看起来不走。
 setInterval(updateRtcClockDisplay, 1000);
 setInterval(loadRtcStatus, 60000);
+setInterval(()=>{
+  if(!document.hidden) refreshMusicScanStatus();
+}, 2000);
 </script>
 </body>
 </html>
@@ -1418,6 +1732,7 @@ static const char WEBCTRL_ARTISTS_HTML[] PROGMEM = R"HTML(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <script src="/web-feedback.js" defer></script>
   <title>ESP32S3 歌手页</title>
   <style>
     body{
@@ -1933,6 +2248,7 @@ static const char WEBCTRL_ALBUMS_HTML[] PROGMEM = R"HTML(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <script src="/web-feedback.js" defer></script>
   <title>ESP32S3 专辑页</title>
   <style>
     body{
@@ -2451,6 +2767,7 @@ static const char WEBCTRL_NFC_HTML[] PROGMEM = R"HTML(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <script src="/web-feedback.js" defer></script>
   <title>ESP32S3 NFC管理</title>
   <style>
     body{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:#111;color:#eee}
@@ -2671,6 +2988,7 @@ static const char WEBCTRL_RADIOS_HTML[] PROGMEM = R"HTML(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <script src="/web-feedback.js" defer></script>
   <title>ESP32S3 电台页</title>
   <style>
     body{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:#111;color:#eee}
@@ -2788,6 +3106,7 @@ static const char WEBCTRL_NETMUSIC_HTML[] PROGMEM = R"HTML(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <script src="/web-feedback.js" defer></script>
   <title>ESP32S3 NAS音乐页</title>
   <style>
     body{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:#111;color:#eee}

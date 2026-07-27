@@ -43,6 +43,8 @@
 #include "web/web_settings.h"
 #include "web/web_cover_cache.h"
 #include "hal/pcf85063.h"
+#include "hal/board_hw_control.h"
+#include "hal/ws2812_status.h"
 
 extern SdFat sd;
 
@@ -626,12 +628,50 @@ static bool web_parse_bool(const String& v, bool defv=false) {
 static bool web_settings_persistent_core_changed(const WebRuntimeSettings& old_cfg,
                                                  const WebRuntimeSettings& new_cfg)
 {
-  // 这些设置保持原来的“立即保存”语义；
-  // 显示类开关 show_next_lyric / show_cover / web_cover_spin 可延迟到关机前保存。
+  // 硬件控制设置立即写入 NVS；网页显示设置可延迟到关机前保存。
   return old_cfg.refresh_preset != new_cfg.refresh_preset
       || old_cfg.lyric_sync_mode != new_cfg.lyric_sync_mode
       || old_cfg.wifi_enabled != new_cfg.wifi_enabled
-      || old_cfg.show_wifi_info != new_cfg.show_wifi_info;
+      || old_cfg.show_wifi_info != new_cfg.show_wifi_info
+      || old_cfg.hall_control_enabled != new_cfg.hall_control_enabled
+      || old_cfg.solenoid_enabled != new_cfg.solenoid_enabled
+      || old_cfg.status_led_enabled != new_cfg.status_led_enabled
+      || old_cfg.status_led_brightness != new_cfg.status_led_brightness;
+}
+
+static const char* web_device_view_key(ui_player_view_t view)
+{
+  switch (view) {
+    case UI_VIEW_ROTATE:      return "rotate";
+    case UI_VIEW_COVER_PANEL: return "cover_panel";
+    case UI_VIEW_INFO:
+    default:                  return "info";
+  }
+}
+
+static bool web_parse_device_view(const String& value, ui_player_view_t* out_view)
+{
+  if (!out_view) return false;
+  String key = web_trim_copy(value);
+  key.toLowerCase();
+  if (key == "info") {
+    *out_view = UI_VIEW_INFO;
+    return true;
+  }
+  if (key == "rotate") {
+    *out_view = UI_VIEW_ROTATE;
+    return true;
+  }
+  if (key == "cover_panel" || key == "panel") {
+    *out_view = UI_VIEW_COVER_PANEL;
+    return true;
+  }
+  return false;
+}
+
+static bool web_sleep_timer_minutes_valid(uint16_t minutes)
+{
+  return minutes == 0 || minutes == 15 || minutes == 30 || minutes == 60 || minutes == 90;
 }
 static bool web_parse_mac(const String& text, uint8_t out[6]) {
   unsigned vals[6];
@@ -1149,10 +1189,14 @@ static void web_handle_settings_page() {
   web_send_no_cache_headers();
   s_server.send_P(200, "text/html; charset=utf-8", WEBCTRL_SETTINGS_HTML);
 }
+static void web_handle_feedback_js() {
+  web_send_no_cache_headers();
+  s_server.send_P(200, "application/javascript; charset=utf-8", WEBCTRL_FEEDBACK_JS);
+}
 static void web_handle_favicon() { web_send_no_cache_headers(); s_server.send(404, "text/plain; charset=utf-8", "not_found"); }
 static void web_handle_settings_get() {
   const WebRuntimeSettings ws = web_settings_get();
-  String json; json.reserve(420);
+  String json; json.reserve(720);
   json += "{\"ok\":true";
   json += ",\"refresh_preset\":\"" + String(web_refresh_preset_key(ws.refresh_preset)) + "\"";
   json += ",\"refresh_preset_label\":\"" + String(web_refresh_preset_label(ws.refresh_preset)) + "\"";
@@ -1164,6 +1208,14 @@ static void web_handle_settings_get() {
   json += ",\"show_cover\":"; json += (ws.show_cover ? "true" : "false");
   json += ",\"web_cover_spin\":"; json += (ws.web_cover_spin ? "true" : "false");
   json += ",\"show_wifi_info\":"; json += (ws.show_wifi_info ? "true" : "false");
+  json += ",\"hall_control_enabled\":"; json += (ws.hall_control_enabled ? "true" : "false");
+  json += ",\"solenoid_enabled\":"; json += (ws.solenoid_enabled ? "true" : "false");
+  json += ",\"status_led_enabled\":"; json += (ws.status_led_enabled ? "true" : "false");
+  json += ",\"status_led_brightness\":\"" + String(status_led_brightness_key(ws.status_led_brightness)) + "\"";
+  json += ",\"device_view\":\"" + String(web_device_view_key(ui_get_view())) + "\"";
+  json += ",\"screen_enabled\":"; json += (board_hw_get_backlight() ? "true" : "false");
+  json += ",\"sleep_timer_minutes\":" + String((unsigned int)app_power_sleep_timer_preset_minutes());
+  json += ",\"sleep_timer_remaining_seconds\":" + String((unsigned long)app_power_sleep_timer_remaining_seconds());
   json += "}";
   web_send_no_cache_headers();
   s_server.send(200, "application/json; charset=utf-8", json);
@@ -1190,9 +1242,75 @@ static void web_handle_settings_post() {
   ws.show_cover = web_parse_bool(s_server.arg("show_cover"), ws.show_cover);
   ws.web_cover_spin = web_parse_bool(s_server.arg("web_cover_spin"), ws.web_cover_spin);
   ws.show_wifi_info = web_parse_bool(s_server.arg("show_wifi_info"), ws.show_wifi_info);
+  ws.hall_control_enabled = web_parse_bool(s_server.arg("hall_control_enabled"), ws.hall_control_enabled);
+  ws.solenoid_enabled = web_parse_bool(s_server.arg("solenoid_enabled"), ws.solenoid_enabled);
+  ws.status_led_enabled = web_parse_bool(s_server.arg("status_led_enabled"), ws.status_led_enabled);
+
+  const String led_brightness_arg = web_trim_copy(s_server.arg("status_led_brightness"));
+  if (led_brightness_arg.length()) {
+    String key = led_brightness_arg;
+    key.toLowerCase();
+    if (key == "low") ws.status_led_brightness = StatusLedBrightness::Low;
+    else if (key == "medium") ws.status_led_brightness = StatusLedBrightness::Medium;
+    else if (key == "high") ws.status_led_brightness = StatusLedBrightness::High;
+    else { web_send_json_err("状态灯亮度参数无效", 400); return; }
+  }
+
+  ui_player_view_t requested_view = ui_get_view();
+  const bool has_device_view = s_server.hasArg("device_view") && s_server.arg("device_view").length();
+  if (has_device_view && !web_parse_device_view(s_server.arg("device_view"), &requested_view)) {
+    web_send_json_err("设备显示类型无效", 400);
+    return;
+  }
+
+  const bool has_screen_enabled = s_server.hasArg("screen_enabled");
+  const bool requested_screen_enabled = has_screen_enabled
+      ? web_parse_bool(s_server.arg("screen_enabled"), board_hw_get_backlight())
+      : board_hw_get_backlight();
+
+  uint16_t sleep_timer_minutes = app_power_sleep_timer_preset_minutes();
+  const bool has_sleep_timer = s_server.hasArg("sleep_timer_minutes")
+      && s_server.arg("sleep_timer_minutes").length();
+  if (has_sleep_timer) {
+    const String value = web_trim_copy(s_server.arg("sleep_timer_minutes"));
+    if (value != "0" && value != "15" && value != "30" && value != "60" && value != "90") {
+      web_send_json_err("睡眠关机档位无效", 400);
+      return;
+    }
+    sleep_timer_minutes = static_cast<uint16_t>(value.toInt());
+    if (!web_sleep_timer_minutes_valid(sleep_timer_minutes)) {
+      web_send_json_err("睡眠关机档位无效", 400);
+      return;
+    }
+  }
+
+  // 屏幕控制先执行；硬件失败时不提交其它设置，避免网页显示保存成功但屏幕未切换。
+  if (has_screen_enabled && requested_screen_enabled != board_hw_get_backlight()) {
+    if (!board_hw_set_backlight(requested_screen_enabled)) {
+      web_send_json_err("屏幕开关失败", 500);
+      return;
+    }
+  }
+
+  if (has_device_view && requested_view != ui_get_view()) {
+    ui_set_view(requested_view);
+  }
+  if (has_sleep_timer) {
+    app_power_sleep_timer_set_minutes(sleep_timer_minutes);
+  }
 
   const bool need_immediate_save = web_settings_persistent_core_changed(old_ws, ws);
   web_settings_set(ws);
+
+  if (old_ws.solenoid_enabled && !ws.solenoid_enabled) {
+    (void)board_hw_solenoid_stop();
+  }
+  if (old_ws.status_led_enabled != ws.status_led_enabled) {
+    if (ws.status_led_enabled) ws2812_status_force_refresh();
+    else ws2812_status_off();
+  } else if (old_ws.status_led_brightness != ws.status_led_brightness && ws.status_led_enabled) {
+    ws2812_status_force_refresh();
+  }
 
   if (need_immediate_save) {
     if (!web_settings_save_if_dirty()) { web_send_json_err("保存设置失败", 500); return; }
@@ -1200,8 +1318,7 @@ static void web_handle_settings_post() {
     return;
   }
 
-  // 只修改封面旋转 / 网页封面 / 下一句歌词这类显示开关时，
-  // 立即生效，但不立刻写 NVS；关机前由 app_power 统一保存。
+  // 网页显示开关立即生效，关机前统一写入 NVS。
   web_send_json_ok_simple(web_settings_is_dirty() ? "settings_deferred" : "settings_unchanged");
 }
 
@@ -3164,6 +3281,7 @@ static void web_setup_routes() {
   s_server.on("/radios", HTTP_GET, web_handle_radios_page);
   s_server.on("/netmusic", HTTP_GET, web_handle_netmusic_page);
   s_server.on("/settings", HTTP_GET, web_handle_settings_page);
+  s_server.on("/web-feedback.js", HTTP_GET, web_handle_feedback_js);
   s_server.on("/favicon.ico", HTTP_GET, web_handle_favicon);
   s_server.on("/api/status", HTTP_GET, web_handle_status);
   s_server.on("/api/status/check", HTTP_GET, web_handle_status_check);
