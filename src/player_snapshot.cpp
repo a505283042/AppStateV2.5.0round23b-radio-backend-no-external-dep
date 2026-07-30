@@ -1,6 +1,8 @@
 #include "player_snapshot.h"
 
 #include <Preferences.h>
+#include <nvs.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -23,10 +25,15 @@ namespace {
 
 static const char* kPrefsNs = "playerst";
 static const char* kMetaKey = "meta_v1";
+static const char* kRetentionIndexKey = "index_v1";
 static const uint8_t kLocalSnapshotVersion = 2;
 static const uint8_t kNetSnapshotVersion = 1;
 static const uint8_t kMetaVersion = 1;
+static const uint8_t kRetentionIndexVersion = 1;
 static const uint32_t kDeferredRestoreDelayMs = 450;
+static constexpr uint8_t kMaxLocalSnapshotKeys = 4;
+static constexpr uint8_t kMaxNetSnapshotKeys = 2;
+static constexpr size_t kSnapshotKeyBytes = 16;
 
 struct PlayerPersistSnapshotBlob {
     uint8_t version;
@@ -60,6 +67,22 @@ struct PlayerSnapshotMetaBlob {
     uint8_t last_source;
     uint8_t normal_volume;
     uint8_t ui_view;
+};
+
+struct PlayerSnapshotRetentionIndexBlob {
+    uint8_t version;
+    uint8_t local_count;
+    uint8_t net_count;
+    uint8_t reserved0;
+    char local_keys[kMaxLocalSnapshotKeys][kSnapshotKeyBytes];
+    char net_keys[kMaxNetSnapshotKeys][kSnapshotKeyBytes];
+    uint32_t checksum;
+};
+
+struct PlayerSnapshotNvsStats {
+    size_t local_keys = 0;
+    size_t net_keys = 0;
+    size_t other_keys = 0;
 };
 
 bool s_local_valid = false;
@@ -161,6 +184,341 @@ static void snapshot_net_key(char* out, size_t out_size)
     snprintf(out, out_size, "nas_%08lX", (unsigned long)hash);
 }
 
+static bool snapshot_key_starts_with(const char* key, const char* prefix)
+{
+    if (!key || !prefix) return false;
+    const size_t prefix_len = strlen(prefix);
+    return strncmp(key, prefix, prefix_len) == 0;
+}
+
+static bool snapshot_is_local_key(const char* key)
+{
+    return key && strlen(key) < kSnapshotKeyBytes &&
+           snapshot_key_starts_with(key, "snap_");
+}
+
+static bool snapshot_is_net_key(const char* key)
+{
+    return key && strlen(key) < kSnapshotKeyBytes &&
+           snapshot_key_starts_with(key, "nas_");
+}
+
+static bool snapshot_current_local_key(char* out, size_t out_size)
+{
+    if (!out || out_size == 0) return false;
+    out[0] = '\0';
+    if (!storage_is_ready()) return false;
+    if (!storage_copy_card_snapshot_key(out, out_size)) return false;
+    return snapshot_is_local_key(out);
+}
+
+static uint32_t snapshot_retention_checksum(
+    const PlayerSnapshotRetentionIndexBlob& index)
+{
+    const uint8_t* data = reinterpret_cast<const uint8_t*>(&index);
+    const size_t len = offsetof(PlayerSnapshotRetentionIndexBlob, checksum);
+    uint32_t hash = 2166136261u;
+    for (size_t i = 0; i < len; ++i) {
+        hash ^= data[i];
+        hash *= 16777619u;
+    }
+    return hash;
+}
+
+static void snapshot_retention_reset(PlayerSnapshotRetentionIndexBlob& index)
+{
+    memset(&index, 0, sizeof(index));
+    index.version = kRetentionIndexVersion;
+}
+
+static bool snapshot_key_list_contains(const char keys[][kSnapshotKeyBytes],
+                                       uint8_t count,
+                                       const char* key)
+{
+    if (!key || !*key) return false;
+    for (uint8_t i = 0; i < count; ++i) {
+        if (strncmp(keys[i], key, kSnapshotKeyBytes) == 0) return true;
+    }
+    return false;
+}
+
+static void snapshot_key_list_touch(char keys[][kSnapshotKeyBytes],
+                                    uint8_t& count,
+                                    uint8_t capacity,
+                                    const char* key)
+{
+    if (!key || !*key || capacity == 0) return;
+
+    uint8_t found = count;
+    for (uint8_t i = 0; i < count; ++i) {
+        if (strncmp(keys[i], key, kSnapshotKeyBytes) == 0) {
+            found = i;
+            break;
+        }
+    }
+
+    if (found < count) {
+        for (uint8_t i = found; i > 0; --i) {
+            memcpy(keys[i], keys[i - 1], kSnapshotKeyBytes);
+        }
+    } else {
+        if (count < capacity) ++count;
+        for (uint8_t i = count - 1; i > 0; --i) {
+            memcpy(keys[i], keys[i - 1], kSnapshotKeyBytes);
+        }
+    }
+
+    snprintf(keys[0], kSnapshotKeyBytes, "%s", key);
+}
+
+static bool snapshot_blob_length_valid(Preferences& pref,
+                                       const char* key,
+                                       bool local)
+{
+    if (!key || !pref.isKey(key)) return false;
+    const size_t expected = local
+        ? sizeof(PlayerPersistSnapshotBlob)
+        : sizeof(PlayerNetPersistSnapshotBlob);
+    return pref.getBytesLength(key) == expected;
+}
+
+static bool snapshot_read_retention_index(
+    Preferences& pref,
+    PlayerSnapshotRetentionIndexBlob& index)
+{
+    snapshot_retention_reset(index);
+    if (!pref.isKey(kRetentionIndexKey) ||
+        pref.getBytesLength(kRetentionIndexKey) != sizeof(index)) {
+        return false;
+    }
+
+    PlayerSnapshotRetentionIndexBlob raw{};
+    if (pref.getBytes(kRetentionIndexKey, &raw, sizeof(raw)) != sizeof(raw) ||
+        raw.version != kRetentionIndexVersion ||
+        raw.local_count > kMaxLocalSnapshotKeys ||
+        raw.net_count > kMaxNetSnapshotKeys ||
+        raw.checksum != snapshot_retention_checksum(raw)) {
+        LOGW("[快照] NVS 容量索引无效，将根据现有键重建");
+        return false;
+    }
+
+    // 重新压紧并去重，避免旧固件异常写入的空键占用保留名额。
+    for (uint8_t i = 0; i < raw.local_count; ++i) {
+        if (snapshot_is_local_key(raw.local_keys[i]) &&
+            !snapshot_key_list_contains(index.local_keys,
+                                        index.local_count,
+                                        raw.local_keys[i])) {
+            snprintf(index.local_keys[index.local_count++],
+                     kSnapshotKeyBytes,
+                     "%s",
+                     raw.local_keys[i]);
+        }
+    }
+    for (uint8_t i = 0; i < raw.net_count; ++i) {
+        if (snapshot_is_net_key(raw.net_keys[i]) &&
+            !snapshot_key_list_contains(index.net_keys,
+                                        index.net_count,
+                                        raw.net_keys[i])) {
+            snprintf(index.net_keys[index.net_count++],
+                     kSnapshotKeyBytes,
+                     "%s",
+                     raw.net_keys[i]);
+        }
+    }
+    return true;
+}
+
+static void snapshot_rebuild_retention_index(
+    Preferences& pref,
+    PlayerSnapshotRetentionIndexBlob& index,
+    const char* current_local_key,
+    const char* current_net_key)
+{
+    snapshot_retention_reset(index);
+    if (current_local_key && *current_local_key) {
+        snapshot_key_list_touch(index.local_keys,
+                                index.local_count,
+                                kMaxLocalSnapshotKeys,
+                                current_local_key);
+    }
+    if (current_net_key && *current_net_key) {
+        snapshot_key_list_touch(index.net_keys,
+                                index.net_count,
+                                kMaxNetSnapshotKeys,
+                                current_net_key);
+    }
+
+    // 旧版本没有保存访问时间，首次升级只能保留当前键，
+    // 再按 NVS 枚举顺序补足历史名额；之后由索引精确维护最近使用顺序。
+    nvs_iterator_t it = nvs_entry_find("nvs", kPrefsNs, NVS_TYPE_ANY);
+    while (it != nullptr) {
+        nvs_entry_info_t info{};
+        nvs_entry_info(it, &info);
+        if (snapshot_is_local_key(info.key) &&
+            index.local_count < kMaxLocalSnapshotKeys &&
+            snapshot_blob_length_valid(pref, info.key, true) &&
+            !snapshot_key_list_contains(index.local_keys,
+                                        index.local_count,
+                                        info.key)) {
+            snprintf(index.local_keys[index.local_count++],
+                     kSnapshotKeyBytes,
+                     "%s",
+                     info.key);
+        } else if (snapshot_is_net_key(info.key) &&
+                   index.net_count < kMaxNetSnapshotKeys &&
+                   snapshot_blob_length_valid(pref, info.key, false) &&
+                   !snapshot_key_list_contains(index.net_keys,
+                                               index.net_count,
+                                               info.key)) {
+            snprintf(index.net_keys[index.net_count++],
+                     kSnapshotKeyBytes,
+                     "%s",
+                     info.key);
+        }
+        it = nvs_entry_next(it);
+    }
+    if (it != nullptr) nvs_release_iterator(it);
+}
+
+static bool snapshot_retention_keeps_key(
+    const PlayerSnapshotRetentionIndexBlob& index,
+    const char* key)
+{
+    if (snapshot_is_local_key(key)) {
+        return snapshot_key_list_contains(index.local_keys,
+                                          index.local_count,
+                                          key);
+    }
+    if (snapshot_is_net_key(key)) {
+        return snapshot_key_list_contains(index.net_keys,
+                                          index.net_count,
+                                          key);
+    }
+    return true;
+}
+
+static bool snapshot_find_stale_key(
+    const PlayerSnapshotRetentionIndexBlob& index,
+    char* out_key,
+    size_t out_size)
+{
+    if (!out_key || out_size == 0) return false;
+    out_key[0] = '\0';
+
+    nvs_iterator_t it = nvs_entry_find("nvs", kPrefsNs, NVS_TYPE_ANY);
+    while (it != nullptr) {
+        nvs_entry_info_t info{};
+        nvs_entry_info(it, &info);
+        if ((snapshot_is_local_key(info.key) || snapshot_is_net_key(info.key)) &&
+            !snapshot_retention_keeps_key(index, info.key)) {
+            snprintf(out_key, out_size, "%s", info.key);
+            nvs_release_iterator(it);
+            return true;
+        }
+        it = nvs_entry_next(it);
+    }
+    if (it != nullptr) nvs_release_iterator(it);
+    return false;
+}
+
+static size_t snapshot_prune_stale_keys(
+    Preferences& pref,
+    const PlayerSnapshotRetentionIndexBlob& index)
+{
+    size_t removed = 0;
+    while (true) {
+        char stale_key[kSnapshotKeyBytes] = {};
+        if (!snapshot_find_stale_key(index,
+                                     stale_key,
+                                     sizeof(stale_key))) {
+            break;
+        }
+        if (!pref.remove(stale_key)) {
+            LOGW("[快照] 删除历史快照失败：key=%s", stale_key);
+            break;
+        }
+        ++removed;
+        LOGI("[快照] 已清理历史快照：key=%s", stale_key);
+    }
+    return removed;
+}
+
+static PlayerSnapshotNvsStats snapshot_collect_namespace_stats()
+{
+    PlayerSnapshotNvsStats result{};
+    nvs_iterator_t it = nvs_entry_find("nvs", kPrefsNs, NVS_TYPE_ANY);
+    while (it != nullptr) {
+        nvs_entry_info_t info{};
+        nvs_entry_info(it, &info);
+        if (snapshot_is_local_key(info.key)) {
+            ++result.local_keys;
+        } else if (snapshot_is_net_key(info.key)) {
+            ++result.net_keys;
+        } else {
+            ++result.other_keys;
+        }
+        it = nvs_entry_next(it);
+    }
+    if (it != nullptr) nvs_release_iterator(it);
+    return result;
+}
+
+static void snapshot_log_nvs_stats(const char* stage)
+{
+    nvs_stats_t stats{};
+    const esp_err_t err = nvs_get_stats("nvs", &stats);
+    const PlayerSnapshotNvsStats ns = snapshot_collect_namespace_stats();
+
+    size_t player_entries = 0;
+    nvs_handle_t handle = 0;
+    const esp_err_t open_err = nvs_open(kPrefsNs, NVS_READONLY, &handle);
+    if (open_err == ESP_OK) {
+        (void)nvs_get_used_entry_count(handle, &player_entries);
+        nvs_close(handle);
+    }
+
+    if (err == ESP_OK) {
+        LOGI("[快照] NVS统计(%s)：已用=%u 空闲=%u 总计=%u namespace=%u "
+             "playerst条目=%u 本地键=%u NAS键=%u 其他键=%u",
+             stage ? stage : "-",
+             (unsigned)stats.used_entries,
+             (unsigned)stats.free_entries,
+             (unsigned)stats.total_entries,
+             (unsigned)stats.namespace_count,
+             (unsigned)player_entries,
+             (unsigned)ns.local_keys,
+             (unsigned)ns.net_keys,
+             (unsigned)ns.other_keys);
+    } else {
+        LOGW("[快照] NVS统计失败：阶段=%s 错误=%d playerst条目=%u "
+             "本地键=%u NAS键=%u 其他键=%u",
+             stage ? stage : "-",
+             (int)err,
+             (unsigned)player_entries,
+             (unsigned)ns.local_keys,
+             (unsigned)ns.net_keys,
+             (unsigned)ns.other_keys);
+    }
+}
+
+static bool snapshot_write_retention_index(
+    Preferences& pref,
+    PlayerSnapshotRetentionIndexBlob& index)
+{
+    index.version = kRetentionIndexVersion;
+    index.checksum = snapshot_retention_checksum(index);
+    const size_t written = pref.putBytes(kRetentionIndexKey,
+                                         &index,
+                                         sizeof(index));
+    if (written != sizeof(index)) {
+        LOGE("[快照] 容量索引保存失败：写入=%u 期望=%u",
+             (unsigned)written,
+             (unsigned)sizeof(index));
+        return false;
+    }
+    return true;
+}
+
 static void snapshot_log_local(const char* prefix, const PlayerPersistSnapshot& snap)
 {
     LOGD("[快照] %s 本地：模式=%u 分组=%d 歌曲=%d 路径=%s 暂停=%d",
@@ -186,9 +544,10 @@ static void snapshot_log_net(const char* prefix, const PlayerNetPersistSnapshot&
 
 static bool snapshot_read_local_blob(Preferences& pref, PlayerPersistSnapshot& out)
 {
-    char key[16] = {0};
-    (void)storage_copy_card_snapshot_key(key, sizeof(key));
-    if (!pref.isKey(key)) return false;
+    char key[kSnapshotKeyBytes] = {};
+    if (!snapshot_current_local_key(key, sizeof(key)) || !pref.isKey(key)) {
+        return false;
+    }
 
     const size_t len = pref.getBytesLength(key);
     if (len != sizeof(PlayerPersistSnapshotBlob)) return false;
@@ -271,9 +630,15 @@ static bool snapshot_read_meta_blob(Preferences& pref)
     return true;
 }
 
-static bool snapshot_write_local_blob(Preferences& pref)
+static bool snapshot_write_local_blob(Preferences& pref,
+                                      const char* key)
 {
     if (!s_local_valid) return true;
+    if (!key || !*key) {
+        // TF 卡已经移除时不把上一张卡的状态误写到 snap_default。
+        LOGW("[快照] 本地保存已跳过：当前没有有效 TF 卡身份");
+        return true;
+    }
 
     PlayerPersistSnapshotBlob blob{};
     blob.version = kLocalSnapshotVersion;
@@ -285,8 +650,6 @@ static bool snapshot_write_local_blob(Preferences& pref)
     blob.user_paused = s_local.user_paused ? 1 : 0;
     s_local.track_path.toCharArray(blob.track_path, sizeof(blob.track_path));
 
-    char key[16] = {0};
-    (void)storage_copy_card_snapshot_key(key, sizeof(key));
     const size_t written = pref.putBytes(key, &blob, sizeof(blob));
     if (written != sizeof(blob)) {
         LOGE("[快照] 本地保存失败：key=%s 写入=%u 期望=%u",
@@ -296,9 +659,11 @@ static bool snapshot_write_local_blob(Preferences& pref)
     return true;
 }
 
-static bool snapshot_write_net_blob(Preferences& pref)
+static bool snapshot_write_net_blob(Preferences& pref,
+                                    const char* key)
 {
     if (!s_net_valid) return true;
+    if (!key || !*key) return false;
 
     PlayerNetPersistSnapshotBlob blob{};
     blob.version = kNetSnapshotVersion;
@@ -314,8 +679,6 @@ static bool snapshot_write_net_blob(Preferences& pref)
     s_net.album.toCharArray(blob.album, sizeof(blob.album));
     s_net.format.toCharArray(blob.format, sizeof(blob.format));
 
-    char key[16] = {0};
-    snapshot_net_key(key, sizeof(key));
     const size_t written = pref.putBytes(key, &blob, sizeof(blob));
     if (written != sizeof(blob)) {
         LOGE("[快照] NAS 保存失败：key=%s 写入=%u 期望=%u",
@@ -508,26 +871,121 @@ bool player_snapshot_save_to_nvs()
     (void)player_snapshot_capture_current_source();
     snapshot_capture_global_state();
 
+    char local_key[kSnapshotKeyBytes] = {};
+    const bool have_local_key = snapshot_current_local_key(local_key,
+                                                           sizeof(local_key));
+    char net_key[kSnapshotKeyBytes] = {};
+    snapshot_net_key(net_key, sizeof(net_key));
+
     Preferences pref;
     if (!pref.begin(kPrefsNs, false)) {
         LOGE("[快照] 保存失败：打开 NVS namespace");
         return false;
     }
 
-    const bool local_ok = snapshot_write_local_blob(pref);
-    const bool net_ok = snapshot_write_net_blob(pref);
-    const bool meta_ok = snapshot_write_meta_blob(pref);
-    pref.end();
+    PlayerSnapshotRetentionIndexBlob index{};
+    const bool index_loaded = snapshot_read_retention_index(pref, index);
+    if (!index_loaded) {
+        snapshot_rebuild_retention_index(pref,
+                                         index,
+                                         (s_local_valid && have_local_key)
+                                             ? local_key
+                                             : nullptr,
+                                         s_net_valid ? net_key : nullptr);
+        LOGI("[快照] NVS容量索引已重建：本地=%u/%u NAS=%u/%u",
+             (unsigned)index.local_count,
+             (unsigned)kMaxLocalSnapshotKeys,
+             (unsigned)index.net_count,
+             (unsigned)kMaxNetSnapshotKeys);
+    }
 
-    LOGI("[快照] 双快照保存：本地=%d/%d NAS=%d/%d meta=%d 最后音源=%u 普通音量=%u",
+    if (s_local_valid && have_local_key) {
+        snapshot_key_list_touch(index.local_keys,
+                                index.local_count,
+                                kMaxLocalSnapshotKeys,
+                                local_key);
+    }
+    if (s_net_valid) {
+        snapshot_key_list_touch(index.net_keys,
+                                index.net_count,
+                                kMaxNetSnapshotKeys,
+                                net_key);
+    }
+
+    const size_t removed = snapshot_prune_stale_keys(pref, index);
+    if (removed > 0) {
+        LOGI("[快照] NVS容量治理完成：清理=%u 本地保留=%u NAS保留=%u",
+             (unsigned)removed,
+             (unsigned)index.local_count,
+             (unsigned)index.net_count);
+    }
+
+    bool local_ok = snapshot_write_local_blob(pref,
+                                              have_local_key ? local_key : nullptr);
+    bool net_ok = false;
+    bool meta_ok = false;
+    bool index_ok = false;
+    if (local_ok) net_ok = snapshot_write_net_blob(pref, net_key);
+    if (local_ok && net_ok) meta_ok = snapshot_write_meta_blob(pref);
+    if (local_ok && net_ok && meta_ok) {
+        index_ok = snapshot_write_retention_index(pref, index);
+    }
+
+    bool retried = false;
+    if (!(local_ok && net_ok && meta_ok && index_ok)) {
+        retried = true;
+        LOGW("[快照] 首次保存失败，收缩为当前 TF/NAS 快照后重试一次");
+        snapshot_log_nvs_stats("重试前");
+
+        // 紧急治理只保留当前 TF 卡和当前 NAS，优先确保本次关机状态可保存。
+        snapshot_retention_reset(index);
+        if (s_local_valid && have_local_key) {
+            snapshot_key_list_touch(index.local_keys,
+                                    index.local_count,
+                                    kMaxLocalSnapshotKeys,
+                                    local_key);
+        }
+        if (s_net_valid) {
+            snapshot_key_list_touch(index.net_keys,
+                                    index.net_count,
+                                    kMaxNetSnapshotKeys,
+                                    net_key);
+        }
+        const size_t emergency_removed = snapshot_prune_stale_keys(pref, index);
+        LOGW("[快照] 紧急容量治理：清理=%u 本地保留=%u NAS保留=%u",
+             (unsigned)emergency_removed,
+             (unsigned)index.local_count,
+             (unsigned)index.net_count);
+
+        if (!local_ok) {
+            local_ok = snapshot_write_local_blob(
+                pref, have_local_key ? local_key : nullptr);
+        }
+        if (!net_ok && local_ok) {
+            net_ok = snapshot_write_net_blob(pref, net_key);
+        }
+        if (!meta_ok && local_ok && net_ok) {
+            meta_ok = snapshot_write_meta_blob(pref);
+        }
+        if (!index_ok && local_ok && net_ok && meta_ok) {
+            index_ok = snapshot_write_retention_index(pref, index);
+        }
+    }
+
+    pref.end();
+    snapshot_log_nvs_stats(retried ? "重试后" : "保存后");
+
+    LOGI("[快照] 双快照保存：本地=%d/%d NAS=%d/%d meta=%d index=%d "
+         "最后音源=%u 普通音量=%u",
          s_local_valid ? 1 : 0,
          local_ok ? 1 : 0,
          s_net_valid ? 1 : 0,
          net_ok ? 1 : 0,
          meta_ok ? 1 : 0,
+         index_ok ? 1 : 0,
          (unsigned)s_last_source,
          (unsigned)s_normal_volume);
-    return local_ok && net_ok && meta_ok;
+    return local_ok && net_ok && meta_ok && index_ok;
 }
 
 bool player_snapshot_reload_net_context_for_active_source()
