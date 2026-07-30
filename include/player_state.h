@@ -20,6 +20,12 @@ void player_state_run(void);
 /** 统一播放入口（基于 V3 catalog）。 */
 bool player_play_idx_v3(uint32_t idx, bool verbose = false, bool force_cover = false);
 
+/**
+ * 只准备本地歌曲的播放器 UI，不启动音频。
+ * 用于换卡、快照恢复失败等“有曲库但当前歌曲为空”的正常停播状态。
+ */
+bool player_prepare_local_track_ui(int idx);
+
 /** 当前播放索引（供 NFC admin 等少量编排场景读取）。 */
 int player_state_current_index(void);
 void player_state_set_current_index(int idx);

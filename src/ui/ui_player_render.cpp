@@ -880,7 +880,7 @@ static void draw_nfc_notice_popup_canvas(CanvasT* dst)
   dst->setTextDatum(top_left);
 }
 
-void ui_show_nfc_notice_popup(const char* title, const char* detail)
+void ui_show_notice_popup(const char* title, const char* detail)
 {
   String next_title = title ? String(title) : String("");
   String next_detail = detail ? String(detail) : String("");
@@ -888,7 +888,7 @@ void ui_show_nfc_notice_popup(const char* title, const char* detail)
   next_detail.trim();
 
   if (next_title.isEmpty()) {
-    next_title = "NFC提示";
+    next_title = "提示";
   }
   if (next_detail.isEmpty()) {
     next_detail = "操作不可用";
@@ -902,6 +902,11 @@ void ui_show_nfc_notice_popup(const char* title, const char* detail)
   s_nfc_notice_popup_until_ms = millis() + NFC_NOTICE_POPUP_DURATION_MS;
   ui_unlock();
   ui_request_refresh();
+}
+
+void ui_show_nfc_notice_popup(const char* title, const char* detail)
+{
+  ui_show_notice_popup(title, detail);
 }
 
 void ui_draw_nfc_notice_popup_on_tft_if_visible()

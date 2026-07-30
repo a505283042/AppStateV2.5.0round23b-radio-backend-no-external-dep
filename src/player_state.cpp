@@ -22,6 +22,7 @@
 #include "storage/storage_catalog_v3.h"
 #include "storage/storage_types_v3.h"
 #include "storage/storage.h"
+#include "storage/system_paths.h"
 #include "ui/ui.h"
 #include "utils/log.h"
 
@@ -692,6 +693,118 @@ bool player_play_idx_v3(uint32_t idx, bool verbose, bool force_cover)
     }
 
     return player_play_trackinfo_core(t, (int)idx, (int)total, verbose, force_cover);
+}
+
+static bool player_apply_default_cover_for_idle_ui()
+{
+    uint8_t* buf = nullptr;
+    size_t len = 0;
+    bool is_png = false;
+
+    const bool ok = audio_service_fetch_cover(COVER_FILE_FALLBACK,
+                                              "",
+                                              SystemPaths::kDefaultCover,
+                                              0,
+                                              0,
+                                              &buf,
+                                              &len,
+                                              &is_png,
+                                              true);
+    if (!ok || !buf || len == 0) {
+        if (buf) ui_cover_free_allocated(buf);
+        return false;
+    }
+
+    const bool scaled = ui_cover_scale_from_buffer(buf, len, is_png);
+    ui_cover_free_allocated(buf);
+    return scaled;
+}
+
+bool player_prepare_local_track_ui(int idx)
+{
+    if (!storage_catalog_v3_ready()) {
+        LOGE("[播放器] 准备停播界面失败：V3 曲库未就绪");
+        return false;
+    }
+
+    const int total = (int)storage_catalog_v3_track_count();
+    if (idx < 0 || idx >= total) {
+        LOGE("[播放器] 准备停播界面失败：索引越界 idx=%d total=%d", idx, total);
+        return false;
+    }
+
+    TrackInfo t;
+    if (!storage_catalog_v3_get_trackinfo((uint32_t)idx, t, "/Music")) {
+        LOGE("[播放器] 准备停播界面失败：展开歌曲信息失败 idx=%d", idx);
+        return false;
+    }
+
+    player_assets_init_once();
+    player_control_init_once();
+    player_recover_init_once();
+    player_binding_init_once();
+
+    // 这里只预选歌曲并恢复播放器页面，不启动音频。
+    player_control_mark_user_paused();
+    s_cur = idx;
+    player_source_set_local_track(idx);
+
+    (void)player_playlist_align_group_context_for_track(idx, true);
+    player_playlist_update_for_current_track(idx, true);
+
+    ui_set_now_playing(t.title.c_str(), t.artist.c_str());
+    ui_set_album(t.album);
+    ui_set_play_mode(app_play_mode_get());
+    audio_output_route_sync_ui_volume();
+
+    const PlayerPlaylistDisplayInfo display =
+        player_playlist_get_display_info(idx, total);
+    ui_set_track_pos(display.display_pos, display.display_total);
+
+    g_lyricsDisplay.clear();
+    player_assets_invalidate_requests();
+
+    const bool cover_cache_hit = ui_cover_apply_cached(idx);
+    if (cover_cache_hit) {
+        s_cover_idx = idx;
+    } else {
+        s_cover_idx = -1;
+        (void)player_apply_default_cover_for_idle_ui();
+    }
+
+    PlayerDeferredAssetJob asset_job{};
+    const bool need_decode_cover = !cover_cache_hit;
+    const bool has_deferred_assets = player_assets_prepare_deferred_request(
+        t,
+        idx,
+        false,
+        t.lrc_path.length() > 0,
+        need_decode_cover,
+        asset_job);
+
+    const bool allow_next_prefetch = total > 1;
+    asset_job.need_total = false;
+    asset_job.need_lyrics = t.lrc_path.length() > 0;
+    asset_job.need_cover = need_decode_cover;
+    asset_job.suppress_next_prefetch = !allow_next_prefetch;
+
+    if (has_deferred_assets) {
+        player_assets_schedule(asset_job);
+    } else if (allow_next_prefetch) {
+        player_assets_reset_job(asset_job);
+        asset_job.track_idx = idx;
+        asset_job.need_total = false;
+        asset_job.need_lyrics = false;
+        asset_job.need_cover = false;
+        asset_job.suppress_next_prefetch = false;
+        player_assets_schedule(asset_job);
+    }
+
+    ui_request_refresh_now();
+    LOGI("[播放器] 已预选歌曲并进入停播界面：索引=%d 标题=%s",
+         idx,
+         t.title.c_str());
+    return true;
 }
 
 void player_state_run(void)

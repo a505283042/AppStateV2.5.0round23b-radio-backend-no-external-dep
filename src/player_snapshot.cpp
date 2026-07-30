@@ -8,9 +8,7 @@
 #include "audio/audio.h"
 #include "audio/audio_output_route.h"
 #include "audio/audio_service.h"
-#include "lyrics/lyrics.h"
 #include "net_music/net_music_catalog.h"
-#include "player_assets.h"
 #include "player_control.h"
 #include "player_playlist.h"
 #include "player_recover.h"
@@ -18,7 +16,6 @@
 #include "player_state.h"
 #include "storage/storage.h"
 #include "storage/storage_catalog_v3.h"
-#include "storage/system_paths.h"
 #include "ui/ui.h"
 #include "utils/log.h"
 
@@ -441,29 +438,6 @@ static void snapshot_apply_global_state()
     }
 }
 
-static bool snapshot_apply_default_cover()
-{
-    uint8_t* buf = nullptr;
-    size_t len = 0;
-    bool is_png = false;
-    const bool ok = audio_service_fetch_cover(COVER_FILE_FALLBACK,
-                                              "",
-                                              SystemPaths::kDefaultCover,
-                                              0,
-                                              0,
-                                              &buf,
-                                              &len,
-                                              &is_png,
-                                              true);
-    if (!ok || !buf || len == 0) {
-        if (buf) free(buf);
-        return false;
-    }
-    const bool scaled = ui_cover_scale_from_buffer(buf, len, is_png);
-    free(buf);
-    return scaled;
-}
-
 } // namespace
 
 bool player_snapshot_load_pending_from_nvs()
@@ -711,82 +685,11 @@ PlayerSnapshotRestorePollResult player_snapshot_poll_restore()
         return PLAYER_SNAPSHOT_RESTORE_FAILED;
     }
 
-    TrackInfo t;
-    if (!storage_catalog_v3_get_trackinfo((uint32_t)track_idx, t, "/Music")) {
-        LOGE("[快照] 延迟 UI-only 恢复展开歌曲信息失败：索引=%d", track_idx);
+    // 开机恢复只恢复播放器 UI，不启动音频。
+    if (!player_prepare_local_track_ui(track_idx)) {
+        LOGE("[快照] 延迟 UI-only 恢复失败：索引=%d", track_idx);
         return PLAYER_SNAPSHOT_RESTORE_FAILED;
     }
-
-    // 开机恢复只恢复 UI，不启动音频。
-    player_control_mark_user_paused();
-    player_state_set_current_index(track_idx);
-    player_source_set_local_track(track_idx);
-
-    (void)player_playlist_align_group_context_for_track(track_idx, true);
-    player_playlist_update_for_current_track(track_idx, true);
-
-    ui_set_now_playing(t.title.c_str(), t.artist.c_str());
-    ui_set_album(t.album);
-    ui_set_play_mode(app_play_mode_get());
-    audio_output_route_sync_ui_volume();
-
-    {
-        const int total = (int)storage_catalog_v3_track_count();
-        int display_pos = track_idx;
-        int display_total = total;
-
-        const play_mode_t mode = app_play_mode_get();
-        if (mode == PLAY_MODE_ARTIST_SEQ || mode == PLAY_MODE_ARTIST_RND ||
-            mode == PLAY_MODE_ALBUM_SEQ || mode == PLAY_MODE_ALBUM_RND) {
-            const PlayerPlaylistDisplayInfo display =
-                player_playlist_get_display_info(track_idx, total);
-            display_total = display.display_total;
-            display_pos = display.display_pos;
-        }
-
-        ui_set_track_pos(display_pos, display_total);
-    }
-
-    g_lyricsDisplay.clear();
-
-    const bool cover_cache_hit = ui_cover_apply_cached(track_idx);
-    if (cover_cache_hit) {
-        ui_request_refresh_now();
-    } else {
-        (void)snapshot_apply_default_cover();
-    }
-
-    PlayerDeferredAssetJob asset_job{};
-    const bool need_decode_cover = !cover_cache_hit;
-
-    const bool has_deferred_assets = player_assets_prepare_deferred_request(
-        t,
-        track_idx,
-        false,
-        t.lrc_path.length() > 0,
-        need_decode_cover,
-        asset_job);
-
-    const bool allow_boot_next_prefetch = storage_catalog_v3_track_count() > 1;
-
-    asset_job.need_total = false;
-    asset_job.need_lyrics = (t.lrc_path.length() > 0);
-    asset_job.need_cover = need_decode_cover;
-    asset_job.suppress_next_prefetch = !allow_boot_next_prefetch;
-
-    if (has_deferred_assets) {
-        player_assets_schedule(asset_job);
-    } else if (allow_boot_next_prefetch) {
-        player_assets_reset_job(asset_job);
-        asset_job.track_idx = track_idx;
-        asset_job.need_total = false;
-        asset_job.need_lyrics = false;
-        asset_job.need_cover = false;
-        asset_job.suppress_next_prefetch = false;
-        player_assets_schedule(asset_job);
-    }
-
-    ui_request_refresh_now();
 
     LOGD("[快照] 延迟本地 UI 恢复完成：模式=%d 分组=%d 歌曲=%d 路径=%s 普通音量=%u 视图=%u",
          (int)app_play_mode_get(),

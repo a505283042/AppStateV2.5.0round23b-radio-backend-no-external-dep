@@ -151,7 +151,9 @@ void ui_hide_seek_preview();
 // 显示 / 隐藏 NFC 绑定类型小弹窗，selected: 0=单曲, 1=歌手, 2=专辑
 void ui_show_nfc_bind_target_popup(uint8_t selected);
 void ui_hide_nfc_bind_target_popup();
-// NFC 操作提示：用于当前播放源不允许绑定等无需展示 UID 的反馈。
+// 播放器通用短时提示，不离开当前播放器页面。
+void ui_show_notice_popup(const char* title, const char* detail);
+// NFC 操作提示：兼容旧调用，内部复用通用短时提示。
 void ui_show_nfc_notice_popup(const char* title, const char* detail);
 // 刷 NFC 卡时显示识别结果弹窗。bound=false 时 bind_type 可传 "未绑定"。
 void ui_show_nfc_scan_popup(const String& uid,

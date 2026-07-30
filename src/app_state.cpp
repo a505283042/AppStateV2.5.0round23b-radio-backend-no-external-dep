@@ -39,6 +39,33 @@ static bool s_low_battery_shutdown_started = false;
 static void app_handle_tf_removed();
 static void app_handle_tf_mounted();
 
+static bool app_prepare_tf_player_ui()
+{
+    if (!storage_catalog_v3_ready() || storage_catalog_v3_track_count() == 0) {
+        ui_show_player_placeholder("没有歌曲", "请检查 /Music 目录");
+        return false;
+    }
+
+    player_playlist_ensure_current();
+    const int first_track = player_playlist_current_track_at(0);
+    if (first_track < 0) {
+        LOGE("[应用] TF 卡挂载后播放列表为空，无法进入播放器界面");
+        ui_show_player_placeholder("播放列表加载失败", "请重试或重扫曲库");
+        return false;
+    }
+
+    // 换卡后只预选当前播放列表第一首，不自动播放。
+    player_control_mark_manual_stop();
+    if (!player_prepare_local_track_ui(first_track)) {
+        LOGE("[应用] TF 卡挂载后歌曲界面准备失败：索引=%d", first_track);
+        ui_show_player_placeholder("歌曲信息加载失败", "请切换歌曲或重扫曲库");
+        return false;
+    }
+
+    LOGI("[应用] TF 卡已就绪：已进入播放器界面，预选索引=%d", first_track);
+    return true;
+}
+
 // 扫描任务入口
 static void app_rescan_task_entry(void* )
 {
@@ -208,7 +235,7 @@ static void app_handle_tf_mounted()
 
     if (!storage_catalog_v3_load_or_rebuild("/Music", SystemPaths::kMusicIndexV3)) {
         LOGE("[应用] 目录 re加载 失败 after TF 已挂载");
-        ui_request_refresh_now();
+        ui_show_player_placeholder("曲库加载失败", "请重插TF卡或重扫曲库");
         return;
     }
 
@@ -237,11 +264,9 @@ static void app_handle_tf_mounted()
         return;
     }
 
-    if (storage_catalog_v3_track_count() > 0) {
-        ui_show_player_placeholder("TF卡已就绪", "按播放键开始");
-    } else {
-        ui_show_player_placeholder("没有歌曲", "请检查 /Music 目录");
-    }
+    // 无快照属于正常状态：直接预选当前播放列表第一首并进入播放器 UI。
+    // 只有曲库、播放列表或歌曲信息真正失败时才显示错误占位页。
+    (void)app_prepare_tf_player_ui();
 }
 
 /* 根据当前应用状态执行相应的状态处理函数 */
@@ -322,10 +347,10 @@ void app_state_update(void)
             return;
         }
 
-        LOGW("[应用] TF 已挂载: snapshot 恢复 失败");
+        LOGW("[应用] TF 已挂载: snapshot 恢复失败，回退到播放列表第一首");
 
-        // 恢复失败时不要自动从第一首播放，只提示用户手动开始。
-        ui_request_refresh_now();
+        // 快照歌曲不存在等恢复失败属于可恢复状态：进入播放器 UI，但不自动播放。
+        (void)app_prepare_tf_player_ui();
         return;
     }
 

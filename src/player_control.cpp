@@ -1540,16 +1540,30 @@ bool player_set_paused(bool paused, PlayerToggleTrigger trigger)
     }
 
     if (control_track_count() <= 0) {
+        ui_show_notice_popup("无法播放", "TF卡中没有可播放歌曲");
         return false;
     }
 
-    const int cur = control_current_track_idx();
+    int cur = control_current_track_idx();
     if (cur < 0) {
-        return false;
+        // 最终兜底：即使其他状态路径漏掉预选，也从当前播放列表选择第一首。
+        player_playlist_ensure_current();
+        cur = player_playlist_current_track_at(0);
+        if (cur < 0) {
+            LOGE("[播放器] 手动起播失败：当前播放列表为空");
+            ui_show_notice_popup("无法播放", "播放列表为空，请重扫曲库");
+            return false;
+        }
+        LOGW("[播放器] 当前歌曲为空，播放键回退到列表第一首：索引=%d", cur);
     }
 
     LOGI("[播放器] 重新启动当前歌曲 #%d", cur);
-    return control_play_track_dispatch(cur, false, true);
+    const bool ok = control_play_track_dispatch(cur, false, true);
+    if (!ok) {
+        LOGE("[播放器] 手动起播失败：索引=%d", cur);
+        ui_show_notice_popup("播放失败", "请切换歌曲或重扫曲库");
+    }
+    return ok;
 }
 
 void player_toggle_play(PlayerToggleTrigger trigger)
