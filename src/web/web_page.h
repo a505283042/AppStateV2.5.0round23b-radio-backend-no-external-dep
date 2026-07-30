@@ -1290,16 +1290,20 @@ static const char WEBCTRL_SETTINGS_HTML[] PROGMEM = R"HTML(
     body{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:#111;color:#eee}
     .wrap{max-width:760px;margin:0 auto;padding:16px}
     .card{background:#1b1b1b;border-radius:16px;padding:16px;margin-bottom:12px;box-shadow:0 4px 18px rgba(0,0,0,.25)}
-    details.card{padding:0;overflow:hidden}
+    details.card{padding:0;overflow:hidden;border:1px solid transparent;transition:border-color .16s ease,box-shadow .16s ease}
     details.card>summary{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:16px;cursor:pointer;font-size:20px;font-weight:800;list-style:none;user-select:none}
     details.card>summary::-webkit-details-marker{display:none}
     details.card>summary::after{content:'›';font-size:28px;line-height:1;color:#aaa;transform:rotate(0deg);transition:transform .16s ease}
-    details.card[open]>summary{border-bottom:1px solid #303030}
-    details.card[open]>summary::after{transform:rotate(90deg)}
+    details.card>summary:hover{background:rgba(47,111,235,.08)}
+    details.card>summary:focus-visible{outline:2px solid #58a6ff;outline-offset:-3px}
+    details.card[open]{border-color:#315f97;box-shadow:0 0 0 1px rgba(47,111,235,.24),0 4px 18px rgba(0,0,0,.25)}
+    details.card[open]>summary{border-bottom:1px solid #315f97;background:linear-gradient(90deg,rgba(47,111,235,.22),rgba(47,111,235,.07));color:#cfe6ff}
+    details.card[open]>summary::after{transform:rotate(90deg);color:#79c0ff}
     .setting-body{padding:16px}
     .row{display:grid;grid-template-columns:1fr auto;gap:12px;align-items:center;margin-bottom:12px}
     label{font-size:15px}
     input[type=number],input[type=text],input[type=password],select{width:180px;padding:10px;border-radius:10px;border:1px solid #444;background:#111;color:#eee;box-sizing:border-box}
+    input[type=checkbox],input[type=radio]{accent-color:#2f6feb}
     input[type=checkbox]{transform:scale(1.2)}
     input[type=range]{width:180px;accent-color:#2f6feb}
     details.card[hidden]{display:none}
@@ -1330,12 +1334,17 @@ static const char WEBCTRL_SETTINGS_HTML[] PROGMEM = R"HTML(
     .config-item-actions-row{display:flex;justify-content:flex-end;gap:6px;flex-wrap:wrap;margin-bottom:12px}
     .config-item-actions-row button{padding:7px 10px;font-size:13px}
     .wifi-list{display:flex;flex-direction:column;gap:10px;margin:0 0 14px}
-    .wifi-item{border:1px solid #343434;border-radius:14px;background:#151515;overflow:hidden}
-    .wifi-item>summary,.radio-item>summary,.nas-item>summary{display:flex;align-items:center;gap:10px;padding:12px;cursor:pointer;list-style:none;user-select:none}
-    .wifi-item>summary::-webkit-details-marker,.radio-item>summary::-webkit-details-marker,.nas-item>summary::-webkit-details-marker{display:none}
-    .wifi-item>summary::after,.radio-item>summary::after,.nas-item>summary::after{content:'›';font-size:24px;line-height:1;color:#aaa;transform:rotate(0deg);transition:transform .16s ease}
-    .wifi-item[open]>summary,.radio-item[open]>summary,.nas-item[open]>summary{border-bottom:1px solid #303030}
-    .wifi-item[open]>summary::after,.radio-item[open]>summary::after,.nas-item[open]>summary::after{transform:rotate(90deg)}
+    .wifi-item{border:1px solid #343434;border-radius:14px;background:#151515;overflow:hidden;transition:border-color .16s ease,box-shadow .16s ease,background .16s ease}
+    .wifi-item>summary,.radio-item>summary,.nas-item>summary,.asset-item>summary{display:flex;align-items:center;gap:10px;padding:12px;cursor:pointer;list-style:none;user-select:none;transition:background .16s ease,color .16s ease}
+    .wifi-item>summary::-webkit-details-marker,.radio-item>summary::-webkit-details-marker,.nas-item>summary::-webkit-details-marker,.asset-item>summary::-webkit-details-marker{display:none}
+    .wifi-item>summary::after,.radio-item>summary::after,.nas-item>summary::after,.asset-item>summary::after{content:'›';font-size:24px;line-height:1;color:#aaa;transform:rotate(0deg);transition:transform .16s ease,color .16s ease}
+    .wifi-item>summary:hover,.radio-item>summary:hover,.nas-item>summary:hover,.asset-item>summary:hover{background:rgba(47,111,235,.08)}
+    .wifi-item>summary:focus-visible,.radio-item>summary:focus-visible,.nas-item>summary:focus-visible,.asset-item>summary:focus-visible{outline:2px solid #58a6ff;outline-offset:-3px}
+    .wifi-item[open],.radio-item[open],.nas-item[open],.asset-item[open]{border-color:#2f6feb;box-shadow:0 0 0 1px rgba(47,111,235,.22)}
+    .wifi-item[open]>summary,.radio-item[open]>summary,.nas-item[open]>summary,.asset-item[open]>summary{border-bottom:1px solid #315f97;background:rgba(47,111,235,.17);color:#cfe6ff}
+    .wifi-item[open]>summary .config-item-name,.radio-item[open]>summary .config-item-name,.nas-item[open]>summary .config-item-name,.asset-item[open]>summary .config-item-name{color:#cfe6ff}
+    .wifi-item[open]>summary::after,.radio-item[open]>summary::after,.nas-item[open]>summary::after,.asset-item[open]>summary::after{transform:rotate(90deg);color:#79c0ff}
+    .wifi-item.is-current:not([open]),.nas-item.is-current:not([open]){border-color:#2f7d50;background:#14221a}
     .wifi-item-body,.radio-item-body,.nas-item-body{padding:12px}
     .wifi-item-title{display:flex;align-items:center;gap:8px;font-weight:800}
     .wifi-item-actions{display:flex;gap:6px;flex-wrap:wrap}
@@ -1349,7 +1358,7 @@ static const char WEBCTRL_SETTINGS_HTML[] PROGMEM = R"HTML(
     .wifi-badge{display:inline-flex;padding:3px 8px;border-radius:999px;background:#175f35;color:#b7f7ce;font-size:12px}
     .wifi-empty{border:1px dashed #444;border-radius:12px;padding:18px;text-align:center;color:#999}
     .radio-list{display:flex;flex-direction:column;gap:10px;margin:0 0 14px}
-    .radio-item{border:1px solid #343434;border-radius:14px;background:#151515;overflow:hidden}
+    .radio-item{border:1px solid #343434;border-radius:14px;background:#151515;overflow:hidden;transition:border-color .16s ease,box-shadow .16s ease,background .16s ease}
     .radio-item-title{font-weight:800}
     .radio-item-actions{display:flex;gap:6px;flex-wrap:wrap}
     .radio-item-actions button{padding:7px 10px;font-size:13px}
@@ -1362,7 +1371,7 @@ static const char WEBCTRL_SETTINGS_HTML[] PROGMEM = R"HTML(
     .radio-upload input[type=file]{max-width:100%;color:#ccc}
     .radio-empty{border:1px dashed #444;border-radius:12px;padding:18px;text-align:center;color:#999}
     .nas-list{display:flex;flex-direction:column;gap:10px;margin:0 0 14px}
-    .nas-item{border:1px solid #343434;border-radius:14px;background:#151515;overflow:hidden}
+    .nas-item{border:1px solid #343434;border-radius:14px;background:#151515;overflow:hidden;transition:border-color .16s ease,box-shadow .16s ease,background .16s ease}
     .nas-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px 12px}
     .nas-field{display:flex;flex-direction:column;gap:6px}
     .nas-field label{font-size:13px;color:#bbb}
@@ -1372,11 +1381,22 @@ static const char WEBCTRL_SETTINGS_HTML[] PROGMEM = R"HTML(
     .nas-active-badge{display:inline-flex;padding:3px 8px;border-radius:999px;background:#1f4e78;color:#c7e5ff;font-size:12px}
     .nas-empty{border:1px dashed #444;border-radius:12px;padding:18px;text-align:center;color:#999}
     .asset-list{display:flex;flex-direction:column;gap:10px}
-    .asset-item{border:1px solid #343434;border-radius:14px;background:#151515;overflow:hidden}
+    .asset-item{border:1px solid #343434;border-radius:14px;background:#151515;overflow:hidden;transition:border-color .16s ease,box-shadow .16s ease,background .16s ease}
     .asset-item-body{padding:14px}
     .asset-status{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px;color:#bbb;font-size:13px}
     .asset-upload{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
     .asset-upload input[type=file]{max-width:100%;color:#ccc}
+    .config-center-list{display:flex;flex-direction:column;gap:10px}
+    details.config-section{border:1px solid #343434;border-radius:14px;background:#151515;overflow:hidden;transition:border-color .16s ease,box-shadow .16s ease}
+    details.config-section>summary{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px;cursor:pointer;font-size:17px;font-weight:800;list-style:none;user-select:none}
+    details.config-section>summary::-webkit-details-marker{display:none}
+    details.config-section>summary::after{content:'›';font-size:24px;line-height:1;color:#aaa;transform:rotate(0deg);transition:transform .16s ease}
+    details.config-section>summary:hover{background:rgba(47,111,235,.08)}
+    details.config-section>summary:focus-visible{outline:2px solid #58a6ff;outline-offset:-3px}
+    details.config-section[open]{border-color:#2f6feb;box-shadow:0 0 0 1px rgba(47,111,235,.2)}
+    details.config-section[open]>summary{border-bottom:1px solid #315f97;background:rgba(47,111,235,.14);color:#b9dcff}
+    details.config-section[open]>summary::after{transform:rotate(90deg);color:#79c0ff}
+    details.config-section>.setting-body{padding:14px}
     @media(max-width:560px){.config-item-meta{display:none}.wifi-grid,.radio-grid,.nas-grid{grid-template-columns:1fr}.radio-url-field,.nas-path-field{grid-column:auto}.row{grid-template-columns:1fr}.row>.status-value,.row>.diag-value,.row>div{text-align:left}.row input[type=number],.row input[type=text],.row input[type=password],.row select{width:100%}}
   </style>
 </head>
@@ -1389,96 +1409,104 @@ static const char WEBCTRL_SETTINGS_HTML[] PROGMEM = R"HTML(
       <h2>网页设置</h2>
     </div>
 
-    <details class="card" id="wifiConfigCard">
-      <summary>Wi-Fi 网络</summary>
+    <details class="card" id="tfConfigCenterCard">
+      <summary>TF卡配置中心</summary>
       <div class="setting-body">
-        <div class="row"><label>当前连接</label><div class="status-value" id="wifiConnectionText">正在读取...</div></div>
-        <div class="row"><label>配置文件</label><div class="status-value" id="wifiConfigPathText">/System/config/wifi.conf</div></div>
-        <div class="row"><label for="wifiHostname">设备主机名</label><input id="wifiHostname" type="text" maxlength="63" autocomplete="off" placeholder="esp32s3-player"></div>
-        <div class="config-list-heading"><span>已有网络</span><span class="config-list-count" id="wifiNetworkCount">0 个</span></div>
-        <div id="wifiNetworkList" class="wifi-list"></div>
-        <div class="actions">
-          <button class="secondary" id="wifiAddBtn" onclick="addWifiNetwork()">添加网络</button>
-          <button class="secondary" id="wifiReloadBtn" onclick="loadWifiConfig(false)">重新读取</button>
-        </div>
-        <div class="actions" style="margin-top:10px">
-          <button id="wifiSaveBtn" onclick="saveWifiConfig(false)">保存配置</button>
-          <button class="warn" id="wifiApplyBtn" onclick="saveWifiConfig(true)">保存并重连</button>
-        </div>
-        <div class="muted" id="wifiConfigMessage" style="margin-top:10px">网页不会读取明文密码；本地播放期间保存会先暂存PSRAM，在下次切歌安全窗口写入TF卡。</div>
-      </div>
-    </details>
-
-
-    <details class="card" id="radioConfigCard">
-      <summary>网络电台配置</summary>
-      <div class="setting-body">
-        <div class="row"><label>配置文件</label><div class="status-value" id="radioConfigPathText">/System/config/radio_list.txt</div></div>
-        <div class="row"><label>台标目录</label><div class="status-value" id="radioAssetDirText">/System/assets/radio</div></div>
-        <div class="config-list-heading"><span>已有电台</span><span class="config-list-count" id="radioConfigCount">0 个</span></div>
-        <div id="radioConfigList" class="radio-list"></div>
-        <div class="actions">
-          <button class="secondary" id="radioAddBtn" onclick="addRadioConfigItem()">添加电台</button>
-          <button class="secondary" id="radioReloadBtn" onclick="loadRadioConfig(false)">重新读取</button>
-          <a class="secondary" href="/radios">打开电台页</a>
-        </div>
-        <div class="actions" style="margin-top:10px">
-          <button id="radioSaveBtn" onclick="saveRadioConfig()">保存电台配置</button>
-        </div>
-        <div class="muted" id="radioConfigMessage" style="margin-top:10px">地址、顺序和台标都先暂存PSRAM；本地播放时在下次切歌安全窗口写入TF卡。</div>
-      </div>
-    </details>
-
-    <details class="card" id="nasConfigCard">
-      <summary>NAS 配置</summary>
-      <div class="setting-body">
-        <div class="row"><label>根地址文件</label><div class="status-value" id="nasBasePathText">/System/config/net_music_base.txt</div></div>
-        <div class="row"><label>曲库源文件</label><div class="status-value" id="nasSourcesPathText">/System/config/net_music_sources.txt</div></div>
-        <div class="row"><label for="nasBaseUrl">NAS HTTP 根地址</label><input id="nasBaseUrl" type="text" maxlength="768" autocomplete="off" placeholder="http://192.168.1.105:8080/music/"></div>
-        <div class="config-list-heading"><span>NAS 曲库源</span><span class="config-list-count" id="nasSourceCount">0 个</span></div>
-        <div id="nasSourceList" class="nas-list"></div>
-        <div class="actions">
-          <button class="secondary" id="nasAddBtn" onclick="addNasSource()">添加曲库源</button>
-          <button class="secondary" id="nasReloadBtn" onclick="loadNasConfig(false)">重新读取</button>
-          <a class="secondary" href="/netmusic">打开NAS页</a>
-        </div>
-        <div class="actions" style="margin-top:10px">
-          <button id="nasSaveBtn" onclick="saveNasConfig(false)">保存配置</button>
-          <button class="warn" id="nasApplyBtn" onclick="saveNasConfig(true)">保存并应用</button>
-        </div>
-        <div class="muted" id="nasConfigMessage" style="margin-top:10px">根地址和曲库源先暂存PSRAM；本地播放时在下次切歌安全窗口写入TF卡。保存并应用会停止正在播放的NAS歌曲，但不会自动下载完整列表。</div>
-      </div>
-    </details>
-
-    <details class="card" id="systemAssetCard">
-      <summary>系统图片</summary>
-      <div class="setting-body">
-        <div class="asset-list">
-          <details class="asset-item" id="defaultCoverAssetItem">
-            <summary><div class="config-item-main"><span class="config-item-title">默认封面</span><span class="config-item-name" id="defaultCoverAssetSummary">正在读取...</span></div><span class="config-item-meta">240×240 方图优先</span></summary>
-            <div class="asset-item-body">
-              <div class="asset-status"><span>路径：</span><span id="defaultCoverAssetPath">/System/assets/default_cover.jpg</span><span id="defaultCoverAssetStatus">未读取</span></div>
-              <div class="asset-upload">
-                <input id="defaultCoverAssetFile" type="file" accept="image/jpeg,.jpg,.jpeg">
-                <button id="defaultCoverAssetUploadBtn" onclick="uploadSystemAsset('default_cover')">上传默认封面</button>
-              </div>
-              <div class="muted" style="margin-top:10px">仅支持完整JPEG，最大400KB。上传后在下一次加载默认封面时生效。</div>
+        <div class="config-center-list">
+        <details class="config-section" id="wifiConfigCard">
+          <summary>Wi-Fi 网络</summary>
+          <div class="setting-body">
+            <div class="row"><label>当前连接</label><div class="status-value" id="wifiConnectionText">正在读取...</div></div>
+            <div class="row"><label>配置文件</label><div class="status-value" id="wifiConfigPathText">/System/config/wifi.conf</div></div>
+            <div class="row"><label for="wifiHostname">设备主机名</label><input id="wifiHostname" type="text" maxlength="63" autocomplete="off" placeholder="esp32s3-player"></div>
+            <div class="config-list-heading"><span>已有网络</span><span class="config-list-count" id="wifiNetworkCount">0 个</span></div>
+            <div id="wifiNetworkList" class="wifi-list"></div>
+            <div class="actions">
+              <button class="secondary" id="wifiAddBtn" onclick="addWifiNetwork()">添加网络</button>
+              <button class="secondary" id="wifiReloadBtn" onclick="loadWifiConfig(false)">重新读取</button>
             </div>
-          </details>
-
-          <details class="asset-item" id="netCoverLoadingAssetItem">
-            <summary><div class="config-item-main"><span class="config-item-title">NAS 加载图</span><span class="config-item-name" id="netCoverLoadingAssetSummary">正在读取...</span></div><span class="config-item-meta">NAS MP3 起播占位图</span></summary>
-            <div class="asset-item-body">
-              <div class="asset-status"><span>路径：</span><span id="netCoverLoadingAssetPath">/System/assets/net_cover_loading.jpg</span><span id="netCoverLoadingAssetStatus">未读取</span></div>
-              <div class="asset-upload">
-                <input id="netCoverLoadingAssetFile" type="file" accept="image/jpeg,.jpg,.jpeg">
-                <button id="netCoverLoadingAssetUploadBtn" onclick="uploadSystemAsset('net_cover_loading')">上传NAS加载图</button>
-              </div>
-              <div class="muted" style="margin-top:10px">仅支持完整JPEG，最大400KB。上传后在下一次播放NAS MP3时生效；NAS FLAC仍按现有逻辑先显示默认封面。</div>
+            <div class="actions" style="margin-top:10px">
+              <button id="wifiSaveBtn" onclick="saveWifiConfig(false)">保存配置</button>
+              <button class="warn" id="wifiApplyBtn" onclick="saveWifiConfig(true)">保存并重连</button>
             </div>
-          </details>
+            <div class="muted" id="wifiConfigMessage" style="margin-top:10px">网页不会读取明文密码；本地播放期间保存会先暂存PSRAM，在下次切歌安全窗口写入TF卡。</div>
+          </div>
+        </details>
+
+
+        <details class="config-section" id="radioConfigCard">
+          <summary>网络电台配置</summary>
+          <div class="setting-body">
+            <div class="row"><label>配置文件</label><div class="status-value" id="radioConfigPathText">/System/config/radio_list.txt</div></div>
+            <div class="row"><label>台标目录</label><div class="status-value" id="radioAssetDirText">/System/assets/radio</div></div>
+            <div class="config-list-heading"><span>已有电台</span><span class="config-list-count" id="radioConfigCount">0 个</span></div>
+            <div id="radioConfigList" class="radio-list"></div>
+            <div class="actions">
+              <button class="secondary" id="radioAddBtn" onclick="addRadioConfigItem()">添加电台</button>
+              <button class="secondary" id="radioReloadBtn" onclick="loadRadioConfig(false)">重新读取</button>
+              <a class="secondary" href="/radios">打开电台页</a>
+            </div>
+            <div class="actions" style="margin-top:10px">
+              <button id="radioSaveBtn" onclick="saveRadioConfig()">保存电台配置</button>
+            </div>
+            <div class="muted" id="radioConfigMessage" style="margin-top:10px">地址、顺序和台标都先暂存PSRAM；本地播放时在下次切歌安全窗口写入TF卡。</div>
+          </div>
+        </details>
+
+        <details class="config-section" id="nasConfigCard">
+          <summary>NAS 配置</summary>
+          <div class="setting-body">
+            <div class="row"><label>根地址文件</label><div class="status-value" id="nasBasePathText">/System/config/net_music_base.txt</div></div>
+            <div class="row"><label>曲库源文件</label><div class="status-value" id="nasSourcesPathText">/System/config/net_music_sources.txt</div></div>
+            <div class="row"><label for="nasBaseUrl">NAS HTTP 根地址</label><input id="nasBaseUrl" type="text" maxlength="768" autocomplete="off" placeholder="http://192.168.1.105:8080/music/"></div>
+            <div class="config-list-heading"><span>NAS 曲库源</span><span class="config-list-count" id="nasSourceCount">0 个</span></div>
+            <div id="nasSourceList" class="nas-list"></div>
+            <div class="actions">
+              <button class="secondary" id="nasAddBtn" onclick="addNasSource()">添加曲库源</button>
+              <button class="secondary" id="nasReloadBtn" onclick="loadNasConfig(false)">重新读取</button>
+              <a class="secondary" href="/netmusic">打开NAS页</a>
+            </div>
+            <div class="actions" style="margin-top:10px">
+              <button id="nasSaveBtn" onclick="saveNasConfig(false)">保存配置</button>
+              <button class="warn" id="nasApplyBtn" onclick="saveNasConfig(true)">保存并应用</button>
+            </div>
+            <div class="muted" id="nasConfigMessage" style="margin-top:10px">根地址和曲库源先暂存PSRAM；本地播放时在下次切歌安全窗口写入TF卡。保存并应用会停止正在播放的NAS歌曲，但不会自动下载完整列表。</div>
+          </div>
+        </details>
+
+        <details class="config-section" id="systemAssetCard">
+          <summary>系统图片</summary>
+          <div class="setting-body">
+            <div class="asset-list">
+              <details class="asset-item" id="defaultCoverAssetItem">
+                <summary><div class="config-item-main"><span class="config-item-title">默认封面</span><span class="config-item-name" id="defaultCoverAssetSummary">正在读取...</span></div><span class="config-item-meta">240×240 方图优先</span></summary>
+                <div class="asset-item-body">
+                  <div class="asset-status"><span>路径：</span><span id="defaultCoverAssetPath">/System/assets/default_cover.jpg</span><span id="defaultCoverAssetStatus">未读取</span></div>
+                  <div class="asset-upload">
+                    <input id="defaultCoverAssetFile" type="file" accept="image/jpeg,.jpg,.jpeg">
+                    <button id="defaultCoverAssetUploadBtn" onclick="uploadSystemAsset('default_cover')">上传默认封面</button>
+                  </div>
+                  <div class="muted" style="margin-top:10px">仅支持完整JPEG，最大400KB。上传后在下一次加载默认封面时生效。</div>
+                </div>
+              </details>
+
+              <details class="asset-item" id="netCoverLoadingAssetItem">
+                <summary><div class="config-item-main"><span class="config-item-title">NAS 加载图</span><span class="config-item-name" id="netCoverLoadingAssetSummary">正在读取...</span></div><span class="config-item-meta">NAS MP3 起播占位图</span></summary>
+                <div class="asset-item-body">
+                  <div class="asset-status"><span>路径：</span><span id="netCoverLoadingAssetPath">/System/assets/net_cover_loading.jpg</span><span id="netCoverLoadingAssetStatus">未读取</span></div>
+                  <div class="asset-upload">
+                    <input id="netCoverLoadingAssetFile" type="file" accept="image/jpeg,.jpg,.jpeg">
+                    <button id="netCoverLoadingAssetUploadBtn" onclick="uploadSystemAsset('net_cover_loading')">上传NAS加载图</button>
+                  </div>
+                  <div class="muted" style="margin-top:10px">仅支持完整JPEG，最大400KB。上传后在下一次播放NAS MP3时生效；NAS FLAC仍按现有逻辑先显示默认封面。</div>
+                </div>
+              </details>
+            </div>
+            <div class="muted" id="systemAssetMessage" style="margin-top:10px">图片先暂存PSRAM；本地播放时在下次切歌安全窗口写入TF卡。</div>
+          </div>
+        </details>
+
         </div>
-        <div class="muted" id="systemAssetMessage" style="margin-top:10px">图片先暂存PSRAM；本地播放时在下次切歌安全窗口写入TF卡。</div>
       </div>
     </details>
 
@@ -1851,6 +1879,7 @@ function renderWifiNetworks(){
   wifiConfigNetworks.forEach((network, index)=>{
     const item = document.createElement('details');
     item.className = 'wifi-item';
+    if(network.active) item.classList.add('is-current');
     item.open = !!network.expanded;
     item.addEventListener('toggle', ()=>{ network.expanded = item.open; });
 
@@ -2510,6 +2539,7 @@ function renderNasSources(){
   nasConfigSources.forEach((model, index)=>{
     const item = document.createElement('details');
     item.className = 'nas-item';
+    if(index === nasConfigActiveIndex) item.classList.add('is-current');
     item.open = !!model.expanded;
     item.addEventListener('toggle', ()=>{ model.expanded = item.open; });
 
@@ -3507,6 +3537,19 @@ async function deleteAlarm(){
     alert('闹钟删除失败');
   }
 }
+
+function openTfConfigSectionFromHash(){
+  const targetId = String(location.hash || '').replace(/^#/, '');
+  if(!['wifiConfigCard','radioConfigCard','nasConfigCard','systemAssetCard'].includes(targetId)) return;
+  const center = document.getElementById('tfConfigCenterCard');
+  const section = document.getElementById(targetId);
+  if(center) center.open = true;
+  if(section) section.open = true;
+  requestAnimationFrame(()=>{ if(section) section.scrollIntoView({block:'start'}); });
+}
+
+openTfConfigSectionFromHash();
+window.addEventListener('hashchange', openTfConfigSectionFromHash);
 
 refreshClockAlarmStatus();
 loadSettings();
