@@ -72,6 +72,14 @@ bool storage_config_read_pending(const char* final_path,
                                  size_t* out_size);
 
 /**
+ * @brief 丢弃指定路径的待写配置。
+ *
+ * 用于多文件配置暂存失败时回滚已经入队的另一部分，避免只落盘半套配置。
+ */
+bool storage_config_discard_pending_path(const char* final_path,
+                                         const char* reason = nullptr);
+
+/**
  * @brief 丢弃全部待写配置。换卡时必须调用，避免旧卡配置写入新卡。
  */
 void storage_config_discard_pending(const char* reason = nullptr);

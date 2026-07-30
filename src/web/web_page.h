@@ -1331,12 +1331,12 @@ static const char WEBCTRL_SETTINGS_HTML[] PROGMEM = R"HTML(
     .config-item-actions-row button{padding:7px 10px;font-size:13px}
     .wifi-list{display:flex;flex-direction:column;gap:10px;margin:0 0 14px}
     .wifi-item{border:1px solid #343434;border-radius:14px;background:#151515;overflow:hidden}
-    .wifi-item>summary,.radio-item>summary{display:flex;align-items:center;gap:10px;padding:12px;cursor:pointer;list-style:none;user-select:none}
-    .wifi-item>summary::-webkit-details-marker,.radio-item>summary::-webkit-details-marker{display:none}
-    .wifi-item>summary::after,.radio-item>summary::after{content:'›';font-size:24px;line-height:1;color:#aaa;transform:rotate(0deg);transition:transform .16s ease}
-    .wifi-item[open]>summary,.radio-item[open]>summary{border-bottom:1px solid #303030}
-    .wifi-item[open]>summary::after,.radio-item[open]>summary::after{transform:rotate(90deg)}
-    .wifi-item-body,.radio-item-body{padding:12px}
+    .wifi-item>summary,.radio-item>summary,.nas-item>summary{display:flex;align-items:center;gap:10px;padding:12px;cursor:pointer;list-style:none;user-select:none}
+    .wifi-item>summary::-webkit-details-marker,.radio-item>summary::-webkit-details-marker,.nas-item>summary::-webkit-details-marker{display:none}
+    .wifi-item>summary::after,.radio-item>summary::after,.nas-item>summary::after{content:'›';font-size:24px;line-height:1;color:#aaa;transform:rotate(0deg);transition:transform .16s ease}
+    .wifi-item[open]>summary,.radio-item[open]>summary,.nas-item[open]>summary{border-bottom:1px solid #303030}
+    .wifi-item[open]>summary::after,.radio-item[open]>summary::after,.nas-item[open]>summary::after{transform:rotate(90deg)}
+    .wifi-item-body,.radio-item-body,.nas-item-body{padding:12px}
     .wifi-item-title{display:flex;align-items:center;gap:8px;font-weight:800}
     .wifi-item-actions{display:flex;gap:6px;flex-wrap:wrap}
     .wifi-item-actions button{padding:7px 10px;font-size:13px}
@@ -1361,7 +1361,17 @@ static const char WEBCTRL_SETTINGS_HTML[] PROGMEM = R"HTML(
     .radio-upload{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px}
     .radio-upload input[type=file]{max-width:100%;color:#ccc}
     .radio-empty{border:1px dashed #444;border-radius:12px;padding:18px;text-align:center;color:#999}
-    @media(max-width:560px){.config-item-meta{display:none}.wifi-grid,.radio-grid{grid-template-columns:1fr}.radio-url-field{grid-column:auto}.row{grid-template-columns:1fr}.row>.status-value,.row>.diag-value,.row>div{text-align:left}.row input[type=number],.row input[type=text],.row input[type=password],.row select{width:100%}}
+    .nas-list{display:flex;flex-direction:column;gap:10px;margin:0 0 14px}
+    .nas-item{border:1px solid #343434;border-radius:14px;background:#151515;overflow:hidden}
+    .nas-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px 12px}
+    .nas-field{display:flex;flex-direction:column;gap:6px}
+    .nas-field label{font-size:13px;color:#bbb}
+    .nas-field input{width:100%}
+    .nas-path-field{grid-column:1 / -1}
+    .nas-active-row{display:flex;align-items:center;gap:8px;margin-top:12px;color:#ddd}
+    .nas-active-badge{display:inline-flex;padding:3px 8px;border-radius:999px;background:#1f4e78;color:#c7e5ff;font-size:12px}
+    .nas-empty{border:1px dashed #444;border-radius:12px;padding:18px;text-align:center;color:#999}
+    @media(max-width:560px){.config-item-meta{display:none}.wifi-grid,.radio-grid,.nas-grid{grid-template-columns:1fr}.radio-url-field,.nas-path-field{grid-column:auto}.row{grid-template-columns:1fr}.row>.status-value,.row>.diag-value,.row>div{text-align:left}.row input[type=number],.row input[type=text],.row input[type=password],.row select{width:100%}}
   </style>
 </head>
 <body>
@@ -1410,6 +1420,27 @@ static const char WEBCTRL_SETTINGS_HTML[] PROGMEM = R"HTML(
           <button id="radioSaveBtn" onclick="saveRadioConfig()">保存电台配置</button>
         </div>
         <div class="muted" id="radioConfigMessage" style="margin-top:10px">地址、顺序和台标都先暂存PSRAM；本地播放时在下次切歌安全窗口写入TF卡。</div>
+      </div>
+    </details>
+
+    <details class="card" id="nasConfigCard">
+      <summary>NAS 配置</summary>
+      <div class="setting-body">
+        <div class="row"><label>根地址文件</label><div class="status-value" id="nasBasePathText">/System/config/net_music_base.txt</div></div>
+        <div class="row"><label>曲库源文件</label><div class="status-value" id="nasSourcesPathText">/System/config/net_music_sources.txt</div></div>
+        <div class="row"><label for="nasBaseUrl">NAS HTTP 根地址</label><input id="nasBaseUrl" type="text" maxlength="768" autocomplete="off" placeholder="http://192.168.1.105:8080/music/"></div>
+        <div class="config-list-heading"><span>NAS 曲库源</span><span class="config-list-count" id="nasSourceCount">0 个</span></div>
+        <div id="nasSourceList" class="nas-list"></div>
+        <div class="actions">
+          <button class="secondary" id="nasAddBtn" onclick="addNasSource()">添加曲库源</button>
+          <button class="secondary" id="nasReloadBtn" onclick="loadNasConfig(false)">重新读取</button>
+          <a class="secondary" href="/netmusic">打开NAS页</a>
+        </div>
+        <div class="actions" style="margin-top:10px">
+          <button id="nasSaveBtn" onclick="saveNasConfig(false)">保存配置</button>
+          <button class="warn" id="nasApplyBtn" onclick="saveNasConfig(true)">保存并应用</button>
+        </div>
+        <div class="muted" id="nasConfigMessage" style="margin-top:10px">根地址和曲库源先暂存PSRAM；本地播放时在下次切歌安全窗口写入TF卡。保存并应用会停止正在播放的NAS歌曲，但不会自动下载完整列表。</div>
       </div>
     </details>
 
@@ -1663,6 +1694,10 @@ let wifiConfigNetworks = [];
 let radioConfigBusy = false;
 let radioConfigMaxItems = 64;
 let radioConfigItems = [];
+let nasConfigBusy = false;
+let nasConfigMaxSources = 8;
+let nasConfigSources = [];
+let nasConfigActiveIndex = 0;
 
 function setWifiConfigBusy(busy){
   wifiConfigBusy = !!busy;
@@ -2317,6 +2352,303 @@ async function saveRadioConfig(){
     alert(`电台配置保存失败：${e.message || '网络错误'}`);
   }finally{
     setRadioConfigBusy(false);
+  }
+}
+
+function setNasConfigBusy(busy){
+  nasConfigBusy = !!busy;
+  ['nasAddBtn','nasReloadBtn','nasSaveBtn','nasApplyBtn'].forEach(id=>{
+    const el = document.getElementById(id);
+    if(el) el.disabled = nasConfigBusy;
+  });
+  const base = document.getElementById('nasBaseUrl');
+  if(base) base.disabled = nasConfigBusy;
+  document.querySelectorAll('#nasSourceList input').forEach(el=>{
+    el.disabled = nasConfigBusy;
+  });
+  document.querySelectorAll('#nasSourceList button').forEach(el=>{
+    el.disabled = nasConfigBusy || el.dataset.edgeDisabled === '1';
+  });
+}
+
+function nasMakeInput(value, placeholder='', maxLength=0){
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.value = value == null ? '' : String(value);
+  input.placeholder = placeholder;
+  input.autocomplete = 'off';
+  if(maxLength > 0) input.maxLength = maxLength;
+  return input;
+}
+
+function nasMakeField(labelText, input, extraClass=''){
+  const box = document.createElement('div');
+  box.className = `nas-field${extraClass ? ` ${extraClass}` : ''}`;
+  const label = document.createElement('label');
+  label.textContent = labelText;
+  box.append(label, input);
+  return box;
+}
+
+function syncNasConfigFromDom(){
+  document.querySelectorAll('#nasSourceList .nas-item').forEach((item, index)=>{
+    const model = nasConfigSources[index];
+    if(!model) return;
+    model.expanded = item.open;
+    model.name = item.querySelector('[data-field="name"]').value;
+    model.relative_path = item.querySelector('[data-field="path"]').value;
+    model.list_name = item.querySelector('[data-field="list"]').value;
+    const active = item.querySelector('[data-field="active"]');
+    if(active && active.checked) nasConfigActiveIndex = index;
+  });
+}
+
+function moveNasSource(index, delta){
+  if(nasConfigBusy) return;
+  syncNasConfigFromDom();
+  const target = index + delta;
+  if(target < 0 || target >= nasConfigSources.length) return;
+  const temp = nasConfigSources[index];
+  nasConfigSources[index] = nasConfigSources[target];
+  nasConfigSources[target] = temp;
+  if(nasConfigActiveIndex === index) nasConfigActiveIndex = target;
+  else if(nasConfigActiveIndex === target) nasConfigActiveIndex = index;
+  renderNasSources();
+}
+
+function removeNasSource(index){
+  if(nasConfigBusy || nasConfigSources.length <= 1){
+    if(nasConfigSources.length <= 1) alert('至少保留一个NAS曲库源');
+    return;
+  }
+  syncNasConfigFromDom();
+  const model = nasConfigSources[index];
+  if(model && model.name && !confirm(`确认删除曲库源“${model.name}”？`)) return;
+  nasConfigSources.splice(index, 1);
+  if(nasConfigActiveIndex === index) nasConfigActiveIndex = 0;
+  else if(nasConfigActiveIndex > index) nasConfigActiveIndex -= 1;
+  renderNasSources();
+}
+
+function addNasSource(){
+  if(nasConfigBusy) return;
+  syncNasConfigFromDom();
+  if(nasConfigSources.length >= nasConfigMaxSources){
+    alert(`最多配置 ${nasConfigMaxSources} 个NAS曲库源`);
+    return;
+  }
+  nasConfigSources.push({
+    name:'',relative_path:'',list_name:'net_music.txt',expanded:true
+  });
+  renderNasSources();
+  const rows = document.querySelectorAll('#nasSourceList .nas-item');
+  const last = rows[rows.length - 1];
+  if(last){
+    const input = last.querySelector('[data-field="name"]');
+    if(input) input.focus();
+  }
+}
+
+function renderNasSources(){
+  const list = document.getElementById('nasSourceList');
+  if(!list) return;
+  list.textContent = '';
+  const count = document.getElementById('nasSourceCount');
+  if(count) count.textContent = `${nasConfigSources.length} 个`;
+
+  if(!nasConfigSources.length){
+    const empty = document.createElement('div');
+    empty.className = 'nas-empty';
+    empty.textContent = '至少需要一个NAS曲库源。';
+    list.appendChild(empty);
+    setNasConfigBusy(nasConfigBusy);
+    return;
+  }
+
+  if(nasConfigActiveIndex < 0 || nasConfigActiveIndex >= nasConfigSources.length){
+    nasConfigActiveIndex = 0;
+  }
+
+  nasConfigSources.forEach((model, index)=>{
+    const item = document.createElement('details');
+    item.className = 'nas-item';
+    item.open = !!model.expanded;
+    item.addEventListener('toggle', ()=>{ model.expanded = item.open; });
+
+    const summary = document.createElement('summary');
+    const main = document.createElement('div');
+    main.className = 'config-item-main';
+    const order = document.createElement('span');
+    order.className = 'config-item-title';
+    order.textContent = `曲库 ${index + 1}`;
+    const summaryName = document.createElement('span');
+    summaryName.className = 'config-item-name';
+    summaryName.textContent = model.name || '未命名曲库';
+    main.append(order, summaryName);
+    if(index === nasConfigActiveIndex){
+      const badge = document.createElement('span');
+      badge.className = 'nas-active-badge';
+      badge.textContent = '当前源';
+      main.appendChild(badge);
+    }
+    const meta = document.createElement('span');
+    meta.className = 'config-item-meta';
+    const updateMeta = ()=>{
+      const folder = (model.relative_path || '').trim() || '根目录';
+      const file = (model.list_name || '').trim() || 'net_music.txt';
+      meta.textContent = `${folder} / ${file}`;
+    };
+    updateMeta();
+    summary.append(main, meta);
+    item.appendChild(summary);
+
+    const body = document.createElement('div');
+    body.className = 'nas-item-body';
+    const actions = document.createElement('div');
+    actions.className = 'config-item-actions-row';
+    const up = document.createElement('button');
+    up.type = 'button'; up.className = 'secondary'; up.textContent = '上移';
+    up.dataset.edgeDisabled = index === 0 ? '1' : '0';
+    up.disabled = index === 0;
+    up.onclick = ()=>moveNasSource(index, -1);
+    const down = document.createElement('button');
+    down.type = 'button'; down.className = 'secondary'; down.textContent = '下移';
+    down.dataset.edgeDisabled = index === nasConfigSources.length - 1 ? '1' : '0';
+    down.disabled = index === nasConfigSources.length - 1;
+    down.onclick = ()=>moveNasSource(index, 1);
+    const remove = document.createElement('button');
+    remove.type = 'button'; remove.className = 'danger'; remove.textContent = '删除';
+    remove.onclick = ()=>removeNasSource(index);
+    actions.append(up, down, remove);
+    body.appendChild(actions);
+
+    const grid = document.createElement('div');
+    grid.className = 'nas-grid';
+    const name = nasMakeInput(model.name, '例如：我喜欢', 96);
+    name.dataset.field = 'name';
+    name.addEventListener('input', ()=>{
+      model.name = name.value;
+      summaryName.textContent = name.value.trim() || '未命名曲库';
+    });
+    grid.appendChild(nasMakeField('曲库名称', name));
+    const listName = nasMakeInput(model.list_name || 'net_music.txt', 'net_music.txt', 192);
+    listName.dataset.field = 'list';
+    listName.addEventListener('input', ()=>{
+      model.list_name = listName.value;
+      updateMeta();
+    });
+    grid.appendChild(nasMakeField('列表文件名', listName));
+    const path = nasMakeInput(model.relative_path, '留空表示NAS根目录', 384);
+    path.dataset.field = 'path';
+    path.addEventListener('input', ()=>{
+      model.relative_path = path.value;
+      updateMeta();
+    });
+    grid.appendChild(nasMakeField('相对目录', path, 'nas-path-field'));
+    body.appendChild(grid);
+
+    const activeRow = document.createElement('label');
+    activeRow.className = 'nas-active-row';
+    const active = document.createElement('input');
+    active.type = 'radio';
+    active.name = 'nasActiveSource';
+    active.dataset.field = 'active';
+    active.checked = index === nasConfigActiveIndex;
+    active.onchange = ()=>{
+      if(active.checked){
+        syncNasConfigFromDom();
+        nasConfigActiveIndex = index;
+        renderNasSources();
+      }
+    };
+    activeRow.append(active, document.createTextNode('设为保存并应用后的当前NAS曲库源'));
+    body.appendChild(activeRow);
+    item.appendChild(body);
+    list.appendChild(item);
+  });
+
+  setNasConfigBusy(nasConfigBusy);
+}
+
+async function loadNasConfig(silent=true){
+  if(nasConfigBusy) return;
+  setNasConfigBusy(true);
+  const message = document.getElementById('nasConfigMessage');
+  try{
+    const r = await fetchWithTimeout('/api/config/nas', {cache:'no-store'}, 7000);
+    const j = await r.json();
+    if(!j || !j.ok) throw new Error((j && (j.error || j.message)) || '读取失败');
+    nasConfigMaxSources = Number(j.max_sources) || 8;
+    nasConfigActiveIndex = Number(j.active_index) || 0;
+    nasConfigSources = (j.sources || []).map(source=>({
+      name:source.name || '',
+      relative_path:source.relative_path || '',
+      list_name:source.list_name || 'net_music.txt',
+      expanded:false
+    }));
+    if(!nasConfigSources.length){
+      nasConfigSources = [{
+        name:'NAS音乐',relative_path:'',list_name:'net_music.txt',expanded:false
+      }];
+      nasConfigActiveIndex = 0;
+    }
+    const base = document.getElementById('nasBaseUrl');
+    if(base) base.value = j.base_url || '';
+    const basePath = document.getElementById('nasBasePathText');
+    if(basePath) basePath.textContent = j.base_path || '/System/config/net_music_base.txt';
+    const sourcesPath = document.getElementById('nasSourcesPathText');
+    if(sourcesPath) sourcesPath.textContent = j.sources_path || '/System/config/net_music_sources.txt';
+    if(message){
+      let baseMessage = '根地址和曲库源可在此管理；已有曲库源默认逐条收起。';
+      if(j.write_pending) baseMessage = '当前显示的是PSRAM待写NAS配置；下次切歌后写入TF卡。';
+      if(j.apply_pending) baseMessage += ' 写入完成后会自动应用。';
+      message.textContent = j.warning ? `${baseMessage} 注意：${j.warning}` : baseMessage;
+    }
+    renderNasSources();
+  }catch(e){
+    if(message) message.textContent = `NAS配置读取失败：${e.message || '网络错误'}`;
+    if(!silent) alert('NAS配置读取失败');
+  }finally{
+    setNasConfigBusy(false);
+  }
+}
+
+async function saveNasConfig(apply){
+  if(nasConfigBusy) return;
+  syncNasConfigFromDom();
+  const base = document.getElementById('nasBaseUrl');
+  const params = new URLSearchParams();
+  params.set('base_url', (base ? base.value : '').trim());
+  params.set('count', String(nasConfigSources.length));
+  params.set('active_index', String(nasConfigActiveIndex));
+  nasConfigSources.forEach((source, index)=>{
+    params.set(`name_${index}`, (source.name || '').trim());
+    params.set(`path_${index}`, (source.relative_path || '').trim());
+    params.set(`list_${index}`, (source.list_name || 'net_music.txt').trim());
+  });
+
+  setNasConfigBusy(true);
+  const message = document.getElementById('nasConfigMessage');
+  try{
+    const endpoint = apply ? '/api/config/nas/apply' : '/api/config/nas/save';
+    const r = await fetchWithTimeout(endpoint, {
+      method:'POST',
+      headers:{'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8'},
+      body:params.toString()
+    }, 12000);
+    const j = await r.json();
+    if(!j || !j.ok){
+      alert((j && j.message) || 'NAS配置保存失败');
+      return;
+    }
+    if(message) message.textContent = j.message || 'NAS配置已保存';
+    alert(j.message || 'NAS配置已保存');
+    setNasConfigBusy(false);
+    await loadNasConfig(true);
+  }catch(e){
+    alert(`NAS配置保存失败：${e.message || '网络错误'}`);
+  }finally{
+    setNasConfigBusy(false);
   }
 }
 
@@ -3037,6 +3369,7 @@ refreshClockAlarmStatus();
 loadSettings();
 loadWifiConfig(true);
 loadRadioConfig(true);
+loadNasConfig(true);
 loadAudioOutputStatus(true);
 refreshMusicScanStatus();
 

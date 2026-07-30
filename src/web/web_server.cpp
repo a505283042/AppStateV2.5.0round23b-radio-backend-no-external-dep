@@ -97,6 +97,24 @@ static constexpr size_t kWebRadioMaxLogoBytes = 192;
 static constexpr size_t kWebRadioConfigMaxBytes = 48 * 1024;
 static constexpr size_t kWebRadioLogoMaxBytes = 1024 * 1024;
 
+struct WebNasConfigSource {
+  String name;
+  String relative_path;
+  String list_name;
+};
+
+static constexpr size_t kWebNasMaxSources = 8;
+static constexpr size_t kWebNasMaxBaseUrlBytes = 768;
+static constexpr size_t kWebNasMaxNameBytes = 96;
+static constexpr size_t kWebNasMaxRelativePathBytes = 384;
+static constexpr size_t kWebNasMaxListNameBytes = 192;
+static constexpr size_t kWebNasBaseConfigMaxBytes = 2048;
+static constexpr size_t kWebNasSourcesConfigMaxBytes = 12 * 1024;
+static constexpr uint8_t kWebNasCommitBaseBit = 0x01;
+static constexpr uint8_t kWebNasCommitSourcesBit = 0x02;
+static constexpr uint8_t kWebNasCommitAllBits =
+    kWebNasCommitBaseBit | kWebNasCommitSourcesBit;
+
 struct WebRadioLogoUploadState {
   uint8_t* data = nullptr;
   size_t size = 0;
@@ -122,6 +140,13 @@ static bool s_ap_mode = false;
 static bool s_wifi_config_apply_pending = false;
 static uint32_t s_wifi_config_apply_at_ms = 0;
 static portMUX_TYPE s_wifi_config_apply_mux = portMUX_INITIALIZER_UNLOCKED;
+static bool s_nas_config_apply_requested = false;
+static bool s_nas_config_apply_pending = false;
+static uint32_t s_nas_config_apply_at_ms = 0;
+static uint8_t s_nas_config_commit_success_mask = 0;
+static uint8_t s_nas_config_requested_source_index = 0;
+static uint16_t s_nas_config_commit_generation = 0;
+static portMUX_TYPE s_nas_config_apply_mux = portMUX_INITIALIZER_UNLOCKED;
 static WebRadioLogoUploadState s_radio_logo_upload{};
 
 static void web_schedule_wifi_config_apply(uint32_t delay_ms)
@@ -1955,6 +1980,898 @@ static void web_handle_radio_config_save()
   json += "\"}";
   web_send_no_cache_headers();
   s_server.send(200, "application/json; charset=utf-8", json);
+}
+
+static bool web_nas_set_error(String* error, const String& message)
+{
+  if (error) *error = message;
+  return false;
+}
+
+static void web_nas_append_warning(String* warning, const String& message)
+{
+  if (!warning || message.isEmpty()) return;
+  if (warning->length()) *warning += "；";
+  *warning += message;
+}
+
+static bool web_nas_text_valid(const String& value,
+                               size_t max_bytes,
+                               bool allow_empty)
+{
+  if ((!allow_empty && value.isEmpty()) || value.length() > max_bytes) {
+    return false;
+  }
+  for (size_t i = 0; i < value.length(); ++i) {
+    const uint8_t ch = static_cast<uint8_t>(value[i]);
+    if (ch == 0 || ch == '\r' || ch == '\n' || ch < 0x20 || ch == '|') {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool web_nas_has_http_scheme(const String& value)
+{
+  if (value.length() < 7) return false;
+  String prefix = value.substring(0, value.length() >= 8 ? 8 : 7);
+  prefix.toLowerCase();
+  return prefix.startsWith("http://") || prefix.startsWith("https://");
+}
+
+static String web_nas_normalize_base_url(const String& raw)
+{
+  String value = web_trim_copy(raw);
+  if (value.length() && !value.endsWith("/")) value += '/';
+  return value;
+}
+
+static String web_nas_normalize_path(const String& raw)
+{
+  String value = web_trim_copy(raw);
+  value.replace('\\', '/');
+  while (value.startsWith("./")) value.remove(0, 2);
+  while (value.startsWith("/")) value.remove(0, 1);
+  while (value.endsWith("/")) value.remove(value.length() - 1);
+  return value;
+}
+
+static bool web_nas_relative_path_safe(const String& value)
+{
+  if (value == ".." || value.startsWith("../") ||
+      value.indexOf("/../") >= 0 || value.endsWith("/..")) {
+    return false;
+  }
+  return true;
+}
+
+static bool web_nas_base_url_valid(const String& value, String* error)
+{
+  if (!web_nas_text_valid(value, kWebNasMaxBaseUrlBytes, false) ||
+      !web_nas_has_http_scheme(value)) {
+    return web_nas_set_error(
+        error,
+        "NAS根地址必须以http://或https://开头，最多768字节");
+  }
+  return true;
+}
+
+static bool web_nas_source_valid(const WebNasConfigSource& source,
+                                 String* error)
+{
+  if (!web_nas_text_valid(source.name, kWebNasMaxNameBytes, false)) {
+    return web_nas_set_error(error,
+                             "曲库名称不能为空，最多96字节且不能包含竖线");
+  }
+  if (!web_nas_text_valid(source.relative_path,
+                          kWebNasMaxRelativePathBytes,
+                          true) ||
+      !web_nas_relative_path_safe(source.relative_path)) {
+    return web_nas_set_error(error,
+                             "相对目录最多384字节，且不能包含..、竖线或换行");
+  }
+  if (!web_nas_text_valid(source.list_name,
+                          kWebNasMaxListNameBytes,
+                          false) ||
+      !web_nas_relative_path_safe(source.list_name)) {
+    return web_nas_set_error(error,
+                             "列表文件名不能为空，最多192字节，且不能包含..、竖线或换行");
+  }
+  return true;
+}
+
+static void web_nas_strip_utf8_bom(String& line)
+{
+  if (line.length() >= 3 &&
+      static_cast<uint8_t>(line[0]) == 0xEF &&
+      static_cast<uint8_t>(line[1]) == 0xBB &&
+      static_cast<uint8_t>(line[2]) == 0xBF) {
+    line.remove(0, 3);
+  }
+}
+
+static bool web_nas_parse_base_line(const String& raw, String& base_url)
+{
+  String line = web_trim_copy(raw);
+  web_nas_strip_utf8_bom(line);
+  line.trim();
+  if (line.isEmpty() || line.startsWith("#") || line.startsWith(";")) {
+    return false;
+  }
+  base_url = web_nas_normalize_base_url(line);
+  return true;
+}
+
+static bool web_nas_parse_source_line(const String& raw,
+                                      WebNasConfigSource& source,
+                                      String* reason)
+{
+  String line = web_trim_copy(raw);
+  web_nas_strip_utf8_bom(line);
+  line.trim();
+  if (line.isEmpty() || line.startsWith("#") || line.startsWith(";")) {
+    return false;
+  }
+
+  const int p1 = line.indexOf('|');
+  const int p2 = p1 >= 0 ? line.indexOf('|', p1 + 1) : -1;
+
+  source = WebNasConfigSource{};
+  if (p1 < 0) {
+    // 兼容旧版单字段：名称和相对目录相同。
+    source.name = line;
+    source.relative_path = line;
+  } else {
+    source.name = web_trim_copy(line.substring(0, p1));
+    source.relative_path = p2 < 0
+        ? web_trim_copy(line.substring(p1 + 1))
+        : web_trim_copy(line.substring(p1 + 1, p2));
+    if (p2 >= 0) {
+      source.list_name = web_trim_copy(line.substring(p2 + 1));
+    }
+  }
+
+  source.relative_path = web_nas_normalize_path(source.relative_path);
+  source.list_name = web_nas_normalize_path(source.list_name);
+  if (source.name.isEmpty()) {
+    source.name = source.relative_path.length()
+        ? source.relative_path
+        : String("NAS音乐");
+  }
+  if (source.list_name.isEmpty()) source.list_name = "net_music.txt";
+
+  String item_error;
+  if (!web_nas_source_valid(source, &item_error)) {
+    if (reason) *reason = item_error;
+    return false;
+  }
+  return true;
+}
+
+static bool web_nas_read_pending_text(const char* path,
+                                      size_t max_bytes,
+                                      String& text)
+{
+  text.remove(0);
+  const size_t pending_size = storage_config_pending_size(path);
+  if (pending_size == 0 || pending_size > max_bytes) return false;
+
+  uint8_t* pending = static_cast<uint8_t*>(heap_caps_malloc(
+      pending_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (!pending) return false;
+
+  size_t copied = 0;
+  const bool read_ok = storage_config_read_pending(path,
+                                                   pending,
+                                                   pending_size,
+                                                   &copied);
+  bool copy_ok = false;
+  if (read_ok && copied == pending_size && text.reserve(copied + 1)) {
+    for (size_t i = 0; i < copied; ++i) text += static_cast<char>(pending[i]);
+    copy_ok = true;
+  }
+  heap_caps_free(pending);
+  return copy_ok;
+}
+
+static bool web_nas_parse_base_text(const String& text,
+                                    String& base_url,
+                                    String* error)
+{
+  base_url.remove(0);
+  size_t start = 0;
+  while (start <= text.length()) {
+    int end = text.indexOf('\n', start);
+    if (end < 0) end = static_cast<int>(text.length());
+    String line = text.substring(start, static_cast<size_t>(end));
+    if (web_nas_parse_base_line(line, base_url)) break;
+    if (static_cast<size_t>(end) >= text.length()) break;
+    start = static_cast<size_t>(end) + 1;
+  }
+
+  if (base_url.isEmpty()) {
+    return web_nas_set_error(error, "NAS根地址配置为空");
+  }
+  return web_nas_base_url_valid(base_url, error);
+}
+
+static bool web_nas_parse_sources_text(
+    const String& text,
+    std::vector<WebNasConfigSource>& sources,
+    String* error,
+    String* warning)
+{
+  sources.clear();
+  size_t skipped = 0;
+  size_t first_skipped_line = 0;
+  String first_reason;
+  size_t start = 0;
+  size_t line_number = 0;
+
+  while (start <= text.length()) {
+    int end = text.indexOf('\n', start);
+    if (end < 0) end = static_cast<int>(text.length());
+    ++line_number;
+    String raw = text.substring(start, static_cast<size_t>(end));
+    String trimmed = web_trim_copy(raw);
+    web_nas_strip_utf8_bom(trimmed);
+    trimmed.trim();
+
+    if (trimmed.length() && !trimmed.startsWith("#") &&
+        !trimmed.startsWith(";")) {
+      WebNasConfigSource source{};
+      String reason;
+      if (web_nas_parse_source_line(raw, source, &reason)) {
+        if (sources.size() >= kWebNasMaxSources) {
+          ++skipped;
+          if (first_skipped_line == 0) {
+            first_skipped_line = line_number;
+            first_reason = "超过最多8个曲库源，后续条目已忽略";
+          }
+        } else {
+          sources.push_back(source);
+        }
+      } else {
+        ++skipped;
+        if (first_skipped_line == 0) {
+          first_skipped_line = line_number;
+          first_reason = reason.length() ? reason : String("格式无效");
+        }
+      }
+    }
+
+    if (static_cast<size_t>(end) >= text.length()) break;
+    start = static_cast<size_t>(end) + 1;
+  }
+
+  if (sources.empty()) {
+    return web_nas_set_error(error, "NAS曲库源配置没有有效条目");
+  }
+  if (skipped > 0 && warning) {
+    *warning = String("已跳过") + String((unsigned)skipped) +
+        "行不兼容曲库源；首个为第" +
+        String((unsigned)first_skipped_line) + "行：" + first_reason;
+  }
+  return true;
+}
+
+static bool web_nas_read_file_text(const char* path,
+                                   size_t max_bytes,
+                                   String& text,
+                                   bool* missing,
+                                   String* error)
+{
+  text.remove(0);
+  if (missing) *missing = false;
+
+  StorageSdLockGuard guard(2500);
+  if (!guard) return web_nas_set_error(error, "等待SD锁超时");
+
+  File32 file = sd.open(path, O_RDONLY);
+  if (!file) {
+    if (missing) *missing = true;
+    return true;
+  }
+
+  const uint64_t size64 = file.fileSize();
+  if (size64 > max_bytes) {
+    file.close();
+    return web_nas_set_error(error, "NAS配置文件过大");
+  }
+
+  const size_t size = static_cast<size_t>(size64);
+  if (!text.reserve(size + 1)) {
+    file.close();
+    return web_nas_set_error(error, "读取NAS配置时内存不足");
+  }
+
+  while (file.available()) {
+    const int value = file.read();
+    if (value < 0) break;
+    text += static_cast<char>(value);
+  }
+  file.close();
+  return true;
+}
+
+static bool web_validate_nas_base_file(File32& file, void*)
+{
+  const uint64_t size64 = file.fileSize();
+  if (size64 == 0 || size64 > kWebNasBaseConfigMaxBytes) return false;
+
+  String text;
+  if (!text.reserve(static_cast<size_t>(size64) + 1)) return false;
+  while (file.available()) {
+    const int value = file.read();
+    if (value < 0) break;
+    text += static_cast<char>(value);
+  }
+  String base_url;
+  return web_nas_parse_base_text(text, base_url, nullptr);
+}
+
+static bool web_validate_nas_sources_file(File32& file, void*)
+{
+  const uint64_t size64 = file.fileSize();
+  if (size64 == 0 || size64 > kWebNasSourcesConfigMaxBytes) return false;
+
+  String text;
+  if (!text.reserve(static_cast<size_t>(size64) + 1)) return false;
+  while (file.available()) {
+    const int value = file.read();
+    if (value < 0) break;
+    text += static_cast<char>(value);
+  }
+  std::vector<WebNasConfigSource> sources;
+  return web_nas_parse_sources_text(text, sources, nullptr, nullptr);
+}
+
+static bool web_load_nas_config(String& base_url,
+                                std::vector<WebNasConfigSource>& sources,
+                                String* error,
+                                String* warning,
+                                bool* base_pending,
+                                bool* sources_pending)
+{
+  base_url.remove(0);
+  sources.clear();
+  if (error) error->remove(0);
+  if (warning) warning->remove(0);
+  if (base_pending) *base_pending = false;
+  if (sources_pending) *sources_pending = false;
+
+  String base_text;
+  const bool have_pending_base = web_nas_read_pending_text(
+      SystemPaths::kNetMusicBase, kWebNasBaseConfigMaxBytes, base_text);
+  if (have_pending_base) {
+    if (base_pending) *base_pending = true;
+  } else {
+    (void)storage_config_recover(SystemPaths::kNetMusicBase,
+                                 web_validate_nas_base_file,
+                                 nullptr,
+                                 2500);
+    bool missing = false;
+    String read_error;
+    if (!web_nas_read_file_text(SystemPaths::kNetMusicBase,
+                                kWebNasBaseConfigMaxBytes,
+                                base_text,
+                                &missing,
+                                &read_error)) {
+      return web_nas_set_error(error, read_error);
+    }
+    if (missing) {
+      web_nas_append_warning(warning, "NAS根地址配置不存在，请填写后保存");
+    }
+  }
+
+  if (base_text.length()) {
+    String parse_error;
+    if (!web_nas_parse_base_text(base_text, base_url, &parse_error)) {
+      return web_nas_set_error(error, parse_error);
+    }
+  }
+
+  String sources_text;
+  const bool have_pending_sources = web_nas_read_pending_text(
+      SystemPaths::kNetMusicSources,
+      kWebNasSourcesConfigMaxBytes,
+      sources_text);
+  if (have_pending_sources) {
+    if (sources_pending) *sources_pending = true;
+  } else {
+    (void)storage_config_recover(SystemPaths::kNetMusicSources,
+                                 web_validate_nas_sources_file,
+                                 nullptr,
+                                 2500);
+    bool missing = false;
+    String read_error;
+    if (!web_nas_read_file_text(SystemPaths::kNetMusicSources,
+                                kWebNasSourcesConfigMaxBytes,
+                                sources_text,
+                                &missing,
+                                &read_error)) {
+      return web_nas_set_error(error, read_error);
+    }
+    if (missing) {
+      web_nas_append_warning(
+          warning,
+          "曲库源配置不存在，当前显示兼容旧版的根目录曲库");
+    }
+  }
+
+  if (sources_text.length()) {
+    String parse_error;
+    String parse_warning;
+    if (!web_nas_parse_sources_text(sources_text,
+                                    sources,
+                                    &parse_error,
+                                    &parse_warning)) {
+      return web_nas_set_error(error, parse_error);
+    }
+    web_nas_append_warning(warning, parse_warning);
+  } else {
+    WebNasConfigSource source{};
+    source.name = "NAS音乐";
+    source.relative_path = "";
+    source.list_name = "net_music.txt";
+    sources.push_back(source);
+  }
+  return true;
+}
+
+static bool web_serialize_nas_base(const String& base_url, String& output)
+{
+  output.remove(0);
+  output.reserve(base_url.length() + 160);
+  output += "# ESP32S3 Player NAS base URL\r\n";
+  output += "# 网页保存时先暂存PSRAM，安全窗口再写入TF卡\r\n";
+  output += base_url;
+  output += "\r\n";
+  return output.length() <= kWebNasBaseConfigMaxBytes;
+}
+
+static bool web_serialize_nas_sources(
+    const std::vector<WebNasConfigSource>& sources,
+    String& output)
+{
+  output.remove(0);
+  output.reserve(180 + sources.size() * 360);
+  output += "# ESP32S3 Player NAS sources\r\n";
+  output += "# 名称|相对目录|列表文件名\r\n";
+  for (const WebNasConfigSource& source : sources) {
+    output += source.name;
+    output += '|';
+    output += source.relative_path;
+    output += '|';
+    output += source.list_name;
+    output += "\r\n";
+  }
+  return output.length() <= kWebNasSourcesConfigMaxBytes;
+}
+
+static String web_nas_arg_name(size_t index, const char* field)
+{
+  char name[40] = {};
+  snprintf(name, sizeof(name), "%s_%u", field, (unsigned)index);
+  return String(name);
+}
+
+static String web_nas_arg(size_t index, const char* field)
+{
+  return s_server.arg(web_nas_arg_name(index, field));
+}
+
+static bool web_parse_nas_save_request(
+    String& base_url,
+    std::vector<WebNasConfigSource>& sources,
+    uint8_t& active_index,
+    String& error)
+{
+  error.remove(0);
+  base_url = web_nas_normalize_base_url(s_server.arg("base_url"));
+  if (!web_nas_base_url_valid(base_url, &error)) return false;
+
+  if (!s_server.hasArg("count")) {
+    error = "缺少NAS曲库源数量";
+    return false;
+  }
+  const int count = s_server.arg("count").toInt();
+  if (count <= 0 || count > static_cast<int>(kWebNasMaxSources)) {
+    error = "NAS曲库源数量必须在1到8之间";
+    return false;
+  }
+
+  const int requested_active = s_server.arg("active_index").toInt();
+  if (requested_active < 0 || requested_active >= count) {
+    error = "当前NAS曲库源索引无效";
+    return false;
+  }
+  active_index = static_cast<uint8_t>(requested_active);
+
+  sources.clear();
+  sources.reserve(static_cast<size_t>(count));
+  for (int i = 0; i < count; ++i) {
+    WebNasConfigSource source{};
+    source.name = web_trim_copy(web_nas_arg(i, "name"));
+    source.relative_path = web_nas_normalize_path(web_nas_arg(i, "path"));
+    source.list_name = web_nas_normalize_path(web_nas_arg(i, "list"));
+    if (source.list_name.isEmpty()) source.list_name = "net_music.txt";
+
+    String source_error;
+    if (!web_nas_source_valid(source, &source_error)) {
+      error = String("第") + String(i + 1) + "个NAS曲库源：" + source_error;
+      return false;
+    }
+    sources.push_back(source);
+  }
+  return true;
+}
+
+static uint16_t web_nas_reset_commit_state(bool apply_after_commit,
+                                           uint8_t requested_source_index)
+{
+  portENTER_CRITICAL(&s_nas_config_apply_mux);
+  ++s_nas_config_commit_generation;
+  if (s_nas_config_commit_generation == 0) {
+    ++s_nas_config_commit_generation;
+  }
+  s_nas_config_apply_requested = apply_after_commit;
+  s_nas_config_apply_pending = false;
+  s_nas_config_apply_at_ms = 0;
+  s_nas_config_commit_success_mask = 0;
+  s_nas_config_requested_source_index = requested_source_index;
+  const uint16_t generation = s_nas_config_commit_generation;
+  portEXIT_CRITICAL(&s_nas_config_apply_mux);
+  return generation;
+}
+
+static void* web_nas_commit_context(uint16_t generation, uint8_t bit)
+{
+  const uintptr_t token =
+      (static_cast<uintptr_t>(generation) << 8) | bit;
+  return reinterpret_cast<void*>(token);
+}
+
+static bool web_nas_apply_is_pending(uint8_t* requested_source_index = nullptr)
+{
+  portENTER_CRITICAL(&s_nas_config_apply_mux);
+  const bool pending = s_nas_config_apply_requested ||
+                       s_nas_config_apply_pending;
+  if (requested_source_index) {
+    *requested_source_index = s_nas_config_requested_source_index;
+  }
+  portEXIT_CRITICAL(&s_nas_config_apply_mux);
+  return pending;
+}
+
+static void web_nas_config_commit_complete(const char* final_path,
+                                           bool success,
+                                           void* context)
+{
+  const uintptr_t token = reinterpret_cast<uintptr_t>(context);
+  const uint8_t bit = static_cast<uint8_t>(token & 0xFFu);
+  const uint16_t generation = static_cast<uint16_t>(token >> 8);
+  if ((bit != kWebNasCommitBaseBit && bit != kWebNasCommitSourcesBit) ||
+      generation == 0) {
+    return;
+  }
+
+  bool current_generation = false;
+  uint16_t current_generation_value = 0;
+  portENTER_CRITICAL(&s_nas_config_apply_mux);
+  current_generation_value = s_nas_config_commit_generation;
+  current_generation = generation == current_generation_value;
+  portEXIT_CRITICAL(&s_nas_config_apply_mux);
+  if (!current_generation) {
+    LOGD("[网页] 忽略旧NAS配置事务回调：世代=%u 当前=%u 路径=%s",
+         (unsigned)generation,
+         (unsigned)current_generation_value,
+         final_path ? final_path : "-");
+    return;
+  }
+
+  if (!success) {
+    portENTER_CRITICAL(&s_nas_config_apply_mux);
+    s_nas_config_commit_success_mask &= static_cast<uint8_t>(~bit);
+    portEXIT_CRITICAL(&s_nas_config_apply_mux);
+    LOGW("[网页] NAS配置本次未完成落盘：%s", final_path);
+    return;
+  }
+
+  bool schedule_apply = false;
+  portENTER_CRITICAL(&s_nas_config_apply_mux);
+  if (generation == s_nas_config_commit_generation) {
+    s_nas_config_commit_success_mask |= bit;
+    if (s_nas_config_commit_success_mask == kWebNasCommitAllBits) {
+      if (s_nas_config_apply_requested) {
+        s_nas_config_apply_pending = true;
+        s_nas_config_apply_at_ms = millis() + 700;
+        schedule_apply = true;
+      }
+      s_nas_config_apply_requested = false;
+    }
+  }
+  portEXIT_CRITICAL(&s_nas_config_apply_mux);
+
+  LOGI("[网页] NAS配置文件已落盘：%s", final_path);
+  if (schedule_apply) {
+    LOGI("[网页] NAS配置完整落盘，已安排延迟应用");
+  }
+}
+
+static void web_apply_saved_nas_config_now()
+{
+  uint8_t requested_index = 0;
+  portENTER_CRITICAL(&s_nas_config_apply_mux);
+  requested_index = s_nas_config_requested_source_index;
+  portEXIT_CRITICAL(&s_nas_config_apply_mux);
+
+  const PlayerSourceState before = player_source_get();
+  if (before.type == PlayerSourceType::NET_TRACK) {
+    player_stop_net_track();
+  }
+
+  net_music_catalog_clear();
+  if (!net_music_catalog_load_base()) {
+    LOGE("[网页] NAS配置应用失败：%s",
+         net_music_catalog_error().c_str());
+    ui_show_notice_popup("NAS配置应用失败", "请检查根地址和曲库源配置");
+    quick_menu_request_refresh();
+    return;
+  }
+
+  const uint8_t count = net_music_catalog_source_count();
+  if (count == 0) {
+    LOGE("[网页] NAS配置应用失败：没有有效曲库源");
+    ui_show_notice_popup("NAS配置应用失败", "没有有效曲库源");
+    quick_menu_request_refresh();
+    return;
+  }
+  if (requested_index >= count) requested_index = 0;
+
+  if (!net_music_catalog_select_source(requested_index)) {
+    LOGE("[网页] NAS配置应用失败：无法选择曲库源=%u",
+         (unsigned)requested_index);
+    ui_show_notice_popup("NAS配置应用失败", "无法选择当前曲库源");
+    quick_menu_request_refresh();
+    return;
+  }
+
+  (void)player_snapshot_reload_net_context_for_active_source();
+  LOGI("[网页] NAS配置已应用：base=%s 源=%u/%u 名称=%s",
+       net_music_catalog_base_url().c_str(),
+       (unsigned)requested_index,
+       (unsigned)count,
+       net_music_catalog_active_source_name().c_str());
+  ui_show_notice_popup("NAS配置已应用", "进入NAS页后重新加载歌曲列表");
+  quick_menu_request_refresh();
+}
+
+static void web_process_pending_nas_config_apply()
+{
+  const uint32_t now = millis();
+  bool due = false;
+
+  portENTER_CRITICAL(&s_nas_config_apply_mux);
+  if (s_nas_config_apply_pending &&
+      static_cast<int32_t>(now - s_nas_config_apply_at_ms) >= 0) {
+    s_nas_config_apply_pending = false;
+    due = true;
+  }
+  portEXIT_CRITICAL(&s_nas_config_apply_mux);
+
+  if (due) web_apply_saved_nas_config_now();
+}
+
+static bool web_stage_nas_config_from_request(bool apply_after_commit,
+                                              String& error,
+                                              bool& deferred)
+{
+  deferred = false;
+  String base_url;
+  std::vector<WebNasConfigSource> sources;
+  uint8_t active_index = 0;
+  if (!web_parse_nas_save_request(base_url,
+                                  sources,
+                                  active_index,
+                                  error)) {
+    return false;
+  }
+
+  String base_serialized;
+  String sources_serialized;
+  if (!web_serialize_nas_base(base_url, base_serialized) ||
+      !web_serialize_nas_sources(sources, sources_serialized)) {
+    error = "NAS配置序列化失败或超过大小限制";
+    return false;
+  }
+
+  const uint16_t generation =
+      web_nas_reset_commit_state(apply_after_commit, active_index);
+
+  // 先暂存根地址，再暂存曲库源；任意一步失败都撤销另一部分，
+  // 避免只留下半套PSRAM待写配置。
+  if (!storage_config_stage_psram(
+          SystemPaths::kNetMusicBase,
+          reinterpret_cast<const uint8_t*>(base_serialized.c_str()),
+          base_serialized.length(),
+          web_validate_nas_base_file,
+          nullptr,
+          web_nas_config_commit_complete,
+          web_nas_commit_context(generation, kWebNasCommitBaseBit))) {
+    error = "NAS根地址暂存PSRAM失败，原配置未改变";
+    (void)web_nas_reset_commit_state(false, 0);
+    return false;
+  }
+
+  if (!storage_config_stage_psram(
+          SystemPaths::kNetMusicSources,
+          reinterpret_cast<const uint8_t*>(sources_serialized.c_str()),
+          sources_serialized.length(),
+          web_validate_nas_sources_file,
+          nullptr,
+          web_nas_config_commit_complete,
+          web_nas_commit_context(generation, kWebNasCommitSourcesBit))) {
+    // 先推进世代，使回滚时触发的旧回调不会污染新的事务状态。
+    (void)web_nas_reset_commit_state(false, 0);
+    (void)storage_config_discard_pending_path(
+        SystemPaths::kNetMusicBase,
+        "NAS曲库源暂存失败，回滚根地址待写项");
+    error = "NAS曲库源暂存PSRAM失败，原配置未改变";
+    return false;
+  }
+
+  const bool local_audio_open =
+      player_source_type_get() == PlayerSourceType::LOCAL_TRACK &&
+      (audio_service_is_playing() || audio_service_is_paused());
+  if (local_audio_open) {
+    deferred = true;
+  } else {
+    (void)storage_config_commit_pending(4000);
+    deferred = storage_config_has_pending_path(SystemPaths::kNetMusicBase) ||
+               storage_config_has_pending_path(SystemPaths::kNetMusicSources);
+  }
+
+  LOGI("[网页] NAS配置已%s：base=%s 源=%u 当前=%u 应用=%d",
+       deferred ? "暂存PSRAM等待安全窗口" : "写入TF卡",
+       base_url.c_str(),
+       (unsigned)sources.size(),
+       (unsigned)active_index,
+       apply_after_commit ? 1 : 0);
+  return true;
+}
+
+static void web_handle_nas_config_get()
+{
+  if (!storage_is_ready()) {
+    web_send_json_err("TF卡未就绪，无法读取NAS配置", 503);
+    return;
+  }
+
+  String base_url;
+  std::vector<WebNasConfigSource> sources;
+  String error;
+  String warning;
+  bool base_pending = false;
+  bool sources_pending = false;
+  const bool ok = web_load_nas_config(base_url,
+                                      sources,
+                                      &error,
+                                      &warning,
+                                      &base_pending,
+                                      &sources_pending);
+
+  uint8_t active_index = net_music_catalog_active_source_index();
+  uint8_t requested_apply_index = active_index;
+  const bool apply_pending = web_nas_apply_is_pending(&requested_apply_index);
+  if (apply_pending) active_index = requested_apply_index;
+  if (active_index >= sources.size()) active_index = 0;
+
+  web_send_no_cache_headers();
+  s_server.sendHeader("Connection", "close");
+  s_server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  s_server.send(200, "application/json; charset=utf-8", "{");
+
+  String head;
+  head.reserve(640);
+  head += "\"ok\":";
+  head += ok ? "true" : "false";
+  head += ",\"configured\":";
+  head += base_url.length() ? "true" : "false";
+  head += ",\"base_path\":\"";
+  head += web_json_escape(String(SystemPaths::kNetMusicBase));
+  head += "\",\"sources_path\":\"";
+  head += web_json_escape(String(SystemPaths::kNetMusicSources));
+  head += "\",\"base_url\":\"";
+  head += web_json_escape(base_url);
+  head += "\",\"base_pending\":";
+  head += base_pending ? "true" : "false";
+  head += ",\"sources_pending\":";
+  head += sources_pending ? "true" : "false";
+  head += ",\"write_pending\":";
+  head += (base_pending || sources_pending) ? "true" : "false";
+  head += ",\"apply_pending\":";
+  head += apply_pending ? "true" : "false";
+  head += ",\"active_index\":";
+  head += String((unsigned)active_index);
+  head += ",\"max_sources\":";
+  head += String((unsigned)kWebNasMaxSources);
+  head += ",\"error\":\"";
+  head += web_json_escape(error);
+  head += "\",\"warning\":\"";
+  head += web_json_escape(warning);
+  head += "\",\"sources\":[";
+  if (!web_send_chunk(head)) return;
+
+  String chunk;
+  chunk.reserve(1200);
+  for (size_t i = 0; i < sources.size(); ++i) {
+    const WebNasConfigSource& source = sources[i];
+    if (i) chunk += ',';
+    chunk += "{\"index\":";
+    chunk += String((unsigned)i);
+    chunk += ",\"name\":\"";
+    chunk += web_json_escape(source.name);
+    chunk += "\",\"relative_path\":\"";
+    chunk += web_json_escape(source.relative_path);
+    chunk += "\",\"list_name\":\"";
+    chunk += web_json_escape(source.list_name);
+    chunk += "\",\"active\":";
+    chunk += (i == active_index) ? "true" : "false";
+    chunk += '}';
+    if (chunk.length() >= 1000 && !web_flush_chunk_buffer(chunk)) return;
+  }
+  if (!web_flush_chunk_buffer(chunk)) return;
+  if (!web_send_chunk("]}")) return;
+  web_end_stream_response();
+}
+
+static void web_handle_nas_config_save_common(bool apply_after_commit)
+{
+  if (!storage_is_ready()) {
+    web_send_json_err("TF卡未就绪，无法保存NAS配置", 503);
+    return;
+  }
+
+  String error;
+  bool deferred = false;
+  if (!web_stage_nas_config_from_request(apply_after_commit,
+                                         error,
+                                         deferred)) {
+    web_send_json_err(error.c_str(), 400);
+    return;
+  }
+
+  String message;
+  if (deferred) {
+    message = apply_after_commit
+        ? "NAS配置已暂存PSRAM，下次切歌后写入TF卡并应用"
+        : "NAS配置已暂存PSRAM，下次切歌后写入TF卡";
+  } else {
+    message = apply_after_commit
+        ? "NAS配置已写入TF卡，即将停止NAS播放并应用新配置"
+        : "NAS配置已写入TF卡；当前运行配置保持不变";
+  }
+
+  String json = "{\"ok\":true,\"state\":\"";
+  json += deferred ? "pending" : "committed";
+  json += "\",\"apply\":";
+  json += apply_after_commit ? "true" : "false";
+  json += ",\"message\":\"";
+  json += web_json_escape(message);
+  json += "\"}";
+  web_send_no_cache_headers();
+  s_server.send(200, "application/json; charset=utf-8", json);
+}
+
+static void web_handle_nas_config_save()
+{
+  web_handle_nas_config_save_common(false);
+}
+
+static void web_handle_nas_config_apply()
+{
+  web_handle_nas_config_save_common(true);
 }
 
 static bool web_validate_radio_logo_bytes(const uint8_t* data,
@@ -5084,6 +6001,9 @@ static void web_setup_routes() {
   s_server.on("/api/config/wifi/apply", HTTP_POST, web_handle_wifi_config_apply);
   s_server.on("/api/config/radios", HTTP_GET, web_handle_radio_config_get);
   s_server.on("/api/config/radios/save", HTTP_POST, web_handle_radio_config_save);
+  s_server.on("/api/config/nas", HTTP_GET, web_handle_nas_config_get);
+  s_server.on("/api/config/nas/save", HTTP_POST, web_handle_nas_config_save);
+  s_server.on("/api/config/nas/apply", HTTP_POST, web_handle_nas_config_apply);
   s_server.on("/api/config/radios/logo",
               HTTP_POST,
               web_handle_radio_logo_upload_complete,
@@ -5367,6 +6287,7 @@ void web_server_poll()
     if (!s_ready) return;
     s_server.handleClient();
     web_process_pending_wifi_config_apply();
+    web_process_pending_nas_config_apply();
 #endif
 }
 

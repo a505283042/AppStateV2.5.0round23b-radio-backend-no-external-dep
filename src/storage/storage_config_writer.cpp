@@ -510,6 +510,37 @@ bool storage_config_read_pending(const char* final_path,
   return true;
 }
 
+bool storage_config_discard_pending_path(const char* final_path,
+                                         const char* reason)
+{
+  if (!final_path || !*final_path) return false;
+
+  PendingConfigWrite* removed = nullptr;
+  {
+    PendingConfigLockGuard guard;
+    if (!guard) return false;
+
+    PendingConfigWrite** link = &s_pending_config_head;
+    while (*link) {
+      if (strcmp((*link)->final_path, final_path) == 0) {
+        removed = *link;
+        *link = removed->next;
+        removed->next = nullptr;
+        break;
+      }
+      link = &((*link)->next);
+    }
+  }
+
+  if (!removed) return false;
+
+  pending_notify_and_free(removed, false);
+  LOGW("[配置文件] 已丢弃待写配置：路径=%s 原因=%s",
+       final_path,
+       reason ? reason : "未指定");
+  return true;
+}
+
 void storage_config_discard_pending(const char* reason)
 {
   PendingConfigWrite* batch = nullptr;
