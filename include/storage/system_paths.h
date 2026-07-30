@@ -15,6 +15,7 @@ static constexpr const char* kNetMusicBase = "/System/config/net_music_base.txt"
 static constexpr const char* kNetMusicSources = "/System/config/net_music_sources.txt";
 static constexpr const char* kNfcMap = "/System/config/nfc_map.txt";
 static constexpr const char* kRadioList = "/System/config/radio_list.txt";
+static constexpr const char* kWifiConfig = "/System/config/wifi.conf";
 
 static constexpr const char* kDefaultCover = "/System/assets/default_cover.jpg";
 static constexpr const char* kNetCoverLoading = "/System/assets/net_cover_loading.jpg";

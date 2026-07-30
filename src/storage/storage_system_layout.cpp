@@ -166,6 +166,7 @@ bool storage_system_layout_prepare()
       {"/System/net_music_sources.txt", SystemPaths::kNetMusicSources},
       {"/System/nfc_map.txt", SystemPaths::kNfcMap},
       {"/System/radio_list.txt", SystemPaths::kRadioList},
+      {"/System/wifi.conf", SystemPaths::kWifiConfig},
       {"/System/default_cover.jpg", SystemPaths::kDefaultCover},
       {"/System/net_cover_loading.jpg", SystemPaths::kNetCoverLoading},
       {"/System/music_index_v3.bin", SystemPaths::kMusicIndexV3},

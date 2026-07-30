@@ -35,7 +35,10 @@
 #include "storage/storage_catalog_v3.h"
 #include "storage/storage_view_v3.h"
 #include "storage/storage_io.h"
+#include "storage/storage.h"
+#include "storage/storage_config_writer.h"
 #include "storage/storage_groups_v3.h"
+#include "storage/system_paths.h"
 #include "ui/ui.h"
 #include "menu/quick_menu.h"
 #include "utils/log.h"
@@ -65,6 +68,11 @@ struct WebWifiNetwork {
   String bssid_text;
 };
 
+static constexpr size_t kWebWifiMaxNetworks = 16;
+static constexpr size_t kWebWifiMaxSsidBytes = 32;
+static constexpr size_t kWebWifiMaxPasswordBytes = 64;
+static constexpr size_t kWebWifiMaxHostnameBytes = 63;
+
 static bool s_wifi_enabled = true;
 
 static WebServer s_server(80);
@@ -74,6 +82,8 @@ static TaskHandle_t s_web_start_task = nullptr;
 static bool s_web_start_in_progress = false;
 static portMUX_TYPE s_web_start_task_mux = portMUX_INITIALIZER_UNLOCKED;
 static bool s_ap_mode = false;
+static bool s_wifi_config_apply_pending = false;
+static uint32_t s_wifi_config_apply_at_ms = 0;
 
 // Web 音量锁由状态页和控制接口共同访问，统一通过短临界区读取和发布。
 struct WebUiControlSnapshot {
@@ -758,42 +768,365 @@ static bool web_require_player_state() {
   return true;
 }
 
-static bool web_load_wifi_config(std::vector<WebWifiNetwork>& nets, String& hostname) {
-  hostname = WEBCTRL_HOSTNAME_DEFAULT;
-  StorageSdLockGuard guard(1200);
-  if (!guard) { LOGW("[网页] 跳过 WiFi 配置读取：获取 SD 锁失败"); return false; }
-  File32 f = sd.open(WEBCTRL_WIFI_CONFIG_PATH, O_RDONLY);
-  if (!f) { LOGW("[网页] 未找到 WiFi 配置：%s", WEBCTRL_WIFI_CONFIG_PATH); return false; }
+static bool web_wifi_set_error(String* error, const char* message)
+{
+  if (error) *error = message ? message : "wifi_config_invalid";
+  return false;
+}
 
-  WebWifiNetwork cur{}; bool in_network = false; bool any = false;
-  while (f.available()) {
-    String line = f.readStringUntil('\n'); line.trim();
-    if (line.isEmpty() || line.startsWith("#") || line.startsWith(";")) continue;
+static bool web_wifi_text_value_valid(const String& value,
+                                      size_t max_bytes,
+                                      bool allow_empty)
+{
+  if ((!allow_empty && value.isEmpty()) || value.length() > max_bytes) {
+    return false;
+  }
+  for (size_t i = 0; i < value.length(); ++i) {
+    const uint8_t ch = static_cast<uint8_t>(value[i]);
+    if (ch == 0 || ch == '\r' || ch == '\n' || ch < 0x20) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool web_wifi_hostname_valid(const String& hostname)
+{
+  if (!web_wifi_text_value_valid(hostname,
+                                 kWebWifiMaxHostnameBytes,
+                                 false)) {
+    return false;
+  }
+  if (hostname[0] == '-' || hostname[hostname.length() - 1] == '-') {
+    return false;
+  }
+  for (size_t i = 0; i < hostname.length(); ++i) {
+    const char ch = hostname[i];
+    const bool alpha_num = (ch >= 'a' && ch <= 'z') ||
+                           (ch >= 'A' && ch <= 'Z') ||
+                           (ch >= '0' && ch <= '9');
+    if (!alpha_num && ch != '-') return false;
+  }
+  return true;
+}
+
+static bool web_wifi_network_valid(const WebWifiNetwork& network,
+                                   String* error)
+{
+  if (!web_wifi_text_value_valid(network.ssid,
+                                 kWebWifiMaxSsidBytes,
+                                 false)) {
+    return web_wifi_set_error(error, "SSID不能为空，且最多32字节");
+  }
+  if (!web_wifi_text_value_valid(network.password,
+                                 kWebWifiMaxPasswordBytes,
+                                 true)) {
+    return web_wifi_set_error(error, "WiFi密码最多64字节，不能包含换行或控制字符");
+  }
+  if (network.channel < 0 || network.channel > 14) {
+    return web_wifi_set_error(error, "WiFi信道必须为0或1到14");
+  }
+  if (network.has_bssid && network.bssid_text.isEmpty()) {
+    return web_wifi_set_error(error, "BSSID格式无效");
+  }
+  return true;
+}
+
+static bool web_wifi_push_network(std::vector<WebWifiNetwork>& nets,
+                                  const WebWifiNetwork& network,
+                                  String* error)
+{
+  if (network.ssid.isEmpty()) return true;
+  if (nets.size() >= kWebWifiMaxNetworks) {
+    return web_wifi_set_error(error, "WiFi配置数量超过上限");
+  }
+  nets.push_back(network);
+  return true;
+}
+
+static bool web_parse_wifi_config_file(File32& file,
+                                       std::vector<WebWifiNetwork>& nets,
+                                       String& hostname,
+                                       String* error)
+{
+  nets.clear();
+  hostname = WEBCTRL_HOSTNAME_DEFAULT;
+  if (error) error->remove(0);
+
+  if (file.fileSize() > 16 * 1024) {
+    return web_wifi_set_error(error, "WiFi配置文件过大");
+  }
+
+  WebWifiNetwork cur{};
+  bool in_network = false;
+  while (file.available()) {
+    String line = file.readStringUntil('\n');
+    if (line.length() > 256) {
+      return web_wifi_set_error(error, "WiFi配置存在过长行");
+    }
+    line.trim();
+    if (line.isEmpty() || line.startsWith("#") || line.startsWith(";")) {
+      continue;
+    }
+
     if (line.startsWith("[")) {
-      if (in_network && cur.ssid.length()) { nets.push_back(cur); any = true; }
+      if (in_network && !web_wifi_push_network(nets, cur, error)) {
+        return false;
+      }
       cur = WebWifiNetwork{};
       in_network = line.equalsIgnoreCase("[network]");
       continue;
     }
-    int eq = line.indexOf('=');
+
+    const int eq = line.indexOf('=');
     if (eq <= 0) continue;
+
     String key = web_trim_copy(line.substring(0, eq));
     String val = web_trim_copy(line.substring(eq + 1));
     key.toLowerCase();
+
     if (!in_network) {
       if (key == "hostname" && val.length()) hostname = val;
       continue;
     }
-    if (key == "ssid") cur.ssid = val;
-    else if (key == "password") cur.password = val;
-    else if (key == "hidden") cur.hidden = web_parse_bool(val, false);
-    else if (key == "channel") { long ch = val.toInt(); if (ch < 0) ch = 0; cur.channel = (int)ch; }
-    else if (key == "bssid") { cur.has_bssid = web_parse_mac(val, cur.bssid); cur.bssid_text = val; }
+
+    if (key == "ssid") {
+      cur.ssid = val;
+    } else if (key == "password") {
+      cur.password = val;
+    } else if (key == "hidden") {
+      cur.hidden = web_parse_bool(val, false);
+    } else if (key == "channel") {
+      long channel = val.toInt();
+      if (channel < 0) channel = 0;
+      cur.channel = static_cast<int>(channel);
+    } else if (key == "bssid") {
+      cur.has_bssid = web_parse_mac(val, cur.bssid);
+      cur.bssid_text = cur.has_bssid ? val : String("");
+    }
   }
-  if (in_network && cur.ssid.length()) { nets.push_back(cur); any = true; }
-  f.close();
-  LOGD("[网页] WiFi 配置已读取：网络数量=%d 主机名=%s", (int)nets.size(), hostname.c_str());
-  return any;
+
+  if (in_network && !web_wifi_push_network(nets, cur, error)) {
+    return false;
+  }
+  if (nets.empty()) {
+    return web_wifi_set_error(error, "WiFi配置中没有可用网络");
+  }
+  return true;
+}
+
+static bool web_validate_wifi_config_file(File32& file, void*)
+{
+  std::vector<WebWifiNetwork> nets;
+  String hostname;
+  String error;
+  return web_parse_wifi_config_file(file, nets, hostname, &error);
+}
+
+static bool web_load_wifi_config(std::vector<WebWifiNetwork>& nets,
+                                 String& hostname,
+                                 String* error = nullptr)
+{
+  (void)storage_config_recover(SystemPaths::kWifiConfig,
+                               web_validate_wifi_config_file,
+                               nullptr,
+                               1200);
+
+  StorageSdLockGuard guard(1200);
+  if (!guard) {
+    LOGW("[网页] 跳过 WiFi 配置读取：获取 SD 锁失败");
+    return web_wifi_set_error(error, "等待TF卡访问超时");
+  }
+
+  File32 file = sd.open(SystemPaths::kWifiConfig, O_RDONLY);
+  if (!file) {
+    LOGW("[网页] 未找到 WiFi 配置：%s", SystemPaths::kWifiConfig);
+    return web_wifi_set_error(error, "WiFi配置文件不存在");
+  }
+
+  const bool ok = web_parse_wifi_config_file(file,
+                                              nets,
+                                              hostname,
+                                              error);
+  file.close();
+  if (!ok) {
+    LOGW("[网页] WiFi 配置读取失败：%s",
+         error && error->length() ? error->c_str() : "格式无效");
+    return false;
+  }
+
+  LOGD("[网页] WiFi 配置已读取：网络数量=%d 主机名=%s",
+       (int)nets.size(),
+       hostname.c_str());
+  return true;
+}
+
+static bool web_wifi_write_text(File32& file, const String& text)
+{
+  if (text.isEmpty()) return true;
+  return file.write(reinterpret_cast<const uint8_t*>(text.c_str()),
+                    text.length()) == text.length();
+}
+
+static String web_wifi_format_bssid(const WebWifiNetwork& network)
+{
+  if (!network.has_bssid) return String("");
+  char text[18] = {};
+  snprintf(text,
+           sizeof(text),
+           "%02X:%02X:%02X:%02X:%02X:%02X",
+           network.bssid[0],
+           network.bssid[1],
+           network.bssid[2],
+           network.bssid[3],
+           network.bssid[4],
+           network.bssid[5]);
+  return String(text);
+}
+
+struct WebWifiConfigWriteContext {
+  const std::vector<WebWifiNetwork>* networks = nullptr;
+  const String* hostname = nullptr;
+};
+
+static bool web_write_wifi_config_file(File32& file, void* context)
+{
+  WebWifiConfigWriteContext* cfg =
+      static_cast<WebWifiConfigWriteContext*>(context);
+  if (!cfg || !cfg->networks || !cfg->hostname) return false;
+
+  if (!web_wifi_write_text(file,
+                           String("# ESP32S3 Player WiFi configuration\r\n") +
+                           "# 由设备网页配置中心原子保存，请勿在写入过程中拔卡\r\n" +
+                           "hostname=" + *cfg->hostname + "\r\n")) {
+    return false;
+  }
+
+  for (const WebWifiNetwork& network : *cfg->networks) {
+    String block;
+    block.reserve(240);
+    block += "\r\n[network]\r\n";
+    block += "ssid=";
+    block += network.ssid;
+    block += "\r\npassword=";
+    block += network.password;
+    block += "\r\nhidden=";
+    block += network.hidden ? "1" : "0";
+    block += "\r\nchannel=";
+    block += String(network.channel);
+    block += "\r\nbssid=";
+    block += web_wifi_format_bssid(network);
+    block += "\r\n";
+    if (!web_wifi_write_text(file, block)) return false;
+  }
+  return true;
+}
+
+static String web_wifi_arg_name(size_t index, const char* field)
+{
+  char name[40] = {};
+  snprintf(name, sizeof(name), "%s_%u", field, (unsigned)index);
+  return String(name);
+}
+
+static String web_wifi_arg(size_t index, const char* field)
+{
+  return s_server.arg(web_wifi_arg_name(index, field));
+}
+
+static bool web_parse_wifi_save_request(std::vector<WebWifiNetwork>& networks,
+                                        String& hostname,
+                                        String& error)
+{
+  networks.clear();
+  error.remove(0);
+
+  hostname = web_trim_copy(s_server.arg("hostname"));
+  if (!web_wifi_hostname_valid(hostname)) {
+    error = "主机名只能包含字母、数字和连字符，长度1到63字节";
+    return false;
+  }
+
+  const int requested_count = s_server.arg("count").toInt();
+  if (requested_count <= 0 ||
+      requested_count > static_cast<int>(kWebWifiMaxNetworks)) {
+    error = "至少保留一个WiFi网络，最多16个";
+    return false;
+  }
+
+  std::vector<WebWifiNetwork> old_networks;
+  String old_hostname;
+  String old_error;
+  (void)web_load_wifi_config(old_networks, old_hostname, &old_error);
+
+  networks.reserve(static_cast<size_t>(requested_count));
+  for (int i = 0; i < requested_count; ++i) {
+    WebWifiNetwork network{};
+    network.ssid = web_trim_copy(web_wifi_arg(i, "ssid"));
+    network.hidden = web_parse_bool(web_wifi_arg(i, "hidden"), false);
+
+    const String channel_text = web_trim_copy(web_wifi_arg(i, "channel"));
+    network.channel = channel_text.length() ? channel_text.toInt() : 0;
+
+    const String bssid_text = web_trim_copy(web_wifi_arg(i, "bssid"));
+    if (bssid_text.length()) {
+      network.has_bssid = web_parse_mac(bssid_text, network.bssid);
+      if (!network.has_bssid) {
+        error = String("第") + String(i + 1) + "个网络的BSSID格式无效";
+        return false;
+      }
+      network.bssid_text = web_wifi_format_bssid(network);
+    }
+
+    const bool keep_password =
+        web_parse_bool(web_wifi_arg(i, "keep_password"), false);
+    const int source_index = web_wifi_arg(i, "source_index").toInt();
+    if (keep_password &&
+        source_index >= 0 &&
+        source_index < static_cast<int>(old_networks.size())) {
+      network.password = old_networks[source_index].password;
+    } else {
+      network.password = s_server.arg(web_wifi_arg_name(i, "password"));
+    }
+
+    String network_error;
+    if (!web_wifi_network_valid(network, &network_error)) {
+      error = String("第") + String(i + 1) + "个网络：" + network_error;
+      return false;
+    }
+
+    networks.push_back(network);
+  }
+
+  return true;
+}
+
+static bool web_save_wifi_config_from_request(String& error)
+{
+  std::vector<WebWifiNetwork> networks;
+  String hostname;
+  if (!web_parse_wifi_save_request(networks, hostname, error)) {
+    return false;
+  }
+
+  WebWifiConfigWriteContext context{};
+  context.networks = &networks;
+  context.hostname = &hostname;
+
+  if (!storage_config_atomic_write(SystemPaths::kWifiConfig,
+                                   web_write_wifi_config_file,
+                                   &context,
+                                   web_validate_wifi_config_file,
+                                   nullptr,
+                                   4000)) {
+    error = "WiFi配置写入TF卡失败，原配置已保留";
+    return false;
+  }
+
+  LOGI("[网页] WiFi配置已保存：网络=%u 主机名=%s",
+       (unsigned)networks.size(),
+       hostname.c_str());
+  return true;
 }
 
 static bool web_try_connect_one(const WebWifiNetwork& n, const String& hostname) {
@@ -855,6 +1188,42 @@ static bool web_start_ap_fallback() {
   s_ap_mode = true;
   LOGI("[网页] AP 已就绪：SSID=%s IP=%s", WEBCTRL_AP_SSID, WiFi.softAPIP().toString().c_str());
   return true;
+}
+
+static void web_apply_saved_wifi_config_now()
+{
+  s_wifi_config_apply_pending = false;
+
+  if (!s_wifi_enabled) {
+    LOGW("[网页] WiFi配置已保存，但WiFi总开关关闭，跳过重连");
+    return;
+  }
+
+  LOGI("[网页] 开始应用网页保存的WiFi配置");
+  web_stop_network_audio_before_wifi_down("apply saved WiFi config");
+
+  WiFi.softAPdisconnect(true);
+  WiFi.disconnect(true, true);
+  delay(120);
+
+  if (web_try_connect_sta_from_config()) {
+    s_ap_mode = false;
+    LOGI("[网页] 新WiFi配置已生效，IP=%s",
+         WiFi.localIP().toString().c_str());
+  } else {
+    LOGW("[网页] 新WiFi配置连接失败，恢复AP兜底模式");
+    (void)web_start_ap_fallback();
+  }
+
+  quick_menu_request_refresh();
+}
+
+static void web_process_pending_wifi_config_apply()
+{
+  if (!s_wifi_config_apply_pending) return;
+  const uint32_t now = millis();
+  if (static_cast<int32_t>(now - s_wifi_config_apply_at_ms) < 0) return;
+  web_apply_saved_wifi_config_now();
 }
 
 static bool web_parse_int_arg(const char* name, int& out) {
@@ -1188,6 +1557,114 @@ static void web_handle_feedback_js() {
   s_server.send_P(200, "application/javascript; charset=utf-8", WEBCTRL_FEEDBACK_JS);
 }
 static void web_handle_favicon() { web_send_no_cache_headers(); s_server.send(404, "text/plain; charset=utf-8", "not_found"); }
+static void web_handle_wifi_config_get()
+{
+  std::vector<WebWifiNetwork> networks;
+  String hostname;
+  String error;
+  const bool configured = web_load_wifi_config(networks, hostname, &error);
+  if (!configured) {
+    networks.clear();
+    hostname = WEBCTRL_HOSTNAME_DEFAULT;
+  }
+
+  const bool connected = WiFi.status() == WL_CONNECTED;
+  const String active_ssid = connected ? WiFi.SSID() : String("");
+
+  String json;
+  json.reserve(640 + networks.size() * 190);
+  json += "{\"ok\":true";
+  json += ",\"path\":\"";
+  json += web_json_escape(SystemPaths::kWifiConfig);
+  json += "\"";
+  json += ",\"configured\":";
+  json += configured ? "true" : "false";
+  json += ",\"error\":\"";
+  json += web_json_escape(error);
+  json += "\"";
+  json += ",\"hostname\":\"";
+  json += web_json_escape(hostname);
+  json += "\"";
+  json += ",\"wifi_enabled\":";
+  json += s_wifi_enabled ? "true" : "false";
+  json += ",\"connected\":";
+  json += connected ? "true" : "false";
+  json += ",\"mode\":\"";
+  json += web_net_mode_cstr();
+  json += "\"";
+  json += ",\"ip\":\"";
+  json += web_json_escape(web_ip_string());
+  json += "\"";
+  json += ",\"active_ssid\":\"";
+  json += web_json_escape(active_ssid);
+  json += "\"";
+  json += ",\"apply_pending\":";
+  json += s_wifi_config_apply_pending ? "true" : "false";
+  json += ",\"max_networks\":";
+  json += String((unsigned)kWebWifiMaxNetworks);
+  json += ",\"networks\":[";
+
+  for (size_t i = 0; i < networks.size(); ++i) {
+    if (i) json += ',';
+    const WebWifiNetwork& network = networks[i];
+    json += "{\"index\":";
+    json += String((unsigned)i);
+    json += ",\"ssid\":\"";
+    json += web_json_escape(network.ssid);
+    json += "\"";
+    json += ",\"has_password\":";
+    json += network.password.length() ? "true" : "false";
+    json += ",\"hidden\":";
+    json += network.hidden ? "true" : "false";
+    json += ",\"channel\":";
+    json += String(network.channel);
+    json += ",\"bssid\":\"";
+    json += web_json_escape(web_wifi_format_bssid(network));
+    json += "\"";
+    json += ",\"active\":";
+    json += (connected && network.ssid == active_ssid) ? "true" : "false";
+    json += '}';
+  }
+  json += "]}";
+
+  web_send_no_cache_headers();
+  s_server.send(200, "application/json; charset=utf-8", json);
+}
+
+static void web_handle_wifi_config_save_common(bool apply_after_save)
+{
+  if (!storage_is_ready()) {
+    web_send_json_err("TF卡未就绪，无法保存WiFi配置", 503);
+    return;
+  }
+
+  String error;
+  if (!web_save_wifi_config_from_request(error)) {
+    web_send_json_err(error.c_str(), 400);
+    return;
+  }
+
+  if (apply_after_save) {
+    // 先让HTTP响应完整发回浏览器，再断开当前网络并应用新配置。
+    s_wifi_config_apply_pending = true;
+    s_wifi_config_apply_at_ms = millis() + 900;
+    web_send_json_ok_simple("WiFi配置已保存，设备即将按新顺序重连");
+    return;
+  }
+
+  web_send_json_ok_simple("WiFi配置已保存，当前连接保持不变");
+}
+
+static void web_handle_wifi_config_save()
+{
+  web_handle_wifi_config_save_common(false);
+}
+
+static void web_handle_wifi_config_apply()
+{
+  web_handle_wifi_config_save_common(true);
+}
+
 static void web_handle_settings_get() {
   const WebRuntimeSettings ws = web_settings_get();
   String json; json.reserve(720);
@@ -3656,6 +4133,9 @@ static void web_setup_routes() {
   s_server.on("/api/album/detail", HTTP_GET, web_handle_album_detail);
   s_server.on("/api/settings", HTTP_GET, web_handle_settings_get);
   s_server.on("/api/settings", HTTP_POST, web_handle_settings_post);
+  s_server.on("/api/config/wifi", HTTP_GET, web_handle_wifi_config_get);
+  s_server.on("/api/config/wifi/save", HTTP_POST, web_handle_wifi_config_save);
+  s_server.on("/api/config/wifi/apply", HTTP_POST, web_handle_wifi_config_apply);
   s_server.on("/api/audio-output/status", HTTP_GET, web_handle_audio_output_status);
   s_server.on("/api/audio-output/route", HTTP_POST, web_handle_audio_output_route);
   s_server.on("/api/audio-output/amp-mute", HTTP_POST, web_handle_audio_output_amp_mute);
@@ -3934,6 +4414,7 @@ void web_server_poll()
 #if WEBCTRL_ENABLED
     if (!s_ready) return;
     s_server.handleClient();
+    web_process_pending_wifi_config_apply();
 #endif
 }
 

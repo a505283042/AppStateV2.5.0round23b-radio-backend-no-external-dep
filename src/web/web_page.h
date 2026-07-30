@@ -1299,7 +1299,7 @@ static const char WEBCTRL_SETTINGS_HTML[] PROGMEM = R"HTML(
     .setting-body{padding:16px}
     .row{display:grid;grid-template-columns:1fr auto;gap:12px;align-items:center;margin-bottom:12px}
     label{font-size:15px}
-    input[type=number],select{width:180px;padding:10px;border-radius:10px;border:1px solid #444;background:#111;color:#eee}
+    input[type=number],input[type=text],input[type=password],select{width:180px;padding:10px;border-radius:10px;border:1px solid #444;background:#111;color:#eee;box-sizing:border-box}
     input[type=checkbox]{transform:scale(1.2)}
     input[type=range]{width:180px;accent-color:#2f6feb}
     details.card[hidden]{display:none}
@@ -1321,6 +1321,21 @@ static const char WEBCTRL_SETTINGS_HTML[] PROGMEM = R"HTML(
     .diag-group:first-child{margin-top:0;border-top:none}
     .diag-title{font-size:13px;font-weight:800;color:#79c0ff;letter-spacing:.04em;margin:0 0 10px}
     .diag-value{font-weight:700;text-align:right;word-break:break-word;font-variant-numeric:tabular-nums}
+    .wifi-list{display:flex;flex-direction:column;gap:12px;margin:14px 0}
+    .wifi-item{border:1px solid #343434;border-radius:14px;padding:12px;background:#151515}
+    .wifi-item-header{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px}
+    .wifi-item-title{display:flex;align-items:center;gap:8px;font-weight:800}
+    .wifi-item-actions{display:flex;gap:6px;flex-wrap:wrap}
+    .wifi-item-actions button{padding:7px 10px;font-size:13px}
+    .wifi-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px 12px}
+    .wifi-field{display:flex;flex-direction:column;gap:6px}
+    .wifi-field label{font-size:13px;color:#bbb}
+    .wifi-field input{width:100%}
+    .wifi-checks{display:flex;gap:16px;flex-wrap:wrap;align-items:center;margin-top:12px}
+    .wifi-checks label{display:inline-flex;gap:7px;align-items:center;color:#ddd}
+    .wifi-badge{display:inline-flex;padding:3px 8px;border-radius:999px;background:#175f35;color:#b7f7ce;font-size:12px}
+    .wifi-empty{border:1px dashed #444;border-radius:12px;padding:18px;text-align:center;color:#999}
+    @media(max-width:560px){.wifi-grid{grid-template-columns:1fr}.row{grid-template-columns:1fr}.row>.status-value,.row>.diag-value,.row>div{text-align:left}.row input[type=number],.row input[type=text],.row input[type=password],.row select{width:100%}}
   </style>
 </head>
 <body>
@@ -1331,6 +1346,25 @@ static const char WEBCTRL_SETTINGS_HTML[] PROGMEM = R"HTML(
       </div>
       <h2>网页设置</h2>
     </div>
+
+    <details class="card" id="wifiConfigCard">
+      <summary>Wi-Fi 网络</summary>
+      <div class="setting-body">
+        <div class="row"><label>当前连接</label><div class="status-value" id="wifiConnectionText">正在读取...</div></div>
+        <div class="row"><label>配置文件</label><div class="status-value" id="wifiConfigPathText">/System/config/wifi.conf</div></div>
+        <div class="row"><label for="wifiHostname">设备主机名</label><input id="wifiHostname" type="text" maxlength="63" autocomplete="off" placeholder="esp32s3-player"></div>
+        <div id="wifiNetworkList" class="wifi-list"></div>
+        <div class="actions">
+          <button class="secondary" id="wifiAddBtn" onclick="addWifiNetwork()">添加网络</button>
+          <button class="secondary" id="wifiReloadBtn" onclick="loadWifiConfig(false)">重新读取</button>
+        </div>
+        <div class="actions" style="margin-top:10px">
+          <button id="wifiSaveBtn" onclick="saveWifiConfig(false)">保存配置</button>
+          <button class="warn" id="wifiApplyBtn" onclick="saveWifiConfig(true)">保存并重连</button>
+        </div>
+        <div class="muted" id="wifiConfigMessage" style="margin-top:10px">网页不会读取或显示已保存的明文密码；已有网络密码留空即保持不变。</div>
+      </div>
+    </details>
 
     <details class="card">
       <summary>时间与闹钟</summary>
@@ -1576,6 +1610,325 @@ let btDeviceAutoQueryPending = false;
 let lastAudioOutputStatus = null;
 let systemDiagnosticsBusy = false;
 let lastSystemDiagnosticsAt = 0;
+let wifiConfigBusy = false;
+let wifiConfigMaxNetworks = 16;
+let wifiConfigNetworks = [];
+
+function setWifiConfigBusy(busy){
+  wifiConfigBusy = !!busy;
+  ['wifiAddBtn','wifiReloadBtn','wifiSaveBtn','wifiApplyBtn'].forEach(id=>{
+    const el = document.getElementById(id);
+    if(el) el.disabled = wifiConfigBusy;
+  });
+  document.querySelectorAll('#wifiNetworkList input,#wifiHostname')
+    .forEach(el=>{ el.disabled = wifiConfigBusy; });
+  document.querySelectorAll('#wifiNetworkList button').forEach(el=>{
+    el.disabled = wifiConfigBusy || el.dataset.edgeDisabled === '1';
+  });
+}
+
+function wifiMakeField(labelText, input){
+  const box = document.createElement('div');
+  box.className = 'wifi-field';
+  const label = document.createElement('label');
+  label.textContent = labelText;
+  box.appendChild(label);
+  box.appendChild(input);
+  return box;
+}
+
+function wifiMakeInput(type, value, placeholder=''){
+  const input = document.createElement('input');
+  input.type = type;
+  input.value = value == null ? '' : String(value);
+  input.placeholder = placeholder;
+  input.autocomplete = type === 'password' ? 'new-password' : 'off';
+  return input;
+}
+
+function syncWifiModelFromDom(){
+  document.querySelectorAll('#wifiNetworkList .wifi-item').forEach((item, index)=>{
+    const network = wifiConfigNetworks[index];
+    if(!network) return;
+    network.ssid = item.querySelector('[data-field="ssid"]').value;
+    network.password = item.querySelector('[data-field="password"]').value;
+    network.channel = item.querySelector('[data-field="channel"]').value;
+    network.bssid = item.querySelector('[data-field="bssid"]').value;
+    network.hidden = item.querySelector('[data-field="hidden"]').checked;
+    const clear = item.querySelector('[data-field="clear_password"]');
+    network.clearPassword = !!(clear && clear.checked);
+  });
+}
+
+function moveWifiNetwork(index, delta){
+  if(wifiConfigBusy) return;
+  syncWifiModelFromDom();
+  const target = index + delta;
+  if(target < 0 || target >= wifiConfigNetworks.length) return;
+  const temp = wifiConfigNetworks[index];
+  wifiConfigNetworks[index] = wifiConfigNetworks[target];
+  wifiConfigNetworks[target] = temp;
+  renderWifiNetworks();
+}
+
+function removeWifiNetwork(index){
+  if(wifiConfigBusy) return;
+  syncWifiModelFromDom();
+  const network = wifiConfigNetworks[index];
+  if(network && network.ssid && !confirm(`确认删除网络“${network.ssid}”？`)) return;
+  wifiConfigNetworks.splice(index, 1);
+  renderWifiNetworks();
+}
+
+function addWifiNetwork(){
+  if(wifiConfigBusy) return;
+  syncWifiModelFromDom();
+  if(wifiConfigNetworks.length >= wifiConfigMaxNetworks){
+    alert(`最多配置 ${wifiConfigMaxNetworks} 个网络`);
+    return;
+  }
+  wifiConfigNetworks.push({
+    sourceIndex:-1,
+    ssid:'',
+    password:'',
+    hasPassword:false,
+    clearPassword:false,
+    hidden:false,
+    channel:0,
+    bssid:'',
+    active:false
+  });
+  renderWifiNetworks();
+  const items = document.querySelectorAll('#wifiNetworkList .wifi-item');
+  const last = items[items.length - 1];
+  if(last){
+    const input = last.querySelector('[data-field="ssid"]');
+    if(input) input.focus();
+  }
+}
+
+function renderWifiNetworks(){
+  const list = document.getElementById('wifiNetworkList');
+  if(!list) return;
+  list.textContent = '';
+
+  if(!wifiConfigNetworks.length){
+    const empty = document.createElement('div');
+    empty.className = 'wifi-empty';
+    empty.textContent = '尚未配置网络，请先添加至少一个网络。';
+    list.appendChild(empty);
+    setWifiConfigBusy(wifiConfigBusy);
+    return;
+  }
+
+  wifiConfigNetworks.forEach((network, index)=>{
+    const item = document.createElement('div');
+    item.className = 'wifi-item';
+
+    const header = document.createElement('div');
+    header.className = 'wifi-item-header';
+    const title = document.createElement('div');
+    title.className = 'wifi-item-title';
+    const titleText = document.createElement('span');
+    titleText.textContent = `网络 ${index + 1}`;
+    title.appendChild(titleText);
+    if(network.active){
+      const badge = document.createElement('span');
+      badge.className = 'wifi-badge';
+      badge.textContent = '当前连接';
+      title.appendChild(badge);
+    }
+    header.appendChild(title);
+
+    const actions = document.createElement('div');
+    actions.className = 'wifi-item-actions';
+    const up = document.createElement('button');
+    up.type = 'button';
+    up.className = 'secondary';
+    up.textContent = '上移';
+    up.dataset.edgeDisabled = index === 0 ? '1' : '0';
+    up.disabled = index === 0;
+    up.onclick = ()=>moveWifiNetwork(index, -1);
+    const down = document.createElement('button');
+    down.type = 'button';
+    down.className = 'secondary';
+    down.textContent = '下移';
+    down.dataset.edgeDisabled = index === wifiConfigNetworks.length - 1 ? '1' : '0';
+    down.disabled = index === wifiConfigNetworks.length - 1;
+    down.onclick = ()=>moveWifiNetwork(index, 1);
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'danger';
+    remove.textContent = '删除';
+    remove.onclick = ()=>removeWifiNetwork(index);
+    actions.append(up, down, remove);
+    header.appendChild(actions);
+    item.appendChild(header);
+
+    const grid = document.createElement('div');
+    grid.className = 'wifi-grid';
+
+    const ssid = wifiMakeInput('text', network.ssid, 'Wi-Fi 名称');
+    ssid.maxLength = 32;
+    ssid.dataset.field = 'ssid';
+    grid.appendChild(wifiMakeField('SSID', ssid));
+
+    const password = wifiMakeInput(
+      'password',
+      network.password || '',
+      network.hasPassword ? '留空保持原密码' : '开放网络可留空'
+    );
+    password.maxLength = 64;
+    password.dataset.field = 'password';
+    grid.appendChild(wifiMakeField('密码', password));
+
+    const channel = wifiMakeInput('number', network.channel || 0, '0=自动');
+    channel.min = '0';
+    channel.max = '14';
+    channel.step = '1';
+    channel.dataset.field = 'channel';
+    grid.appendChild(wifiMakeField('信道（0为自动）', channel));
+
+    const bssid = wifiMakeInput('text', network.bssid || '', 'AA:BB:CC:DD:EE:FF');
+    bssid.maxLength = 17;
+    bssid.dataset.field = 'bssid';
+    grid.appendChild(wifiMakeField('BSSID（可选）', bssid));
+    item.appendChild(grid);
+
+    const checks = document.createElement('div');
+    checks.className = 'wifi-checks';
+    const hiddenLabel = document.createElement('label');
+    const hidden = document.createElement('input');
+    hidden.type = 'checkbox';
+    hidden.checked = !!network.hidden;
+    hidden.dataset.field = 'hidden';
+    hiddenLabel.append(hidden, document.createTextNode('隐藏网络'));
+    checks.appendChild(hiddenLabel);
+
+    if(network.hasPassword){
+      const clearLabel = document.createElement('label');
+      const clear = document.createElement('input');
+      clear.type = 'checkbox';
+      clear.checked = !!network.clearPassword;
+      clear.dataset.field = 'clear_password';
+      clearLabel.append(clear, document.createTextNode('清除已保存密码'));
+      checks.appendChild(clearLabel);
+      password.addEventListener('input', ()=>{
+        if(password.value) clear.checked = false;
+      });
+    }
+
+    item.appendChild(checks);
+    list.appendChild(item);
+  });
+
+  setWifiConfigBusy(wifiConfigBusy);
+}
+
+async function loadWifiConfig(silent=true){
+  if(wifiConfigBusy) return;
+  setWifiConfigBusy(true);
+  const message = document.getElementById('wifiConfigMessage');
+  try{
+    const r = await fetchWithTimeout('/api/config/wifi', {cache:'no-store'}, 4500);
+    const j = await r.json();
+    if(!j || !j.ok) throw new Error((j && j.message) || '读取失败');
+
+    wifiConfigMaxNetworks = Number(j.max_networks) || 16;
+    wifiConfigNetworks = (j.networks || []).map((network, index)=>({
+      sourceIndex:Number.isInteger(network.index) ? network.index : index,
+      ssid:network.ssid || '',
+      password:'',
+      hasPassword:!!network.has_password,
+      clearPassword:false,
+      hidden:!!network.hidden,
+      channel:Number(network.channel) || 0,
+      bssid:network.bssid || '',
+      active:!!network.active
+    }));
+
+    const hostname = document.getElementById('wifiHostname');
+    if(hostname) hostname.value = j.hostname || 'esp32s3-player';
+    const path = document.getElementById('wifiConfigPathText');
+    if(path) path.textContent = j.path || '/System/config/wifi.conf';
+    const status = document.getElementById('wifiConnectionText');
+    if(status){
+      const name = j.active_ssid || (j.mode === 'AP' ? '设备热点' : '未连接');
+      status.textContent = `${j.mode || '-'} · ${name} · ${j.ip || '-'}`;
+    }
+    if(message){
+      message.textContent = j.configured
+        ? '网页不会读取或显示已保存的明文密码；已有网络密码留空即保持不变。'
+        : `尚无有效配置：${j.error || '请添加网络后保存'}`;
+    }
+    renderWifiNetworks();
+  }catch(e){
+    if(message) message.textContent = `WiFi配置读取失败：${e.message || '网络错误'}`;
+    if(!silent) alert('WiFi配置读取失败');
+  }finally{
+    setWifiConfigBusy(false);
+  }
+}
+
+async function saveWifiConfig(applyAfterSave){
+  if(wifiConfigBusy) return;
+  syncWifiModelFromDom();
+  if(!wifiConfigNetworks.length){
+    alert('至少保留一个WiFi网络');
+    return;
+  }
+  if(applyAfterSave &&
+     !confirm('保存后将断开当前网络，并按新顺序重新连接。确认继续？')){
+    return;
+  }
+
+  const params = new URLSearchParams();
+  params.set('hostname', document.getElementById('wifiHostname').value.trim());
+  params.set('count', String(wifiConfigNetworks.length));
+
+  wifiConfigNetworks.forEach((network, index)=>{
+    const password = network.password || '';
+    const keepPassword = network.sourceIndex >= 0 &&
+      network.hasPassword &&
+      !network.clearPassword &&
+      !password.length;
+    params.set(`ssid_${index}`, (network.ssid || '').trim());
+    params.set(`password_${index}`, password);
+    params.set(`keep_password_${index}`, keepPassword ? '1' : '0');
+    params.set(`source_index_${index}`, String(network.sourceIndex));
+    params.set(`hidden_${index}`, network.hidden ? '1' : '0');
+    params.set(`channel_${index}`, String(Number(network.channel) || 0));
+    params.set(`bssid_${index}`, (network.bssid || '').trim());
+  });
+
+  setWifiConfigBusy(true);
+  const message = document.getElementById('wifiConfigMessage');
+  try{
+    const url = applyAfterSave
+      ? '/api/config/wifi/apply'
+      : '/api/config/wifi/save';
+    const r = await fetchWithTimeout(url, {
+      method:'POST',
+      headers:{'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8'},
+      body:params.toString()
+    }, 6000);
+    const j = await r.json();
+    if(!j || !j.ok){
+      alert((j && j.message) || 'WiFi配置保存失败');
+      return;
+    }
+    if(message) message.textContent = j.message || 'WiFi配置已保存';
+    alert(j.message || 'WiFi配置已保存');
+    if(!applyAfterSave){
+      setWifiConfigBusy(false);
+      await loadWifiConfig(true);
+    }
+  }catch(e){
+    alert('WiFi配置保存失败');
+  }finally{
+    setWifiConfigBusy(false);
+  }
+}
 
 function btDeviceStateLabel(state){
   const labels = {
@@ -2292,6 +2645,7 @@ async function deleteAlarm(){
 
 refreshClockAlarmStatus();
 loadSettings();
+loadWifiConfig(true);
 loadAudioOutputStatus(true);
 refreshMusicScanStatus();
 
