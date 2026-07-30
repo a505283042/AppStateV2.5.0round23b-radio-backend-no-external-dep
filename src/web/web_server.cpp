@@ -1656,8 +1656,8 @@ static void web_handle_system_diagnostics()
     json += "\"audio\":" + String(static_cast<unsigned long>(web_task_stack_free_bytes(audio_service_get_task_handle())));
     json += ",\"ui\":" + String(static_cast<unsigned long>(web_task_stack_free_bytes(ui_get_task_handle())));
     json += ",\"loop\":" + String(static_cast<unsigned long>(web_task_stack_free_bytes(xTaskGetHandle("loopTask"))));
-    json += ",\"runtime\":" + String(static_cast<unsigned long>(web_task_stack_free_bytes(xTaskGetHandle("RuntimeMon"))));
     json += ",\"asset\":" + String(static_cast<unsigned long>(web_task_stack_free_bytes(xTaskGetHandle("PlayerAssetTask"))));
+    json += ",\"net_cover\":" + String(static_cast<unsigned long>(web_task_stack_free_bytes(xTaskGetHandle("NetCoverTask"))));
     json += ",\"flac_prefetch\":" + String(static_cast<unsigned long>(web_task_stack_free_bytes(xTaskGetHandle("FlacNetTask"))));
     json += ",\"rescan\":" + String(static_cast<unsigned long>(web_task_stack_free_bytes(xTaskGetHandle("rescan_v3"))));
     json += "}";

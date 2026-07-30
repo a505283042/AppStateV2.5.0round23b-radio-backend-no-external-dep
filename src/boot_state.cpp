@@ -105,10 +105,8 @@ void boot_state_run(void)
 
     // ✅ 启动音频专用任务（双核：音频与UI分离，避免旋转推屏导致卡顿）
     audio_service_start();
-    if (!runtime_monitor_start()) {
-        // 监控任务只负责诊断，创建失败不阻止播放器进入主功能。
-        LOGW("[启动] RuntimeMon 创建失败，继续启动播放器");
-    }
+    // 运行监控使用 loopTask 的非阻塞定时回调，不再创建独立任务栈。
+    runtime_monitor_start();
 
     nfc_init();
 

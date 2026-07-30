@@ -1520,9 +1520,9 @@ static const char WEBCTRL_SETTINGS_HTML[] PROGMEM = R"HTML(
         <div class="diag-group">
           <div class="diag-title">任务栈余量</div>
           <div class="row"><label>音频 / UI</label><div class="diag-value" id="diagTaskAudioUi">-</div></div>
-          <div class="row"><label>资源 / FLAC预取</label><div class="diag-value" id="diagTaskAssetFlac">-</div></div>
-          <div class="row"><label>主循环 / 运行监控</label><div class="diag-value" id="diagTaskLoopRuntime">-</div></div>
-          <div class="row"><label>曲库重扫</label><div class="diag-value" id="diagTaskRescan">-</div></div>
+          <div class="row"><label>资源 / 网络封面</label><div class="diag-value" id="diagTaskAssetCover">-</div></div>
+          <div class="row"><label>FLAC预取 / 曲库重扫</label><div class="diag-value" id="diagTaskFlacRescan">-</div></div>
+          <div class="row"><label>主循环（含监控）</label><div class="diag-value" id="diagTaskLoop">-</div></div>
         </div>
         <div class="diag-group">
           <div class="diag-title">硬件与系统</div>
@@ -1862,9 +1862,9 @@ function renderSystemDiagnostics(j){
   diagSetText('diagMinHeap', diagFormatBytes(memory.heap_min_free));
 
   diagSetText('diagTaskAudioUi', `${diagStack(tasks.audio)} / ${diagStack(tasks.ui)}`);
-  diagSetText('diagTaskAssetFlac', `${diagStack(tasks.asset)} / ${diagStack(tasks.flac_prefetch)}`);
-  diagSetText('diagTaskLoopRuntime', `${diagStack(tasks.loop)} / ${diagStack(tasks.runtime)}`);
-  diagSetText('diagTaskRescan', diagStack(tasks.rescan));
+  diagSetText('diagTaskAssetCover', `${diagStack(tasks.asset)} / ${diagStack(tasks.net_cover)}`);
+  diagSetText('diagTaskFlacRescan', `${diagStack(tasks.flac_prefetch)} / ${diagStack(tasks.rescan)}`);
+  diagSetText('diagTaskLoop', diagStack(tasks.loop));
 
   diagSetText('diagFirmwareUptime', `${system.firmware || '-'} / ${diagFormatDuration(system.uptime_ms)}`);
   diagSetText('diagI2cMcp', `${hardware.i2c_ready ? 'OK' : 'ERR'} ${Math.round((Number(hardware.i2c_clock_hz) || 0) / 1000)}kHz / ${hardware.mcp23017_ready ? 'OK' : 'ERR'}`);

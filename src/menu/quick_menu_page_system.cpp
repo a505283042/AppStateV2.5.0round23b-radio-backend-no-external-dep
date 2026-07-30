@@ -235,9 +235,14 @@ const char* value_stack_loop()
     return stack_free_label(xTaskGetHandle("loopTask"));
 }
 
-const char* value_stack_runtime()
+const char* value_stack_net_cover()
 {
-    return stack_free_label(xTaskGetHandle("RuntimeMon"));
+    return stack_free_label(xTaskGetHandle("NetCoverTask"));
+}
+
+const char* value_stack_flac_prefetch()
+{
+    return stack_free_label(xTaskGetHandle("FlacNetTask"));
 }
 
 const char* value_stack_asset()
@@ -662,9 +667,10 @@ const QuickMenuItem MEMORY_ITEMS[] = {
 const QuickMenuItem STACK_ITEMS[] = {
     {"音频任务", QuickMenuItemType::Status, QuickMenuPage::StackInfo, "", value_stack_audio, nullptr, true, false},
     {"屏幕任务", QuickMenuItemType::Status, QuickMenuPage::StackInfo, "", value_stack_ui, nullptr, true, false},
-    {"主循环", QuickMenuItemType::Status, QuickMenuPage::StackInfo, "", value_stack_loop, nullptr, true, false},
-    {"监控任务", QuickMenuItemType::Status, QuickMenuPage::StackInfo, "", value_stack_runtime, nullptr, true, false},
+    {"主循环/监控", QuickMenuItemType::Status, QuickMenuPage::StackInfo, "", value_stack_loop, nullptr, true, false},
     {"资源任务", QuickMenuItemType::Status, QuickMenuPage::StackInfo, "", value_stack_asset, nullptr, true, false},
+    {"网络封面", QuickMenuItemType::Status, QuickMenuPage::StackInfo, "", value_stack_net_cover, nullptr, true, false},
+    {"FLAC预取", QuickMenuItemType::Status, QuickMenuPage::StackInfo, "", value_stack_flac_prefetch, nullptr, true, false},
     {"扫描任务", QuickMenuItemType::Status, QuickMenuPage::StackInfo, "", value_stack_rescan, nullptr, true, false},
     {"返回", QuickMenuItemType::Back, QuickMenuPage::SystemInfo, "", nullptr, nullptr, true, false},
 };

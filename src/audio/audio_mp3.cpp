@@ -68,9 +68,8 @@ static constexpr uint32_t kMp3StreamRefillWaitTimeoutMs = 25;
 static constexpr uint32_t kMp3DiagLogIntervalMs = 2000;
 static constexpr uint32_t kMp3DiagLoopGapMs = 60;
 
-static uint8_t s_file_inbuf[kMp3FileInputBufferBytes];
-static uint8_t* g_inbuf = s_file_inbuf;
-static size_t g_inbuf_capacity = sizeof(s_file_inbuf);
+static uint8_t* g_inbuf = nullptr;
+static size_t g_inbuf_capacity = 0;
 static bool g_inbuf_is_psram = false;
 static int g_inbuf_filled = 0;
 static bool g_playing = false;
@@ -880,36 +879,48 @@ static uint32_t estimate_seek_actual_ms(Mp3SeekStrategy strategy,
   return ms > total_ms ? total_ms : (uint32_t)ms;
 }
 
-static void release_stream_input_buffer()
+static void release_input_buffer()
 {
-  if (g_inbuf && g_inbuf != s_file_inbuf) {
-    free(g_inbuf);
+  if (g_inbuf) {
+    heap_caps_free(g_inbuf);
   }
-  g_inbuf = s_file_inbuf;
-  g_inbuf_capacity = sizeof(s_file_inbuf);
+  g_inbuf = nullptr;
+  g_inbuf_capacity = 0;
   g_inbuf_is_psram = false;
 }
 
 static bool select_input_buffer_for_source(bool is_stream)
 {
-  release_stream_input_buffer();
+  release_input_buffer();
 
-  if (!is_stream) {
-    return true;
-  }
-
-  uint8_t* psram_buf = static_cast<uint8_t*>(heap_caps_malloc(kMp3StreamInputBufferBytes,
-                                                              MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-  if (psram_buf) {
-    g_inbuf = psram_buf;
-    g_inbuf_capacity = kMp3StreamInputBufferBytes;
+  const size_t psram_bytes = is_stream
+      ? kMp3StreamInputBufferBytes
+      : kMp3FileInputBufferBytes;
+  g_inbuf = static_cast<uint8_t*>(heap_caps_malloc(
+      psram_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (g_inbuf) {
+    g_inbuf_capacity = psram_bytes;
     g_inbuf_is_psram = true;
     return true;
   }
 
-  // PSRAM 不够时不要强行占用大量内部 RAM，退回 8KB 安全缓冲，至少保证能播放。
-  LOGW("[MP3] 网络流 PSRAM 输入缓冲区分配失败，回退到 %u 字节内部缓冲区",
-       (unsigned)sizeof(s_file_inbuf));
+  // PSRAM 不可用时仅为本次播放临时申请 8KB 内部 RAM。
+  // 停止 MP3 时立即释放，不再让本地文件缓冲长期占用 BSS。
+  g_inbuf = static_cast<uint8_t*>(heap_caps_malloc(
+      kMp3FileInputBufferBytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+  if (!g_inbuf) {
+    LOGE("[MP3] 输入缓冲分配失败：来源=%s PSRAM=%u 内部回退=%u",
+         is_stream ? "NAS" : "本地",
+         (unsigned)psram_bytes,
+         (unsigned)kMp3FileInputBufferBytes);
+    return false;
+  }
+
+  g_inbuf_capacity = kMp3FileInputBufferBytes;
+  g_inbuf_is_psram = false;
+  LOGW("[MP3] %s PSRAM 输入缓冲分配失败，临时回退到 %u 字节内部缓冲",
+       is_stream ? "网络流" : "本地文件",
+       (unsigned)g_inbuf_capacity);
   return true;
 }
 
@@ -1150,7 +1161,9 @@ bool audio_mp3_start_source(const AudioMp3Source& source, const char* debug_name
   s_debug_name = s_mp3_debug_name.length() ? s_mp3_debug_name.c_str() : nullptr;
 
   if (!select_input_buffer_for_source(g_source_is_stream)) {
-    set_last_error("stream_buffer_alloc_failed");
+    set_last_error(g_source_is_stream
+        ? "stream_buffer_alloc_failed"
+        : "file_buffer_alloc_failed");
     audio_mp3_stop();
     return false;
   }
@@ -1425,7 +1438,7 @@ void audio_mp3_stop()
   g_inbuf_filled = 0;
   g_source_eof = false;
   reset_seek_index_state();
-  release_stream_input_buffer();
+  release_input_buffer();
 
   // 更新主线状态
   s_mp3_active = false;

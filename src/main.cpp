@@ -7,6 +7,7 @@
 
 #include "app_state.h"         /* 包含应用状态模块 */
 #include "hal/bt62sp_uart_debug.h"  /* BT62SP串口调试桥 */
+#include "utils/runtime_monitor.h" /* 运行时内存与任务栈监控 */
 
 /* Arduino主设置函数 - 系统初始化入口点 */
 void setup() {  
@@ -32,5 +33,6 @@ void setup() {
 void loop() {
   app_state_update();    /* 更新应用状态 */
   bt62sp_uart_debug_update(); /* 处理电脑串口与BT62SP UART调试桥 */
+  runtime_monitor_update(); /* 非阻塞定时采样，已并入 loopTask */
   vTaskDelay(1);         /* 延时1ms */
 }
