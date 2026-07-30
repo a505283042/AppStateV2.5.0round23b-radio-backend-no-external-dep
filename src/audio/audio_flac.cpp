@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include "audio/audio_flac.h"
+#include "audio/audio_decode_workspace.h"
 #include "audio/audio_i2s.h"
 #include "audio/audio_file.h"
 #include "audio/audio_http_range_source.h"
@@ -66,7 +67,8 @@ static void set_end_reason_if_none(AudioPlaybackEndReason reason)
 // 44.1kHz 下约 92ms 音频，配合 NAS 环形缓存可降低解码调度压力。
 static constexpr uint32_t FLAC_BUFFER_FRAMES = 4096;
 static constexpr uint32_t FLAC_PCM_SAMPLES_PER_CHUNK = FLAC_BUFFER_FRAMES * 2 + 64;
-static int16_t s_decode_pcm[FLAC_PCM_SAMPLES_PER_CHUNK]; // stereo buffer + 安全边距
+static_assert(FLAC_PCM_SAMPLES_PER_CHUNK <= AudioDecodeWorkspace::kPcmSamples,
+              "共享 PCM 工作区不足以容纳 FLAC 单次解码输出");
 
 // 码率用于网络预取配置；真正的单块实时预算由采样率决定。
 static uint32_t s_average_bitrate_kbps = 0;
@@ -784,7 +786,7 @@ bool audio_flac_loop()
   }
 
   // C) 读新 PCM（按 channels 读）
-  uint32_t frames_read = decode_one_chunk_to(s_decode_pcm);
+  uint32_t frames_read = decode_one_chunk_to(AudioDecodeWorkspace::pcm);
 
   if (frames_read == 0) {
     if (source_had_io_error()) {
@@ -818,7 +820,7 @@ bool audio_flac_loop()
   }
 
   // E) 建 pending 并尝试写
-  s_pending_pcm = s_decode_pcm;
+  s_pending_pcm = AudioDecodeWorkspace::pcm;
   s_pending_off = 0;
   s_pending_frames = frames_read;
 

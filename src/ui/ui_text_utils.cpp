@@ -1,6 +1,5 @@
 #include "ui/ui_text_utils.h"
 #include "ui/gc9a01_lgfx.h"
-#include <math.h>
 
 // 封面尺寸常量（需要与 ui.cpp 保持一致）
 static constexpr int COVER_SIZE = 240;
@@ -181,66 +180,45 @@ void draw_center_text(const char* s, int y)
   tft.print(s);
 }
 
-// 查找表缓存：预计算所有 y 值对应的 (x0, w) 结果
-// 屏幕尺寸固定为 240x240，y 范围 0-239
-struct CircleSpanLutEntry {
-  uint16_t x0;
-  uint16_t w;
+// 圆屏每条扫描线的半宽只与到圆心的纵向距离有关。
+// 旧实现为 240 × 10 个可写结构体，常驻占用 9600B 内部 RAM；
+// 这里改为 120B Flash 只读半宽表，pad 在查询时用整数运算扣除。
+static constexpr uint8_t s_circle_half_width[120] = {
+  120, 119, 119, 119, 119, 119, 119, 119, 119, 119, 119, 119, 119, 119, 119, 119,
+  118, 118, 118, 118, 118, 118, 117, 117, 117, 117, 117, 116, 116, 116, 116, 115,
+  115, 115, 115, 114, 114, 114, 113, 113, 113, 112, 112, 112, 111, 111, 110, 110,
+  109, 109, 109, 108, 108, 107, 107, 106, 106, 105, 105, 104, 103, 103, 102, 102,
+  101, 100, 100, 99, 98, 98, 97, 96, 96, 95, 94, 93, 92, 92, 91, 90,
+  89, 88, 87, 86, 85, 84, 83, 82, 81, 80, 79, 78, 77, 75, 74, 73,
+  72, 70, 69, 67, 66, 64, 63, 61, 59, 58, 56, 54, 52, 50, 47, 45,
+  43, 40, 37, 34, 30, 26, 21, 15
 };
-
-static bool s_circle_lut_init = false;
-static CircleSpanLutEntry s_circle_lut[240][10]; // [y][pad]
-
-void init_circle_lut()
-{
-  if (s_circle_lut_init) return;
-
-  const int cx = COVER_SIZE / 2;   // 120
-  const int cy = COVER_SIZE / 2;   // 120
-  const int r  = COVER_SIZE / 2;   // 120
-
-  for (int y = 0; y < 240; y++) {
-    int dy = y - cy;
-    int ady = dy < 0 ? -dy : dy;
-
-    if (ady >= r) {
-      for (int pad = 0; pad < 10; pad++) {
-        s_circle_lut[y][pad].x0 = (uint16_t)cx;
-        s_circle_lut[y][pad].w = 0;
-      }
-      continue;
-    }
-
-    float dx = sqrtf((float)(r * r - ady * ady));
-
-    for (int pad = 0; pad < 10; pad++) {
-      int xmin = (int)ceilf(cx - dx) + pad;
-      int xmax = (int)floorf(cx + dx) - pad;
-
-      if (xmax < xmin) {
-        s_circle_lut[y][pad].x0 = (uint16_t)cx;
-        s_circle_lut[y][pad].w = 0;
-      } else {
-        s_circle_lut[y][pad].x0 = (uint16_t)xmin;
-        s_circle_lut[y][pad].w = (uint16_t)(xmax - xmin + 1);
-      }
-    }
-  }
-
-  s_circle_lut_init = true;
-}
 
 void circle_span(int y, int pad, int& x0, int& w)
 {
-  init_circle_lut();
-
   if (y < 0) y = 0;
   if (y >= 240) y = 239;
   if (pad < 0) pad = 0;
   if (pad >= 10) pad = 9;
 
-  x0 = (int)s_circle_lut[y][pad].x0;
-  w  = (int)s_circle_lut[y][pad].w;
+  const int cy = COVER_SIZE / 2;
+  const int dy = y - cy;
+  const int ady = (dy < 0) ? -dy : dy;
+  if (ady >= 120) {
+    x0 = cy;
+    w = 0;
+    return;
+  }
+
+  const int half = (int)s_circle_half_width[ady] - pad;
+  if (half < 0) {
+    x0 = cy;
+    w = 0;
+    return;
+  }
+
+  x0 = cy - half;
+  w = half * 2 + 1;
 }
 
 void fmt_mmss(uint32_t ms, char out[6])

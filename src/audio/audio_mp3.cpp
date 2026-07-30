@@ -9,6 +9,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include "audio/audio_mp3.h"
+#include "audio/audio_decode_workspace.h"
 #include "audio/audio_i2s.h"
 #include "audio/audio_file.h"
 #include "audio/audio_mp3_source_file.h"
@@ -77,7 +78,8 @@ static int g_sr = 44100;
 
 // MINIMP3_MAX_SAMPLES_PER_FRAME 已包含双声道一帧的最大样本数（1152 * 2）。
 // 单声道原地扩展时最大也只写到 2304 个样本，不需要再额外乘 2。
-static int16_t g_pcm[MINIMP3_MAX_SAMPLES_PER_FRAME];
+static_assert(MINIMP3_MAX_SAMPLES_PER_FRAME <= AudioDecodeWorkspace::kPcmSamples,
+              "共享 PCM 工作区不足以容纳 MP3 单帧输出");
 static size_t s_pending_off = 0;
 static size_t s_pending_frames = 0;
 static int s_channels = 2; // 当前声道数
@@ -1017,7 +1019,7 @@ static bool prepare_stream_first_frame()
     const int samples = mp3dec_decode_frame(&g_dec,
                                             g_inbuf,
                                             g_inbuf_filled,
-                                            g_pcm,
+                                            AudioDecodeWorkspace::pcm,
                                             &info);
 
     if (info.frame_bytes <= 0) {
@@ -1083,8 +1085,8 @@ static bool prepare_stream_first_frame()
 
     if (s_channels == 1) {
       for (int i = samples - 1; i >= 0; --i) {
-        g_pcm[i * 2] = g_pcm[i];
-        g_pcm[i * 2 + 1] = g_pcm[i];
+        AudioDecodeWorkspace::pcm[i * 2] = AudioDecodeWorkspace::pcm[i];
+        AudioDecodeWorkspace::pcm[i * 2 + 1] = AudioDecodeWorkspace::pcm[i];
       }
     }
 
@@ -1456,7 +1458,7 @@ bool audio_mp3_loop()
 
   // --- A) 先把 pending 的 PCM 写完 ---
   if (s_pending_frames > 0) {
-    size_t w = audio_i2s_write_frames(g_pcm + s_pending_off * 2, s_pending_frames);
+    size_t w = audio_i2s_write_frames(AudioDecodeWorkspace::pcm + s_pending_off * 2, s_pending_frames);
     if (w == SIZE_MAX) {
       set_end_reason_if_none(AudioPlaybackEndReason::OutputError);
       set_last_error("i2s_write_failed");
@@ -1512,7 +1514,7 @@ bool audio_mp3_loop()
   }
 
   mp3dec_frame_info_t info;
-  int samples = mp3dec_decode_frame(&g_dec, g_inbuf, g_inbuf_filled, g_pcm, &info);
+  int samples = mp3dec_decode_frame(&g_dec, g_inbuf, g_inbuf_filled, AudioDecodeWorkspace::pcm, &info);
 
   if (info.frame_bytes == 0) {
     if (g_inbuf_filled >= 2) {
@@ -1593,8 +1595,8 @@ bool audio_mp3_loop()
     if (s_channels == 1) {
       // 从后往前复制，避免覆盖
       for (int i = samples - 1; i >= 0; --i) {
-        g_pcm[i * 2] = g_pcm[i];     // 左声道
-        g_pcm[i * 2 + 1] = g_pcm[i]; // 右声道
+        AudioDecodeWorkspace::pcm[i * 2] = AudioDecodeWorkspace::pcm[i];     // 左声道
+        AudioDecodeWorkspace::pcm[i * 2 + 1] = AudioDecodeWorkspace::pcm[i]; // 右声道
       }
     }
 
@@ -1603,7 +1605,7 @@ bool audio_mp3_loop()
     s_pending_frames = (size_t)samples;// 转换为帧数（每帧2个样本）
 
     // 先尝试写一次，写不完就留 pending
-    size_t w = audio_i2s_write_frames(g_pcm, s_pending_frames);
+    size_t w = audio_i2s_write_frames(AudioDecodeWorkspace::pcm, s_pending_frames);
     if (w == SIZE_MAX) {
       set_end_reason_if_none(AudioPlaybackEndReason::OutputError);
       set_last_error("i2s_write_failed");

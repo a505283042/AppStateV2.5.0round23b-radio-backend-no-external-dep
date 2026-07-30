@@ -30,10 +30,6 @@ struct StorageRuntimeState {
 StorageRuntimeState s_runtime{};
 portMUX_TYPE s_runtime_mux = portMUX_INITIALIZER_UNLOCKED;
 
-// 轻量探测用缓冲区。读 sector 0 可以强制触碰物理卡，
-// 比 root.open("/") 更可靠，避免目录对象缓存导致误判“卡还在”。
-uint8_t s_probe_sector[512];
-
 void storage_revision_advance_locked()
 {
     ++s_runtime.revision;
@@ -296,7 +292,9 @@ bool storage_probe_alive(void)
     }
 
     // 强制读物理 0 扇区。无 CD 脚时这是比 root.open("/") 更可靠的存在性探测。
-    const bool ok = sd.card()->readSector(0, s_probe_sector);
+    // 探测缓冲只在本次调用期间使用，放入任务栈，避免 512B 长期占用内部 BSS。
+    uint8_t probe_sector[512];
+    const bool ok = sd.card()->readSector(0, probe_sector);
     if (!ok) {
         Serial.printf("[存储] 探测读扇区失败 错误=%u data=%u\n",
                       sd.card()->errorCode(),

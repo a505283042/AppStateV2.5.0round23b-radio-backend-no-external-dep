@@ -1671,77 +1671,19 @@ static constexpr uint8_t COVER_PANEL_RECORD_ALPHA = 155;
 static constexpr int COVER_PANEL_RECORD_INNER_R = 25;// 最内圈半径，不参与半透明混合
 
 
-static constexpr int COVER_PANEL_RECORD_SPAN_INVALID_X0 = 1;
-static constexpr int COVER_PANEL_RECORD_SPAN_INVALID_X1 = 0;
-
-struct CoverPanelRecordSpan {
-  int16_t x0;
-  int16_t x1;
-  int16_t inner_x0;
-  int16_t inner_x1;
+// 唱片扫描线半宽只与 abs(y - cy) 有关。
+// 旧实现使用 240 个可写结构体，常驻占用 1920B 内部 RAM；
+// 改为 67B Flash 只读表，并在绘制时恢复 x0/x1。
+static constexpr uint8_t s_cover_panel_record_outer_half[41] = {
+  40, 39, 39, 39, 39, 39, 39, 39, 39, 38, 38, 38, 38, 37, 37, 37,
+  36, 36, 35, 35, 34, 34, 33, 32, 32, 31, 30, 29, 28, 27, 26, 25,
+  24, 22, 21, 19, 17, 15, 12, 8, 0
 };
 
-static CoverPanelRecordSpan s_cover_panel_record_spans[240];
-static bool s_cover_panel_record_spans_ready = false;
-
-static void cover_panel_init_record_spans()
-{
-  if (s_cover_panel_record_spans_ready) {
-    return;
-  }
-
-  for (int y = 0; y < 240; ++y) {
-    s_cover_panel_record_spans[y] = {
-        COVER_PANEL_RECORD_SPAN_INVALID_X0,
-        COVER_PANEL_RECORD_SPAN_INVALID_X1,
-        COVER_PANEL_RECORD_SPAN_INVALID_X0,
-        COVER_PANEL_RECORD_SPAN_INVALID_X1,
-    };
-  }
-
-  const int cx = COVER_PANEL_RECORD_CX;
-  const int cy = COVER_PANEL_RECORD_CY;
-  const int r = COVER_PANEL_RECORD_R;
-  const int inner_r = COVER_PANEL_RECORD_INNER_R;
-
-  for (int y = cy - r; y <= cy + r; ++y) {
-    if ((unsigned)y >= 240) {
-      continue;
-    }
-
-    const int dy = y - cy;
-    const int outer_xx = r * r - dy * dy;
-    if (outer_xx < 0) {
-      continue;
-    }
-
-    const int outer_half = (int)sqrtf((float)outer_xx);
-    int x0 = cx - outer_half;
-    int x1 = cx + outer_half;
-    if (x0 < 0) x0 = 0;
-    if (x1 > 239) x1 = 239;
-
-    int inner_x0 = COVER_PANEL_RECORD_SPAN_INVALID_X0;
-    int inner_x1 = COVER_PANEL_RECORD_SPAN_INVALID_X1;
-    const int inner_xx = inner_r * inner_r - dy * dy;
-    if (inner_xx >= 0) {
-      const int inner_half = (int)sqrtf((float)inner_xx);
-      inner_x0 = cx - inner_half;
-      inner_x1 = cx + inner_half;
-      if (inner_x0 < 0) inner_x0 = 0;
-      if (inner_x1 > 239) inner_x1 = 239;
-    }
-
-    s_cover_panel_record_spans[y] = {
-        (int16_t)x0,
-        (int16_t)x1,
-        (int16_t)inner_x0,
-        (int16_t)inner_x1,
-    };
-  }
-
-  s_cover_panel_record_spans_ready = true;
-}
+static constexpr uint8_t s_cover_panel_record_inner_half[26] = {
+  25, 24, 24, 24, 24, 24, 24, 24, 23, 23, 22, 22, 21, 21, 20, 20,
+  19, 18, 17, 16, 15, 13, 11, 9, 7, 0
+};
 
 // 面板页 bilinear 旋转的源封面缓存。
 // 安全版每个像素会 src->readPixel() 4 次，画质好但帧耗时高。
@@ -1999,23 +1941,30 @@ static void fill_cover_panel_record_blend(LGFX_Sprite* dst, uint16_t color, uint
 {
   if (!dst || alpha == 0) return;
 
-  cover_panel_init_record_spans();
-
   int y0 = COVER_PANEL_RECORD_CY - COVER_PANEL_RECORD_R;
   int y1 = COVER_PANEL_RECORD_CY + COVER_PANEL_RECORD_R;
   if (y0 < 0) y0 = 0;
   if (y1 > 239) y1 = 239;
 
   for (int y = y0; y <= y1; ++y) {
-    const CoverPanelRecordSpan& span = s_cover_panel_record_spans[y];
-    if (span.x0 > span.x1) {
-      continue;
+    const int dy = y - COVER_PANEL_RECORD_CY;
+    const int ady = (dy < 0) ? -dy : dy;
+    const int outer_half = (int)s_cover_panel_record_outer_half[ady];
+    const int x0 = COVER_PANEL_RECORD_CX - outer_half;
+    const int x1 = COVER_PANEL_RECORD_CX + outer_half;
+
+    int inner_x0 = 1;
+    int inner_x1 = 0;
+    if (ady <= COVER_PANEL_RECORD_INNER_R) {
+      const int inner_half = (int)s_cover_panel_record_inner_half[ady];
+      inner_x0 = COVER_PANEL_RECORD_CX - inner_half;
+      inner_x1 = COVER_PANEL_RECORD_CX + inner_half;
     }
 
-    for (int x = span.x0; x <= span.x1; ++x) {
+    for (int x = x0; x <= x1; ++x) {
       // 最内圈后面会被实心圆覆盖，这里直接跳过，避免无效 readPixel/blend/drawPixel。
-      if (span.inner_x0 <= span.inner_x1 && x >= span.inner_x0 && x <= span.inner_x1) {
-        x = span.inner_x1;
+      if (inner_x0 <= inner_x1 && x >= inner_x0 && x <= inner_x1) {
+        x = inner_x1;
         continue;
       }
 
@@ -2035,7 +1984,7 @@ static void draw_cover_panel_record_overlay(LGFX_Sprite* dst)
   const int r  = COVER_PANEL_RECORD_R;
 
   // 大唱片圆：半透明，但跳过最内圈。
-  // span 已预计算，避免每帧 sqrtf 和 inner dx*dx 判断。
+  // 扫描线半宽已预计算，避免每帧 sqrtf 和 inner dx*dx 判断。
   fill_cover_panel_record_blend(dst, TFT_BLACK, COVER_PANEL_RECORD_ALPHA);
 
   // 内部弱环纹，保留一条
@@ -2593,13 +2542,18 @@ static void draw_cover_panel_info(LGFX_Sprite* dst)
   }
 }
 
-struct CoverPanelTrigPoint {
-  int16_t cos1024;
-  int16_t sin1024;
+// 旧实现首次绘制时生成 360 个可写三角函数点，常驻占用 1440B 内部 RAM。
+// 整数角度具备四象限对称性，只保留 0~90 度正弦值到 Flash。
+static constexpr int16_t s_cover_panel_sin1024_quarter[91] = {
+  0, 18, 36, 54, 71, 89, 107, 125, 143, 160, 178, 195,
+  213, 230, 248, 265, 282, 299, 316, 333, 350, 367, 384, 400,
+  416, 433, 449, 465, 481, 496, 512, 527, 543, 558, 573, 587,
+  602, 616, 630, 644, 658, 672, 685, 698, 711, 724, 737, 749,
+  761, 773, 784, 796, 807, 818, 828, 839, 849, 859, 868, 878,
+  887, 896, 904, 912, 920, 928, 935, 943, 949, 956, 962, 968,
+  974, 979, 984, 989, 994, 998, 1002, 1005, 1008, 1011, 1014, 1016,
+  1018, 1020, 1022, 1023, 1023, 1024, 1024
 };
-
-static CoverPanelTrigPoint s_cover_panel_trig_lut[360];
-static bool s_cover_panel_trig_lut_ready = false;
 
 static int cover_panel_norm_deg(int deg)
 {
@@ -2608,34 +2562,32 @@ static int cover_panel_norm_deg(int deg)
   return deg;
 }
 
-static void cover_panel_init_trig_lut()
+static inline int cover_panel_sin1024(int deg)
 {
-  if (s_cover_panel_trig_lut_ready) {
-    return;
+  deg = cover_panel_norm_deg(deg);
+  if (deg <= 90) {
+    return (int)s_cover_panel_sin1024_quarter[deg];
   }
-
-  for (int deg = 0; deg < 360; ++deg) {
-    const float rad = ((float)deg - 90.0f) * 0.01745329252f;
-    s_cover_panel_trig_lut[deg].cos1024 = (int16_t)lroundf(cosf(rad) * 1024.0f);
-    s_cover_panel_trig_lut[deg].sin1024 = (int16_t)lroundf(sinf(rad) * 1024.0f);
+  if (deg <= 180) {
+    return (int)s_cover_panel_sin1024_quarter[180 - deg];
   }
-
-  s_cover_panel_trig_lut_ready = true;
+  if (deg <= 270) {
+    return -(int)s_cover_panel_sin1024_quarter[deg - 180];
+  }
+  return -(int)s_cover_panel_sin1024_quarter[360 - deg];
 }
 
 static inline int cover_panel_arc_x(int cx, int radius, int deg)
 {
-  cover_panel_init_trig_lut();
-  const CoverPanelTrigPoint& p = s_cover_panel_trig_lut[cover_panel_norm_deg(deg)];
-  const int v = (int)p.cos1024 * radius;
+  // 原 cos(deg - 90°) 等价于 sin(deg)。
+  const int v = cover_panel_sin1024(deg) * radius;
   return cx + ((v >= 0) ? ((v + 512) >> 10) : -(((-v) + 512) >> 10));
 }
 
 static inline int cover_panel_arc_y(int cy, int radius, int deg)
 {
-  cover_panel_init_trig_lut();
-  const CoverPanelTrigPoint& p = s_cover_panel_trig_lut[cover_panel_norm_deg(deg)];
-  const int v = (int)p.sin1024 * radius;
+  // 原 sin(deg - 90°) 直接用同一张四分之一正弦表。
+  const int v = cover_panel_sin1024(deg - 90) * radius;
   return cy + ((v >= 0) ? ((v + 512) >> 10) : -(((-v) + 512) >> 10));
 }
 

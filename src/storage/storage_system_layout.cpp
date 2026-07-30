@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <SdFat.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "storage/storage.h"
@@ -76,43 +77,63 @@ static bool ends_with(const char* text, const char* suffix)
          strcmp(text + text_len - suffix_len, suffix) == 0;
 }
 
-static void migrate_crash_files_locked()
+static bool find_legacy_crash_file_locked(char* out_name, size_t out_size)
 {
+  if (!out_name || out_size == 0) return false;
+  out_name[0] = '\0';
+
   SdFile root;
   if (!root.open(SystemPaths::kRoot, O_RDONLY) || !root.isDir()) {
     root.close();
-    return;
+    return false;
   }
 
-  // 先收集名称，关闭目录句柄后再 rename，避免遍历过程中修改目录结构。
-  static constexpr size_t kMaxCrashFilesPerBoot = 32;
-  static char names[kMaxCrashFilesPerBoot][96];
-  memset(names, 0, sizeof(names));
-  size_t count = 0;
-
+  bool found = false;
   SdFile file;
-  while (count < kMaxCrashFilesPerBoot && file.openNext(&root, O_RDONLY)) {
+  while (file.openNext(&root, O_RDONLY)) {
     if (!file.isDir()) {
-      char name[96] = {};
-      file.getName(name, sizeof(name));
-      const bool coredump = starts_with(name, "coredump_") && ends_with(name, ".bin");
-      const bool panic = starts_with(name, "panic_") && ends_with(name, ".txt");
-      if (coredump || panic) {
-        strlcpy(names[count], name, sizeof(names[count]));
-        ++count;
-      }
+      file.getName(out_name, out_size);
+      const bool coredump = starts_with(out_name, "coredump_") &&
+                            ends_with(out_name, ".bin");
+      const bool panic = starts_with(out_name, "panic_") &&
+                         ends_with(out_name, ".txt");
+      found = coredump || panic;
+      if (!found) out_name[0] = '\0';
     }
     file.close();
+    if (found) break;
   }
   root.close();
+  return found;
+}
 
-  for (size_t i = 0; i < count; ++i) {
-    const String old_path = String(SystemPaths::kRoot) + "/" + names[i];
-    const String new_path = String(SystemPaths::kCrashDir) + "/" + names[i];
-    (void)migrate_file_locked(old_path.c_str(), new_path.c_str());
+static void migrate_crash_files_locked()
+{
+  // 每次只找一个旧崩溃文件，关闭目录句柄后再 rename。
+  // 这样既不会在遍历期间修改目录，也不需要常驻 32×96B 名称表。
+  static constexpr size_t kMaxCrashFilesPerBoot = 32;
+  size_t migrated = 0;
+
+  for (; migrated < kMaxCrashFilesPerBoot; ++migrated) {
+    char name[96] = {};
+    if (!find_legacy_crash_file_locked(name, sizeof(name))) break;
+
+    char old_path[128] = {};
+    char new_path[128] = {};
+    snprintf(old_path, sizeof(old_path), "%s/%s", SystemPaths::kRoot, name);
+    snprintf(new_path, sizeof(new_path), "%s/%s", SystemPaths::kCrashDir, name);
+
+    if (!migrate_file_locked(old_path, new_path)) break;
+
+    // migrate_file_locked() 在冲突文件无法归档时会保留旧文件并返回 true。
+    // 此时必须停止，避免下一轮反复处理同一个名称。
+    if (sd.exists(old_path)) {
+      LOGW("[系统目录] 崩溃文件仍位于旧目录，本次停止继续迁移：%s", old_path);
+      break;
+    }
   }
 
-  if (count == kMaxCrashFilesPerBoot) {
+  if (migrated == kMaxCrashFilesPerBoot) {
     LOGW("[系统目录] 单次最多迁移 %u 个崩溃文件，剩余文件下次挂载继续处理",
          (unsigned)kMaxCrashFilesPerBoot);
   }
