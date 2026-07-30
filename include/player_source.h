@@ -60,6 +60,8 @@ void player_source_set_radio_runtime(const char* backend,
                                      bool active,
                                      const String& err = String());
 void player_source_clear_radio();
+// 电台配置重新加载后按新目录修正当前索引和静态元数据，保留连接/播放运行态。
+void player_source_remap_radio_catalog(int radio_idx, const RadioItem* item);
 
 void player_source_set_net_track_stub(int idx,
                                       const NetMusicItem& item,

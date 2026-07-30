@@ -73,6 +73,43 @@ static constexpr size_t kWebWifiMaxSsidBytes = 32;
 static constexpr size_t kWebWifiMaxPasswordBytes = 64;
 static constexpr size_t kWebWifiMaxHostnameBytes = 63;
 
+struct WebRadioConfigItem {
+  String name;
+  String url;
+  String format;
+  String region;
+  String logo;
+};
+
+struct WebRadioParseStats {
+  size_t data_lines = 0;
+  size_t skipped_lines = 0;
+  size_t first_skipped_line = 0;
+  String first_skip_reason;
+};
+
+static constexpr size_t kWebRadioMaxItems = 64;
+static constexpr size_t kWebRadioMaxNameBytes = 96;
+static constexpr size_t kWebRadioMaxUrlBytes = 512;
+static constexpr size_t kWebRadioMaxFormatBytes = 24;
+static constexpr size_t kWebRadioMaxRegionBytes = 64;
+static constexpr size_t kWebRadioMaxLogoBytes = 192;
+static constexpr size_t kWebRadioConfigMaxBytes = 48 * 1024;
+static constexpr size_t kWebRadioLogoMaxBytes = 1024 * 1024;
+
+struct WebRadioLogoUploadState {
+  uint8_t* data = nullptr;
+  size_t size = 0;
+  size_t capacity = 0;
+  int slot = -1;
+  bool failed = false;
+  bool result_ready = false;
+  bool staged = false;
+  bool deferred = false;
+  char path[192] = {};
+  char error[128] = {};
+};
+
 static bool s_wifi_enabled = true;
 
 static WebServer s_server(80);
@@ -85,6 +122,7 @@ static bool s_ap_mode = false;
 static bool s_wifi_config_apply_pending = false;
 static uint32_t s_wifi_config_apply_at_ms = 0;
 static portMUX_TYPE s_wifi_config_apply_mux = portMUX_INITIALIZER_UNLOCKED;
+static WebRadioLogoUploadState s_radio_logo_upload{};
 
 static void web_schedule_wifi_config_apply(uint32_t delay_ms)
 {
@@ -1362,6 +1400,759 @@ static void web_process_pending_wifi_config_apply()
   portEXIT_CRITICAL(&s_wifi_config_apply_mux);
 
   if (due) web_apply_saved_wifi_config_now();
+}
+
+static bool web_radio_set_error(String* error, const String& message)
+{
+  if (error) *error = message;
+  return false;
+}
+
+static bool web_radio_text_valid(const String& value,
+                                 size_t max_bytes,
+                                 bool allow_empty)
+{
+  if ((!allow_empty && value.isEmpty()) || value.length() > max_bytes) {
+    return false;
+  }
+  for (size_t i = 0; i < value.length(); ++i) {
+    const uint8_t ch = static_cast<uint8_t>(value[i]);
+    if (ch == 0 || ch == '\r' || ch == '\n' || ch < 0x20 || ch == '|') {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool web_radio_has_http_scheme(const String& value)
+{
+  if (value.length() < 7) return false;
+  String prefix = value.substring(0, value.length() >= 8 ? 8 : 7);
+  prefix.toLowerCase();
+  return prefix.startsWith("http://") || prefix.startsWith("https://");
+}
+
+static bool web_radio_url_valid(const String& url)
+{
+  return web_radio_text_valid(url, kWebRadioMaxUrlBytes, false) &&
+         web_radio_has_http_scheme(url);
+}
+
+static bool web_radio_logo_valid(const String& logo)
+{
+  if (!web_radio_text_valid(logo, kWebRadioMaxLogoBytes, true)) return false;
+  if (logo.isEmpty()) return true;
+  if (web_radio_has_http_scheme(logo)) return true;
+
+  // 兼容旧版配置中已存在的 /System/ 本地台标路径。
+  // 网页上传仍只会写入 /System/assets/radio/，这里只允许引用，不提供任意路径写入。
+  return logo.startsWith("/System/") && logo.indexOf("..") < 0;
+}
+
+static bool web_radio_item_valid(const WebRadioConfigItem& item,
+                                 String* error)
+{
+  if (!web_radio_text_valid(item.name, kWebRadioMaxNameBytes, false)) {
+    return web_radio_set_error(error, "电台名称不能为空，最多96字节且不能包含竖线");
+  }
+  if (!web_radio_url_valid(item.url)) {
+    return web_radio_set_error(error, "电台地址必须以http://或https://开头，最多512字节");
+  }
+  if (!web_radio_text_valid(item.format, kWebRadioMaxFormatBytes, true)) {
+    return web_radio_set_error(error, "格式最多24字节，不能包含竖线或换行");
+  }
+  if (!web_radio_text_valid(item.region, kWebRadioMaxRegionBytes, true)) {
+    return web_radio_set_error(error, "地区最多64字节，不能包含竖线或换行");
+  }
+  if (!web_radio_logo_valid(item.logo)) {
+    return web_radio_set_error(error, "台标必须为空、远程图片URL或安全的/System/本地路径");
+  }
+  return true;
+}
+
+enum class WebRadioLineParseResult : uint8_t {
+  Skip,
+  Item,
+  Invalid,
+};
+
+static WebRadioLineParseResult web_parse_radio_config_line(
+    const String& raw,
+    WebRadioConfigItem& item,
+    String* reason)
+{
+  String line = web_trim_copy(raw);
+  if (line.length() >= 3 &&
+      static_cast<uint8_t>(line[0]) == 0xEF &&
+      static_cast<uint8_t>(line[1]) == 0xBB &&
+      static_cast<uint8_t>(line[2]) == 0xBF) {
+    line.remove(0, 3);
+    line.trim();
+  }
+
+  if (line.isEmpty() || line.startsWith("#") || line.startsWith(";")) {
+    return WebRadioLineParseResult::Skip;
+  }
+  if (line.length() > 1024) {
+    if (reason) *reason = "配置行超过1024字节";
+    return WebRadioLineParseResult::Invalid;
+  }
+
+  const int p1 = line.indexOf('|');
+  const int p2 = p1 >= 0 ? line.indexOf('|', p1 + 1) : -1;
+  const int p3 = p2 >= 0 ? line.indexOf('|', p2 + 1) : -1;
+  const int p4 = p3 >= 0 ? line.indexOf('|', p3 + 1) : -1;
+  if (p1 <= 0) {
+    if (reason) *reason = "缺少名称与地址之间的竖线分隔符";
+    return WebRadioLineParseResult::Invalid;
+  }
+
+  item = WebRadioConfigItem{};
+  item.name = web_trim_copy(line.substring(0, p1));
+  if (p2 < 0) {
+    item.url = web_trim_copy(line.substring(p1 + 1));
+  } else {
+    item.url = web_trim_copy(line.substring(p1 + 1, p2));
+    if (p3 < 0) {
+      item.format = web_trim_copy(line.substring(p2 + 1));
+    } else {
+      item.format = web_trim_copy(line.substring(p2 + 1, p3));
+      if (p4 < 0) {
+        item.region = web_trim_copy(line.substring(p3 + 1));
+      } else {
+        item.region = web_trim_copy(line.substring(p3 + 1, p4));
+        item.logo = web_trim_copy(line.substring(p4 + 1));
+      }
+    }
+  }
+
+  String item_error;
+  if (!web_radio_item_valid(item, &item_error)) {
+    if (reason) *reason = item_error;
+    return WebRadioLineParseResult::Invalid;
+  }
+  return WebRadioLineParseResult::Item;
+}
+
+using WebRadioReadLineCallback = bool (*)(void* context, String& line);
+
+static bool web_parse_radio_config_lines(WebRadioReadLineCallback read_line,
+                                         void* read_context,
+                                         size_t source_size,
+                                         std::vector<WebRadioConfigItem>& items,
+                                         String* error,
+                                         String* warning = nullptr)
+{
+  items.clear();
+  if (error) error->remove(0);
+  if (warning) warning->remove(0);
+  if (!read_line || source_size > kWebRadioConfigMaxBytes) {
+    return web_radio_set_error(error, "电台配置文件过大");
+  }
+
+  WebRadioParseStats stats{};
+  String line;
+  size_t line_number = 0;
+  while (read_line(read_context, line)) {
+    ++line_number;
+    WebRadioConfigItem item{};
+    String reason;
+    const WebRadioLineParseResult result =
+        web_parse_radio_config_line(line, item, &reason);
+    if (result == WebRadioLineParseResult::Skip) continue;
+
+    ++stats.data_lines;
+    if (result == WebRadioLineParseResult::Invalid) {
+      ++stats.skipped_lines;
+      if (stats.first_skipped_line == 0) {
+        stats.first_skipped_line = line_number;
+        stats.first_skip_reason = reason;
+      }
+      LOGW("[网页] 跳过不兼容电台配置行：行=%u 原因=%s",
+           (unsigned)line_number,
+           reason.c_str());
+      continue;
+    }
+
+    if (items.size() >= kWebRadioMaxItems) {
+      return web_radio_set_error(
+          error,
+          String("有效电台数量超过") + String((unsigned)kWebRadioMaxItems) + "个");
+    }
+    items.push_back(item);
+  }
+
+  if (stats.data_lines > 0 && items.empty()) {
+    String message = "未读取到有效电台";
+    if (stats.first_skipped_line > 0) {
+      message += String("；第") + String((unsigned)stats.first_skipped_line) +
+                 "行：" + stats.first_skip_reason;
+    }
+    return web_radio_set_error(error, message);
+  }
+
+  if (warning && stats.skipped_lines > 0) {
+    *warning = String("已跳过") + String((unsigned)stats.skipped_lines) +
+               "行不兼容内容";
+    if (stats.first_skipped_line > 0) {
+      *warning += String("；首个为第") +
+                  String((unsigned)stats.first_skipped_line) +
+                  "行：" + stats.first_skip_reason;
+    }
+  }
+  return true;
+}
+
+struct WebRadioMemoryReader {
+  const uint8_t* data = nullptr;
+  size_t size = 0;
+  size_t offset = 0;
+};
+
+static bool web_radio_read_memory_line(void* context, String& line)
+{
+  WebRadioMemoryReader* reader = static_cast<WebRadioMemoryReader*>(context);
+  if (!reader || reader->offset >= reader->size) return false;
+
+  const size_t start = reader->offset;
+  while (reader->offset < reader->size && reader->data[reader->offset] != '\n') {
+    ++reader->offset;
+  }
+  line.remove(0);
+  line.reserve(reader->offset - start + 1);
+  for (size_t i = start; i < reader->offset; ++i) {
+    line += static_cast<char>(reader->data[i]);
+  }
+  if (reader->offset < reader->size && reader->data[reader->offset] == '\n') {
+    ++reader->offset;
+  }
+  return true;
+}
+
+static bool web_radio_read_file_line(void* context, String& line)
+{
+  File32* file = static_cast<File32*>(context);
+  if (!file || !file->available()) return false;
+  line = file->readStringUntil('\n');
+  return true;
+}
+
+static bool web_parse_radio_config_memory(const uint8_t* data,
+                                          size_t size,
+                                          std::vector<WebRadioConfigItem>& items,
+                                          String* error,
+                                          String* warning = nullptr)
+{
+  WebRadioMemoryReader reader{};
+  reader.data = data;
+  reader.size = size;
+  return web_parse_radio_config_lines(web_radio_read_memory_line,
+                                      &reader,
+                                      size,
+                                      items,
+                                      error,
+                                      warning);
+}
+
+static bool web_validate_radio_config_file(File32& file, void*)
+{
+  std::vector<WebRadioConfigItem> items;
+  String error;
+  return web_parse_radio_config_lines(web_radio_read_file_line,
+                                      &file,
+                                      file.fileSize(),
+                                      items,
+                                      &error);
+}
+
+static bool web_load_radio_config(std::vector<WebRadioConfigItem>& items,
+                                  String* error = nullptr,
+                                  bool* out_pending = nullptr,
+                                  String* warning = nullptr)
+{
+  items.clear();
+  if (error) error->remove(0);
+  if (warning) warning->remove(0);
+  if (out_pending) *out_pending = false;
+
+  const size_t pending_size =
+      storage_config_pending_size(SystemPaths::kRadioList);
+  if (pending_size > 0 && pending_size <= kWebRadioConfigMaxBytes) {
+    uint8_t* pending = static_cast<uint8_t*>(heap_caps_malloc(
+        pending_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (!pending) {
+      return web_radio_set_error(error, "读取PSRAM待写电台配置失败");
+    }
+    size_t copied = 0;
+    const bool read_ok = storage_config_read_pending(SystemPaths::kRadioList,
+                                                     pending,
+                                                     pending_size,
+                                                     &copied);
+    const bool parse_ok = read_ok &&
+        web_parse_radio_config_memory(pending, copied, items, error, warning);
+    heap_caps_free(pending);
+    if (parse_ok && out_pending) *out_pending = true;
+    return parse_ok;
+  }
+
+  (void)storage_config_recover(SystemPaths::kRadioList,
+                               web_validate_radio_config_file,
+                               nullptr,
+                               3000);
+
+  StorageSdLockGuard guard(2000);
+  if (!guard) return web_radio_set_error(error, "等待SD锁超时");
+
+  File32 file = sd.open(SystemPaths::kRadioList, O_RDONLY);
+  if (!file) return web_radio_set_error(error, "电台列表文件不存在");
+
+  const bool ok = web_parse_radio_config_lines(web_radio_read_file_line,
+                                               &file,
+                                               file.fileSize(),
+                                               items,
+                                               error,
+                                               warning);
+  file.close();
+  return ok;
+}
+
+static bool web_serialize_radio_config(
+    const std::vector<WebRadioConfigItem>& items,
+    String& output)
+{
+  output.remove(0);
+  output.reserve(160 + items.size() * 240);
+  output += "# ESP32S3 Player radio list\r\n";
+  output += "# 名称|地址|格式|地区|台标；网页保存时先暂存PSRAM，安全窗口再写入TF卡\r\n";
+  for (const WebRadioConfigItem& item : items) {
+    output += item.name;
+    output += '|';
+    output += item.url;
+    output += '|';
+    output += item.format;
+    output += '|';
+    output += item.region;
+    output += '|';
+    output += item.logo;
+    output += "\r\n";
+  }
+  return output.length() > 0 && output.length() <= kWebRadioConfigMaxBytes;
+}
+
+static void web_radio_config_commit_complete(const char* final_path,
+                                             bool success,
+                                             void*)
+{
+  if (!success) {
+    LOGW("[网页] 电台配置本次落盘失败，将在下一个安全窗口重试：%s",
+         final_path ? final_path : "-");
+    return;
+  }
+
+  const PlayerSourceState before = player_source_get();
+  if (radio_catalog_load()) {
+    if (before.type == PlayerSourceType::NET_RADIO) {
+      int remapped = -1;
+      const RadioItem* matched = nullptr;
+      for (size_t i = 0; i < radio_catalog_count(); ++i) {
+        const RadioItem* item = radio_catalog_get(i);
+        if (!item || !item->valid) continue;
+        if ((!before.radio_url.isEmpty() && item->url == before.radio_url) ||
+            (before.radio_url.isEmpty() && item->name == before.radio_name)) {
+          remapped = static_cast<int>(i);
+          matched = item;
+          break;
+        }
+      }
+      player_source_remap_radio_catalog(remapped, matched);
+      if (remapped >= 0) {
+        ui_set_track_pos(remapped, static_cast<int>(radio_catalog_count()));
+      }
+      LOGI("[网页] 当前电台目录索引已重映射：旧=%d 新=%d",
+           before.radio_idx,
+           remapped);
+    }
+
+    LOGI("[网页] 电台配置已落盘并重新加载：数量=%u",
+         (unsigned)radio_catalog_count());
+  } else {
+    LOGE("[网页] 电台配置落盘成功，但重新加载失败：%s",
+         radio_catalog_error().c_str());
+  }
+  quick_menu_request_refresh();
+}
+
+static String web_radio_arg_name(size_t index, const char* field)
+{
+  char name[40] = {};
+  snprintf(name, sizeof(name), "%s_%u", field, (unsigned)index);
+  return String(name);
+}
+
+static String web_radio_arg(size_t index, const char* field)
+{
+  return s_server.arg(web_radio_arg_name(index, field));
+}
+
+static bool web_parse_radio_save_request(
+    std::vector<WebRadioConfigItem>& items,
+    String& error)
+{
+  items.clear();
+  error.remove(0);
+  if (!s_server.hasArg("count")) {
+    error = "缺少电台数量";
+    return false;
+  }
+
+  const int count = s_server.arg("count").toInt();
+  if (count < 0 || count > static_cast<int>(kWebRadioMaxItems)) {
+    error = "电台数量必须在0到64之间";
+    return false;
+  }
+
+  items.reserve(static_cast<size_t>(count));
+  for (int i = 0; i < count; ++i) {
+    WebRadioConfigItem item{};
+    item.name = web_trim_copy(web_radio_arg(i, "name"));
+    item.url = web_trim_copy(web_radio_arg(i, "url"));
+    item.format = web_trim_copy(web_radio_arg(i, "format"));
+    item.region = web_trim_copy(web_radio_arg(i, "region"));
+    item.logo = web_trim_copy(web_radio_arg(i, "logo"));
+
+    String item_error;
+    if (!web_radio_item_valid(item, &item_error)) {
+      error = String("第") + String(i + 1) + "个电台：" + item_error;
+      return false;
+    }
+    items.push_back(item);
+  }
+  return true;
+}
+
+static bool web_stage_radio_config_from_request(String& error, bool& deferred)
+{
+  deferred = false;
+  std::vector<WebRadioConfigItem> items;
+  if (!web_parse_radio_save_request(items, error)) return false;
+
+  String serialized;
+  if (!web_serialize_radio_config(items, serialized)) {
+    error = "电台配置序列化失败或超过48KB";
+    return false;
+  }
+
+  if (!storage_config_stage_psram(
+          SystemPaths::kRadioList,
+          reinterpret_cast<const uint8_t*>(serialized.c_str()),
+          serialized.length(),
+          web_validate_radio_config_file,
+          nullptr,
+          web_radio_config_commit_complete,
+          nullptr)) {
+    error = "电台配置暂存PSRAM失败，原配置未改变";
+    return false;
+  }
+
+  const bool local_audio_open =
+      player_source_type_get() == PlayerSourceType::LOCAL_TRACK &&
+      (audio_service_is_playing() || audio_service_is_paused());
+  if (local_audio_open) {
+    deferred = true;
+  } else {
+    (void)storage_config_commit_pending(4000);
+    deferred = storage_config_has_pending_path(SystemPaths::kRadioList);
+  }
+
+  LOGI("[网页] 电台配置已%s：数量=%u",
+       deferred ? "暂存PSRAM等待安全窗口" : "写入TF卡",
+       (unsigned)items.size());
+  return true;
+}
+
+static void web_handle_radio_config_get()
+{
+  if (!storage_is_ready()) {
+    web_send_json_err("TF卡未就绪，无法读取电台配置", 503);
+    return;
+  }
+
+  std::vector<WebRadioConfigItem> items;
+  String error;
+  String warning;
+  bool pending = false;
+  const bool ok = web_load_radio_config(items, &error, &pending, &warning);
+
+  web_send_no_cache_headers();
+  s_server.sendHeader("Connection", "close");
+  s_server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  s_server.send(200, "application/json; charset=utf-8", "{");
+
+  String head;
+  head.reserve(256);
+  head += "\"ok\":";
+  head += ok ? "true" : "false";
+  head += ",\"path\":\"";
+  head += web_json_escape(String(SystemPaths::kRadioList));
+  head += "\",\"asset_dir\":\"";
+  head += web_json_escape(String(SystemPaths::kRadioAssetsDir));
+  head += "\",\"write_pending\":";
+  head += pending ? "true" : "false";
+  head += ",\"max_items\":";
+  head += String((unsigned)kWebRadioMaxItems);
+  head += ",\"error\":\"";
+  head += web_json_escape(error);
+  head += "\",\"warning\":\"";
+  head += web_json_escape(warning);
+  head += "\",\"items\":[";
+  if (!web_send_chunk(head)) return;
+
+  String chunk;
+  chunk.reserve(1400);
+  for (size_t i = 0; i < items.size(); ++i) {
+    const WebRadioConfigItem& item = items[i];
+    if (i) chunk += ',';
+    chunk += "{\"index\":";
+    chunk += String((unsigned)i);
+    chunk += ",\"name\":\"";
+    chunk += web_json_escape(item.name);
+    chunk += "\",\"url\":\"";
+    chunk += web_json_escape(item.url);
+    chunk += "\",\"format\":\"";
+    chunk += web_json_escape(item.format);
+    chunk += "\",\"region\":\"";
+    chunk += web_json_escape(item.region);
+    chunk += "\",\"logo\":\"";
+    chunk += web_json_escape(item.logo);
+    chunk += "\"}";
+    if (chunk.length() >= 1200 && !web_flush_chunk_buffer(chunk)) return;
+  }
+  if (!web_flush_chunk_buffer(chunk)) return;
+  if (!web_send_chunk("]}")) return;
+  web_end_stream_response();
+}
+
+static void web_handle_radio_config_save()
+{
+  if (!storage_is_ready()) {
+    web_send_json_err("TF卡未就绪，无法保存电台配置", 503);
+    return;
+  }
+
+  String error;
+  bool deferred = false;
+  if (!web_stage_radio_config_from_request(error, deferred)) {
+    web_send_json_err(error.c_str(), 400);
+    return;
+  }
+
+  String json = "{\"ok\":true,\"state\":\"";
+  json += deferred ? "pending" : "committed";
+  json += "\",\"message\":\"";
+  json += deferred
+      ? "电台配置已暂存PSRAM，下次切歌后写入TF卡"
+      : "电台配置已写入TF卡并重新加载";
+  json += "\"}";
+  web_send_no_cache_headers();
+  s_server.send(200, "application/json; charset=utf-8", json);
+}
+
+static bool web_validate_radio_logo_bytes(const uint8_t* data,
+                                          size_t size,
+                                          const char** extension)
+{
+  if (extension) *extension = nullptr;
+  if (!data || size < 8 || size > kWebRadioLogoMaxBytes) return false;
+
+  const bool jpeg = data[0] == 0xFF && data[1] == 0xD8;
+  const bool png = data[0] == 0x89 && data[1] == 0x50 &&
+                   data[2] == 0x4E && data[3] == 0x47 &&
+                   data[4] == 0x0D && data[5] == 0x0A &&
+                   data[6] == 0x1A && data[7] == 0x0A;
+  if (jpeg) {
+    if (extension) *extension = ".jpg";
+    return true;
+  }
+  if (png) {
+    if (extension) *extension = ".png";
+    return true;
+  }
+  return false;
+}
+
+static bool web_validate_radio_logo_file(File32& file, void*)
+{
+  const uint64_t size64 = file.fileSize();
+  if (size64 < 8 || size64 > kWebRadioLogoMaxBytes) return false;
+
+  uint8_t head[8] = {};
+  if (file.read(head, sizeof(head)) != sizeof(head)) return false;
+  const bool jpeg = head[0] == 0xFF && head[1] == 0xD8;
+  const bool png = head[0] == 0x89 && head[1] == 0x50 &&
+                   head[2] == 0x4E && head[3] == 0x47 &&
+                   head[4] == 0x0D && head[5] == 0x0A &&
+                   head[6] == 0x1A && head[7] == 0x0A;
+  return jpeg || png;
+}
+
+static void web_radio_logo_upload_reset()
+{
+  if (s_radio_logo_upload.data) {
+    heap_caps_free(s_radio_logo_upload.data);
+  }
+  s_radio_logo_upload = WebRadioLogoUploadState{};
+}
+
+static void web_radio_logo_upload_fail(const char* message)
+{
+  s_radio_logo_upload.failed = true;
+  snprintf(s_radio_logo_upload.error,
+           sizeof(s_radio_logo_upload.error),
+           "%s",
+           message ? message : "台标上传失败");
+}
+
+static bool web_radio_logo_upload_reserve(size_t required)
+{
+  if (required <= s_radio_logo_upload.capacity) return true;
+  if (required > kWebRadioLogoMaxBytes) return false;
+
+  size_t capacity = s_radio_logo_upload.capacity ?
+      s_radio_logo_upload.capacity : 16 * 1024;
+  while (capacity < required) {
+    capacity *= 2;
+    if (capacity > kWebRadioLogoMaxBytes) {
+      capacity = kWebRadioLogoMaxBytes;
+      break;
+    }
+  }
+
+  void* fresh = heap_caps_realloc(s_radio_logo_upload.data,
+                                  capacity,
+                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!fresh) return false;
+  s_radio_logo_upload.data = static_cast<uint8_t*>(fresh);
+  s_radio_logo_upload.capacity = capacity;
+  return true;
+}
+
+static void web_radio_logo_commit_complete(const char* final_path,
+                                           bool success,
+                                           void*)
+{
+  if (success) {
+    LOGI("[网页] 电台台标已在安全窗口写入：%s",
+         final_path ? final_path : "-");
+  } else {
+    LOGW("[网页] 电台台标本次写入失败，将在下一个安全窗口重试：%s",
+         final_path ? final_path : "-");
+  }
+}
+
+static void web_handle_radio_logo_upload_stream()
+{
+  HTTPUpload& upload = s_server.upload();
+  if (upload.status == UPLOAD_FILE_START) {
+    web_radio_logo_upload_reset();
+    s_radio_logo_upload.slot = s_server.arg("slot").toInt();
+    if (s_radio_logo_upload.slot < 0 ||
+        s_radio_logo_upload.slot >= static_cast<int>(kWebRadioMaxItems)) {
+      web_radio_logo_upload_fail("台标槽位无效");
+    }
+    return;
+  }
+
+  if (upload.status == UPLOAD_FILE_WRITE) {
+    if (s_radio_logo_upload.failed) return;
+    const size_t required = s_radio_logo_upload.size + upload.currentSize;
+    if (!web_radio_logo_upload_reserve(required)) {
+      web_radio_logo_upload_fail("台标超过1MB或PSRAM不足");
+      return;
+    }
+    memcpy(s_radio_logo_upload.data + s_radio_logo_upload.size,
+           upload.buf,
+           upload.currentSize);
+    s_radio_logo_upload.size = required;
+    return;
+  }
+
+  if (upload.status == UPLOAD_FILE_ABORTED) {
+    web_radio_logo_upload_fail("台标上传已中止");
+    s_radio_logo_upload.result_ready = true;
+    return;
+  }
+
+  if (upload.status != UPLOAD_FILE_END) return;
+  s_radio_logo_upload.result_ready = true;
+  if (s_radio_logo_upload.failed) return;
+
+  const char* extension = nullptr;
+  if (!web_validate_radio_logo_bytes(s_radio_logo_upload.data,
+                                     s_radio_logo_upload.size,
+                                     &extension)) {
+    web_radio_logo_upload_fail("只支持完整的JPEG或PNG图片，最大1MB");
+    return;
+  }
+
+  snprintf(s_radio_logo_upload.path,
+           sizeof(s_radio_logo_upload.path),
+           "%s/radio_%02d%s",
+           SystemPaths::kRadioAssetsDir,
+           s_radio_logo_upload.slot,
+           extension);
+
+  if (!storage_config_stage_psram(
+          s_radio_logo_upload.path,
+          s_radio_logo_upload.data,
+          s_radio_logo_upload.size,
+          web_validate_radio_logo_file,
+          nullptr,
+          web_radio_logo_commit_complete,
+          nullptr)) {
+    web_radio_logo_upload_fail("台标暂存PSRAM失败，原图片未改变");
+    return;
+  }
+
+  s_radio_logo_upload.staged = true;
+  const bool local_audio_open =
+      player_source_type_get() == PlayerSourceType::LOCAL_TRACK &&
+      (audio_service_is_playing() || audio_service_is_paused());
+  if (local_audio_open) {
+    s_radio_logo_upload.deferred = true;
+  } else {
+    (void)storage_config_commit_pending(5000);
+    s_radio_logo_upload.deferred =
+        storage_config_has_pending_path(s_radio_logo_upload.path);
+  }
+}
+
+static void web_handle_radio_logo_upload_complete()
+{
+  if (!s_radio_logo_upload.result_ready || s_radio_logo_upload.failed ||
+      !s_radio_logo_upload.staged) {
+    const String message = s_radio_logo_upload.error[0]
+        ? String(s_radio_logo_upload.error)
+        : String("未收到有效台标文件");
+    web_radio_logo_upload_reset();
+    web_send_json_err(message.c_str(), 400);
+    return;
+  }
+
+  String json = "{\"ok\":true,\"state\":\"";
+  json += s_radio_logo_upload.deferred ? "pending" : "committed";
+  json += "\",\"path\":\"";
+  json += web_json_escape(String(s_radio_logo_upload.path));
+  json += "\",\"size\":";
+  json += String((unsigned)s_radio_logo_upload.size);
+  json += ",\"message\":\"";
+  json += s_radio_logo_upload.deferred
+      ? "台标已暂存PSRAM，下次切歌后写入TF卡"
+      : "台标已写入TF卡";
+  json += "\"}";
+
+  web_radio_logo_upload_reset();
+  web_send_no_cache_headers();
+  s_server.send(200, "application/json; charset=utf-8", json);
 }
 
 static bool web_parse_int_arg(const char* name, int& out) {
@@ -4291,6 +5082,12 @@ static void web_setup_routes() {
   s_server.on("/api/config/wifi", HTTP_GET, web_handle_wifi_config_get);
   s_server.on("/api/config/wifi/save", HTTP_POST, web_handle_wifi_config_save);
   s_server.on("/api/config/wifi/apply", HTTP_POST, web_handle_wifi_config_apply);
+  s_server.on("/api/config/radios", HTTP_GET, web_handle_radio_config_get);
+  s_server.on("/api/config/radios/save", HTTP_POST, web_handle_radio_config_save);
+  s_server.on("/api/config/radios/logo",
+              HTTP_POST,
+              web_handle_radio_logo_upload_complete,
+              web_handle_radio_logo_upload_stream);
   s_server.on("/api/audio-output/status", HTTP_GET, web_handle_audio_output_status);
   s_server.on("/api/audio-output/route", HTTP_POST, web_handle_audio_output_route);
   s_server.on("/api/audio-output/amp-mute", HTTP_POST, web_handle_audio_output_amp_mute);

@@ -1058,8 +1058,12 @@ bool player_control_try_auto_next(bool entered, bool started)
 bool player_play_radio_index(int idx)
 {
     if (idx < 0) return false;
-    const RadioItem* item = radio_catalog_get((size_t)idx);
-    if (!item || !item->valid) return false;
+    const RadioItem* catalog_item = radio_catalog_get((size_t)idx);
+    if (!catalog_item || !catalog_item->valid) return false;
+
+    // 切换安全窗口可能提交并重新加载电台配置，必须先复制当前条目，
+    // 避免 radio_catalog_load() 使 vector 中的旧指针失效。
+    const RadioItem item = *catalog_item;
 
     // 进入电台前先把当前本地或 NAS 状态保存到各自内存快照；电台不会覆盖这两套状态。
     (void)player_snapshot_capture_current_source();
@@ -1083,27 +1087,27 @@ bool player_play_radio_index(int idx)
     }
     control_normalize_remote_mode_category("网络收音机");
 
-    player_source_set_radio_stub(idx, *item, String("connecting"), String());
+    player_source_set_radio_stub(idx, item, String("connecting"), String());
     player_state_set_current_index(-1);
     player_control_reset_runtime_flags();
 
-    ui_set_now_playing(item->name.c_str(), "网络电台");
-    ui_set_album(item->region);
+    ui_set_now_playing(item.name.c_str(), "网络电台");
+    ui_set_album(item.region);
     ui_set_track_pos(idx, (int)radio_catalog_count());
-    control_apply_radio_cover(*item);
+    control_apply_radio_cover(item);
     ui_request_refresh_now();
 
-    const bool ok = audio_radio_backend_start(*item);
+    const bool ok = audio_radio_backend_start(item);
     if (ok) {
         player_source_set_radio_status(true, String("connecting"), String());
         player_source_set_radio_runtime(audio_radio_backend_name(),
-                                        item->name,
+                                        item.name,
                                         String(),
                                         0,
                                         "connecting",
                                         true,
                                         String());
-        LOGI("[电台] 播放电台 索引=%d 名称=%s 后端=%s", idx, item->name.c_str(), audio_radio_backend_name());
+        LOGI("[电台] 播放电台 索引=%d 名称=%s 后端=%s", idx, item.name.c_str(), audio_radio_backend_name());
         return true;
     }
 
@@ -1114,7 +1118,7 @@ bool player_play_radio_index(int idx)
     player_source_set_radio_status(false, String("error"), error);
     LOGW("[电台] 播放失败：索引=%d 名称=%s 原因=%s",
          idx,
-         item->name.c_str(),
+         item.name.c_str(),
          error.c_str());
     return false;
 }

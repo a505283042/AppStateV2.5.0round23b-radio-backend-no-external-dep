@@ -7,6 +7,7 @@ namespace SystemPaths {
 static constexpr const char* kRoot = "/System";
 static constexpr const char* kConfigDir = "/System/config";
 static constexpr const char* kAssetsDir = "/System/assets";
+static constexpr const char* kRadioAssetsDir = "/System/assets/radio";
 static constexpr const char* kLibraryDir = "/System/library";
 static constexpr const char* kReportsDir = "/System/reports";
 static constexpr const char* kCrashDir = "/System/crash";

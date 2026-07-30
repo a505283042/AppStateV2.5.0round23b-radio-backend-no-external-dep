@@ -154,6 +154,21 @@ void player_source_set_radio_status(bool active, const String& state, const Stri
   unlock_state();
 }
 
+void player_source_remap_radio_catalog(int radio_idx, const RadioItem* item) {
+  lock_state();
+  if (s_state.type == PlayerSourceType::NET_RADIO) {
+    s_state.radio_idx = radio_idx;
+    if (item) {
+      s_state.radio_name = item->name;
+      s_state.radio_url = item->url;
+      s_state.radio_format = item->format;
+      s_state.radio_region = item->region;
+      s_state.radio_logo = item->logo;
+    }
+  }
+  unlock_state();
+}
+
 void player_source_clear_radio() {
   lock_state();
   if (s_state.type == PlayerSourceType::NET_RADIO) {

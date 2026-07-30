@@ -155,6 +155,7 @@ bool storage_system_layout_prepare()
   ok = ensure_dir_locked(SystemPaths::kRoot) && ok;
   ok = ensure_dir_locked(SystemPaths::kConfigDir) && ok;
   ok = ensure_dir_locked(SystemPaths::kAssetsDir) && ok;
+  ok = ensure_dir_locked(SystemPaths::kRadioAssetsDir) && ok;
   ok = ensure_dir_locked(SystemPaths::kLibraryDir) && ok;
   ok = ensure_dir_locked(SystemPaths::kReportsDir) && ok;
   ok = ensure_dir_locked(SystemPaths::kCrashDir) && ok;

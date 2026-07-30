@@ -1321,9 +1321,22 @@ static const char WEBCTRL_SETTINGS_HTML[] PROGMEM = R"HTML(
     .diag-group:first-child{margin-top:0;border-top:none}
     .diag-title{font-size:13px;font-weight:800;color:#79c0ff;letter-spacing:.04em;margin:0 0 10px}
     .diag-value{font-weight:700;text-align:right;word-break:break-word;font-variant-numeric:tabular-nums}
-    .wifi-list{display:flex;flex-direction:column;gap:12px;margin:14px 0}
-    .wifi-item{border:1px solid #343434;border-radius:14px;padding:12px;background:#151515}
-    .wifi-item-header{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px}
+    .config-list-heading{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:14px 2px 8px;font-weight:800}
+    .config-list-count{font-size:13px;font-weight:700;color:#9aa4b2}
+    .config-item-main{display:flex;align-items:center;gap:8px;min-width:0}
+    .config-item-title{font-weight:800;white-space:nowrap}
+    .config-item-name{color:#ddd;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .config-item-meta{margin-left:auto;font-size:12px;font-weight:700;color:#9aa4b2;white-space:nowrap}
+    .config-item-actions-row{display:flex;justify-content:flex-end;gap:6px;flex-wrap:wrap;margin-bottom:12px}
+    .config-item-actions-row button{padding:7px 10px;font-size:13px}
+    .wifi-list{display:flex;flex-direction:column;gap:10px;margin:0 0 14px}
+    .wifi-item{border:1px solid #343434;border-radius:14px;background:#151515;overflow:hidden}
+    .wifi-item>summary,.radio-item>summary{display:flex;align-items:center;gap:10px;padding:12px;cursor:pointer;list-style:none;user-select:none}
+    .wifi-item>summary::-webkit-details-marker,.radio-item>summary::-webkit-details-marker{display:none}
+    .wifi-item>summary::after,.radio-item>summary::after{content:'›';font-size:24px;line-height:1;color:#aaa;transform:rotate(0deg);transition:transform .16s ease}
+    .wifi-item[open]>summary,.radio-item[open]>summary{border-bottom:1px solid #303030}
+    .wifi-item[open]>summary::after,.radio-item[open]>summary::after{transform:rotate(90deg)}
+    .wifi-item-body,.radio-item-body{padding:12px}
     .wifi-item-title{display:flex;align-items:center;gap:8px;font-weight:800}
     .wifi-item-actions{display:flex;gap:6px;flex-wrap:wrap}
     .wifi-item-actions button{padding:7px 10px;font-size:13px}
@@ -1335,7 +1348,20 @@ static const char WEBCTRL_SETTINGS_HTML[] PROGMEM = R"HTML(
     .wifi-checks label{display:inline-flex;gap:7px;align-items:center;color:#ddd}
     .wifi-badge{display:inline-flex;padding:3px 8px;border-radius:999px;background:#175f35;color:#b7f7ce;font-size:12px}
     .wifi-empty{border:1px dashed #444;border-radius:12px;padding:18px;text-align:center;color:#999}
-    @media(max-width:560px){.wifi-grid{grid-template-columns:1fr}.row{grid-template-columns:1fr}.row>.status-value,.row>.diag-value,.row>div{text-align:left}.row input[type=number],.row input[type=text],.row input[type=password],.row select{width:100%}}
+    .radio-list{display:flex;flex-direction:column;gap:10px;margin:0 0 14px}
+    .radio-item{border:1px solid #343434;border-radius:14px;background:#151515;overflow:hidden}
+    .radio-item-title{font-weight:800}
+    .radio-item-actions{display:flex;gap:6px;flex-wrap:wrap}
+    .radio-item-actions button{padding:7px 10px;font-size:13px}
+    .radio-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px 12px}
+    .radio-field{display:flex;flex-direction:column;gap:6px}
+    .radio-field label{font-size:13px;color:#bbb}
+    .radio-field input{width:100%}
+    .radio-url-field{grid-column:1 / -1}
+    .radio-upload{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px}
+    .radio-upload input[type=file]{max-width:100%;color:#ccc}
+    .radio-empty{border:1px dashed #444;border-radius:12px;padding:18px;text-align:center;color:#999}
+    @media(max-width:560px){.config-item-meta{display:none}.wifi-grid,.radio-grid{grid-template-columns:1fr}.radio-url-field{grid-column:auto}.row{grid-template-columns:1fr}.row>.status-value,.row>.diag-value,.row>div{text-align:left}.row input[type=number],.row input[type=text],.row input[type=password],.row select{width:100%}}
   </style>
 </head>
 <body>
@@ -1353,6 +1379,7 @@ static const char WEBCTRL_SETTINGS_HTML[] PROGMEM = R"HTML(
         <div class="row"><label>当前连接</label><div class="status-value" id="wifiConnectionText">正在读取...</div></div>
         <div class="row"><label>配置文件</label><div class="status-value" id="wifiConfigPathText">/System/config/wifi.conf</div></div>
         <div class="row"><label for="wifiHostname">设备主机名</label><input id="wifiHostname" type="text" maxlength="63" autocomplete="off" placeholder="esp32s3-player"></div>
+        <div class="config-list-heading"><span>已有网络</span><span class="config-list-count" id="wifiNetworkCount">0 个</span></div>
         <div id="wifiNetworkList" class="wifi-list"></div>
         <div class="actions">
           <button class="secondary" id="wifiAddBtn" onclick="addWifiNetwork()">添加网络</button>
@@ -1363,6 +1390,26 @@ static const char WEBCTRL_SETTINGS_HTML[] PROGMEM = R"HTML(
           <button class="warn" id="wifiApplyBtn" onclick="saveWifiConfig(true)">保存并重连</button>
         </div>
         <div class="muted" id="wifiConfigMessage" style="margin-top:10px">网页不会读取明文密码；本地播放期间保存会先暂存PSRAM，在下次切歌安全窗口写入TF卡。</div>
+      </div>
+    </details>
+
+
+    <details class="card" id="radioConfigCard">
+      <summary>网络电台配置</summary>
+      <div class="setting-body">
+        <div class="row"><label>配置文件</label><div class="status-value" id="radioConfigPathText">/System/config/radio_list.txt</div></div>
+        <div class="row"><label>台标目录</label><div class="status-value" id="radioAssetDirText">/System/assets/radio</div></div>
+        <div class="config-list-heading"><span>已有电台</span><span class="config-list-count" id="radioConfigCount">0 个</span></div>
+        <div id="radioConfigList" class="radio-list"></div>
+        <div class="actions">
+          <button class="secondary" id="radioAddBtn" onclick="addRadioConfigItem()">添加电台</button>
+          <button class="secondary" id="radioReloadBtn" onclick="loadRadioConfig(false)">重新读取</button>
+          <a class="secondary" href="/radios">打开电台页</a>
+        </div>
+        <div class="actions" style="margin-top:10px">
+          <button id="radioSaveBtn" onclick="saveRadioConfig()">保存电台配置</button>
+        </div>
+        <div class="muted" id="radioConfigMessage" style="margin-top:10px">地址、顺序和台标都先暂存PSRAM；本地播放时在下次切歌安全窗口写入TF卡。</div>
       </div>
     </details>
 
@@ -1613,6 +1660,9 @@ let lastSystemDiagnosticsAt = 0;
 let wifiConfigBusy = false;
 let wifiConfigMaxNetworks = 16;
 let wifiConfigNetworks = [];
+let radioConfigBusy = false;
+let radioConfigMaxItems = 64;
+let radioConfigItems = [];
 
 function setWifiConfigBusy(busy){
   wifiConfigBusy = !!busy;
@@ -1650,6 +1700,7 @@ function syncWifiModelFromDom(){
   document.querySelectorAll('#wifiNetworkList .wifi-item').forEach((item, index)=>{
     const network = wifiConfigNetworks[index];
     if(!network) return;
+    network.expanded = item.open;
     network.ssid = item.querySelector('[data-field="ssid"]').value;
     network.password = item.querySelector('[data-field="password"]').value;
     network.channel = item.querySelector('[data-field="channel"]').value;
@@ -1696,7 +1747,8 @@ function addWifiNetwork(){
     hidden:false,
     channel:0,
     bssid:'',
-    active:false
+    active:false,
+    expanded:true
   });
   renderWifiNetworks();
   const items = document.querySelectorAll('#wifiNetworkList .wifi-item');
@@ -1711,6 +1763,8 @@ function renderWifiNetworks(){
   const list = document.getElementById('wifiNetworkList');
   if(!list) return;
   list.textContent = '';
+  const count = document.getElementById('wifiNetworkCount');
+  if(count) count.textContent = `${wifiConfigNetworks.length} 个`;
 
   if(!wifiConfigNetworks.length){
     const empty = document.createElement('div');
@@ -1722,26 +1776,39 @@ function renderWifiNetworks(){
   }
 
   wifiConfigNetworks.forEach((network, index)=>{
-    const item = document.createElement('div');
+    const item = document.createElement('details');
     item.className = 'wifi-item';
+    item.open = !!network.expanded;
+    item.addEventListener('toggle', ()=>{ network.expanded = item.open; });
 
-    const header = document.createElement('div');
-    header.className = 'wifi-item-header';
-    const title = document.createElement('div');
-    title.className = 'wifi-item-title';
-    const titleText = document.createElement('span');
-    titleText.textContent = `网络 ${index + 1}`;
-    title.appendChild(titleText);
+    const summary = document.createElement('summary');
+    const main = document.createElement('div');
+    main.className = 'config-item-main';
+    const order = document.createElement('span');
+    order.className = 'config-item-title';
+    order.textContent = `网络 ${index + 1}`;
+    const summaryName = document.createElement('span');
+    summaryName.className = 'config-item-name';
+    summaryName.textContent = network.ssid || '未命名网络';
+    main.append(order, summaryName);
     if(network.active){
       const badge = document.createElement('span');
       badge.className = 'wifi-badge';
       badge.textContent = '当前连接';
-      title.appendChild(badge);
+      main.appendChild(badge);
     }
-    header.appendChild(title);
+    const meta = document.createElement('span');
+    meta.className = 'config-item-meta';
+    meta.textContent = network.hidden
+      ? '隐藏网络'
+      : ((Number(network.channel) || 0) > 0 ? `信道 ${network.channel}` : '自动信道');
+    summary.append(main, meta);
+    item.appendChild(summary);
 
+    const body = document.createElement('div');
+    body.className = 'wifi-item-body';
     const actions = document.createElement('div');
-    actions.className = 'wifi-item-actions';
+    actions.className = 'config-item-actions-row';
     const up = document.createElement('button');
     up.type = 'button';
     up.className = 'secondary';
@@ -1762,8 +1829,7 @@ function renderWifiNetworks(){
     remove.textContent = '删除';
     remove.onclick = ()=>removeWifiNetwork(index);
     actions.append(up, down, remove);
-    header.appendChild(actions);
-    item.appendChild(header);
+    body.appendChild(actions);
 
     const grid = document.createElement('div');
     grid.className = 'wifi-grid';
@@ -1771,6 +1837,9 @@ function renderWifiNetworks(){
     const ssid = wifiMakeInput('text', network.ssid, 'Wi-Fi 名称');
     ssid.maxLength = 32;
     ssid.dataset.field = 'ssid';
+    ssid.addEventListener('input', ()=>{
+      summaryName.textContent = ssid.value.trim() || '未命名网络';
+    });
     grid.appendChild(wifiMakeField('SSID', ssid));
 
     const password = wifiMakeInput(
@@ -1793,7 +1862,7 @@ function renderWifiNetworks(){
     bssid.maxLength = 17;
     bssid.dataset.field = 'bssid';
     grid.appendChild(wifiMakeField('BSSID（可选）', bssid));
-    item.appendChild(grid);
+    body.appendChild(grid);
 
     const checks = document.createElement('div');
     checks.className = 'wifi-checks';
@@ -1802,6 +1871,18 @@ function renderWifiNetworks(){
     hidden.type = 'checkbox';
     hidden.checked = !!network.hidden;
     hidden.dataset.field = 'hidden';
+    hidden.addEventListener('change', ()=>{
+      meta.textContent = hidden.checked
+        ? '隐藏网络'
+        : ((Number(channel.value) || 0) > 0 ? `信道 ${channel.value}` : '自动信道');
+    });
+    channel.addEventListener('input', ()=>{
+      if(!hidden.checked){
+        meta.textContent = (Number(channel.value) || 0) > 0
+          ? `信道 ${channel.value}`
+          : '自动信道';
+      }
+    });
     hiddenLabel.append(hidden, document.createTextNode('隐藏网络'));
     checks.appendChild(hiddenLabel);
 
@@ -1818,7 +1899,8 @@ function renderWifiNetworks(){
       });
     }
 
-    item.appendChild(checks);
+    body.appendChild(checks);
+    item.appendChild(body);
     list.appendChild(item);
   });
 
@@ -1844,7 +1926,8 @@ async function loadWifiConfig(silent=true){
       hidden:!!network.hidden,
       channel:Number(network.channel) || 0,
       bssid:network.bssid || '',
-      active:!!network.active
+      active:!!network.active,
+      expanded:false
     }));
 
     const hostname = document.getElementById('wifiHostname');
@@ -1929,6 +2012,311 @@ async function saveWifiConfig(applyAfterSave){
     alert('WiFi配置保存失败');
   }finally{
     setWifiConfigBusy(false);
+  }
+}
+
+function setRadioConfigBusy(busy){
+  radioConfigBusy = !!busy;
+  ['radioAddBtn','radioReloadBtn','radioSaveBtn'].forEach(id=>{
+    const el = document.getElementById(id);
+    if(el) el.disabled = radioConfigBusy;
+  });
+  document.querySelectorAll('#radioConfigList input,#radioConfigList button')
+    .forEach(el=>{
+      el.disabled = radioConfigBusy || el.dataset.edgeDisabled === '1';
+    });
+}
+
+function radioMakeInput(value, placeholder='', maxLength=0){
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.value = value == null ? '' : String(value);
+  input.placeholder = placeholder;
+  input.autocomplete = 'off';
+  if(maxLength > 0) input.maxLength = maxLength;
+  return input;
+}
+
+function radioMakeField(labelText, input, extraClass=''){
+  const box = document.createElement('div');
+  box.className = `radio-field${extraClass ? ` ${extraClass}` : ''}`;
+  const label = document.createElement('label');
+  label.textContent = labelText;
+  box.append(label, input);
+  return box;
+}
+
+function syncRadioConfigFromDom(){
+  document.querySelectorAll('#radioConfigList .radio-item').forEach((item, index)=>{
+    const model = radioConfigItems[index];
+    if(!model) return;
+    model.expanded = item.open;
+    model.name = item.querySelector('[data-field="name"]').value;
+    model.url = item.querySelector('[data-field="url"]').value;
+    model.format = item.querySelector('[data-field="format"]').value;
+    model.region = item.querySelector('[data-field="region"]').value;
+    model.logo = item.querySelector('[data-field="logo"]').value;
+  });
+}
+
+function moveRadioConfigItem(index, delta){
+  if(radioConfigBusy) return;
+  syncRadioConfigFromDom();
+  const target = index + delta;
+  if(target < 0 || target >= radioConfigItems.length) return;
+  const temp = radioConfigItems[index];
+  radioConfigItems[index] = radioConfigItems[target];
+  radioConfigItems[target] = temp;
+  renderRadioConfigItems();
+}
+
+function removeRadioConfigItem(index){
+  if(radioConfigBusy) return;
+  syncRadioConfigFromDom();
+  const item = radioConfigItems[index];
+  if(item && item.name && !confirm(`确认删除电台“${item.name}”？`)) return;
+  radioConfigItems.splice(index, 1);
+  renderRadioConfigItems();
+}
+
+function addRadioConfigItem(){
+  if(radioConfigBusy) return;
+  syncRadioConfigFromDom();
+  if(radioConfigItems.length >= radioConfigMaxItems){
+    alert(`最多配置 ${radioConfigMaxItems} 个电台`);
+    return;
+  }
+  radioConfigItems.push({name:'',url:'',format:'mp3',region:'',logo:'',expanded:true});
+  renderRadioConfigItems();
+  const rows = document.querySelectorAll('#radioConfigList .radio-item');
+  const last = rows[rows.length - 1];
+  if(last){
+    const input = last.querySelector('[data-field="name"]');
+    if(input) input.focus();
+  }
+}
+
+async function uploadRadioLogo(index, fileInput){
+  if(radioConfigBusy) return;
+  const file = fileInput && fileInput.files ? fileInput.files[0] : null;
+  if(!file){
+    alert('请先选择JPEG或PNG图片');
+    return;
+  }
+  if(file.size <= 0 || file.size > 1024 * 1024){
+    alert('台标大小必须在1MB以内');
+    return;
+  }
+  if(!/^image\/(jpeg|png)$/i.test(file.type || '')){
+    alert('只支持JPEG或PNG图片');
+    return;
+  }
+
+  setRadioConfigBusy(true);
+  const message = document.getElementById('radioConfigMessage');
+  try{
+    const form = new FormData();
+    form.append('file', file, file.name);
+    const r = await fetchWithTimeout(`/api/config/radios/logo?slot=${index}`, {
+      method:'POST',
+      body:form
+    }, 30000);
+    const j = await r.json();
+    if(!j || !j.ok){
+      alert((j && j.message) || '台标上传失败');
+      return;
+    }
+    syncRadioConfigFromDom();
+    if(radioConfigItems[index]) radioConfigItems[index].logo = j.path || '';
+    renderRadioConfigItems();
+    if(message) message.textContent = j.message || '台标已上传';
+    alert(`${j.message || '台标已上传'}\n路径：${j.path || '-'}`);
+  }catch(e){
+    alert(`台标上传失败：${e.message || '网络错误'}`);
+  }finally{
+    setRadioConfigBusy(false);
+  }
+}
+
+function renderRadioConfigItems(){
+  const list = document.getElementById('radioConfigList');
+  if(!list) return;
+  list.textContent = '';
+  const count = document.getElementById('radioConfigCount');
+  if(count) count.textContent = `${radioConfigItems.length} 个`;
+
+  if(!radioConfigItems.length){
+    const empty = document.createElement('div');
+    empty.className = 'radio-empty';
+    empty.textContent = '当前没有电台，可添加后保存；保存空列表会清空电台目录。';
+    list.appendChild(empty);
+    setRadioConfigBusy(radioConfigBusy);
+    return;
+  }
+
+  radioConfigItems.forEach((model, index)=>{
+    const item = document.createElement('details');
+    item.className = 'radio-item';
+    item.open = !!model.expanded;
+    item.addEventListener('toggle', ()=>{ model.expanded = item.open; });
+
+    const summary = document.createElement('summary');
+    const main = document.createElement('div');
+    main.className = 'config-item-main';
+    const order = document.createElement('span');
+    order.className = 'config-item-title';
+    order.textContent = `电台 ${index + 1}`;
+    const summaryName = document.createElement('span');
+    summaryName.className = 'config-item-name';
+    summaryName.textContent = model.name || '未命名电台';
+    main.append(order, summaryName);
+    const meta = document.createElement('span');
+    meta.className = 'config-item-meta';
+    meta.textContent = [model.format || '自动', model.region || '未分类'].join(' · ');
+    summary.append(main, meta);
+    item.appendChild(summary);
+
+    const body = document.createElement('div');
+    body.className = 'radio-item-body';
+    const actions = document.createElement('div');
+    actions.className = 'config-item-actions-row';
+    const up = document.createElement('button');
+    up.type = 'button'; up.className = 'secondary'; up.textContent = '上移';
+    up.dataset.edgeDisabled = index === 0 ? '1' : '0';
+    up.disabled = index === 0;
+    up.onclick = ()=>moveRadioConfigItem(index, -1);
+    const down = document.createElement('button');
+    down.type = 'button'; down.className = 'secondary'; down.textContent = '下移';
+    down.dataset.edgeDisabled = index === radioConfigItems.length - 1 ? '1' : '0';
+    down.disabled = index === radioConfigItems.length - 1;
+    down.onclick = ()=>moveRadioConfigItem(index, 1);
+    const remove = document.createElement('button');
+    remove.type = 'button'; remove.className = 'danger'; remove.textContent = '删除';
+    remove.onclick = ()=>removeRadioConfigItem(index);
+    actions.append(up, down, remove);
+    body.appendChild(actions);
+
+    const grid = document.createElement('div');
+    grid.className = 'radio-grid';
+    const name = radioMakeInput(model.name, '电台名称', 96);
+    name.dataset.field = 'name';
+    name.addEventListener('input', ()=>{
+      summaryName.textContent = name.value.trim() || '未命名电台';
+    });
+    grid.appendChild(radioMakeField('名称', name));
+    const format = radioMakeInput(model.format, 'mp3 / aac / auto', 24);
+    format.dataset.field = 'format';
+    grid.appendChild(radioMakeField('格式（可选）', format));
+    const url = radioMakeInput(model.url, 'http://或https://流地址', 512);
+    url.dataset.field = 'url';
+    grid.appendChild(radioMakeField('电台地址', url, 'radio-url-field'));
+    const region = radioMakeInput(model.region, '地区或分类', 64);
+    region.dataset.field = 'region';
+    grid.appendChild(radioMakeField('地区（可选）', region));
+    const refreshMeta = ()=>{
+      meta.textContent = [format.value.trim() || '自动', region.value.trim() || '未分类'].join(' · ');
+    };
+    format.addEventListener('input', refreshMeta);
+    region.addEventListener('input', refreshMeta);
+    const logo = radioMakeInput(model.logo, '远程URL或上传后的本地路径', 192);
+    logo.dataset.field = 'logo';
+    grid.appendChild(radioMakeField('台标路径（可选）', logo));
+    body.appendChild(grid);
+
+    const upload = document.createElement('div');
+    upload.className = 'radio-upload';
+    const file = document.createElement('input');
+    file.type = 'file';
+    file.accept = 'image/jpeg,image/png,.jpg,.jpeg,.png';
+    const button = document.createElement('button');
+    button.type = 'button'; button.className = 'secondary';
+    button.textContent = '上传台标';
+    button.onclick = ()=>uploadRadioLogo(index, file);
+    const hint = document.createElement('span');
+    hint.className = 'muted';
+    hint.textContent = 'JPEG/PNG，最大1MB；上传后仍需保存电台配置。';
+    upload.append(file, button, hint);
+    body.appendChild(upload);
+    item.appendChild(body);
+    list.appendChild(item);
+  });
+
+  setRadioConfigBusy(radioConfigBusy);
+}
+
+async function loadRadioConfig(silent=true){
+  if(radioConfigBusy) return;
+  setRadioConfigBusy(true);
+  const message = document.getElementById('radioConfigMessage');
+  try{
+    const r = await fetchWithTimeout('/api/config/radios', {cache:'no-store'}, 6000);
+    const j = await r.json();
+    if(!j || !j.ok) throw new Error((j && (j.error || j.message)) || '读取失败');
+    radioConfigMaxItems = Number(j.max_items) || 64;
+    radioConfigItems = (j.items || []).map(item=>({
+      name:item.name || '',
+      url:item.url || '',
+      format:item.format || '',
+      region:item.region || '',
+      logo:item.logo || '',
+      expanded:false
+    }));
+    const path = document.getElementById('radioConfigPathText');
+    if(path) path.textContent = j.path || '/System/config/radio_list.txt';
+    const dir = document.getElementById('radioAssetDirText');
+    if(dir) dir.textContent = j.asset_dir || '/System/assets/radio';
+    if(message){
+      const base = j.write_pending
+        ? '当前显示的是PSRAM待写电台配置；下次切歌后写入TF卡。'
+        : '电台地址、顺序和台标可在此管理；本地播放期间保存不会直接写卡。';
+      message.textContent = j.warning ? `${base} 注意：${j.warning}` : base;
+    }
+    renderRadioConfigItems();
+  }catch(e){
+    radioConfigItems = [];
+    renderRadioConfigItems();
+    if(message) message.textContent = `电台配置读取失败：${e.message || '网络错误'}`;
+    if(!silent) alert('电台配置读取失败');
+  }finally{
+    setRadioConfigBusy(false);
+  }
+}
+
+async function saveRadioConfig(){
+  if(radioConfigBusy) return;
+  syncRadioConfigFromDom();
+
+  const params = new URLSearchParams();
+  params.set('count', String(radioConfigItems.length));
+  radioConfigItems.forEach((item, index)=>{
+    params.set(`name_${index}`, (item.name || '').trim());
+    params.set(`url_${index}`, (item.url || '').trim());
+    params.set(`format_${index}`, (item.format || '').trim());
+    params.set(`region_${index}`, (item.region || '').trim());
+    params.set(`logo_${index}`, (item.logo || '').trim());
+  });
+
+  setRadioConfigBusy(true);
+  const message = document.getElementById('radioConfigMessage');
+  try{
+    const r = await fetchWithTimeout('/api/config/radios/save', {
+      method:'POST',
+      headers:{'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8'},
+      body:params.toString()
+    }, 10000);
+    const j = await r.json();
+    if(!j || !j.ok){
+      alert((j && j.message) || '电台配置保存失败');
+      return;
+    }
+    if(message) message.textContent = j.message || '电台配置已保存';
+    alert(j.message || '电台配置已保存');
+    setRadioConfigBusy(false);
+    await loadRadioConfig(true);
+  }catch(e){
+    alert(`电台配置保存失败：${e.message || '网络错误'}`);
+  }finally{
+    setRadioConfigBusy(false);
   }
 }
 
@@ -2648,6 +3036,7 @@ async function deleteAlarm(){
 refreshClockAlarmStatus();
 loadSettings();
 loadWifiConfig(true);
+loadRadioConfig(true);
 loadAudioOutputStatus(true);
 refreshMusicScanStatus();
 
@@ -4023,6 +4412,7 @@ static const char WEBCTRL_RADIOS_HTML[] PROGMEM = R"HTML(
         <a class="secondary" href="/artists">歌手页</a>
         <a class="secondary" href="/albums">专辑页</a>
         <a class="secondary" href="/settings">网页设置</a>
+        <a class="secondary" href="/settings#radioConfigCard">管理电台</a>
       </div>
     </div>
   </div>

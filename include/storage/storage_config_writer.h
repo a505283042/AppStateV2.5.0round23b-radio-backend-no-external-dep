@@ -15,7 +15,7 @@ using StorageConfigCommitCallback = void (*)(const char* final_path,
                                              void* context);
 
 /**
- * @brief 使用 .tmp + .bak 事务方式替换 /System/config 下的配置文件。
+ * @brief 使用 .tmp + .bak 事务方式替换受管配置或电台资源文件。
  *
  * 保存成功后保留上一版 .bak；写入、同步、校验或重命名失败时恢复旧文件。
  */
@@ -38,7 +38,7 @@ bool storage_config_recover(const char* final_path,
                             uint32_t lock_timeout_ms = 3000);
 
 /**
- * @brief 将完整配置内容复制到 PSRAM，等待安全窗口落盘。
+ * @brief 将完整配置或电台资源复制到 PSRAM，等待安全窗口落盘。
  *
  * 同一路径重复暂存时只保留最新内容。validator_context 与 callback_context
  * 必须在提交完成前保持有效；建议只传静态对象或 nullptr。

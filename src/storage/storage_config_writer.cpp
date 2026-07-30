@@ -17,6 +17,7 @@ namespace {
 
 static constexpr size_t kConfigPathBufferBytes = 192;
 static constexpr const char* kConfigRootPrefix = "/System/config/";
+static constexpr const char* kRadioAssetRootPrefix = "/System/assets/radio/";
 
 struct PendingConfigWrite {
   PendingConfigWrite* next = nullptr;
@@ -112,11 +113,15 @@ static bool write_pending_memory(File32& file, void* context)
 
 static bool config_path_allowed(const char* path)
 {
-  if (!path || !*path) return false;
-  return strncmp(path,
-                 kConfigRootPrefix,
-                 strlen(kConfigRootPrefix)) == 0 &&
-         strstr(path, "..") == nullptr;
+  if (!path || !*path || strstr(path, "..") != nullptr) return false;
+
+  const bool config_file =
+      strncmp(path, kConfigRootPrefix, strlen(kConfigRootPrefix)) == 0;
+  const bool radio_asset =
+      strncmp(path,
+              kRadioAssetRootPrefix,
+              strlen(kRadioAssetRootPrefix)) == 0;
+  return config_file || radio_asset;
 }
 
 static bool build_sidecar_path(const char* final_path,
