@@ -20,6 +20,7 @@
 #include "lyrics/lyrics.h"
 #include "audio/audio_radio_backend.h"
 #include "storage/storage.h"
+#include "storage/storage_config_writer.h"
 #include "storage/storage_catalog_v3.h"
 #include "storage/system_paths.h"
 #include "ui/ui.h"
@@ -1069,10 +1070,17 @@ bool player_play_radio_index(int idx)
     if (player_source_type_get() == PlayerSourceType::NET_RADIO) {
         audio_radio_backend_stop();
     }
+    bool old_audio_closed = true;
     if (audio_service_is_playing() || audio_service_is_paused()) {
-        audio_service_stop(true);
+        old_audio_closed = audio_service_stop(true);
     }
     control_prepare_for_radio_source();
+    // 旧音源已确认关闭、网络电台尚未启动，才提交PSRAM中的待写配置。
+    if (old_audio_closed) {
+        (void)storage_config_commit_pending(4000);
+    } else if (storage_config_has_pending()) {
+        LOGW("[配置文件] 切换电台前未确认旧音频关闭，跳过待写配置提交");
+    }
     control_normalize_remote_mode_category("网络收音机");
 
     player_source_set_radio_stub(idx, *item, String("connecting"), String());
@@ -1246,11 +1254,18 @@ static bool control_play_net_track_index_impl(int idx, bool reset_shuffle)
         audio_radio_backend_stop();
     }
 
+    bool old_audio_closed = true;
     if (audio_service_is_playing() || audio_service_is_paused()) {
-        audio_service_stop(true);
+        old_audio_closed = audio_service_stop(true);
     }
 
     control_prepare_for_radio_source();
+    // 旧音源已确认关闭、NAS新流尚未启动，才提交PSRAM中的待写配置。
+    if (old_audio_closed) {
+        (void)storage_config_commit_pending(4000);
+    } else if (storage_config_has_pending()) {
+        LOGW("[配置文件] 切换NAS歌曲前未确认旧音频关闭，跳过待写配置提交");
+    }
     control_normalize_remote_mode_category("NAS播放");
 
     player_source_set_net_track_stub(idx, item, url, String("connecting"), String());

@@ -19,6 +19,7 @@
 #include "radio/radio_catalog.h"
 #include "net_music/net_music_catalog.h"
 #include "storage/storage.h"
+#include "storage/storage_config_writer.h"
 #include "storage/storage_catalog_v3.h"
 #include "storage/storage_hotplug.h"
 #include "storage/system_paths.h"
@@ -154,6 +155,8 @@ static void app_handle_tf_removed()
     // 不要放在 app_state_update() 高频循环里。
     (void)player_snapshot_save_to_nvs();
 
+    // 待写配置属于当前TF卡；拔卡后必须丢弃，禁止误写到随后插入的另一张卡。
+    storage_config_discard_pending("TF卡已移除");
     storage_mark_not_ready();
     (void)app_rescan_request_abort();
 

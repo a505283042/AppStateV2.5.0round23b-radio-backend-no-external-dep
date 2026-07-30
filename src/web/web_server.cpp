@@ -84,6 +84,23 @@ static portMUX_TYPE s_web_start_task_mux = portMUX_INITIALIZER_UNLOCKED;
 static bool s_ap_mode = false;
 static bool s_wifi_config_apply_pending = false;
 static uint32_t s_wifi_config_apply_at_ms = 0;
+static portMUX_TYPE s_wifi_config_apply_mux = portMUX_INITIALIZER_UNLOCKED;
+
+static void web_schedule_wifi_config_apply(uint32_t delay_ms)
+{
+  portENTER_CRITICAL(&s_wifi_config_apply_mux);
+  s_wifi_config_apply_pending = true;
+  s_wifi_config_apply_at_ms = millis() + delay_ms;
+  portEXIT_CRITICAL(&s_wifi_config_apply_mux);
+}
+
+static bool web_wifi_config_apply_is_pending()
+{
+  portENTER_CRITICAL(&s_wifi_config_apply_mux);
+  const bool pending = s_wifi_config_apply_pending;
+  portEXIT_CRITICAL(&s_wifi_config_apply_mux);
+  return pending;
+}
 
 // Web 音量锁由状态页和控制接口共同访问，统一通过短临界区读取和发布。
 struct WebUiControlSnapshot {
@@ -844,23 +861,27 @@ static bool web_wifi_push_network(std::vector<WebWifiNetwork>& nets,
   return true;
 }
 
-static bool web_parse_wifi_config_file(File32& file,
-                                       std::vector<WebWifiNetwork>& nets,
-                                       String& hostname,
-                                       String* error)
+using WebWifiReadLineCallback = bool (*)(void* context, String& line);
+
+static bool web_parse_wifi_config_lines(WebWifiReadLineCallback read_line,
+                                        void* read_context,
+                                        size_t source_size,
+                                        std::vector<WebWifiNetwork>& nets,
+                                        String& hostname,
+                                        String* error)
 {
   nets.clear();
   hostname = WEBCTRL_HOSTNAME_DEFAULT;
   if (error) error->remove(0);
 
-  if (file.fileSize() > 16 * 1024) {
+  if (!read_line || source_size > 16 * 1024) {
     return web_wifi_set_error(error, "WiFi配置文件过大");
   }
 
   WebWifiNetwork cur{};
   bool in_network = false;
-  while (file.available()) {
-    String line = file.readStringUntil('\n');
+  String line;
+  while (read_line(read_context, line)) {
     if (line.length() > 256) {
       return web_wifi_set_error(error, "WiFi配置存在过长行");
     }
@@ -915,6 +936,65 @@ static bool web_parse_wifi_config_file(File32& file,
   return true;
 }
 
+static bool web_wifi_read_file_line(void* context, String& line)
+{
+  File32* file = static_cast<File32*>(context);
+  if (!file || !file->available()) return false;
+  line = file->readStringUntil('\n');
+  return true;
+}
+
+struct WebWifiMemoryReader {
+  const uint8_t* data = nullptr;
+  size_t size = 0;
+  size_t offset = 0;
+};
+
+static bool web_wifi_read_memory_line(void* context, String& line)
+{
+  WebWifiMemoryReader* reader = static_cast<WebWifiMemoryReader*>(context);
+  if (!reader || !reader->data || reader->offset >= reader->size) return false;
+
+  line.remove(0);
+  while (reader->offset < reader->size) {
+    const char ch = static_cast<char>(reader->data[reader->offset++]);
+    if (ch == '\n') break;
+    line += ch;
+    if (line.length() > 256) break;
+  }
+  return true;
+}
+
+static bool web_parse_wifi_config_file(File32& file,
+                                       std::vector<WebWifiNetwork>& nets,
+                                       String& hostname,
+                                       String* error)
+{
+  return web_parse_wifi_config_lines(web_wifi_read_file_line,
+                                     &file,
+                                     file.fileSize(),
+                                     nets,
+                                     hostname,
+                                     error);
+}
+
+static bool web_parse_wifi_config_memory(const uint8_t* data,
+                                         size_t size,
+                                         std::vector<WebWifiNetwork>& nets,
+                                         String& hostname,
+                                         String* error)
+{
+  WebWifiMemoryReader reader{};
+  reader.data = data;
+  reader.size = size;
+  return web_parse_wifi_config_lines(web_wifi_read_memory_line,
+                                     &reader,
+                                     size,
+                                     nets,
+                                     hostname,
+                                     error);
+}
+
 static bool web_validate_wifi_config_file(File32& file, void*)
 {
   std::vector<WebWifiNetwork> nets;
@@ -925,8 +1005,32 @@ static bool web_validate_wifi_config_file(File32& file, void*)
 
 static bool web_load_wifi_config(std::vector<WebWifiNetwork>& nets,
                                  String& hostname,
-                                 String* error = nullptr)
+                                 String* error = nullptr,
+                                 bool* loaded_from_pending = nullptr)
 {
+  if (loaded_from_pending) *loaded_from_pending = false;
+
+  const size_t pending_size =
+      storage_config_pending_size(SystemPaths::kWifiConfig);
+  if (pending_size > 0 && pending_size <= 16 * 1024) {
+    uint8_t* pending = static_cast<uint8_t*>(heap_caps_malloc(
+        pending_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (pending) {
+      size_t copied = 0;
+      const bool copied_ok = storage_config_read_pending(
+          SystemPaths::kWifiConfig, pending, pending_size, &copied);
+      const bool parsed_ok = copied_ok &&
+          web_parse_wifi_config_memory(pending, copied, nets, hostname, error);
+      heap_caps_free(pending);
+      if (parsed_ok) {
+        if (loaded_from_pending) *loaded_from_pending = true;
+        LOGD("[网页] WiFi配置从PSRAM待写区读取：网络数量=%d",
+             (int)nets.size());
+        return true;
+      }
+    }
+  }
+
   (void)storage_config_recover(SystemPaths::kWifiConfig,
                                web_validate_wifi_config_file,
                                nullptr,
@@ -961,13 +1065,6 @@ static bool web_load_wifi_config(std::vector<WebWifiNetwork>& nets,
   return true;
 }
 
-static bool web_wifi_write_text(File32& file, const String& text)
-{
-  if (text.isEmpty()) return true;
-  return file.write(reinterpret_cast<const uint8_t*>(text.c_str()),
-                    text.length()) == text.length();
-}
-
 static String web_wifi_format_bssid(const WebWifiNetwork& network)
 {
   if (!network.has_bssid) return String("");
@@ -984,42 +1081,54 @@ static String web_wifi_format_bssid(const WebWifiNetwork& network)
   return String(text);
 }
 
-struct WebWifiConfigWriteContext {
-  const std::vector<WebWifiNetwork>* networks = nullptr;
-  const String* hostname = nullptr;
-};
-
-static bool web_write_wifi_config_file(File32& file, void* context)
+static bool web_serialize_wifi_config(
+    const std::vector<WebWifiNetwork>& networks,
+    const String& hostname,
+    String& output)
 {
-  WebWifiConfigWriteContext* cfg =
-      static_cast<WebWifiConfigWriteContext*>(context);
-  if (!cfg || !cfg->networks || !cfg->hostname) return false;
+  output.remove(0);
+  output.reserve(192 + networks.size() * 180);
+  output += "# ESP32S3 Player WiFi configuration\r\n";
+  output += "# 由设备网页配置中心保存；本地播放时先暂存PSRAM，切歌安全窗口再写入TF卡\r\n";
+  output += "hostname=";
+  output += hostname;
+  output += "\r\n";
 
-  if (!web_wifi_write_text(file,
-                           String("# ESP32S3 Player WiFi configuration\r\n") +
-                           "# 由设备网页配置中心原子保存，请勿在写入过程中拔卡\r\n" +
-                           "hostname=" + *cfg->hostname + "\r\n")) {
-    return false;
+  for (const WebWifiNetwork& network : networks) {
+    output += "\r\n[network]\r\nssid=";
+    output += network.ssid;
+    output += "\r\npassword=";
+    output += network.password;
+    output += "\r\nhidden=";
+    output += network.hidden ? "1" : "0";
+    output += "\r\nchannel=";
+    output += String(network.channel);
+    output += "\r\nbssid=";
+    output += web_wifi_format_bssid(network);
+    output += "\r\n";
   }
 
-  for (const WebWifiNetwork& network : *cfg->networks) {
-    String block;
-    block.reserve(240);
-    block += "\r\n[network]\r\n";
-    block += "ssid=";
-    block += network.ssid;
-    block += "\r\npassword=";
-    block += network.password;
-    block += "\r\nhidden=";
-    block += network.hidden ? "1" : "0";
-    block += "\r\nchannel=";
-    block += String(network.channel);
-    block += "\r\nbssid=";
-    block += web_wifi_format_bssid(network);
-    block += "\r\n";
-    if (!web_wifi_write_text(file, block)) return false;
+  return output.length() > 0 && output.length() <= 16 * 1024;
+}
+
+static void web_wifi_config_commit_complete(const char* final_path,
+                                            bool success,
+                                            void* context)
+{
+  const bool apply_after_commit =
+      reinterpret_cast<uintptr_t>(context) != 0;
+  if (!success) {
+    LOGW("[网页] WiFi待写配置本次落盘失败，将在下一个安全窗口重试：%s",
+         final_path ? final_path : "-");
+    return;
   }
-  return true;
+
+  LOGI("[网页] WiFi待写配置已在安全窗口落盘：%s",
+       final_path ? final_path : "-");
+  if (apply_after_commit) {
+    // 回调只安排后续动作；真正断网仍在Web循环中延迟执行。
+    web_schedule_wifi_config_apply(900);
+  }
 }
 
 static String web_wifi_arg_name(size_t index, const char* field)
@@ -1101,29 +1210,52 @@ static bool web_parse_wifi_save_request(std::vector<WebWifiNetwork>& networks,
   return true;
 }
 
-static bool web_save_wifi_config_from_request(String& error)
+static bool web_stage_wifi_config_from_request(bool apply_after_commit,
+                                               String& error,
+                                               bool& deferred)
 {
+  deferred = false;
+
   std::vector<WebWifiNetwork> networks;
   String hostname;
   if (!web_parse_wifi_save_request(networks, hostname, error)) {
     return false;
   }
 
-  WebWifiConfigWriteContext context{};
-  context.networks = &networks;
-  context.hostname = &hostname;
-
-  if (!storage_config_atomic_write(SystemPaths::kWifiConfig,
-                                   web_write_wifi_config_file,
-                                   &context,
-                                   web_validate_wifi_config_file,
-                                   nullptr,
-                                   4000)) {
-    error = "WiFi配置写入TF卡失败，原配置已保留";
+  String serialized;
+  if (!web_serialize_wifi_config(networks, hostname, serialized)) {
+    error = "WiFi配置序列化失败或超过16KB";
     return false;
   }
 
-  LOGI("[网页] WiFi配置已保存：网络=%u 主机名=%s",
+  void* callback_context = reinterpret_cast<void*>(
+      static_cast<uintptr_t>(apply_after_commit ? 1u : 0u));
+  if (!storage_config_stage_psram(
+          SystemPaths::kWifiConfig,
+          reinterpret_cast<const uint8_t*>(serialized.c_str()),
+          serialized.length(),
+          web_validate_wifi_config_file,
+          nullptr,
+          web_wifi_config_commit_complete,
+          callback_context)) {
+    error = "WiFi配置暂存PSRAM失败，原配置未改变";
+    return false;
+  }
+
+  const bool local_audio_open =
+      player_source_type_get() == PlayerSourceType::LOCAL_TRACK &&
+      (audio_service_is_playing() || audio_service_is_paused());
+
+  if (local_audio_open) {
+    deferred = true;
+  } else {
+    // 所有配置都先进入PSRAM；当前没有本地音频文件占用时可立即走同一提交路径。
+    (void)storage_config_commit_pending(4000);
+    deferred = storage_config_has_pending_path(SystemPaths::kWifiConfig);
+  }
+
+  LOGI("[网页] WiFi配置已%s：网络=%u 主机名=%s",
+       deferred ? "暂存PSRAM等待安全窗口" : "写入TF卡",
        (unsigned)networks.size(),
        hostname.c_str());
   return true;
@@ -1192,8 +1324,6 @@ static bool web_start_ap_fallback() {
 
 static void web_apply_saved_wifi_config_now()
 {
-  s_wifi_config_apply_pending = false;
-
   if (!s_wifi_enabled) {
     LOGW("[网页] WiFi配置已保存，但WiFi总开关关闭，跳过重连");
     return;
@@ -1220,10 +1350,18 @@ static void web_apply_saved_wifi_config_now()
 
 static void web_process_pending_wifi_config_apply()
 {
-  if (!s_wifi_config_apply_pending) return;
   const uint32_t now = millis();
-  if (static_cast<int32_t>(now - s_wifi_config_apply_at_ms) < 0) return;
-  web_apply_saved_wifi_config_now();
+  bool due = false;
+
+  portENTER_CRITICAL(&s_wifi_config_apply_mux);
+  if (s_wifi_config_apply_pending &&
+      static_cast<int32_t>(now - s_wifi_config_apply_at_ms) >= 0) {
+    s_wifi_config_apply_pending = false;
+    due = true;
+  }
+  portEXIT_CRITICAL(&s_wifi_config_apply_mux);
+
+  if (due) web_apply_saved_wifi_config_now();
 }
 
 static bool web_parse_int_arg(const char* name, int& out) {
@@ -1562,7 +1700,11 @@ static void web_handle_wifi_config_get()
   std::vector<WebWifiNetwork> networks;
   String hostname;
   String error;
-  const bool configured = web_load_wifi_config(networks, hostname, &error);
+  bool loaded_from_pending = false;
+  const bool configured = web_load_wifi_config(networks,
+                                               hostname,
+                                               &error,
+                                               &loaded_from_pending);
   if (!configured) {
     networks.clear();
     hostname = WEBCTRL_HOSTNAME_DEFAULT;
@@ -1598,8 +1740,10 @@ static void web_handle_wifi_config_get()
   json += ",\"active_ssid\":\"";
   json += web_json_escape(active_ssid);
   json += "\"";
+  json += ",\"write_pending\":";
+  json += loaded_from_pending ? "true" : "false";
   json += ",\"apply_pending\":";
-  json += s_wifi_config_apply_pending ? "true" : "false";
+  json += web_wifi_config_apply_is_pending() ? "true" : "false";
   json += ",\"max_networks\":";
   json += String((unsigned)kWebWifiMaxNetworks);
   json += ",\"networks\":[";
@@ -1639,20 +1783,31 @@ static void web_handle_wifi_config_save_common(bool apply_after_save)
   }
 
   String error;
-  if (!web_save_wifi_config_from_request(error)) {
+  bool deferred = false;
+  if (!web_stage_wifi_config_from_request(apply_after_save, error, deferred)) {
     web_send_json_err(error.c_str(), 400);
     return;
   }
 
-  if (apply_after_save) {
-    // 先让HTTP响应完整发回浏览器，再断开当前网络并应用新配置。
-    s_wifi_config_apply_pending = true;
-    s_wifi_config_apply_at_ms = millis() + 900;
-    web_send_json_ok_simple("WiFi配置已保存，设备即将按新顺序重连");
-    return;
+  const char* state = deferred ? "pending" : "committed";
+  const char* message = nullptr;
+  if (deferred) {
+    message = apply_after_save
+        ? "WiFi配置已暂存PSRAM，下次切歌后写入TF卡并重连"
+        : "WiFi配置已暂存PSRAM，下次切歌后写入TF卡";
+  } else {
+    message = apply_after_save
+        ? "WiFi配置已写入TF卡，设备即将按新顺序重连"
+        : "WiFi配置已写入TF卡，当前连接保持不变";
   }
 
-  web_send_json_ok_simple("WiFi配置已保存，当前连接保持不变");
+  String json = "{\"ok\":true,\"state\":\"";
+  json += state;
+  json += "\",\"message\":\"";
+  json += web_json_escape(String(message));
+  json += "\"}";
+  web_send_no_cache_headers();
+  s_server.send(200, "application/json; charset=utf-8", json);
 }
 
 static void web_handle_wifi_config_save()

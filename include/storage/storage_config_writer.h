@@ -9,6 +9,11 @@ using StorageConfigWriteCallback = bool (*)(File32& file, void* context);
 // 配置文件校验回调。文件以只读方式打开，调用期间已经持有 SD 递归互斥锁。
 using StorageConfigValidateCallback = bool (*)(File32& file, void* context);
 
+// 延迟配置写入完成回调。回调在安全提交窗口执行，只应更新轻量状态，不能再次写TF卡。
+using StorageConfigCommitCallback = void (*)(const char* final_path,
+                                             bool success,
+                                             void* context);
+
 /**
  * @brief 使用 .tmp + .bak 事务方式替换 /System/config 下的配置文件。
  *
@@ -31,3 +36,42 @@ bool storage_config_recover(const char* final_path,
                             StorageConfigValidateCallback validator = nullptr,
                             void* validator_context = nullptr,
                             uint32_t lock_timeout_ms = 3000);
+
+/**
+ * @brief 将完整配置内容复制到 PSRAM，等待安全窗口落盘。
+ *
+ * 同一路径重复暂存时只保留最新内容。validator_context 与 callback_context
+ * 必须在提交完成前保持有效；建议只传静态对象或 nullptr。
+ */
+bool storage_config_stage_psram(const char* final_path,
+                                const uint8_t* data,
+                                size_t data_size,
+                                StorageConfigValidateCallback validator = nullptr,
+                                void* validator_context = nullptr,
+                                StorageConfigCommitCallback callback = nullptr,
+                                void* callback_context = nullptr);
+
+/**
+ * @brief 在旧音频文件关闭、下一音频文件尚未打开的安全窗口提交全部待写配置。
+ *
+ * 写入失败的项目会继续保留在 PSRAM，等待下一个安全窗口重试。
+ */
+bool storage_config_commit_pending(uint32_t lock_timeout_ms = 4000);
+
+// 查询待写配置。
+bool storage_config_has_pending(void);
+bool storage_config_has_pending_path(const char* final_path);
+size_t storage_config_pending_size(const char* final_path);
+
+/**
+ * @brief 将某个待写配置复制到调用方缓冲，供网页预览尚未落盘的新值。
+ */
+bool storage_config_read_pending(const char* final_path,
+                                 uint8_t* out,
+                                 size_t out_capacity,
+                                 size_t* out_size);
+
+/**
+ * @brief 丢弃全部待写配置。换卡时必须调用，避免旧卡配置写入新卡。
+ */
+void storage_config_discard_pending(const char* reason = nullptr);

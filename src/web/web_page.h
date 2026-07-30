@@ -1362,7 +1362,7 @@ static const char WEBCTRL_SETTINGS_HTML[] PROGMEM = R"HTML(
           <button id="wifiSaveBtn" onclick="saveWifiConfig(false)">保存配置</button>
           <button class="warn" id="wifiApplyBtn" onclick="saveWifiConfig(true)">保存并重连</button>
         </div>
-        <div class="muted" id="wifiConfigMessage" style="margin-top:10px">网页不会读取或显示已保存的明文密码；已有网络密码留空即保持不变。</div>
+        <div class="muted" id="wifiConfigMessage" style="margin-top:10px">网页不会读取明文密码；本地播放期间保存会先暂存PSRAM，在下次切歌安全窗口写入TF卡。</div>
       </div>
     </details>
 
@@ -1858,7 +1858,9 @@ async function loadWifiConfig(silent=true){
     }
     if(message){
       message.textContent = j.configured
-        ? '网页不会读取或显示已保存的明文密码；已有网络密码留空即保持不变。'
+        ? (j.write_pending
+          ? '当前显示的是PSRAM待写配置；下次切歌后写入TF卡。'
+          : '网页不会读取明文密码；已有网络密码留空即保持不变。')
         : `尚无有效配置：${j.error || '请添加网络后保存'}`;
     }
     renderWifiNetworks();
@@ -1878,7 +1880,7 @@ async function saveWifiConfig(applyAfterSave){
     return;
   }
   if(applyAfterSave &&
-     !confirm('保存后将断开当前网络，并按新顺序重新连接。确认继续？')){
+     !confirm('配置写入TF卡后将断开当前网络，并按新顺序重新连接。确认继续？')){
     return;
   }
 
@@ -1919,7 +1921,7 @@ async function saveWifiConfig(applyAfterSave){
     }
     if(message) message.textContent = j.message || 'WiFi配置已保存';
     alert(j.message || 'WiFi配置已保存');
-    if(!applyAfterSave){
+    if(!applyAfterSave || j.state === 'pending'){
       setWifiConfigBusy(false);
       await loadWifiConfig(true);
     }

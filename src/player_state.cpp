@@ -22,6 +22,7 @@
 #include "storage/storage_catalog_v3.h"
 #include "storage/storage_types_v3.h"
 #include "storage/storage.h"
+#include "storage/storage_config_writer.h"
 #include "storage/system_paths.h"
 #include "ui/ui.h"
 #include "utils/log.h"
@@ -331,13 +332,21 @@ static bool player_play_trackinfo_core(const TrackInfo& t,
     uint32_t t_after_lyrics_prefetch = t_switch_begin;
 
     // 切歌时必须先停音频，确保旧文件关闭；后续资源改为开播后再补。
-    if (audio_service_is_playing()) {
-        audio_service_stop(true);
+    bool old_audio_closed = true;
+    if (audio_service_is_playing() || audio_service_is_paused()) {
+        old_audio_closed = audio_service_stop(true);
     }
     t_after_stop = millis();
 
     // 新歌开始时，先取消上一首遗留的封面预取请求。
     player_assets_cancel_pending_cover_prefetch();
+
+    // 只有确认旧音频已关闭才允许写TF卡；停止超时时继续保留PSRAM内容。
+    if (old_audio_closed) {
+        (void)storage_config_commit_pending(4000);
+    } else if (storage_config_has_pending()) {
+        LOGW("[配置文件] 本次切歌未确认旧音频关闭，跳过待写配置提交");
+    }
 
     // 当前曲目标记更新后，先清掉旧歌词；封面先沿用上一首/占位图，避免把“能后补”的事情挡在开播前。
     g_lyricsDisplay.clear();
