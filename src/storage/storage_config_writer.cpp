@@ -18,6 +18,8 @@ namespace {
 static constexpr size_t kConfigPathBufferBytes = 192;
 static constexpr const char* kConfigRootPrefix = "/System/config/";
 static constexpr const char* kRadioAssetRootPrefix = "/System/assets/radio/";
+static constexpr const char* kDefaultCoverPath = "/System/assets/default_cover.jpg";
+static constexpr const char* kNetCoverLoadingPath = "/System/assets/net_cover_loading.jpg";
 
 struct PendingConfigWrite {
   PendingConfigWrite* next = nullptr;
@@ -121,7 +123,10 @@ static bool config_path_allowed(const char* path)
       strncmp(path,
               kRadioAssetRootPrefix,
               strlen(kRadioAssetRootPrefix)) == 0;
-  return config_file || radio_asset;
+  const bool managed_cover =
+      strcmp(path, kDefaultCoverPath) == 0 ||
+      strcmp(path, kNetCoverLoadingPath) == 0;
+  return config_file || radio_asset || managed_cover;
 }
 
 static bool build_sidecar_path(const char* final_path,

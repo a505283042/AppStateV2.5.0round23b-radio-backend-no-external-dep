@@ -1371,6 +1371,12 @@ static const char WEBCTRL_SETTINGS_HTML[] PROGMEM = R"HTML(
     .nas-active-row{display:flex;align-items:center;gap:8px;margin-top:12px;color:#ddd}
     .nas-active-badge{display:inline-flex;padding:3px 8px;border-radius:999px;background:#1f4e78;color:#c7e5ff;font-size:12px}
     .nas-empty{border:1px dashed #444;border-radius:12px;padding:18px;text-align:center;color:#999}
+    .asset-list{display:flex;flex-direction:column;gap:10px}
+    .asset-item{border:1px solid #343434;border-radius:14px;background:#151515;overflow:hidden}
+    .asset-item-body{padding:14px}
+    .asset-status{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px;color:#bbb;font-size:13px}
+    .asset-upload{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    .asset-upload input[type=file]{max-width:100%;color:#ccc}
     @media(max-width:560px){.config-item-meta{display:none}.wifi-grid,.radio-grid,.nas-grid{grid-template-columns:1fr}.radio-url-field,.nas-path-field{grid-column:auto}.row{grid-template-columns:1fr}.row>.status-value,.row>.diag-value,.row>div{text-align:left}.row input[type=number],.row input[type=text],.row input[type=password],.row select{width:100%}}
   </style>
 </head>
@@ -1441,6 +1447,38 @@ static const char WEBCTRL_SETTINGS_HTML[] PROGMEM = R"HTML(
           <button class="warn" id="nasApplyBtn" onclick="saveNasConfig(true)">保存并应用</button>
         </div>
         <div class="muted" id="nasConfigMessage" style="margin-top:10px">根地址和曲库源先暂存PSRAM；本地播放时在下次切歌安全窗口写入TF卡。保存并应用会停止正在播放的NAS歌曲，但不会自动下载完整列表。</div>
+      </div>
+    </details>
+
+    <details class="card" id="systemAssetCard">
+      <summary>系统图片</summary>
+      <div class="setting-body">
+        <div class="asset-list">
+          <details class="asset-item" id="defaultCoverAssetItem">
+            <summary><div class="config-item-main"><span class="config-item-title">默认封面</span><span class="config-item-name" id="defaultCoverAssetSummary">正在读取...</span></div><span class="config-item-meta">240×240 方图优先</span></summary>
+            <div class="asset-item-body">
+              <div class="asset-status"><span>路径：</span><span id="defaultCoverAssetPath">/System/assets/default_cover.jpg</span><span id="defaultCoverAssetStatus">未读取</span></div>
+              <div class="asset-upload">
+                <input id="defaultCoverAssetFile" type="file" accept="image/jpeg,.jpg,.jpeg">
+                <button id="defaultCoverAssetUploadBtn" onclick="uploadSystemAsset('default_cover')">上传默认封面</button>
+              </div>
+              <div class="muted" style="margin-top:10px">仅支持完整JPEG，最大400KB。上传后在下一次加载默认封面时生效。</div>
+            </div>
+          </details>
+
+          <details class="asset-item" id="netCoverLoadingAssetItem">
+            <summary><div class="config-item-main"><span class="config-item-title">NAS 加载图</span><span class="config-item-name" id="netCoverLoadingAssetSummary">正在读取...</span></div><span class="config-item-meta">NAS MP3 起播占位图</span></summary>
+            <div class="asset-item-body">
+              <div class="asset-status"><span>路径：</span><span id="netCoverLoadingAssetPath">/System/assets/net_cover_loading.jpg</span><span id="netCoverLoadingAssetStatus">未读取</span></div>
+              <div class="asset-upload">
+                <input id="netCoverLoadingAssetFile" type="file" accept="image/jpeg,.jpg,.jpeg">
+                <button id="netCoverLoadingAssetUploadBtn" onclick="uploadSystemAsset('net_cover_loading')">上传NAS加载图</button>
+              </div>
+              <div class="muted" style="margin-top:10px">仅支持完整JPEG，最大400KB。上传后在下一次播放NAS MP3时生效；NAS FLAC仍按现有逻辑先显示默认封面。</div>
+            </div>
+          </details>
+        </div>
+        <div class="muted" id="systemAssetMessage" style="margin-top:10px">图片先暂存PSRAM；本地播放时在下次切歌安全窗口写入TF卡。</div>
       </div>
     </details>
 
@@ -2652,6 +2690,111 @@ async function saveNasConfig(apply){
   }
 }
 
+let systemAssetBusy = false;
+
+function formatAssetBytes(size){
+  const bytes = Number(size) || 0;
+  if(bytes < 1024) return `${bytes} B`;
+  return `${(bytes / 1024).toFixed(bytes >= 102400 ? 0 : 1)} KB`;
+}
+
+function setSystemAssetBusy(busy){
+  systemAssetBusy = !!busy;
+  ['defaultCoverAssetUploadBtn','netCoverLoadingAssetUploadBtn'].forEach(id=>{
+    const el = document.getElementById(id);
+    if(el) el.disabled = systemAssetBusy;
+  });
+}
+
+function renderSystemAssetStatus(prefix, asset){
+  const summary = document.getElementById(`${prefix}AssetSummary`);
+  const path = document.getElementById(`${prefix}AssetPath`);
+  const status = document.getElementById(`${prefix}AssetStatus`);
+  const exists = !!(asset && asset.exists);
+  const pending = !!(asset && asset.pending);
+  const size = asset ? Number(asset.size) || 0 : 0;
+  if(summary){
+    summary.textContent = pending
+      ? `待写入 · ${formatAssetBytes(size)}`
+      : (exists ? `已配置 · ${formatAssetBytes(size)}` : '尚未配置');
+  }
+  if(path && asset && asset.path) path.textContent = asset.path;
+  if(status){
+    status.textContent = pending
+      ? 'PSRAM待写'
+      : (exists ? `已存在，${formatAssetBytes(size)}` : '文件不存在，可直接上传创建');
+  }
+}
+
+async function loadSystemAssets(silent=true){
+  const message = document.getElementById('systemAssetMessage');
+  try{
+    const r = await fetchWithTimeout('/api/config/assets', {cache:'no-store'}, 5000);
+    const j = await r.json();
+    if(!j || !j.ok) throw new Error((j && (j.error || j.message)) || '读取失败');
+    renderSystemAssetStatus('defaultCover', j.default_cover || {});
+    renderSystemAssetStatus('netCoverLoading', j.net_cover_loading || {});
+    const pending = !!((j.default_cover && j.default_cover.pending) ||
+                       (j.net_cover_loading && j.net_cover_loading.pending));
+    if(message){
+      message.textContent = pending
+        ? '当前有图片暂存在PSRAM；下次切歌后写入TF卡。'
+        : '图片先暂存PSRAM；本地播放时在下次切歌安全窗口写入TF卡。';
+    }
+  }catch(e){
+    if(message) message.textContent = `系统图片状态读取失败：${e.message || '网络错误'}`;
+    if(!silent) alert('系统图片状态读取失败');
+  }
+}
+
+async function uploadSystemAsset(kind){
+  if(systemAssetBusy) return;
+  const isDefault = kind === 'default_cover';
+  const fileInput = document.getElementById(
+      isDefault ? 'defaultCoverAssetFile' : 'netCoverLoadingAssetFile');
+  const file = fileInput && fileInput.files ? fileInput.files[0] : null;
+  if(!file){
+    alert('请先选择JPEG图片');
+    return;
+  }
+  if(file.size <= 0 || file.size > 400 * 1024){
+    alert('图片必须是最大400KB的完整JPEG文件');
+    return;
+  }
+  const lowerName = (file.name || '').toLowerCase();
+  if(file.type !== 'image/jpeg' &&
+     !lowerName.endsWith('.jpg') &&
+     !lowerName.endsWith('.jpeg')){
+    alert('只支持JPEG图片');
+    return;
+  }
+
+  const endpoint = isDefault
+      ? '/api/config/assets/default-cover'
+      : '/api/config/assets/net-cover-loading';
+  const form = new FormData();
+  form.append('file', file, file.name || 'cover.jpg');
+  const message = document.getElementById('systemAssetMessage');
+  setSystemAssetBusy(true);
+  if(message) message.textContent = '正在上传并暂存PSRAM...';
+  try{
+    const r = await fetchWithTimeout(endpoint, {method:'POST', body:form}, 30000);
+    const j = await r.json();
+    if(!j || !j.ok){
+      throw new Error((j && (j.error || j.message)) || '上传失败');
+    }
+    if(message) message.textContent = j.message || '图片上传成功';
+    if(fileInput) fileInput.value = '';
+    alert(j.message || '图片上传成功');
+    await loadSystemAssets(true);
+  }catch(e){
+    if(message) message.textContent = `图片上传失败：${e.message || '网络错误'}`;
+    alert(`图片上传失败：${e.message || '网络错误'}`);
+  }finally{
+    setSystemAssetBusy(false);
+  }
+}
+
 function btDeviceStateLabel(state){
   const labels = {
     unknown:'未查询',
@@ -3370,6 +3513,7 @@ loadSettings();
 loadWifiConfig(true);
 loadRadioConfig(true);
 loadNasConfig(true);
+loadSystemAssets(true);
 loadAudioOutputStatus(true);
 refreshMusicScanStatus();
 

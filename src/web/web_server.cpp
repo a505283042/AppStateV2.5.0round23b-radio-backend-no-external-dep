@@ -96,6 +96,7 @@ static constexpr size_t kWebRadioMaxRegionBytes = 64;
 static constexpr size_t kWebRadioMaxLogoBytes = 192;
 static constexpr size_t kWebRadioConfigMaxBytes = 48 * 1024;
 static constexpr size_t kWebRadioLogoMaxBytes = 1024 * 1024;
+static constexpr size_t kWebSystemAssetMaxBytes = 400 * 1024;
 
 struct WebNasConfigSource {
   String name;
@@ -128,6 +129,24 @@ struct WebRadioLogoUploadState {
   char error[128] = {};
 };
 
+enum class WebSystemAssetKind : uint8_t {
+  None = 0,
+  DefaultCover,
+  NetCoverLoading,
+};
+
+struct WebSystemAssetUploadState {
+  uint8_t* data = nullptr;
+  size_t size = 0;
+  size_t capacity = 0;
+  WebSystemAssetKind kind = WebSystemAssetKind::None;
+  bool failed = false;
+  bool result_ready = false;
+  bool staged = false;
+  bool deferred = false;
+  char error[128] = {};
+};
+
 static bool s_wifi_enabled = true;
 
 static WebServer s_server(80);
@@ -148,6 +167,7 @@ static uint8_t s_nas_config_requested_source_index = 0;
 static uint16_t s_nas_config_commit_generation = 0;
 static portMUX_TYPE s_nas_config_apply_mux = portMUX_INITIALIZER_UNLOCKED;
 static WebRadioLogoUploadState s_radio_logo_upload{};
+static WebSystemAssetUploadState s_system_asset_upload{};
 
 static void web_schedule_wifi_config_apply(uint32_t delay_ms)
 {
@@ -3068,6 +3088,304 @@ static void web_handle_radio_logo_upload_complete()
   json += "\"}";
 
   web_radio_logo_upload_reset();
+  web_send_no_cache_headers();
+  s_server.send(200, "application/json; charset=utf-8", json);
+}
+
+static const char* web_system_asset_path(WebSystemAssetKind kind)
+{
+  switch (kind) {
+    case WebSystemAssetKind::DefaultCover:
+      return SystemPaths::kDefaultCover;
+    case WebSystemAssetKind::NetCoverLoading:
+      return SystemPaths::kNetCoverLoading;
+    default:
+      return nullptr;
+  }
+}
+
+static const char* web_system_asset_label(WebSystemAssetKind kind)
+{
+  switch (kind) {
+    case WebSystemAssetKind::DefaultCover:
+      return "默认封面";
+    case WebSystemAssetKind::NetCoverLoading:
+      return "NAS加载图";
+    default:
+      return "系统图片";
+  }
+}
+
+static bool web_validate_system_jpeg_bytes(const uint8_t* data, size_t size)
+{
+  if (!data || size < 4 || size > kWebSystemAssetMaxBytes) return false;
+  return data[0] == 0xFF && data[1] == 0xD8 &&
+         data[size - 2] == 0xFF && data[size - 1] == 0xD9;
+}
+
+static bool web_validate_system_jpeg_file(File32& file, void*)
+{
+  const uint64_t size64 = file.fileSize();
+  if (size64 < 4 || size64 > kWebSystemAssetMaxBytes) return false;
+
+  uint8_t head[2] = {};
+  uint8_t tail[2] = {};
+  if (!file.seekSet(0) || file.read(head, sizeof(head)) != sizeof(head)) {
+    return false;
+  }
+  if (!file.seekSet(size64 - sizeof(tail)) ||
+      file.read(tail, sizeof(tail)) != sizeof(tail)) {
+    return false;
+  }
+  return head[0] == 0xFF && head[1] == 0xD8 &&
+         tail[0] == 0xFF && tail[1] == 0xD9;
+}
+
+static void web_system_asset_upload_reset()
+{
+  if (s_system_asset_upload.data) {
+    heap_caps_free(s_system_asset_upload.data);
+  }
+  s_system_asset_upload = WebSystemAssetUploadState{};
+}
+
+static void web_system_asset_upload_fail(const char* message)
+{
+  s_system_asset_upload.failed = true;
+  snprintf(s_system_asset_upload.error,
+           sizeof(s_system_asset_upload.error),
+           "%s",
+           message ? message : "系统图片上传失败");
+}
+
+static bool web_system_asset_upload_reserve(size_t required)
+{
+  if (required <= s_system_asset_upload.capacity) return true;
+  if (required > kWebSystemAssetMaxBytes) return false;
+
+  size_t capacity = s_system_asset_upload.capacity ?
+      s_system_asset_upload.capacity : 16 * 1024;
+  while (capacity < required) {
+    capacity *= 2;
+    if (capacity > kWebSystemAssetMaxBytes) {
+      capacity = kWebSystemAssetMaxBytes;
+      break;
+    }
+  }
+
+  void* fresh = heap_caps_realloc(s_system_asset_upload.data,
+                                  capacity,
+                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!fresh) return false;
+  s_system_asset_upload.data = static_cast<uint8_t*>(fresh);
+  s_system_asset_upload.capacity = capacity;
+  return true;
+}
+
+static void web_system_asset_commit_complete(const char* final_path,
+                                             bool success,
+                                             void*)
+{
+  const WebSystemAssetKind kind =
+      final_path && strcmp(final_path, SystemPaths::kDefaultCover) == 0
+          ? WebSystemAssetKind::DefaultCover
+          : WebSystemAssetKind::NetCoverLoading;
+  if (success) {
+    LOGI("[网页] %s已在安全窗口写入：%s",
+         web_system_asset_label(kind),
+         final_path ? final_path : "-");
+  } else {
+    LOGW("[网页] %s本次写入失败，将在下一个安全窗口重试：%s",
+         web_system_asset_label(kind),
+         final_path ? final_path : "-");
+  }
+}
+
+static void web_handle_system_asset_upload_stream(WebSystemAssetKind kind)
+{
+  HTTPUpload& upload = s_server.upload();
+  if (upload.status == UPLOAD_FILE_START) {
+    web_system_asset_upload_reset();
+    s_system_asset_upload.kind = kind;
+    return;
+  }
+
+  if (s_system_asset_upload.kind != kind) {
+    web_system_asset_upload_fail("图片上传状态不一致");
+    return;
+  }
+
+  if (upload.status == UPLOAD_FILE_WRITE) {
+    if (s_system_asset_upload.failed) return;
+    const size_t required = s_system_asset_upload.size + upload.currentSize;
+    if (!web_system_asset_upload_reserve(required)) {
+      web_system_asset_upload_fail("图片超过400KB或PSRAM不足");
+      return;
+    }
+    memcpy(s_system_asset_upload.data + s_system_asset_upload.size,
+           upload.buf,
+           upload.currentSize);
+    s_system_asset_upload.size = required;
+    return;
+  }
+
+  if (upload.status == UPLOAD_FILE_ABORTED) {
+    web_system_asset_upload_fail("图片上传已中止");
+    s_system_asset_upload.result_ready = true;
+    return;
+  }
+
+  if (upload.status != UPLOAD_FILE_END) return;
+  s_system_asset_upload.result_ready = true;
+  if (s_system_asset_upload.failed) return;
+
+  if (!web_validate_system_jpeg_bytes(s_system_asset_upload.data,
+                                      s_system_asset_upload.size)) {
+    web_system_asset_upload_fail("只支持完整JPEG图片，最大400KB");
+    return;
+  }
+
+  const char* final_path = web_system_asset_path(kind);
+  if (!final_path ||
+      !storage_config_stage_psram(
+          final_path,
+          s_system_asset_upload.data,
+          s_system_asset_upload.size,
+          web_validate_system_jpeg_file,
+          nullptr,
+          web_system_asset_commit_complete,
+          nullptr)) {
+    web_system_asset_upload_fail("图片暂存PSRAM失败，原图片未改变");
+    return;
+  }
+
+  s_system_asset_upload.staged = true;
+  const bool local_audio_open =
+      player_source_type_get() == PlayerSourceType::LOCAL_TRACK &&
+      (audio_service_is_playing() || audio_service_is_paused());
+  if (local_audio_open) {
+    s_system_asset_upload.deferred = true;
+  } else {
+    (void)storage_config_commit_pending(5000);
+    s_system_asset_upload.deferred =
+        storage_config_has_pending_path(final_path);
+  }
+}
+
+static void web_handle_system_asset_upload_complete(WebSystemAssetKind kind)
+{
+  if (s_system_asset_upload.kind != kind ||
+      !s_system_asset_upload.result_ready ||
+      s_system_asset_upload.failed ||
+      !s_system_asset_upload.staged) {
+    const String message = s_system_asset_upload.error[0]
+        ? String(s_system_asset_upload.error)
+        : String("未收到有效JPEG图片");
+    web_system_asset_upload_reset();
+    web_send_json_err(message.c_str(), 400);
+    return;
+  }
+
+  const char* final_path = web_system_asset_path(kind);
+  String json = "{\"ok\":true,\"state\":\"";
+  json += s_system_asset_upload.deferred ? "pending" : "committed";
+  json += "\",\"path\":\"";
+  json += web_json_escape(String(final_path ? final_path : ""));
+  json += "\",\"size\":";
+  json += String((unsigned)s_system_asset_upload.size);
+  json += ",\"message\":\"";
+  String message = web_system_asset_label(kind);
+  message += s_system_asset_upload.deferred
+      ? "已暂存PSRAM，下次切歌后写入TF卡"
+      : "已写入TF卡，将在下次加载封面时生效";
+  json += message;
+  json += "\"}";
+
+  web_system_asset_upload_reset();
+  web_send_no_cache_headers();
+  s_server.send(200, "application/json; charset=utf-8", json);
+}
+
+static void web_handle_default_cover_upload_stream()
+{
+  web_handle_system_asset_upload_stream(WebSystemAssetKind::DefaultCover);
+}
+
+static void web_handle_default_cover_upload_complete()
+{
+  web_handle_system_asset_upload_complete(WebSystemAssetKind::DefaultCover);
+}
+
+static void web_handle_net_cover_loading_upload_stream()
+{
+  web_handle_system_asset_upload_stream(WebSystemAssetKind::NetCoverLoading);
+}
+
+static void web_handle_net_cover_loading_upload_complete()
+{
+  web_handle_system_asset_upload_complete(WebSystemAssetKind::NetCoverLoading);
+}
+
+static void web_append_system_asset_status(String& json,
+                                           const char* key,
+                                           const char* path)
+{
+  bool exists = false;
+  size_t size = 0;
+  const bool pending = storage_config_has_pending_path(path);
+  const bool local_audio_open =
+      player_source_type_get() == PlayerSourceType::LOCAL_TRACK &&
+      (audio_service_is_playing() || audio_service_is_paused());
+  if (!pending && !local_audio_open && storage_is_ready()) {
+    // 网页读取状态时顺便恢复掉电遗留的有效 .tmp/.bak；本地音频占卡时不执行。
+    (void)storage_config_recover(path,
+                                 web_validate_system_jpeg_file,
+                                 nullptr,
+                                 1500);
+  }
+  if (pending) {
+    exists = true;
+    size = storage_config_pending_size(path);
+  } else if (storage_is_ready()) {
+    StorageSdLockGuard guard(1000);
+    if (guard && sd.exists(path)) {
+      File32 file = sd.open(path, O_RDONLY);
+      if (file) {
+        exists = true;
+        size = static_cast<size_t>(file.fileSize());
+        file.close();
+      }
+    }
+  }
+
+  json += "\"";
+  json += key;
+  json += "\":{\"path\":\"";
+  json += web_json_escape(String(path));
+  json += "\",\"exists\":";
+  json += exists ? "true" : "false";
+  json += ",\"pending\":";
+  json += pending ? "true" : "false";
+  json += ",\"size\":";
+  json += String((unsigned)size);
+  json += "}";
+}
+
+static void web_handle_system_assets_get()
+{
+  String json;
+  json.reserve(512);
+  json = "{\"ok\":true,\"max_bytes\":";
+  json += String((unsigned)kWebSystemAssetMaxBytes);
+  json += ",";
+  web_append_system_asset_status(json,
+                                 "default_cover",
+                                 SystemPaths::kDefaultCover);
+  json += ",";
+  web_append_system_asset_status(json,
+                                 "net_cover_loading",
+                                 SystemPaths::kNetCoverLoading);
+  json += "}";
   web_send_no_cache_headers();
   s_server.send(200, "application/json; charset=utf-8", json);
 }
@@ -6004,6 +6322,15 @@ static void web_setup_routes() {
   s_server.on("/api/config/nas", HTTP_GET, web_handle_nas_config_get);
   s_server.on("/api/config/nas/save", HTTP_POST, web_handle_nas_config_save);
   s_server.on("/api/config/nas/apply", HTTP_POST, web_handle_nas_config_apply);
+  s_server.on("/api/config/assets", HTTP_GET, web_handle_system_assets_get);
+  s_server.on("/api/config/assets/default-cover",
+              HTTP_POST,
+              web_handle_default_cover_upload_complete,
+              web_handle_default_cover_upload_stream);
+  s_server.on("/api/config/assets/net-cover-loading",
+              HTTP_POST,
+              web_handle_net_cover_loading_upload_complete,
+              web_handle_net_cover_loading_upload_stream);
   s_server.on("/api/config/radios/logo",
               HTTP_POST,
               web_handle_radio_logo_upload_complete,

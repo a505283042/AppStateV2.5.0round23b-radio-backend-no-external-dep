@@ -15,7 +15,7 @@ using StorageConfigCommitCallback = void (*)(const char* final_path,
                                              void* context);
 
 /**
- * @brief 使用 .tmp + .bak 事务方式替换受管配置或电台资源文件。
+ * @brief 使用 .tmp + .bak 事务方式替换受管配置或系统资源文件。
  *
  * 保存成功后保留上一版 .bak；写入、同步、校验或重命名失败时恢复旧文件。
  */
