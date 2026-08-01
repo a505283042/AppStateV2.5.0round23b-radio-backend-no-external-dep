@@ -1301,6 +1301,9 @@ static const char WEBCTRL_SETTINGS_HTML[] PROGMEM = R"HTML(
     details.card[open]>summary::after{transform:rotate(90deg);color:#79c0ff}
     .setting-body{padding:16px}
     .row{display:grid;grid-template-columns:1fr auto;gap:12px;align-items:center;margin-bottom:12px}
+    .row.toggle-row{grid-template-columns:minmax(0,1fr) auto}
+    .row.toggle-row>label{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .row.toggle-row>input[type=checkbox],.row.toggle-row>input[type=radio]{justify-self:end;margin:0 4px 0 0;flex:0 0 auto}
     label{font-size:15px}
     input[type=number],input[type=text],input[type=password],select{width:180px;padding:10px;border-radius:10px;border:1px solid #444;background:#111;color:#eee;box-sizing:border-box}
     input[type=checkbox],input[type=radio]{accent-color:#2f6feb}
@@ -1397,7 +1400,16 @@ static const char WEBCTRL_SETTINGS_HTML[] PROGMEM = R"HTML(
     details.config-section[open]>summary{border-bottom:1px solid #315f97;background:rgba(47,111,235,.14);color:#b9dcff}
     details.config-section[open]>summary::after{transform:rotate(90deg);color:#79c0ff}
     details.config-section>.setting-body{padding:14px}
-    @media(max-width:560px){.config-item-meta{display:none}.wifi-grid,.radio-grid,.nas-grid{grid-template-columns:1fr}.radio-url-field,.nas-path-field{grid-column:auto}.row{grid-template-columns:1fr}.row>.status-value,.row>.diag-value,.row>div{text-align:left}.row input[type=number],.row input[type=text],.row input[type=password],.row select{width:100%}}
+    @media(max-width:560px){.config-item-meta{display:none}.wifi-grid,.radio-grid,.nas-grid{grid-template-columns:1fr}.radio-url-field,.nas-path-field{grid-column:auto}.row{grid-template-columns:1fr}.row.toggle-row{grid-template-columns:minmax(0,1fr) auto}.row>.status-value,.row>.diag-value,.row>div{text-align:left}.row input[type=number],.row input[type=text],.row input[type=password],.row select{width:100%}}
+    @media(max-width:560px){
+      #systemDiagnosticsCard .diag-group .row{grid-template-columns:minmax(108px,42%) minmax(0,1fr);gap:10px;align-items:start}
+      #systemDiagnosticsCard .diag-group .row>label{color:#79c0ff;font-weight:700;line-height:1.45}
+      #systemDiagnosticsCard .diag-group .row>.diag-value{text-align:right;min-width:0;overflow-wrap:anywhere;line-height:1.45}
+    }
+    @media(max-width:340px){
+      #systemDiagnosticsCard .diag-group .row{grid-template-columns:1fr;gap:4px}
+      #systemDiagnosticsCard .diag-group .row>.diag-value{text-align:left}
+    }
   </style>
 </head>
 <body>
@@ -1580,10 +1592,10 @@ static const char WEBCTRL_SETTINGS_HTML[] PROGMEM = R"HTML(
           <option value="follow_poll">省流量</option>
         </select>
       </div>
-      <div class="row"><label>下一句歌词</label><input id="show_next_lyric" type="checkbox"></div>
-      <div class="row"><label>网页封面</label><input id="show_cover" type="checkbox"></div>
-      <div class="row"><label>封面旋转</label><input id="web_cover_spin" type="checkbox"></div>
-      <div class="row"><label>按键振动</label><input id="web_haptic_feedback" data-web-feedback-haptic-toggle type="checkbox"></div>
+      <div class="row toggle-row"><label>下一句歌词</label><input id="show_next_lyric" type="checkbox"></div>
+      <div class="row toggle-row"><label>网页封面</label><input id="show_cover" type="checkbox"></div>
+      <div class="row toggle-row"><label>封面旋转</label><input id="web_cover_spin" type="checkbox"></div>
+      <div class="row toggle-row"><label>按键振动</label><input id="web_haptic_feedback" data-web-feedback-haptic-toggle type="checkbox"></div>
       <div class="actions">
         <button onclick="saveWebDisplaySettings()">保存显示设置</button>
         <button class="secondary" onclick="loadSettings()">重新读取</button>
@@ -1601,7 +1613,7 @@ static const char WEBCTRL_SETTINGS_HTML[] PROGMEM = R"HTML(
           <option value="cover_panel">封面面板</option>
         </select>
       </div>
-      <div class="row"><label>屏幕</label><input id="screen_enabled" type="checkbox"></div>
+      <div class="row toggle-row"><label>屏幕</label><input id="screen_enabled" type="checkbox"></div>
       <div class="row"><label>睡眠关机</label>
         <select id="sleep_timer_minutes">
           <option value="0">关闭</option>
@@ -1611,12 +1623,12 @@ static const char WEBCTRL_SETTINGS_HTML[] PROGMEM = R"HTML(
           <option value="90">90分钟</option>
         </select>
       </div>
-      <div class="row"><label>霍尔控制</label><input id="hall_control_enabled" type="checkbox" onchange="syncHallSolenoidUi()"></div>
-      <div class="row"><label>电磁铁</label><input id="solenoid_enabled" type="checkbox" onchange="syncHallSolenoidUi()"></div>
-      <div class="row"><label>电磁铁方向反转</label><input id="solenoid_direction_inverted" type="checkbox" onchange="syncHallSolenoidUi()"></div>
+      <div class="row toggle-row"><label>霍尔控制</label><input id="hall_control_enabled" type="checkbox" onchange="syncHallSolenoidUi()"></div>
+      <div class="row toggle-row"><label>电磁铁</label><input id="solenoid_enabled" type="checkbox" onchange="syncHallSolenoidUi()"></div>
+      <div class="row toggle-row"><label>电磁铁方向反转</label><input id="solenoid_direction_inverted" type="checkbox" onchange="syncHallSolenoidUi()"></div>
       <div id="hall_solenoid_hint" class="muted small">电磁铁开启时，霍尔自动联动并负责到位后的播放/暂停。</div>
       <div id="solenoid_direction_hint" class="muted small">反转开启时交换A/B对应的靠近与离开方向。</div>
-      <div class="row"><label>状态灯</label><input id="status_led_enabled" type="checkbox" onchange="syncStatusLedUi()"></div>
+      <div class="row toggle-row"><label>状态灯</label><input id="status_led_enabled" type="checkbox" onchange="syncStatusLedUi()"></div>
       <div class="row"><label>状态灯亮度</label>
         <select id="status_led_brightness">
           <option value="low">低</option>
@@ -1653,7 +1665,7 @@ static const char WEBCTRL_SETTINGS_HTML[] PROGMEM = R"HTML(
       <summary>功放设置</summary>
       <div class="setting-body">
         <div class="row"><label>功放状态</label><div class="status-value" id="ampPowerText">-</div></div>
-        <div class="row"><label>功放静音</label><input id="amp_muted" type="checkbox"></div>
+        <div class="row toggle-row"><label>功放静音</label><input id="amp_muted" type="checkbox"></div>
         <div class="actions">
           <button id="ampMuteApplyBtn" onclick="applyAmpMute()">应用静音</button>
         </div>
