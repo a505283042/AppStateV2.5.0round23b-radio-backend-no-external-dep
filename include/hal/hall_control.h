@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stdint.h>
+
 /** 初始化 GPIO9 霍尔状态和电磁铁联动控制。 */
 void hall_control_begin();
 
@@ -16,12 +18,36 @@ void hall_control_tick();
  * 处理用户播放/暂停请求的电磁铁联动语义。
  *
  * 实体播放键和 Web 播放/暂停必须统一经过此接口：
- * - 电磁铁开启时只驱动摆臂，霍尔到位后再改变播放状态；
+ * - 正在播放时，请求摆臂进入靠近霍尔的停止位；
+ * - 暂停或停止时，请求摆臂进入离开霍尔的播放位；
+ * - 摆臂已经处于目标位时，不重复驱动电磁铁，直接切换播放状态；
  * - 电磁铁关闭时返回 false，由播放器执行普通播放/暂停切换。
  *
  * @return true 表示电磁铁模式已接管本次请求，调用方不得再直接切换播放状态。
  */
 bool hall_control_handle_user_toggle();
+
+/** NFC 等延迟起播请求等待摆臂到播放位后的完成回调。 */
+using HallPlayPositionCallback = void (*)(bool success);
+
+/** 请求结果：已经在播放位、已开始移动，或请求失败。 */
+enum class HallPlayPositionRequestResult : uint8_t {
+    Ready = 0,
+    Started,
+    Failed,
+};
+
+/**
+ * 请求把摆臂移动到“离开霍尔”的播放位。
+ *
+ * - 电磁铁关闭，或摆臂已经离开：返回 Ready，调用方可立即执行起播动作；
+ * - 电磁铁开启且摆臂靠近：启动电磁铁并返回 Started，到位/失败后调用 callback；
+ * - 当前状态不允许动作、已有动作进行中或驱动失败：返回 Failed。
+ *
+ * callback 只在返回 Started 后调用一次。失败时 success=false，调用方不得起播。
+ */
+HallPlayPositionRequestResult hall_control_request_play_position(
+    HallPlayPositionCallback callback);
 
 /** 当前稳定状态是否为摆臂磁铁靠近霍尔。 */
 bool hall_control_is_near();

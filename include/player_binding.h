@@ -9,6 +9,9 @@
  * - 单曲播放
  * - 歌手绑定播放
  * - 专辑绑定播放
+ *
+ * 刷到实体 NFC 卡时，如果电磁铁开启且摆臂仍在停止位，
+ * 会先等待霍尔确认摆臂离开，再执行对应绑定播放。
  */
 struct PlayerBindingHooks {
     bool (*play_track_dispatch)(int idx, bool verbose, bool force_cover) = nullptr;
