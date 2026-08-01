@@ -1587,6 +1587,16 @@ bool player_set_paused(bool paused, PlayerToggleTrigger trigger)
 
 void player_toggle_play(PlayerToggleTrigger trigger)
 {
+    // 实体播放键与 Web 播放/暂停共用完全相同的电磁铁—霍尔联动链路。
+    // 闹钟、NFC 管理恢复等内部动作不驱动机械摆臂，继续直接设置播放状态。
+    if ((trigger == PlayerToggleTrigger::PlayKey ||
+         trigger == PlayerToggleTrigger::Web) &&
+        hall_control_handle_user_toggle()) {
+        LOGI("[播放器] 播放/暂停请求已由电磁铁联动接管：来源=%s",
+             control_toggle_trigger_label(trigger));
+        return;
+    }
+
     const PlayerPlaybackState current = player_playback_state_get();
     if (current == PlayerPlaybackState::Playing) {
         (void)player_set_paused(true, trigger);

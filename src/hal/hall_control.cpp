@@ -265,7 +265,7 @@ void hall_control_tick()
     }
 }
 
-bool hall_control_handle_play_key()
+bool hall_control_handle_user_toggle()
 {
     const WebRuntimeSettings settings = web_settings_get();
     if (!settings.solenoid_enabled) {
@@ -276,7 +276,8 @@ bool hall_control_handle_play_key()
         hall_control_begin();
     }
 
-    // 电磁铁开启时本次播放键始终由联动状态机接管，失败也不能回退成软件直切。
+    // 电磁铁开启时，本次实体按键或 Web 请求始终由联动状态机接管；
+    // 即使动作失败，也不能回退成软件直切，避免摆臂位置与播放状态失步。
     if (!hall_actions_allowed()) {
         LOGW("[HALL] 当前状态不允许驱动摆臂");
         ui_show_notice_popup("无法驱动摆臂", "请退出扫描或返回播放器");
@@ -284,7 +285,7 @@ bool hall_control_handle_play_key()
     }
 
     if (s_motion_target != HallMotionTarget::None || board_hw_solenoid_is_busy()) {
-        LOGD("[HALL] 摆臂动作尚未结束，忽略重复播放键");
+        LOGD("[HALL] 摆臂动作尚未结束，忽略重复播放/暂停请求");
         ui_show_notice_popup("摆臂动作中", "请稍候");
         return true;
     }
@@ -307,7 +308,7 @@ bool hall_control_handle_play_key()
 
     s_motion_target = target;
     s_motion_started_ms = millis();
-    LOGI("[HALL] 播放键驱动摆臂：当前=%s 目标=%s 脉冲=%lums",
+    LOGI("[HALL] 播放/暂停请求驱动摆臂：当前=%s 目标=%s 脉冲=%lums",
          currently_near ? "靠近" : "离开",
          motion_target_label(target),
          static_cast<unsigned long>(SOLENOID_DRIVE_MS));

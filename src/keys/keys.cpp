@@ -421,11 +421,8 @@ static void handle_encoder_volume_step(int8_t step)
 
 static void play_key_toggle_with_solenoid()
 {
-    // 电磁铁开启时，播放键只请求摆臂移动；真正的播放/暂停由霍尔到位事件决定。
-    // 电磁铁关闭时返回 false，恢复普通播放键直接切换语义。
-    if (hall_control_handle_play_key()) {
-        return;
-    }
+    // 实体播放键统一进入播放器切换入口。
+    // 电磁铁/霍尔联动由 player_toggle_play() 集中处理，确保 Web 与实体按键语义一致。
     player_toggle_play(PlayerToggleTrigger::PlayKey);
 }
 

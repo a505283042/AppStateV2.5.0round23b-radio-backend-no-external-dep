@@ -13,10 +13,15 @@ void hall_control_begin();
 void hall_control_tick();
 
 /**
- * 处理播放键的电磁铁联动语义。
- * @return true 表示电磁铁模式已接管本次播放键，调用方不得再直接切换播放状态。
+ * 处理用户播放/暂停请求的电磁铁联动语义。
+ *
+ * 实体播放键和 Web 播放/暂停必须统一经过此接口：
+ * - 电磁铁开启时只驱动摆臂，霍尔到位后再改变播放状态；
+ * - 电磁铁关闭时返回 false，由播放器执行普通播放/暂停切换。
+ *
+ * @return true 表示电磁铁模式已接管本次请求，调用方不得再直接切换播放状态。
  */
-bool hall_control_handle_play_key();
+bool hall_control_handle_user_toggle();
 
 /** 当前稳定状态是否为摆臂磁铁靠近霍尔。 */
 bool hall_control_is_near();
