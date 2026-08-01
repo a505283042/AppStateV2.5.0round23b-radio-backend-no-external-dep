@@ -748,6 +748,7 @@ static bool web_settings_persistent_core_changed(const WebRuntimeSettings& old_c
       || old_cfg.wifi_enabled != new_cfg.wifi_enabled
       || old_cfg.hall_control_enabled != new_cfg.hall_control_enabled
       || old_cfg.solenoid_enabled != new_cfg.solenoid_enabled
+      || old_cfg.solenoid_direction_inverted != new_cfg.solenoid_direction_inverted
       || old_cfg.status_led_enabled != new_cfg.status_led_enabled
       || old_cfg.status_led_brightness != new_cfg.status_led_brightness;
 }
@@ -3861,6 +3862,8 @@ static void web_handle_settings_get() {
   json += ",\"web_cover_spin\":"; json += (ws.web_cover_spin ? "true" : "false");
   json += ",\"hall_control_enabled\":"; json += (ws.hall_control_enabled ? "true" : "false");
   json += ",\"solenoid_enabled\":"; json += (ws.solenoid_enabled ? "true" : "false");
+  json += ",\"solenoid_direction_inverted\":";
+  json += (ws.solenoid_direction_inverted ? "true" : "false");
   json += ",\"status_led_enabled\":"; json += (ws.status_led_enabled ? "true" : "false");
   json += ",\"status_led_brightness\":\"" + String(status_led_brightness_key(ws.status_led_brightness)) + "\"";
   json += ",\"device_view\":\"" + String(web_device_view_key(ui_get_view())) + "\"";
@@ -3894,6 +3897,13 @@ static void web_handle_settings_post() {
   ws.web_cover_spin = web_parse_bool(s_server.arg("web_cover_spin"), ws.web_cover_spin);
   ws.hall_control_enabled = web_parse_bool(s_server.arg("hall_control_enabled"), ws.hall_control_enabled);
   ws.solenoid_enabled = web_parse_bool(s_server.arg("solenoid_enabled"), ws.solenoid_enabled);
+  ws.solenoid_direction_inverted = web_parse_bool(
+      s_server.arg("solenoid_direction_inverted"),
+      ws.solenoid_direction_inverted);
+  if (ws.solenoid_enabled) {
+    // 电磁铁开启时霍尔必须参与到位确认，忽略网页提交的关闭值。
+    ws.hall_control_enabled = true;
+  }
   ws.status_led_enabled = web_parse_bool(s_server.arg("status_led_enabled"), ws.status_led_enabled);
 
   const String led_brightness_arg = web_trim_copy(s_server.arg("status_led_brightness"));

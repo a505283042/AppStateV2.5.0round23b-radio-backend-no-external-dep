@@ -149,11 +149,23 @@ bool board_hw_solenoid_begin();
 
 bool board_hw_solenoid_stop();
 
-bool board_hw_solenoid_pulse_a(uint32_t pulse_ms = 150);
+bool board_hw_solenoid_pulse_a(uint32_t pulse_ms = 220);
 
-bool board_hw_solenoid_pulse_b(uint32_t pulse_ms = 150);
+bool board_hw_solenoid_pulse_b(uint32_t pulse_ms = 220);
 
-bool board_hw_solenoid_flip(uint32_t pulse_ms = 150);
+bool board_hw_solenoid_flip(uint32_t pulse_ms = 220);
+
+/** 设置机械方向映射。true 表示交换 A/B 对应的“靠近/离开”方向。 */
+void board_hw_solenoid_set_direction_inverted(bool inverted);
+
+/** 当前是否交换 A/B 机械方向。 */
+bool board_hw_solenoid_get_direction_inverted();
+
+/** 按机械语义驱动摆臂磁铁靠近霍尔；内部处理 A/B 方向反转。 */
+bool board_hw_solenoid_move_hall_near(uint32_t pulse_ms = 220);
+
+/** 按机械语义驱动摆臂磁铁离开霍尔；内部处理 A/B 方向反转。 */
+bool board_hw_solenoid_move_hall_far(uint32_t pulse_ms = 220);
 
 void board_hw_solenoid_tick();
 

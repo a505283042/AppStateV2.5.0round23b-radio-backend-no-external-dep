@@ -4,6 +4,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/portmacro.h>
 
+#include "hal/board_hw_control.h"
 #include "utils/log.h"
 
 static WebRuntimeSettings s_cfg{};
@@ -22,6 +23,7 @@ static bool web_settings_equal(const WebRuntimeSettings& a, const WebRuntimeSett
       && a.wifi_enabled == b.wifi_enabled
       && a.hall_control_enabled == b.hall_control_enabled
       && a.solenoid_enabled == b.solenoid_enabled
+      && a.solenoid_direction_inverted == b.solenoid_direction_inverted
       && a.status_led_enabled == b.status_led_enabled
       && a.status_led_brightness == b.status_led_brightness;
 }
@@ -36,13 +38,22 @@ WebRuntimeSettings web_settings_get()
 
 void web_settings_set(const WebRuntimeSettings& s)
 {
+  WebRuntimeSettings normalized = s;
+  // 电磁铁模式必须依赖霍尔确认到位，禁止出现“电磁铁开、霍尔关”。
+  if (normalized.solenoid_enabled) {
+    normalized.hall_control_enabled = true;
+  }
+
   portENTER_CRITICAL(&s_settings_mux);
-  if (!web_settings_equal(s_cfg, s)) {
-    s_cfg = s;
+  if (!web_settings_equal(s_cfg, normalized)) {
+    s_cfg = normalized;
     s_dirty = true;
     ++s_revision;
   }
   portEXIT_CRITICAL(&s_settings_mux);
+
+  // 硬件层只维护当前映射，持久化仍统一由网页设置负责。
+  board_hw_solenoid_set_direction_inverted(normalized.solenoid_direction_inverted);
 }
 
 bool web_settings_is_dirty()
@@ -176,6 +187,13 @@ bool web_settings_load() {
   loaded.wifi_enabled = pref.getBool("wifi_en", loaded.wifi_enabled);
   loaded.hall_control_enabled = pref.getBool("hall_en", loaded.hall_control_enabled);
   loaded.solenoid_enabled = pref.getBool("sol_en", loaded.solenoid_enabled);
+  loaded.solenoid_direction_inverted = pref.getBool(
+      "sol_inv", loaded.solenoid_direction_inverted);
+  const bool hall_was_forced = loaded.solenoid_enabled && !loaded.hall_control_enabled;
+  if (hall_was_forced) {
+    // 兼容旧 NVS：电磁铁开启时自动修正为霍尔联动，并在后续安全保存时回写。
+    loaded.hall_control_enabled = true;
+  }
   loaded.status_led_enabled = pref.getBool("led_en", loaded.status_led_enabled);
   const uint8_t led_bri = pref.getUChar("led_bri", static_cast<uint8_t>(loaded.status_led_brightness));
   loaded.status_led_brightness = led_bri <= static_cast<uint8_t>(StatusLedBrightness::High)
@@ -186,16 +204,19 @@ bool web_settings_load() {
   // 先在局部对象中完成 NVS 读取，再一次性发布，防止其它任务读到半更新状态。
   portENTER_CRITICAL(&s_settings_mux);
   s_cfg = loaded;
-  s_dirty = false;
+  s_dirty = hall_was_forced;
   ++s_revision;
   portEXIT_CRITICAL(&s_settings_mux);
 
-  LOGD("[网页] 设置已从 NVS 读取：刷新=%s 歌词=%s WiFi=%d HALL=%d SOL=%d LED=%d/%s",
+  board_hw_solenoid_set_direction_inverted(loaded.solenoid_direction_inverted);
+
+  LOGD("[网页] 设置已从 NVS 读取：刷新=%s 歌词=%s WiFi=%d HALL=%d SOL=%d SOL_INV=%d LED=%d/%s",
        web_refresh_preset_key(loaded.refresh_preset),
        web_lyric_sync_mode_key(loaded.lyric_sync_mode),
        (int)loaded.wifi_enabled,
        (int)loaded.hall_control_enabled,
        (int)loaded.solenoid_enabled,
+       (int)loaded.solenoid_direction_inverted,
        (int)loaded.status_led_enabled,
        status_led_brightness_key(loaded.status_led_brightness));
   return true;
@@ -225,6 +246,7 @@ bool web_settings_save() {
                && pref.putBool("wifi_en", snapshot.wifi_enabled)
                && pref.putBool("hall_en", snapshot.hall_control_enabled)
                && pref.putBool("sol_en", snapshot.solenoid_enabled)
+               && pref.putBool("sol_inv", snapshot.solenoid_direction_inverted)
                && pref.putBool("led_en", snapshot.status_led_enabled)
                && pref.putUChar("led_bri", static_cast<uint8_t>(snapshot.status_led_brightness));
   pref.end();
@@ -242,12 +264,13 @@ bool web_settings_save() {
   const bool still_dirty = s_dirty;
   portEXIT_CRITICAL(&s_settings_mux);
 
-  LOGI("[网页] 设置已保存到 NVS：刷新=%s 歌词=%s WiFi=%d HALL=%d SOL=%d LED=%d/%s%s",
+  LOGI("[网页] 设置已保存到 NVS：刷新=%s 歌词=%s WiFi=%d HALL=%d SOL=%d SOL_INV=%d LED=%d/%s%s",
        web_refresh_preset_key(snapshot.refresh_preset),
        web_lyric_sync_mode_key(snapshot.lyric_sync_mode),
        (int)snapshot.wifi_enabled,
        (int)snapshot.hall_control_enabled,
        (int)snapshot.solenoid_enabled,
+       (int)snapshot.solenoid_direction_inverted,
        (int)snapshot.status_led_enabled,
        status_led_brightness_key(snapshot.status_led_brightness),
        still_dirty ? "（保存期间又有新修改，仍待保存）" : "");

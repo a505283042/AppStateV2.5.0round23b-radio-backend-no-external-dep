@@ -15,10 +15,10 @@
 #include "menu/quick_menu_page_nfc.h"
 #include "utils/log.h"
 #include "web/web_server.h"
-#include "web/web_settings.h"
 #include "board/board_pins_pcb1_mcp23017.h"
 #include "hal/mcp23017_u3.h"
 #include "hal/board_hw_control.h"
+#include "hal/hall_control.h"
 
 
 /*
@@ -421,10 +421,10 @@ static void handle_encoder_volume_step(int8_t step)
 
 static void play_key_toggle_with_solenoid()
 {
-    // 播放键短按时，可选给 TC118S 输出一次电磁铁翻转短脉冲。
-    // 只在播放键语义里触发；菜单确认、NFC确认、HALL触发不走这里。
-    if (web_settings_get().solenoid_enabled) {
-        (void)board_hw_solenoid_flip();
+    // 电磁铁开启时，播放键只请求摆臂移动；真正的播放/暂停由霍尔到位事件决定。
+    // 电磁铁关闭时返回 false，恢复普通播放键直接切换语义。
+    if (hall_control_handle_play_key()) {
+        return;
     }
     player_toggle_play(PlayerToggleTrigger::PlayKey);
 }
@@ -1225,7 +1225,7 @@ void keys_update()
   // MODE：短按切换大步音量模式；长按切换播放界面视图。
   handle_key(k_mode, volume_fast_mode_toggle, ui_toggle_view);
 
-  // PLAY：短按输出一次电磁铁短脉冲 + 播放/暂停，长按保存 NVS 后关机。
+  // PLAY：电磁铁开启时只驱动摆臂，关闭时直接播放/暂停；长按保存 NVS 后关机。
   handle_key(k_play, play_key_toggle_with_solenoid, app_power_save_and_shutdown);
 
   // VOL：旧板音量按键逻辑。新 PCB1 已禁用，不影响。

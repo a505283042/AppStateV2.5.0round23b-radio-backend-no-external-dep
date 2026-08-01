@@ -1611,8 +1611,11 @@ static const char WEBCTRL_SETTINGS_HTML[] PROGMEM = R"HTML(
           <option value="90">90分钟</option>
         </select>
       </div>
-      <div class="row"><label>霍尔控制</label><input id="hall_control_enabled" type="checkbox"></div>
-      <div class="row"><label>电磁铁</label><input id="solenoid_enabled" type="checkbox"></div>
+      <div class="row"><label>霍尔控制</label><input id="hall_control_enabled" type="checkbox" onchange="syncHallSolenoidUi()"></div>
+      <div class="row"><label>电磁铁</label><input id="solenoid_enabled" type="checkbox" onchange="syncHallSolenoidUi()"></div>
+      <div class="row"><label>电磁铁方向反转</label><input id="solenoid_direction_inverted" type="checkbox" onchange="syncHallSolenoidUi()"></div>
+      <div id="hall_solenoid_hint" class="muted small">电磁铁开启时，霍尔自动联动并负责到位后的播放/暂停。</div>
+      <div id="solenoid_direction_hint" class="muted small">反转开启时交换A/B对应的靠近与离开方向。</div>
       <div class="row"><label>状态灯</label><input id="status_led_enabled" type="checkbox" onchange="syncStatusLedUi()"></div>
       <div class="row"><label>状态灯亮度</label>
         <select id="status_led_brightness">
@@ -3241,10 +3244,34 @@ async function loadSettings(){
     document.getElementById('sleep_timer_minutes').value = String(j.sleep_timer_minutes || 0);
     document.getElementById('hall_control_enabled').checked = !!j.hall_control_enabled;
     document.getElementById('solenoid_enabled').checked = !!j.solenoid_enabled;
+    document.getElementById('solenoid_direction_inverted').checked = !!j.solenoid_direction_inverted;
+    syncHallSolenoidUi();
     document.getElementById('status_led_enabled').checked = !!j.status_led_enabled;
     document.getElementById('status_led_brightness').value = j.status_led_brightness || 'medium';
     syncStatusLedUi();
   }catch(e){}
+}
+function syncHallSolenoidUi(){
+  const hall = document.getElementById('hall_control_enabled');
+  const solenoid = document.getElementById('solenoid_enabled');
+  const direction = document.getElementById('solenoid_direction_inverted');
+  const hint = document.getElementById('hall_solenoid_hint');
+  const directionHint = document.getElementById('solenoid_direction_hint');
+  if(!hall || !solenoid) return;
+  if(solenoid.checked) hall.checked = true;
+  hall.disabled = !!solenoid.checked;
+  if(hint){
+    hint.textContent = solenoid.checked
+      ? '电磁铁联动中：播放键只驱动摆臂，霍尔到位后控制播放/暂停。'
+      : (hall.checked
+          ? '霍尔独立开启：播放键直接切换，霍尔只在位置变化时控制一次。'
+          : '电磁铁和霍尔均关闭：播放键直接控制播放/暂停。');
+  }
+  if(directionHint && direction){
+    directionHint.textContent = direction.checked
+      ? '当前方向：A/B已反转。若目标离开但摆臂顶向靠近端，可取消反转。'
+      : '当前方向：正常映射（A=靠近、B=离开）。';
+  }
 }
 function syncStatusLedUi(){
   const enabled = document.getElementById('status_led_enabled').checked;
@@ -3282,12 +3309,14 @@ async function saveWebDisplaySettings(){
 }
 
 async function saveDeviceSettings(){
+  syncHallSolenoidUi();
   const params = new URLSearchParams();
   params.set('device_view', document.getElementById('device_view').value);
   params.set('screen_enabled', document.getElementById('screen_enabled').checked ? '1' : '0');
   params.set('sleep_timer_minutes', document.getElementById('sleep_timer_minutes').value);
   params.set('hall_control_enabled', document.getElementById('hall_control_enabled').checked ? '1' : '0');
   params.set('solenoid_enabled', document.getElementById('solenoid_enabled').checked ? '1' : '0');
+  params.set('solenoid_direction_inverted', document.getElementById('solenoid_direction_inverted').checked ? '1' : '0');
   params.set('status_led_enabled', document.getElementById('status_led_enabled').checked ? '1' : '0');
   params.set('status_led_brightness', document.getElementById('status_led_brightness').value);
   await postSettings(params, '设备设置已保存');

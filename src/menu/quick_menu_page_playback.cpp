@@ -174,12 +174,18 @@ const char* value_tf_status()
 
 const char* value_hall_control_enabled()
 {
-    return bool_label(web_settings_get().hall_control_enabled);
+    const WebRuntimeSettings ws = web_settings_get();
+    return ws.solenoid_enabled ? "联动" : bool_label(ws.hall_control_enabled);
 }
 
 const char* value_solenoid_enabled()
 {
     return bool_label(web_settings_get().solenoid_enabled);
+}
+
+const char* value_solenoid_direction()
+{
+    return web_settings_get().solenoid_direction_inverted ? "反转" : "正常";
 }
 
 const char* value_status_led_enabled()
@@ -245,6 +251,12 @@ bool action_open_current_source_list()
 bool action_toggle_hall_control()
 {
     WebRuntimeSettings ws = web_settings_get();
+    if (ws.solenoid_enabled) {
+        // 电磁铁依赖霍尔确认到位，联动模式下不允许单独关闭霍尔。
+        ui_show_notice_popup("霍尔已联动", "请先关闭电磁铁");
+        return true;
+    }
+
     ws.hall_control_enabled = !ws.hall_control_enabled;
     web_settings_set(ws);
     (void)web_settings_save();
@@ -255,14 +267,29 @@ bool action_toggle_solenoid()
 {
     WebRuntimeSettings ws = web_settings_get();
     ws.solenoid_enabled = !ws.solenoid_enabled;
-    web_settings_set(ws);
 
-    // 关闭时立即停止一次输出，保证不会残留在通电状态。
-    if (!ws.solenoid_enabled) {
+    if (ws.solenoid_enabled) {
+        // 电磁铁动作必须由霍尔确认到位；开启时自动打开并锁定霍尔联动。
+        ws.hall_control_enabled = true;
+    } else {
+        // 关闭时立即停止输出；霍尔保持开启，用户可随后单独关闭。
         (void)board_hw_solenoid_stop();
     }
 
+    web_settings_set(ws);
     (void)web_settings_save();
+    return true;
+}
+
+bool action_toggle_solenoid_direction()
+{
+    WebRuntimeSettings ws = web_settings_get();
+    ws.solenoid_direction_inverted = !ws.solenoid_direction_inverted;
+    web_settings_set(ws);
+    (void)web_settings_save();
+
+    ui_show_notice_popup("电磁铁方向",
+                         ws.solenoid_direction_inverted ? "A/B已反转" : "A/B使用正常映射");
     return true;
 }
 
@@ -348,6 +375,7 @@ const QuickMenuItem PLAYBACK_ITEMS[] = {
     {"状态灯", QuickMenuItemType::Toggle, QuickMenuPage::Playback, "", value_status_led_enabled, action_toggle_status_led, true, false},
     {"状态灯亮度", QuickMenuItemType::Toggle, QuickMenuPage::Playback, "", value_status_led_brightness, action_cycle_status_led_brightness, true, false},
     {"电磁铁动作", QuickMenuItemType::Toggle, QuickMenuPage::Playback, "", value_solenoid_enabled, action_toggle_solenoid, true, false},
+    {"电磁铁方向", QuickMenuItemType::Toggle, QuickMenuPage::Playback, "", value_solenoid_direction, action_toggle_solenoid_direction, true, false},
     {"睡眠关机", QuickMenuItemType::Toggle, QuickMenuPage::Playback, "", value_sleep_timer, action_cycle_sleep_timer, true, false},
     {"曲库重扫", QuickMenuItemType::SubPage, QuickMenuPage::LibraryRescan, "", value_open, nullptr, true, false},
     {"TF卡状态", QuickMenuItemType::Status, QuickMenuPage::Playback, "", value_tf_status, nullptr, true, false},

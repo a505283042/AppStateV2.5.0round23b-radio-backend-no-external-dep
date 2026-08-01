@@ -38,12 +38,15 @@ struct WebRuntimeSettings {
   bool wifi_enabled = true;
 
   // HALL_OUT 霍尔输入总开关。
-  // 关闭后 GPIO9 仍保持输入，但不再控制播放 / 暂停。
+  // 电磁铁开启时该项会被强制开启；电磁铁关闭时可独立控制霍尔边沿联动。
   bool hall_control_enabled = true;
 
   // TC118S 电磁铁动作总开关。
-  // 关闭后播放键不再输出电磁铁短脉冲，驱动层仍保持停止态保护。
+  // 开启后播放键只驱动摆臂，霍尔到位后决定播放/暂停；关闭后播放键直接切换。
   bool solenoid_enabled = true;
+
+  // 电磁铁机械方向映射。true 时交换 A/B 对应的“靠近/离开”方向。
+  bool solenoid_direction_inverted = true;
 
   // GPIO3 WS2812 播放状态灯。
   bool status_led_enabled = true;

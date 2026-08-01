@@ -1519,7 +1519,7 @@ bool player_set_paused(bool paused, PlayerToggleTrigger trigger)
         return true;
     }
 
-    // 磁铁仍靠近时，所有入口都只能保持暂停；霍尔离开后的恢复请求不会命中此条件。
+    // 电磁铁联动模式下，摆臂仍靠近霍尔时禁止外部绕过机械位置恢复播放。
     if (hall_control_blocks_resume()) {
         LOGI("[HALL] 磁铁仍靠近，拒绝恢复请求：来源=%s",
              control_toggle_trigger_label(trigger));

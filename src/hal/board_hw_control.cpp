@@ -390,6 +390,9 @@ bool s_backlight_enabled = true;
 // 默认停止态为 A=0/B=0，禁止长期通电。
 static constexpr uint32_t SOLENOID_PULSE_MIN_MS = 20;
 static constexpr uint32_t SOLENOID_PULSE_MAX_MS = 300;
+// 当前机械方向映射，可由设置菜单切换并保存到 NVS。
+// true：交换 A/B 对应的“靠近/离开”；false：A=靠近、B=离开。
+bool s_solenoid_direction_inverted = true;
 
 bool s_solenoid_busy = false;
 uint32_t s_solenoid_stop_at_ms = 0;
@@ -405,6 +408,18 @@ uint32_t clamp_solenoid_pulse_ms(uint32_t pulse_ms)
     if (pulse_ms < SOLENOID_PULSE_MIN_MS) return SOLENOID_PULSE_MIN_MS;
     if (pulse_ms > SOLENOID_PULSE_MAX_MS) return SOLENOID_PULSE_MAX_MS;
     return pulse_ms;
+}
+
+SolenoidDirection solenoid_direction_for_hall_target(bool near)
+{
+    // 未反转时 A=靠近、B=离开；反转后交换两路机械语义。
+    SolenoidDirection direction = near ? SolenoidDirection::A : SolenoidDirection::B;
+    if (s_solenoid_direction_inverted) {
+        direction = direction == SolenoidDirection::A
+            ? SolenoidDirection::B
+            : SolenoidDirection::A;
+    }
+    return direction;
 }
 
 bool write_solenoid_levels(bool a_level, bool b_level)
@@ -1029,6 +1044,44 @@ bool board_hw_solenoid_flip(uint32_t pulse_ms)
             : SolenoidDirection::A;
 
     return start_solenoid_pulse(next, pulse_ms);
+}
+
+void board_hw_solenoid_set_direction_inverted(bool inverted)
+{
+    if (s_solenoid_direction_inverted == inverted) {
+        return;
+    }
+
+    // 方向切换时先停止当前脉冲，避免动作过程中改变机械语义。
+    if (s_solenoid_busy) {
+        (void)board_hw_solenoid_stop();
+    }
+
+    s_solenoid_direction_inverted = inverted;
+    LOGI("[SOL] 电磁铁方向映射=%s", inverted ? "反转" : "正常");
+}
+
+bool board_hw_solenoid_get_direction_inverted()
+{
+    return s_solenoid_direction_inverted;
+}
+
+bool board_hw_solenoid_move_hall_near(uint32_t pulse_ms)
+{
+    const SolenoidDirection direction = solenoid_direction_for_hall_target(true);
+    LOGI("[SOL] 机械目标=靠近 物理方向=%s 反转=%d",
+         direction == SolenoidDirection::A ? "A" : "B",
+         s_solenoid_direction_inverted ? 1 : 0);
+    return start_solenoid_pulse(direction, pulse_ms);
+}
+
+bool board_hw_solenoid_move_hall_far(uint32_t pulse_ms)
+{
+    const SolenoidDirection direction = solenoid_direction_for_hall_target(false);
+    LOGI("[SOL] 机械目标=离开 物理方向=%s 反转=%d",
+         direction == SolenoidDirection::A ? "A" : "B",
+         s_solenoid_direction_inverted ? 1 : 0);
+    return start_solenoid_pulse(direction, pulse_ms);
 }
 
 void board_hw_solenoid_tick()
