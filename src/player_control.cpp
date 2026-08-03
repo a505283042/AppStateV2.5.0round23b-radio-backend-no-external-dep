@@ -28,9 +28,36 @@
 #include "app_diagnostics.h"
 #include "hal/hall_control.h"
 
+static bool control_play_net_track_index_impl(int idx, bool reset_shuffle);
+
 namespace {
 
 PlayerControlHooks s_hooks{};
+
+enum class UserPlayActionType : uint8_t {
+    None = 0,
+    LocalTrack,
+    Group,
+    Radio,
+    NetTrack,
+    Navigation,
+};
+
+struct PendingUserPlayAction {
+    bool valid = false;
+    UserPlayActionType type = UserPlayActionType::None;
+    int target_idx = -1;
+    int group_idx = -1;
+    PlayerUserTrackContext track_context = PlayerUserTrackContext::KeepCurrent;
+    bool is_album = false;
+    bool keep_random = false;
+    bool verbose = true;
+    bool force_cover = true;
+    PlayerSourceType navigation_source = PlayerSourceType::NONE;
+    int navigation_direction = 0;
+};
+
+static PendingUserPlayAction s_pending_user_play_action;
 
 static void log_ptr_region_control(const char* label, const void* ptr, size_t bytes)
 {
@@ -641,9 +668,271 @@ static bool control_net_track_eof_watch_triggered(const PlayerSourceState& sourc
     s_net_track_eof_watch.armed = false;
     return true;
 }
+
+static const char* control_user_play_action_label(UserPlayActionType type)
+{
+    switch (type) {
+        case UserPlayActionType::LocalTrack: return "本地歌曲";
+        case UserPlayActionType::Group:      return "歌手/专辑";
+        case UserPlayActionType::Radio:      return "网络电台";
+        case UserPlayActionType::NetTrack:   return "NAS歌曲";
+        case UserPlayActionType::Navigation: return "手动切歌";
+        case UserPlayActionType::None:
+        default:                             return "未知";
+    }
+}
+
+static void control_clear_pending_user_play_action()
+{
+    s_pending_user_play_action = PendingUserPlayAction{};
+}
+
+static bool control_execute_user_play_action(const PendingUserPlayAction& action)
+{
+    if (!action.valid) return false;
+
+    switch (action.type) {
+        case UserPlayActionType::LocalTrack: {
+            const int track_idx = action.target_idx;
+            if (track_idx < 0 ||
+                track_idx >= static_cast<int>(storage_catalog_v3_track_count())) {
+                return false;
+            }
+
+            if (action.track_context == PlayerUserTrackContext::Artist ||
+                action.track_context == PlayerUserTrackContext::Album) {
+                const play_mode_t next_mode =
+                    action.track_context == PlayerUserTrackContext::Album
+                        ? (action.keep_random ? PLAY_MODE_ALBUM_RND : PLAY_MODE_ALBUM_SEQ)
+                        : (action.keep_random ? PLAY_MODE_ARTIST_RND : PLAY_MODE_ARTIST_SEQ);
+                (void)app_play_mode_set(next_mode, AppPlayModeChangeReason::WebControl);
+
+                if (action.group_idx >= 0) {
+                    player_playlist_set_current_group_idx(action.group_idx);
+                } else {
+                    (void)player_playlist_align_group_context_for_track(track_idx, false);
+                }
+            } else if (action.group_idx >= 0) {
+                // 本地屏幕中的歌手/专辑歌曲列表：保留当前播放模式，只延迟切换组。
+                player_playlist_set_current_group_idx(action.group_idx);
+            } else if (player_playlist_is_artist_mode(app_play_mode_get()) ||
+                       player_playlist_is_album_mode(app_play_mode_get())) {
+                (void)player_playlist_align_group_context_for_track(track_idx, false);
+            } else {
+                player_playlist_set_current_group_idx(-1);
+            }
+
+            player_playlist_force_rebuild();
+            return control_play_track_dispatch(track_idx,
+                                               action.verbose,
+                                               action.force_cover);
+        }
+
+        case UserPlayActionType::Group: {
+            const auto& groups = action.is_album
+                ? player_playlist_album_groups()
+                : player_playlist_artist_groups();
+            if (action.group_idx < 0 || action.group_idx >= static_cast<int>(groups.size())) {
+                return false;
+            }
+
+            const play_mode_t next_mode = action.is_album
+                ? (action.keep_random ? PLAY_MODE_ALBUM_RND : PLAY_MODE_ALBUM_SEQ)
+                : (action.keep_random ? PLAY_MODE_ARTIST_RND : PLAY_MODE_ARTIST_SEQ);
+            (void)app_play_mode_set(next_mode, AppPlayModeChangeReason::WebControl);
+            player_playlist_set_current_group_idx(action.group_idx);
+            player_playlist_force_rebuild();
+            player_playlist_ensure_current();
+
+            const int first_track = player_playlist_current_track_at(0);
+            return first_track >= 0 && control_play_track_dispatch(first_track, true, true);
+        }
+
+        case UserPlayActionType::Radio:
+            return player_play_radio_index(action.target_idx);
+
+        case UserPlayActionType::NetTrack:
+            return player_play_net_track_index(action.target_idx);
+
+        case UserPlayActionType::Navigation:
+            switch (action.navigation_source) {
+                case PlayerSourceType::NET_RADIO:
+                    return player_play_radio_index(action.target_idx);
+                case PlayerSourceType::NET_TRACK:
+                    // 手动上一首/下一首沿用当前 NAS 随机顺序，不重建随机表。
+                    return control_play_net_track_index_impl(action.target_idx, false);
+                case PlayerSourceType::LOCAL_TRACK:
+                case PlayerSourceType::NONE:
+                default:
+                    return control_play_track_dispatch(action.target_idx, false, true);
+            }
+
+        case UserPlayActionType::None:
+        default:
+            return false;
+    }
+}
+
+static void control_user_play_position_complete(bool success)
+{
+    const PendingUserPlayAction action = s_pending_user_play_action;
+    control_clear_pending_user_play_action();
+
+    if (!action.valid) {
+        LOGW("[播放器] 摆臂到位回调没有待执行的用户选歌请求");
+        return;
+    }
+
+    if (!success) {
+        if (action.navigation_direction != 0) {
+            ui_notify_cover_panel_nav_feedback(0);
+        }
+        LOGW("[播放器] 用户选歌已取消：类型=%s 索引=%d，摆臂未到播放位",
+             control_user_play_action_label(action.type),
+             action.target_idx);
+        return;
+    }
+
+    LOGI("[播放器] 摆臂已到播放位，执行用户选歌：类型=%s 索引=%d 分组=%d",
+         control_user_play_action_label(action.type),
+         action.target_idx,
+         action.group_idx);
+
+    if (!control_execute_user_play_action(action)) {
+        if (action.navigation_direction != 0) {
+            ui_notify_cover_panel_nav_feedback(0);
+        }
+        LOGE("[播放器] 摆臂到位后用户选歌执行失败：类型=%s 索引=%d",
+             control_user_play_action_label(action.type),
+             action.target_idx);
+        ui_show_notice_popup("选歌播放失败", "请检查歌曲、列表或网络配置");
+    }
+}
+
+static bool control_submit_user_play_action(const PendingUserPlayAction& action)
+{
+    if (!action.valid) return false;
+
+    if (s_pending_user_play_action.valid) {
+        LOGW("[播放器] 已有用户选歌等待摆臂到位，本次请求忽略");
+        ui_show_notice_popup("播放请求处理中", "请等待摆臂到播放位");
+        return false;
+    }
+
+    s_pending_user_play_action = action;
+    const HallPlayPositionRequestResult result =
+        hall_control_request_play_position(control_user_play_position_complete);
+
+    if (result == HallPlayPositionRequestResult::Ready) {
+        const PendingUserPlayAction ready_action = s_pending_user_play_action;
+        control_clear_pending_user_play_action();
+        if (ready_action.navigation_direction != 0) {
+            ui_notify_cover_panel_nav_feedback(ready_action.navigation_direction);
+        }
+        LOGI("[播放器] 摆臂已在播放位，立即执行用户选歌：类型=%s 索引=%d",
+             control_user_play_action_label(ready_action.type),
+             ready_action.target_idx);
+        const bool ok = control_execute_user_play_action(ready_action);
+        if (!ok && ready_action.navigation_direction != 0) {
+            ui_notify_cover_panel_nav_feedback(0);
+        }
+        return ok;
+    }
+
+    if (result == HallPlayPositionRequestResult::Started) {
+        if (action.navigation_direction != 0) {
+            ui_notify_cover_panel_nav_feedback(action.navigation_direction);
+        }
+        LOGI("[播放器] 用户选歌已暂存，等待摆臂到播放位：类型=%s 索引=%d 分组=%d",
+             control_user_play_action_label(action.type),
+             action.target_idx,
+             action.group_idx);
+        return true;
+    }
+
+    control_clear_pending_user_play_action();
+    LOGW("[播放器] 用户选歌未执行：无法驱动摆臂到播放位 类型=%s 索引=%d",
+         control_user_play_action_label(action.type),
+         action.target_idx);
+    return false;
+}
 } // namespace
 
-static bool control_play_net_track_index_impl(int idx, bool reset_shuffle);
+bool player_request_user_track_play(int idx,
+                                    PlayerUserTrackContext context,
+                                    int group_idx,
+                                    bool verbose,
+                                    bool force_cover)
+{
+    if (!storage_catalog_v3_ready() ||
+        idx < 0 ||
+        idx >= static_cast<int>(storage_catalog_v3_track_count())) {
+        return false;
+    }
+
+    PendingUserPlayAction action{};
+    action.valid = true;
+    action.type = UserPlayActionType::LocalTrack;
+    action.target_idx = idx;
+    action.group_idx = group_idx;
+    action.track_context = context;
+    action.keep_random = control_mode_is_random(app_play_mode_get());
+    action.verbose = verbose;
+    action.force_cover = force_cover;
+    return control_submit_user_play_action(action);
+}
+
+bool player_request_user_group_play(bool is_album, int group_idx)
+{
+    const auto& groups = is_album
+        ? player_playlist_album_groups()
+        : player_playlist_artist_groups();
+    if (group_idx < 0 || group_idx >= static_cast<int>(groups.size()) ||
+        groups[group_idx].track_indices.empty()) {
+        return false;
+    }
+
+    PendingUserPlayAction action{};
+    action.valid = true;
+    action.type = UserPlayActionType::Group;
+    action.group_idx = group_idx;
+    action.is_album = is_album;
+    action.keep_random = control_mode_is_random(app_play_mode_get());
+    return control_submit_user_play_action(action);
+}
+
+bool player_request_user_radio_play(int idx)
+{
+    const RadioItem* item = idx >= 0 ? radio_catalog_get(static_cast<size_t>(idx)) : nullptr;
+    if (!item || !item->valid) return false;
+
+    PendingUserPlayAction action{};
+    action.valid = true;
+    action.type = UserPlayActionType::Radio;
+    action.target_idx = idx;
+    return control_submit_user_play_action(action);
+}
+
+bool player_request_user_net_track_play(int idx)
+{
+    if (!net_music_catalog_is_loaded()) {
+        (void)net_music_catalog_load();
+    }
+    if (idx < 0 || idx >= static_cast<int>(net_music_catalog_count())) {
+        return false;
+    }
+
+    NetMusicItem item{};
+    if (!net_music_catalog_get(static_cast<uint32_t>(idx), &item) || !item.valid) {
+        return false;
+    }
+
+    PendingUserPlayAction action{};
+    action.valid = true;
+    action.type = UserPlayActionType::NetTrack;
+    action.target_idx = idx;
+    return control_submit_user_play_action(action);
+}
 
 void player_control_setup_hooks(const PlayerControlHooks& hooks)
 {
@@ -1340,116 +1629,88 @@ void player_stop_net_track()
 void player_next_track()
 {
     const PlayerSourceState source = player_source_get();
+    PendingUserPlayAction action{};
+    action.valid = true;
+    action.type = UserPlayActionType::Navigation;
+    action.navigation_source = source.type;
+    action.navigation_direction = 1;
+
     if (source.type == PlayerSourceType::NET_RADIO) {
-        const int count = (int)radio_catalog_count();
+        const int count = static_cast<int>(radio_catalog_count());
         if (count <= 0) return;
+        action.target_idx = source.radio_idx >= 0 ? (source.radio_idx + 1) % count : 0;
+    } else if (source.type == PlayerSourceType::NET_TRACK) {
+        action.target_idx = control_resolve_next_net_track_index(source.net_track_idx, +1);
+        if (action.target_idx < 0) return;
+    } else {
+        const int total = control_track_count();
+        if (total <= 0) return;
 
-        int next_radio = source.radio_idx >= 0 ? (source.radio_idx + 1) % count : 0;
-
-        ui_notify_cover_panel_nav_feedback(1);
-
-        const bool ok = player_play_radio_index(next_radio);
-        if (!ok) {
-            ui_notify_cover_panel_nav_feedback(0);
+        const int cur = control_current_track_idx();
+        bool anchored = false;
+        if (!player_playlist_resolve_step(cur, +1, action.target_idx, &anchored)) {
+            return;
         }
 
-        return;
-    }
-
-    if (source.type == PlayerSourceType::NET_TRACK) {
-        const int next = control_resolve_next_net_track_index(source.net_track_idx, +1);
-        if (next < 0) return;
-
-        ui_notify_cover_panel_nav_feedback(1);
-
-        const bool ok = control_play_net_track_index_impl(next, false);
-        if (!ok) {
-            ui_notify_cover_panel_nav_feedback(0);
+        if (anchored) {
+            LOGW("[播放器] NEXT 锚定到播放列表开头, 模式=%d 分组=%d cur=%d",
+                 static_cast<int>(app_play_mode_get()),
+                 player_playlist_get_current_group_idx(),
+                 cur);
         }
-
-        return;
     }
 
-    const int total = control_track_count();
-    if (total <= 0) return;
+    LOGI("[播放器] 用户下一首请求 -> #%d 来源=%d",
+         action.target_idx,
+         static_cast<int>(action.navigation_source));
 
-    const int cur = control_current_track_idx();
-    int next = 0;
-    bool anchored = false;
-    if (!player_playlist_resolve_step(cur, +1, next, &anchored)) {
-        return;
-    }
-
-    if (anchored) {
-        LOGW("[播放器] NEXT 锚定到播放列表开头, 模式=%d 分组=%d cur=%d",
-             (int)app_play_mode_get(), player_playlist_get_current_group_idx(), cur);
-    }
-
-    LOGI("[播放器] 下一首 -> #%d", next);
-
-    ui_notify_cover_panel_nav_feedback(1);
-
-    const bool ok = control_play_track_dispatch(next, false, true);
-    if (!ok) {
-        ui_notify_cover_panel_nav_feedback(0);
+    if (!control_submit_user_play_action(action)) {
+        LOGW("[播放器] 用户下一首请求未执行：目标=%d", action.target_idx);
     }
 }
 
 void player_prev_track()
 {
     const PlayerSourceState source = player_source_get();
+    PendingUserPlayAction action{};
+    action.valid = true;
+    action.type = UserPlayActionType::Navigation;
+    action.navigation_source = source.type;
+    action.navigation_direction = -1;
+
     if (source.type == PlayerSourceType::NET_RADIO) {
-        const int count = (int)radio_catalog_count();
+        const int count = static_cast<int>(radio_catalog_count());
         if (count <= 0) return;
+        action.target_idx = source.radio_idx >= 0
+            ? (source.radio_idx - 1 + count) % count
+            : 0;
+    } else if (source.type == PlayerSourceType::NET_TRACK) {
+        action.target_idx = control_resolve_next_net_track_index(source.net_track_idx, -1);
+        if (action.target_idx < 0) return;
+    } else {
+        const int total = control_track_count();
+        if (total <= 0) return;
 
-        int prev_radio = source.radio_idx >= 0 ? (source.radio_idx - 1 + count) % count : 0;
-
-        ui_notify_cover_panel_nav_feedback(-1);
-
-        const bool ok = player_play_radio_index(prev_radio);
-        if (!ok) {
-            ui_notify_cover_panel_nav_feedback(0);
+        const int cur = control_current_track_idx();
+        bool anchored = false;
+        if (!player_playlist_resolve_step(cur, -1, action.target_idx, &anchored)) {
+            return;
         }
 
-        return;
-    }
-
-    if (source.type == PlayerSourceType::NET_TRACK) {
-        const int prev = control_resolve_next_net_track_index(source.net_track_idx, -1);
-        if (prev < 0) return;
-
-        ui_notify_cover_panel_nav_feedback(-1);
-
-        const bool ok = control_play_net_track_index_impl(prev, false);
-        if (!ok) {
-            ui_notify_cover_panel_nav_feedback(0);
+        if (anchored) {
+            LOGW("[播放器] PREV 锚定到播放列表末尾, 模式=%d 分组=%d cur=%d",
+                 static_cast<int>(app_play_mode_get()),
+                 player_playlist_get_current_group_idx(),
+                 cur);
         }
-
-        return;
     }
 
-    const int total = control_track_count();
-    if (total <= 0) return;
+    LOGI("[播放器] 用户上一首请求 -> #%d 来源=%d",
+         action.target_idx,
+         static_cast<int>(action.navigation_source));
 
-    const int cur = control_current_track_idx();
-    int prev = 0;
-    bool anchored = false;
-    if (!player_playlist_resolve_step(cur, -1, prev, &anchored)) {
-        return;
-    }
-
-    if (anchored) {
-        LOGW("[播放器] PREV 锚定到播放列表末尾, 模式=%d 分组=%d cur=%d",
-             (int)app_play_mode_get(), player_playlist_get_current_group_idx(), cur);
-    }
-
-    LOGI("[播放器] 上一首 -> #%d", prev);
-
-    ui_notify_cover_panel_nav_feedback(-1);
-
-    const bool ok = control_play_track_dispatch(prev, false, true);
-    if (!ok) {
-        ui_notify_cover_panel_nav_feedback(0);
+    if (!control_submit_user_play_action(action)) {
+        LOGW("[播放器] 用户上一首请求未执行：目标=%d", action.target_idx);
     }
 }
 
@@ -1587,12 +1848,13 @@ bool player_set_paused(bool paused, PlayerToggleTrigger trigger)
 
 void player_toggle_play(PlayerToggleTrigger trigger)
 {
-    // 实体播放键与 Web 播放/暂停共用完全相同的电磁铁—霍尔联动链路。
-    // 闹钟、NFC 管理恢复等内部动作不驱动机械摆臂，继续直接设置播放状态。
+    // 实体播放键与 Web 播放/暂停共用完全相同的位置控制链路：
+    // 电磁铁开启时自动驱动摆臂；仅霍尔开启时必须由用户手动拨到播放位。
+    // 闹钟、NFC 管理恢复等内部动作不主动驱动机械摆臂。
     if ((trigger == PlayerToggleTrigger::PlayKey ||
          trigger == PlayerToggleTrigger::Web) &&
         hall_control_handle_user_toggle()) {
-        LOGI("[播放器] 播放/暂停请求已由电磁铁联动接管：来源=%s",
+        LOGI("[播放器] 播放/暂停请求已由霍尔/电磁铁位置控制接管：来源=%s",
              control_toggle_trigger_label(trigger));
         return;
     }

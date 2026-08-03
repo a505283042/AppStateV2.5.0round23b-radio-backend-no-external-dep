@@ -484,16 +484,12 @@ bool list_select_try_play_selected_track()
     }
 
     const int next_track = (int)s_list_tracks[s_list_selected_idx];
-
-    if (s_parent_group_idx >= 0) {
-        player_playlist_set_current_group_idx(s_parent_group_idx);
-        player_playlist_force_rebuild();
-    }
+    const int selected_group_idx = s_parent_group_idx;
 
     list_select_finish_confirm();
 
     if (s_hooks.play_track_dispatch) {
-        return s_hooks.play_track_dispatch(next_track, false, true);
+        return s_hooks.play_track_dispatch(next_track, selected_group_idx, false, true);
     }
     return false;
 }

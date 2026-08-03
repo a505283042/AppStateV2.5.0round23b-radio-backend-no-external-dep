@@ -52,15 +52,49 @@ bool player_net_track_toggle_order_random();
 /** 网络播放源返回本地播放，支持 NET_RADIO / NET_TRACK。 */
 bool player_return_from_network_to_local();
 
+/** 用户从列表或网页选歌时需要保留的播放上下文。 */
+enum class PlayerUserTrackContext : uint8_t {
+    KeepCurrent = 0,
+    Artist,
+    Album,
+};
+
+/**
+ * @brief 用户主动选择本地歌曲。
+ *
+ * 电磁铁开启且摆臂在停止位时，先驱动到播放位，霍尔确认后再真正切歌；
+ * 动作失败时不修改播放模式、分组或当前歌曲。
+ */
+bool player_request_user_track_play(int idx,
+                                    PlayerUserTrackContext context = PlayerUserTrackContext::KeepCurrent,
+                                    int group_idx = -1,
+                                    bool verbose = true,
+                                    bool force_cover = true);
+
+/** 用户主动选择歌手或专辑分组。is_album=false 表示歌手。 */
+bool player_request_user_group_play(bool is_album, int group_idx);
+
+/** 用户主动选择网络电台。 */
+bool player_request_user_radio_play(int idx);
+
+/** 用户主动选择 NAS 网络歌曲。 */
+bool player_request_user_net_track_play(int idx);
+
 /** 播放一首 NAS/HTTP 网络歌曲。 */
 bool player_play_net_track_index(int idx);
 
 /** 停止 NAS/HTTP 网络歌曲并清空网络歌曲源状态。 */
 void player_stop_net_track();
 
-/** 播放当前 playlist 的下一首。 */
+/**
+ * 用户主动播放当前列表的下一首。
+ * 电磁铁开启且摆臂在停止位时，先移动到播放位，霍尔确认后再切歌。
+ */
 void player_next_track();
-/** 播放当前 playlist 的上一首。 */
+/**
+ * 用户主动播放当前列表的上一首。
+ * 电磁铁开启且摆臂在停止位时，先移动到播放位，霍尔确认后再切歌。
+ */
 void player_prev_track();
 
 /** 播放/暂停请求来源，用于定位上电误触发和跨模块控制。 */

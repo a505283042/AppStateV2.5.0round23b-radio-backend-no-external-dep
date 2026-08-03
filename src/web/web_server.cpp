@@ -46,6 +46,7 @@
 #include "web/web_page.h"
 #include "web/web_snapshot.h"
 #include "web/web_settings.h"
+#include "web/web_notice.h"
 #include "web/web_cover_cache.h"
 #include "hal/pcf85063.h"
 #include "hal/board_hw_control.h"
@@ -3678,24 +3679,7 @@ static void web_send_group_detail_json(const std::vector<PlaylistGroup>& groups,
   web_end_stream_response();
 }
 static bool web_play_group_impl(bool is_album, int group_idx) {
-  const auto& groups = is_album ? player_playlist_album_groups() : player_playlist_artist_groups();
-  if (group_idx < 0 || group_idx >= (int)groups.size()) return false;
-
-  const play_mode_t current_mode = app_play_mode_get();
-  const bool keep_random = control_mode_is_random(current_mode);
-  const play_mode_t next_mode = is_album
-      ? (keep_random ? PLAY_MODE_ALBUM_RND : PLAY_MODE_ALBUM_SEQ)
-      : (keep_random ? PLAY_MODE_ARTIST_RND : PLAY_MODE_ARTIST_SEQ);
-  (void)app_play_mode_set(next_mode, AppPlayModeChangeReason::WebControl);
-
-  player_playlist_set_current_group_idx(group_idx);
-  player_playlist_force_rebuild();
-
-  player_playlist_ensure_current();
-  const int first_track = player_playlist_current_track_at(0);
-  if (first_track < 0) return false;
-
-  return player_play_idx_v3((uint32_t)first_track, true, true);
+  return player_request_user_group_play(is_album, group_idx);
 }
 static void web_handle_artists_page() {
   web_send_no_cache_headers();
@@ -3720,6 +3704,53 @@ static void web_handle_settings_page() {
 static void web_handle_feedback_js() {
   web_send_no_cache_headers();
   s_server.send_P(200, "application/javascript; charset=utf-8", WEBCTRL_FEEDBACK_JS);
+}
+
+static void web_handle_notice_get()
+{
+  uint32_t after = 0;
+  if (s_server.hasArg("after")) {
+    const String value = s_server.arg("after");
+    char* end = nullptr;
+    const unsigned long parsed = strtoul(value.c_str(), &end, 10);
+    if (end && end != value.c_str() && *end == '\0') {
+      after = static_cast<uint32_t>(parsed);
+    }
+  }
+
+  WebNoticeSnapshot notice{};
+  const bool has_notice = web_notice_snapshot(&notice);
+  const uint32_t age_ms = has_notice
+      ? static_cast<uint32_t>(millis() - notice.created_ms)
+      : 0;
+  // 网页提示只保留15秒有效期，防止新打开页面弹出很久以前的机械错误。
+  const bool active = has_notice && age_ms <= 15000;
+  const bool changed = active && notice.sequence != after;
+
+  const char* level = "info";
+  if (notice.level == WebNoticeLevel::Warning) level = "warning";
+  else if (notice.level == WebNoticeLevel::Error) level = "error";
+
+  String json;
+  json.reserve(320);
+  json += "{\"ok\":true,\"sequence\":";
+  json += String(static_cast<unsigned long>(notice.sequence));
+  json += ",\"changed\":";
+  json += changed ? "true" : "false";
+  json += ",\"active\":";
+  json += active ? "true" : "false";
+  json += ",\"age_ms\":";
+  json += String(static_cast<unsigned long>(age_ms));
+  json += ",\"level\":\"";
+  json += level;
+  json += "\",\"title\":\"";
+  json += web_json_escape(String(notice.title));
+  json += "\",\"detail\":\"";
+  json += web_json_escape(String(notice.detail));
+  json += "\"}";
+
+  web_send_no_cache_headers();
+  s_server.send(200, "application/json; charset=utf-8", json);
 }
 static void web_handle_favicon() { web_send_no_cache_headers(); s_server.send(404, "text/plain; charset=utf-8", "not_found"); }
 static void web_handle_wifi_config_get()
@@ -5425,13 +5456,13 @@ static void web_handle_artist_play() {
   if (!web_require_player_state()) return;
   int idx = -1; if (!web_parse_int_arg("idx", idx)) { web_send_json_err("缺少 idx 参数"); return; }
   if (!web_play_group_impl(false, idx)) { web_send_json_err("歌手分组播放失败", 500); return; }
-  web_send_json_ok_simple("artist_play_started");
+  web_send_json_ok_simple("歌手播放请求已提交");
 }
 static void web_handle_album_play() {
   if (!web_require_player_state()) return;
   int idx = -1; if (!web_parse_int_arg("idx", idx)) { web_send_json_err("缺少 idx 参数"); return; }
   if (!web_play_group_impl(true, idx)) { web_send_json_err("专辑分组播放失败", 500); return; }
-  web_send_json_ok_simple("album_play_started");
+  web_send_json_ok_simple("专辑播放请求已提交");
 }
 static void web_handle_track_play() {
   if (!web_require_player_state()) return;
@@ -5452,39 +5483,16 @@ static void web_handle_track_play() {
   int group_idx = -1;
   web_parse_int_arg("group_idx", group_idx);
 
-  if (mode == "artist") {
-    const bool keep_random = control_mode_is_random(app_play_mode_get());
-    const play_mode_t next_mode = keep_random ? PLAY_MODE_ARTIST_RND : PLAY_MODE_ARTIST_SEQ;
-    (void)app_play_mode_set(next_mode, AppPlayModeChangeReason::WebControl);
+  PlayerUserTrackContext context = PlayerUserTrackContext::KeepCurrent;
+  if (mode == "artist") context = PlayerUserTrackContext::Artist;
+  else if (mode == "album") context = PlayerUserTrackContext::Album;
 
-    if (group_idx >= 0) player_playlist_set_current_group_idx(group_idx);
-    else (void)player_playlist_align_group_context_for_track(track_idx, false);
-
-  } else if (mode == "album") {
-    const bool keep_random = control_mode_is_random(app_play_mode_get());
-    const play_mode_t next_mode = keep_random ? PLAY_MODE_ALBUM_RND : PLAY_MODE_ALBUM_SEQ;
-    (void)app_play_mode_set(next_mode, AppPlayModeChangeReason::WebControl);
-
-    if (group_idx >= 0) player_playlist_set_current_group_idx(group_idx);
-    else (void)player_playlist_align_group_context_for_track(track_idx, false);
-
-  } else {
-    // 单曲播放：不改变当前播放大类
-    if (web_status_mode_is_artist() || web_status_mode_is_album()) {
-      (void)player_playlist_align_group_context_for_track(track_idx, false);
-    } else {
-      player_playlist_set_current_group_idx(-1);
-    }
-  }
-
-  player_playlist_force_rebuild();
-
-  if (!player_play_idx_v3((uint32_t)track_idx, true, true)) {
+  if (!player_request_user_track_play(track_idx, context, group_idx, true, true)) {
     web_send_json_err("曲目播放失败", 500);
     return;
   }
 
-  web_send_json_ok_simple("track_play_started");
+  web_send_json_ok_simple("歌曲播放请求已提交");
 }
 static void web_handle_artist_bind_nfc() {
   if (!web_require_player_state()) return;
@@ -5740,8 +5748,8 @@ static void web_handle_radio_play() {
   if (!web_radio_catalog_ensure_loaded()) { web_send_json_err("电台列表尚未加载", 500); return; }
   const RadioItem* item = radio_catalog_get((size_t)idx);
   if (!item || !item->valid) { web_send_json_err("电台不存在", 404); return; }
-  if (!player_play_radio_index(idx)) { web_send_json_err("电台播放失败", 500); return; }
-  web_send_json_ok_simple("已开始播放电台");
+  if (!player_request_user_radio_play(idx)) { web_send_json_err("电台播放失败", 500); return; }
+  web_send_json_ok_simple("电台播放请求已提交");
 }
 static void web_handle_radio_stop() {
   if (player_return_from_radio_to_local()) {
@@ -6069,12 +6077,12 @@ static void web_handle_netmusic_play() {
     return;
   }
 
-  if (!player_play_net_track_index(idx)) {
+  if (!player_request_user_net_track_play(idx)) {
     web_send_json_err("网络歌曲播放失败", 500);
     return;
   }
 
-  web_send_json_ok_simple("已开始播放 NAS 歌曲");
+  web_send_json_ok_simple("NAS歌曲播放请求已提交");
 }
 
 static void web_handle_netmusic_prev() {
@@ -6309,6 +6317,7 @@ static void web_setup_routes() {
   s_server.on("/netmusic", HTTP_GET, web_handle_netmusic_page);
   s_server.on("/settings", HTTP_GET, web_handle_settings_page);
   s_server.on("/web-feedback.js", HTTP_GET, web_handle_feedback_js);
+  s_server.on("/api/notice", HTTP_GET, web_handle_notice_get);
   s_server.on("/favicon.ico", HTTP_GET, web_handle_favicon);
   s_server.on("/api/status", HTTP_GET, web_handle_status);
   s_server.on("/api/status/check", HTTP_GET, web_handle_status_check);

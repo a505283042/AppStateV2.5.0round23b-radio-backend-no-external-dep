@@ -11,6 +11,10 @@ static const char WEBCTRL_FEEDBACK_JS[] PROGMEM = R"JS(
   const TARGET_SELECTOR = 'button,a[href],.chip';
   const pressedByPointer = new Map();
   let hapticEnabled = true;
+  let webNoticeSequence = 0;
+  let webNoticeInitialized = false;
+  let webNoticePollTimer = null;
+  let webNoticeHideTimer = null;
 
   function installStyle(){
     if(document.getElementById('webButtonFeedbackStyle')) return;
@@ -30,6 +34,22 @@ static const char WEBCTRL_FEEDBACK_JS[] PROGMEM = R"JS(
       .webfb-ack{animation:webfbAck .22s ease-out;}
       .webfb-success{animation:webfbSuccess .34s ease-out;}
       .webfb-error{animation:webfbError .34s ease-out;}
+      .web-global-notice{
+        position:fixed;left:50%;top:calc(14px + env(safe-area-inset-top));z-index:10020;
+        width:min(430px,calc(100vw - 28px));display:grid;grid-template-columns:1fr auto;gap:12px;
+        padding:14px 14px 14px 16px;border:1px solid rgba(121,192,255,.7);border-radius:14px;
+        background:rgba(22,31,43,.97);color:#f0f6fc;box-shadow:0 14px 40px rgba(0,0,0,.48);
+        opacity:0;transform:translate(-50%,-18px);pointer-events:none;
+        transition:opacity .18s ease,transform .18s ease;
+      }
+      .web-global-notice.show{opacity:1;transform:translate(-50%,0);pointer-events:auto}
+      .web-global-notice.warning{border-color:#d29922;background:rgba(72,49,8,.97)}
+      .web-global-notice.error{border-color:#f85149;background:rgba(82,22,22,.97)}
+      .web-global-notice-title{display:block;font-size:16px;font-weight:800;line-height:1.3}
+      .web-global-notice-detail{display:block;margin-top:4px;font-size:14px;line-height:1.45;color:#c9d1d9}
+      .web-global-notice.warning .web-global-notice-detail{color:#f2cc60}
+      .web-global-notice.error .web-global-notice-detail{color:#ffa198}
+      .web-global-notice-close{align-self:start;min-width:34px;height:34px;padding:0;border:0;border-radius:10px;background:rgba(255,255,255,.1);color:#fff;font-size:22px;line-height:1;cursor:pointer}
       @keyframes webfbAck{
         0%{box-shadow:0 0 0 0 rgba(121,192,255,.62)}
         100%{box-shadow:0 0 0 8px rgba(121,192,255,0)}
@@ -119,10 +139,77 @@ static const char WEBCTRL_FEEDBACK_JS[] PROGMEM = R"JS(
     }
   }
 
+  function ensureWebNoticePopup(){
+    let popup = document.getElementById('webGlobalNotice');
+    if(popup) return popup;
+
+    popup = document.createElement('div');
+    popup.id = 'webGlobalNotice';
+    popup.className = 'web-global-notice';
+    popup.setAttribute('role', 'alert');
+    popup.setAttribute('aria-live', 'assertive');
+    popup.innerHTML = `
+      <div>
+        <strong class="web-global-notice-title"></strong>
+        <span class="web-global-notice-detail"></span>
+      </div>
+      <button type="button" class="web-global-notice-close" aria-label="关闭提示">×</button>`;
+    document.body.appendChild(popup);
+    popup.querySelector('.web-global-notice-close').addEventListener('click', () => {
+      popup.classList.remove('show');
+      if(webNoticeHideTimer){ clearTimeout(webNoticeHideTimer); webNoticeHideTimer = null; }
+    });
+    return popup;
+  }
+
+  function showWebNotice(title, detail, level='info'){
+    const popup = ensureWebNoticePopup();
+    popup.querySelector('.web-global-notice-title').textContent = title || '设备提示';
+    popup.querySelector('.web-global-notice-detail').textContent = detail || '';
+    popup.classList.remove('info','warning','error','show');
+    popup.classList.add(level === 'error' ? 'error' : (level === 'warning' ? 'warning' : 'info'));
+    void popup.offsetWidth;
+    popup.classList.add('show');
+
+    if(webNoticeHideTimer) clearTimeout(webNoticeHideTimer);
+    const duration = level === 'error' ? 7000 : (level === 'warning' ? 5500 : 3500);
+    webNoticeHideTimer = setTimeout(() => popup.classList.remove('show'), duration);
+    if(level === 'error') vibrate(24);
+    else if(level === 'warning') vibrate(16);
+  }
+
+  function scheduleWebNoticePoll(delayMs){
+    if(webNoticePollTimer) clearTimeout(webNoticePollTimer);
+    webNoticePollTimer = setTimeout(pollWebNotice, Math.max(500, Number(delayMs) || 1200));
+  }
+
+  async function pollWebNotice(){
+    try{
+      const r = await fetch(`/api/notice?after=${encodeURIComponent(webNoticeSequence)}`, {cache:'no-store'});
+      const j = await r.json();
+      if(j && j.ok){
+        const sequence = Number(j.sequence) || 0;
+        if(!webNoticeInitialized){
+          webNoticeInitialized = true;
+          // 页面刚打开时只显示最近1.5秒内的新提示，避免弹出历史机械故障。
+          if(j.changed && j.active && Number(j.age_ms) <= 1500){
+            showWebNotice(j.title, j.detail, j.level);
+          }
+        }else if(j.changed && j.active && sequence !== webNoticeSequence){
+          showWebNotice(j.title, j.detail, j.level);
+        }
+        webNoticeSequence = sequence;
+      }
+    }catch(e){}
+    scheduleWebNoticePoll(document.hidden ? 3500 : 1000);
+  }
+
   function init(){
     installStyle();
     hapticEnabled = readHapticEnabled();
     syncHapticToggle();
+    ensureWebNoticePopup();
+    scheduleWebNoticePoll(120);
 
     const toggle = document.querySelector('[data-web-feedback-haptic-toggle]');
     if(toggle){
@@ -170,6 +257,7 @@ static const char WEBCTRL_FEEDBACK_JS[] PROGMEM = R"JS(
     success: el => restartAnimation(el, 'webfb-success', 360),
     error: el => restartAnimation(el, 'webfb-error', 360)
   };
+  window.webNoticePopup = showWebNotice;
 
   if(document.readyState === 'loading'){
     document.addEventListener('DOMContentLoaded', init, {once:true});

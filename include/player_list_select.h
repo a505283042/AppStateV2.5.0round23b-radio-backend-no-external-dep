@@ -42,7 +42,7 @@ enum key_event_t {
  * 这里不直接依赖 player_state，避免形成新的巨石耦合。
  */
 struct PlayerListSelectHooks {
-    bool (*play_track_dispatch)(int idx, bool verbose, bool force_cover) = nullptr;
+    bool (*play_track_dispatch)(int idx, int group_idx, bool verbose, bool force_cover) = nullptr;
     bool (*play_radio_dispatch)(int idx) = nullptr;
     bool (*play_net_track_dispatch)(int idx) = nullptr;
 };

@@ -133,7 +133,10 @@ static int player_clamp_idx_for_dispatch(int idx);
 static int player_assets_hook_get_current_track_idx();
 static void player_assets_hook_on_current_cover_ready(int track_idx);
 static void player_assets_init_once();
-static bool player_list_select_hook_play_track_dispatch(int idx, bool verbose, bool force_cover);
+static bool player_list_select_hook_play_track_dispatch(int idx,
+                                                        int group_idx,
+                                                        bool verbose,
+                                                        bool force_cover);
 static bool player_list_select_hook_play_radio_dispatch(int idx);
 static bool player_list_select_hook_play_net_track_dispatch(int idx);
 static bool player_control_hook_play_track_dispatch(int idx, bool verbose, bool force_cover);
@@ -191,22 +194,29 @@ static void player_assets_init_once()
 }
 
 
-static bool player_list_select_hook_play_track_dispatch(int idx, bool verbose, bool force_cover)
+static bool player_list_select_hook_play_track_dispatch(int idx,
+                                                        int group_idx,
+                                                        bool verbose,
+                                                        bool force_cover)
 {
     if (idx < 0) return false;
-    return player_play_idx_v3((uint32_t)idx, verbose, force_cover);
+    return player_request_user_track_play(idx,
+                                          PlayerUserTrackContext::KeepCurrent,
+                                          group_idx,
+                                          verbose,
+                                          force_cover);
 }
 
 static bool player_list_select_hook_play_radio_dispatch(int idx)
 {
     if (idx < 0) return false;
-    return player_play_radio_index(idx);
+    return player_request_user_radio_play(idx);
 }
 
 static bool player_list_select_hook_play_net_track_dispatch(int idx)
 {
     if (idx < 0) return false;
-    return player_play_net_track_index(idx);
+    return player_request_user_net_track_play(idx);
 }
 
 static void player_list_select_init_once()
