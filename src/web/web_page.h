@@ -5258,7 +5258,8 @@ static const char WEBCTRL_NETMUSIC_HTML[] PROGMEM = R"HTML(
     <div class="pager">
       <button onclick="prevPage()">上一页</button>
       <button onclick="nextPage()">下一页</button>
-      <button class="secondary" onclick="refreshPage()">刷新</button>
+      <button class="secondary" onclick="refreshPage()">刷新页面</button>
+      <button class="secondary" id="reloadListBtn" onclick="reloadCurrentNetMusicList()">重新读取列表文件</button>
       <button class="secondary" onclick="focusCurrentPlaying()">定位当前播放</button>
 
       <label class="muted">每页</label>
@@ -5643,6 +5644,39 @@ function nextPage(){
 
 function refreshPage(){
   loadStatus().then(loadNetMusic);
+}
+
+async function reloadCurrentNetMusicList(){
+  const btn = document.getElementById('reloadListBtn');
+  if(btn) btn.disabled = true;
+  setText('err', '正在从 NAS 重新读取当前目录的播放列表文件...');
+
+  try{
+    const r = await fetch('/api/netmusic/reload', {method:'POST', cache:'no-store'});
+    const j = await r.json();
+    if(!r.ok || !j.ok){
+      throw new Error((j && (j.message || j.error)) || '重新读取失败');
+    }
+
+    total = Number(j.total || 0);
+    currentIdx = Number.isInteger(j.current_idx) ? j.current_idx : -1;
+    focusedIdx = currentIdx;
+    offset = currentIdx >= 0 ? Math.floor(currentIdx / limit) * limit : 0;
+    searchMode = false;
+    searchQuery = '';
+    const searchInput = document.getElementById('searchInput');
+    if(searchInput) searchInput.value = '';
+
+    alert(j.message || `当前目录播放列表已重新读取，共 ${total} 首`);
+    await loadStatus();
+    await loadNetMusic();
+  }catch(e){
+    const message = e && e.message ? e.message : '重新读取失败';
+    setText('err', message);
+    alert(message);
+  }finally{
+    if(btn) btn.disabled = false;
+  }
 }
 
 function changeLimit(){

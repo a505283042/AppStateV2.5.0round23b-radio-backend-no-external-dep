@@ -97,6 +97,9 @@ bool player_list_select_flush_persistent_state();
  */
 int player_list_select_saved_net_track_index();
 
+/** NAS 曲库重载后清除本地圆屏 NAS 列表页缓存，并按新索引刷新当前页。 */
+void player_list_select_on_net_catalog_reloaded(int preferred_idx);
+
 /**
  * @brief 按当前大类模式进入列表选择。
  *

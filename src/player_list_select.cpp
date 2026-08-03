@@ -609,6 +609,38 @@ int player_list_select_saved_net_track_index()
     return list_select_clamp_index(s_last_net_track_list_idx, total);
 }
 
+void player_list_select_on_net_catalog_reloaded(int preferred_idx)
+{
+    list_select_sync_net_track_source();
+
+    const int total = (int)net_music_catalog_count();
+    s_net_track_total = total;
+    s_net_track_page_start_idx = -1;
+    s_list_net_tracks.clear();
+
+    if (preferred_idx >= 0 && total > 0) {
+        const int clamped = list_select_clamp_index(preferred_idx, total);
+        list_select_set_net_track_position_memory(clamped, total, true);
+        if (s_list_state == ListSelectState::NET_TRACK) {
+            s_list_selected_idx = clamped;
+        }
+    } else if (s_list_state == ListSelectState::NET_TRACK && total > 0) {
+        s_list_selected_idx = list_select_clamp_index(s_list_selected_idx, total);
+        list_select_set_net_track_position_memory(s_list_selected_idx, total, true);
+    } else if (total <= 0) {
+        list_select_set_net_track_position_memory(-1, 0, true);
+    }
+
+    if (s_list_state == ListSelectState::NET_TRACK) {
+        if (total > 0) {
+            (void)list_select_load_net_track_page_for_selected();
+        }
+        list_select_publish_view();
+        ui_clear_list_select();
+        ui_request_refresh_now();
+    }
+}
+
 bool player_list_select_enter_local_tracks()
 {
     if (!storage_catalog_v3_ready()) {

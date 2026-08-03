@@ -1626,6 +1626,22 @@ void player_stop_net_track()
     player_source_clear_net_track();
 }
 
+void player_control_on_net_catalog_reloaded(int current_idx)
+{
+    control_clear_net_track_start_pending();
+    control_clear_net_track_shuffle();
+
+    if (current_idx >= 0) {
+        control_reset_net_track_eof_watch(current_idx);
+    } else {
+        s_net_track_eof_watch = NetTrackEofWatchState{};
+    }
+
+    LOGI("[网络歌曲] 曲库重载后已重置运行索引：当前=%d 数量=%lu",
+         current_idx,
+         (unsigned long)net_music_catalog_count());
+}
+
 void player_next_track()
 {
     const PlayerSourceState source = player_source_get();

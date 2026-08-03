@@ -87,6 +87,14 @@ bool net_music_catalog_select_source(uint8_t idx);
  */
 bool net_music_catalog_load();
 
+/**
+ * @brief 强制重新下载当前曲库源的 net_music.txt。
+ *
+ * 使用事务式替换：新列表下载和索引成功后才释放旧列表；
+ * 失败时恢复旧列表，避免 Web 手动刷新导致当前曲库变空。
+ */
+bool net_music_catalog_reload();
+
 /** 当前网络歌曲索引是否已加载。 */
 bool net_music_catalog_is_loaded();
 

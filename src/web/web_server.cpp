@@ -56,6 +56,7 @@
 #include "hal/bluetooth_restart_controller.h"
 #include "hal/bt62sp_uart_debug.h"
 #include "hal/ws2812_status.h"
+#include "hal/hall_control.h"
 
 extern SdFat sd;
 
@@ -6058,6 +6059,119 @@ static void web_handle_netmusic_source_select() {
   s_server.send(200, "application/json; charset=utf-8", json);
 }
 
+static void web_handle_netmusic_reload() {
+  if (!web_require_player_state()) return;
+
+  if (hall_control_motion_active()) {
+    web_send_json_err("摆臂动作或手动到位等待中，请完成后再重新读取列表", 409);
+    return;
+  }
+
+  const PlayerSourceState before = player_source_get();
+  if (before.type == PlayerSourceType::NET_TRACK &&
+      (before.net_track_state == "connecting" ||
+       before.net_track_state == "reconnecting")) {
+    web_send_json_err("NAS 歌曲正在连接，请起播完成后再重新读取列表", 409);
+    return;
+  }
+
+  if (net_music_catalog_source_count() == 0 &&
+      !net_music_catalog_load_base()) {
+    web_send_json_err("NAS 曲库源配置尚未加载", 500);
+    return;
+  }
+
+  if (!net_music_catalog_reload()) {
+    String message = "当前播放列表重新读取失败，已继续使用旧列表";
+    const String error = net_music_catalog_error();
+    if (error.length()) {
+      message += "：";
+      message += error;
+    }
+    web_send_json_err(message.c_str(), 500);
+    return;
+  }
+
+  const uint32_t total = net_music_catalog_count();
+  int remapped_idx = -1;
+  bool current_removed = false;
+
+  if (before.type == PlayerSourceType::NET_TRACK) {
+    NetMusicItem remapped_item{};
+    String remapped_url;
+
+    for (uint32_t i = 0; i < total; ++i) {
+      NetMusicItem candidate{};
+      if (!net_music_catalog_get(i, &candidate) || !candidate.valid) {
+        continue;
+      }
+
+      const String candidate_url = net_music_catalog_build_url(candidate);
+      if (candidate_url == before.net_track_url) {
+        remapped_idx = (int)i;
+        remapped_item = candidate;
+        remapped_url = candidate_url;
+        break;
+      }
+    }
+
+    if (remapped_idx >= 0) {
+      player_source_set_net_track_stub(remapped_idx,
+                                       remapped_item,
+                                       remapped_url,
+                                       before.net_track_state,
+                                       before.net_track_error);
+      player_source_set_net_track_status(before.net_track_active,
+                                         before.net_track_state,
+                                         before.net_track_error);
+      if (before.net_track_duration_ms > 0) {
+        player_source_set_net_track_duration_ms(before.net_track_duration_ms);
+      }
+      ui_set_track_pos(remapped_idx, (int)total);
+      (void)player_snapshot_capture_current_source();
+    } else {
+      // 当前流继续播放，但它已不属于新列表；下一首将从新列表边界重新开始。
+      NetMusicItem running_item{};
+      running_item.title = before.net_track_title;
+      running_item.format = before.net_track_format;
+      running_item.artist = before.net_track_artist;
+      running_item.album = before.net_track_album;
+      running_item.duration_ms = before.net_track_duration_ms;
+      running_item.valid = true;
+      player_source_set_net_track_stub(-1,
+                                       running_item,
+                                       before.net_track_url,
+                                       before.net_track_state,
+                                       before.net_track_error);
+      player_source_set_net_track_status(before.net_track_active,
+                                         before.net_track_state,
+                                         before.net_track_error);
+      current_removed = true;
+    }
+  }
+
+  player_control_on_net_catalog_reloaded(remapped_idx);
+  player_list_select_on_net_catalog_reloaded(remapped_idx);
+
+  String json;
+  json.reserve(640);
+  json += "{\"ok\":true,\"message\":\"";
+  json += current_removed
+      ? "列表已重新读取；当前播放歌曲不在新列表中"
+      : "当前目录播放列表已重新读取";
+  json += "\",\"total\":";
+  json += String((unsigned long)total);
+  json += ",\"current_idx\":";
+  json += String(remapped_idx);
+  json += ",\"current_removed\":";
+  json += current_removed ? "true" : "false";
+  web_append_netmusic_sources_json(json);
+  json += "}";
+
+  web_send_no_cache_headers();
+  s_server.send(200, "application/json; charset=utf-8", json);
+}
+
 static void web_handle_netmusic_play() {
   if (!web_require_player_state()) return;
 
@@ -6329,6 +6443,7 @@ static void web_setup_routes() {
   s_server.on("/api/netmusic", HTTP_GET, web_handle_netmusic);
   s_server.on("/api/netmusic/search", HTTP_GET, web_handle_netmusic_search);
   s_server.on("/api/netmusic/source", HTTP_POST, web_handle_netmusic_source_select);
+  s_server.on("/api/netmusic/reload", HTTP_POST, web_handle_netmusic_reload);
   s_server.on("/api/artist/detail", HTTP_GET, web_handle_artist_detail);
   s_server.on("/api/album/detail", HTTP_GET, web_handle_album_detail);
   s_server.on("/api/settings", HTTP_GET, web_handle_settings_get);

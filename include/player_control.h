@@ -86,6 +86,9 @@ bool player_play_net_track_index(int idx);
 /** 停止 NAS/HTTP 网络歌曲并清空网络歌曲源状态。 */
 void player_stop_net_track();
 
+/** NAS 曲库列表重新读取后，重置随机序列和自动下一首观察状态。 */
+void player_control_on_net_catalog_reloaded(int current_idx);
+
 /**
  * 用户主动播放当前列表的下一首。
  * 电磁铁开启且摆臂在停止位时，先移动到播放位，霍尔确认后再切歌。

@@ -559,7 +559,7 @@ static String build_remote_list_url() {
   return url;
 }
 
-static bool download_remote_list_to_memory() {
+static bool download_remote_list_to_memory(bool cache_bust) {
   free_remote_list_buffer();
 
   if (!WiFi.isConnected()) {
@@ -568,7 +568,12 @@ static bool download_remote_list_to_memory() {
     return false;
   }
 
-  const String url = build_remote_list_url();
+  String url = build_remote_list_url();
+  if (cache_bust) {
+    url += url.indexOf('?') >= 0 ? '&' : '?';
+    url += "esp32_reload=";
+    url += String((unsigned long)millis());
+  }
   LOGI("[网络音乐] 下载列表到内存: %s", url.c_str());
 
   HTTPClient http;
@@ -579,6 +584,11 @@ static bool download_remote_list_to_memory() {
     s_error = "http_begin_failed";
     LOGW("[网络音乐] HTTP begin 失败: %s", url.c_str());
     return false;
+  }
+
+  if (cache_bust) {
+    http.addHeader("Cache-Control", "no-cache");
+    http.addHeader("Pragma", "no-cache");
   }
 
   const int code = http.GET();
@@ -804,6 +814,75 @@ static bool read_item_from_memory(uint32_t idx, NetMusicItem* out) {
   return true;
 }
 
+static bool build_remote_index_from_memory() {
+  free_remote_offsets();
+
+  uint32_t valid_count = 0;
+  uint32_t skipped_count = 0;
+  uint32_t truncate_len = s_list_len;
+  uint32_t pos = 0;
+
+  while (pos < s_list_len) {
+    const uint32_t line_start = pos;
+
+    while (pos < s_list_len && s_list_buf[pos] != '\n') {
+      ++pos;
+    }
+
+    bool kept_line = false;
+    String line;
+    if (copy_line_from_memory(line_start, line)) {
+      NetMusicItem probe{};
+      if (parse_line(line, &probe)) {
+        if (valid_count < kNetMusicMaxItems) {
+          if (!append_remote_offset(line_start)) {
+            s_loaded = false;
+            free_remote_offsets();
+            free_remote_list_buffer();
+            return false;
+          }
+          ++valid_count;
+          kept_line = true;
+        } else {
+          ++skipped_count;
+        }
+      }
+    }
+
+    if (pos < s_list_len && s_list_buf[pos] == '\n') {
+      ++pos;
+    }
+
+    if (kept_line) {
+      truncate_len = pos;
+    }
+  }
+
+  if (skipped_count > 0) {
+    LOGW("[网络音乐] 有效条目超过上限: 保留=%lu 跳过=%lu",
+         (unsigned long)valid_count,
+         (unsigned long)skipped_count);
+    if (truncate_len < s_list_len) {
+      s_list_len = truncate_len;
+      s_list_buf[s_list_len] = '\0';
+      shrink_remote_list_capacity_to_len(s_list_len);
+    }
+  }
+
+  if (valid_count == 0) {
+    s_loaded = false;
+    s_error = "net_music_no_valid_items";
+    LOGW("[网络音乐] 远程列表没有有效 MP3/FLAC 条目");
+    free_remote_offsets();
+    free_remote_list_buffer();
+    return false;
+  }
+
+  s_loaded = true;
+  s_error = "";
+  return true;
+}
+
 }  // namespace
 
 bool net_music_catalog_load_base() {
@@ -868,79 +947,19 @@ bool net_music_catalog_load() {
   }
 
   // 从 NAS 下载 net_music.txt 到内存。
-  if (!download_remote_list_to_memory()) {
+  if (!download_remote_list_to_memory(false)) {
     s_loaded = false;
     return false;
   }
 
-  uint32_t valid_count = 0;
-  uint32_t skipped_count = 0;
-  uint32_t truncate_len = s_list_len;
-  uint32_t pos = 0;
-
-  while (pos < s_list_len) {
-    const uint32_t line_start = pos;
-
-    while (pos < s_list_len && s_list_buf[pos] != '\n') {
-      ++pos;
-    }
-
-    bool kept_line = false;
-    String line;
-    if (copy_line_from_memory(line_start, line)) {
-      NetMusicItem probe{};
-      if (parse_line(line, &probe)) {
-        if (valid_count < kNetMusicMaxItems) {
-          if (!append_remote_offset(line_start)) {
-            s_loaded = false;
-            free_remote_offsets();
-            free_remote_list_buffer();
-            return false;
-          }
-          ++valid_count;
-          kept_line = true;
-        } else {
-          ++skipped_count;
-        }
-      }
-    }
-
-    if (pos < s_list_len && s_list_buf[pos] == '\n') {
-      ++pos;
-    }
-
-    if (kept_line) {
-      truncate_len = pos;
-    }
-  }
-
-  if (skipped_count > 0) {
-    LOGW("[网络音乐] 有效条目超过上限: 保留=%lu 跳过=%lu",
-         (unsigned long)valid_count,
-         (unsigned long)skipped_count);
-    if (truncate_len < s_list_len) {
-      s_list_len = truncate_len;
-      s_list_buf[s_list_len] = '\0';
-      shrink_remote_list_capacity_to_len(s_list_len);
-    }
-  }
-
-  if (valid_count == 0) {
-    s_loaded = false;
-    s_error = "net_music_no_valid_items";
-    LOGW("[网络音乐] 远程列表没有有效 MP3 条目");
-    free_remote_offsets();
-    free_remote_list_buffer();
+  if (!build_remote_index_from_memory()) {
     return false;
   }
-
-  s_loaded = true;
-  s_error = "";
 
   const NetMusicSourceInfo* source = active_source();
   LOGI("[网络音乐] 列表加载完成：曲库=%s 歌曲=%lu 偏移=%u offset_bytes=%lu offset_psram=%d list_psram=%d base=%s 来源=memory",
        source ? source->name.c_str() : "NAS音乐",
-       (unsigned long)valid_count,
+       (unsigned long)s_offsets_count,
        (unsigned)s_offsets_count,
        (unsigned long)((size_t)s_offsets_cap * sizeof(uint32_t)),
        s_offsets ? (esp_ptr_external_ram(s_offsets) ? 1 : 0) : 0,
@@ -948,6 +967,60 @@ bool net_music_catalog_load() {
        build_active_source_root_url().c_str());
 
   return true;
+}
+
+bool net_music_catalog_reload() {
+  // 显式重载期间保留旧列表，只有新列表完整下载并建立索引后才替换。
+  uint32_t* old_offsets = s_offsets;
+  const uint32_t old_offsets_count = s_offsets_count;
+  const uint32_t old_offsets_cap = s_offsets_cap;
+  char* old_list_buf = s_list_buf;
+  const uint32_t old_list_len = s_list_len;
+  const uint32_t old_list_cap = s_list_cap;
+  const bool old_loaded = s_loaded;
+
+  s_offsets = nullptr;
+  s_offsets_count = 0;
+  s_offsets_cap = 0;
+  s_list_buf = nullptr;
+  s_list_len = 0;
+  s_list_cap = 0;
+  s_loaded = false;
+  s_error = "";
+
+  const bool ok =
+      ensure_base_loaded() &&
+      download_remote_list_to_memory(true) &&
+      build_remote_index_from_memory();
+
+  if (ok) {
+    if (old_offsets) heap_caps_free(old_offsets);
+    if (old_list_buf) heap_caps_free(old_list_buf);
+    s_error = "";
+
+    const NetMusicSourceInfo* source = active_source();
+    LOGI("[网络音乐] 当前列表重新读取完成：曲库=%s 歌曲=%lu",
+         source ? source->name.c_str() : "NAS音乐",
+         (unsigned long)s_offsets_count);
+    return true;
+  }
+
+  const String reload_error = s_error.length() ? s_error : String("net_music_reload_failed");
+  clear_loaded_list_state();
+
+  s_offsets = old_offsets;
+  s_offsets_count = old_offsets_count;
+  s_offsets_cap = old_offsets_cap;
+  s_list_buf = old_list_buf;
+  s_list_len = old_list_len;
+  s_list_cap = old_list_cap;
+  s_loaded = old_loaded;
+  s_error = reload_error;
+
+  LOGW("[网络音乐] 当前列表重新读取失败，已保留旧列表：错误=%s 旧歌曲=%lu",
+       reload_error.c_str(),
+       (unsigned long)old_offsets_count);
+  return false;
 }
 
 bool net_music_catalog_is_loaded() {

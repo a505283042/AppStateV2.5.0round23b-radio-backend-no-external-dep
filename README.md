@@ -401,7 +401,7 @@ Track Two|HiRes/Track Two.flac|flac|Artist|Album|0
 
 ### 多 NAS 曲库源
 
-`net_music_sources.txt` 用于声明多个逻辑曲库。设备只加载当前选中的一个源，切换源时释放旧列表和偏移表，再按需加载新源。
+`net_music_sources.txt` 用于声明多个逻辑曲库。设备只加载当前选中的一个源，切换源时释放旧列表和偏移表，再按需加载新源。NAS Web 页面可通过“重新读取列表文件”强制下载当前源最新的 `net_music.txt`；新列表完成下载和索引后才替换旧列表，失败时继续保留旧列表。
 
 根地址和曲库源可以从 Web 配置中心新建、编辑、排序和保存。“保存配置”只更新 TF 卡；“保存并应用”在两个文件都成功落盘后重新加载运行配置，不会在只写入一半时应用。
 
@@ -924,6 +924,7 @@ ultra | fast | strict | full
 - `GET /api/netmusic`
 - `GET /api/netmusic/search`
 - `POST /api/netmusic/source`
+- `POST /api/netmusic/reload`
 - `GET|POST /api/netmusic/play`
 - `POST /api/netmusic/prev`
 - `POST /api/netmusic/next`
