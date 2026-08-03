@@ -43,10 +43,12 @@ static const char WEBCTRL_FEEDBACK_JS[] PROGMEM = R"JS(
         transition:opacity .18s ease,transform .18s ease;
       }
       .web-global-notice.show{opacity:1;transform:translate(-50%,0);pointer-events:auto}
+      .web-global-notice.success{border-color:#3fb950;background:rgba(18,67,33,.97)}
       .web-global-notice.warning{border-color:#d29922;background:rgba(72,49,8,.97)}
       .web-global-notice.error{border-color:#f85149;background:rgba(82,22,22,.97)}
       .web-global-notice-title{display:block;font-size:16px;font-weight:800;line-height:1.3}
-      .web-global-notice-detail{display:block;margin-top:4px;font-size:14px;line-height:1.45;color:#c9d1d9}
+      .web-global-notice-detail{display:block;margin-top:4px;font-size:14px;line-height:1.45;color:#c9d1d9;white-space:pre-line}
+      .web-global-notice.success .web-global-notice-detail{color:#7ee787}
       .web-global-notice.warning .web-global-notice-detail{color:#f2cc60}
       .web-global-notice.error .web-global-notice-detail{color:#ffa198}
       .web-global-notice-close{align-self:start;min-width:34px;height:34px;padding:0;border:0;border-radius:10px;background:rgba(255,255,255,.1);color:#fff;font-size:22px;line-height:1;cursor:pointer}
@@ -163,20 +165,63 @@ static const char WEBCTRL_FEEDBACK_JS[] PROGMEM = R"JS(
   }
 
   function showWebNotice(title, detail, level='info'){
+    installStyle();
     const popup = ensureWebNoticePopup();
+    const normalizedLevel = level === 'error'
+      ? 'error'
+      : (level === 'warning' ? 'warning' : (level === 'success' ? 'success' : 'info'));
     popup.querySelector('.web-global-notice-title').textContent = title || '设备提示';
     popup.querySelector('.web-global-notice-detail').textContent = detail || '';
-    popup.classList.remove('info','warning','error','show');
-    popup.classList.add(level === 'error' ? 'error' : (level === 'warning' ? 'warning' : 'info'));
+    popup.classList.remove('info','success','warning','error','show');
+    popup.classList.add(normalizedLevel);
     void popup.offsetWidth;
     popup.classList.add('show');
 
     if(webNoticeHideTimer) clearTimeout(webNoticeHideTimer);
-    const duration = level === 'error' ? 7000 : (level === 'warning' ? 5500 : 3500);
+    const duration = normalizedLevel === 'error'
+      ? 7000
+      : (normalizedLevel === 'warning' ? 5500 : (normalizedLevel === 'success' ? 3800 : 3500));
     webNoticeHideTimer = setTimeout(() => popup.classList.remove('show'), duration);
-    if(level === 'error') vibrate(24);
-    else if(level === 'warning') vibrate(16);
+    if(normalizedLevel === 'error') vibrate(24);
+    else if(normalizedLevel === 'warning') vibrate(16);
+    else if(normalizedLevel === 'success') vibrate(12);
   }
+
+  function classifyLegacyAlert(message){
+    const text = String(message == null ? '' : message).trim();
+    if(/失败|错误|异常|超时|无法|拒绝|未找到|读取失败|上传失败|保存失败|删除失败|请求失败|操作失败/.test(text)){
+      return 'error';
+    }
+    if(/请输入|请先|请到|至少|最多|必须|只支持|仅支持|当前没有|搜索模式|不能跳|无效|尚未|未配置/.test(text)){
+      return 'warning';
+    }
+    if(/成功|已保存|已上传|已删除|已关闭|已校准|已切换|已发送|已开始|已触发|已返回|已启用|已完成|请求已提交|已暂存/.test(text)){
+      return 'success';
+    }
+    return 'info';
+  }
+
+  function showLegacyAlertAsNotice(message){
+    const text = String(message == null ? '' : message).replace(/\r\n/g, '\n').trim();
+    const level = classifyLegacyAlert(text);
+    const lines = text.split('\n').map(line => line.trim()).filter(Boolean);
+    let title = '';
+    let detail = '';
+    if(lines.length > 1){
+      title = lines.shift();
+      detail = lines.join('\n');
+    }else if(lines.length === 1){
+      title = lines[0];
+    }else{
+      title = level === 'error' ? '操作失败' : (level === 'warning' ? '请检查操作' : '设备提示');
+    }
+    showWebNotice(title, detail, level);
+  }
+
+  // 普通 alert 统一改为非阻塞顶部提示；confirm 保留浏览器原生确认/取消。
+  const nativeAlert = typeof window.alert === 'function' ? window.alert.bind(window) : null;
+  window.webNativeAlert = nativeAlert;
+  window.alert = showLegacyAlertAsNotice;
 
   function scheduleWebNoticePoll(delayMs){
     if(webNoticePollTimer) clearTimeout(webNoticePollTimer);
