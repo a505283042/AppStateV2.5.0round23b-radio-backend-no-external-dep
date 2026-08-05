@@ -1080,6 +1080,13 @@ void keys_update()
 
   const int8_t encoder_step = read_encoder_step();
 
+  // 睡眠定时启用后，只有“连续无实体操作 15 秒”才允许熄屏。
+  // 旋钮转动、按键按住及菜单操作都会延后熄屏，避免用户操作中途黑屏。
+  if (board_hw_get_backlight() &&
+      (encoder_step != 0 || is_any_key_pressed_raw())) {
+    app_power_sleep_timer_note_user_activity();
+  }
+
   if (handle_backlight_sleep_mode(encoder_step)) {
     return;
   }

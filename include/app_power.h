@@ -21,13 +21,20 @@ void app_power_request_save_and_shutdown(const char* reason, uint32_t delay_ms);
 /**
  * @brief 设置睡眠关机定时。
  *
- * 定时启用后，屏幕会在 15 秒后自动关闭；再次唤醒后重新计时。
+ * 定时启用后，屏幕会在最后一次实体按键或旋钮操作 15 秒后自动关闭；再次唤醒后重新计时。
  * @param minutes 分钟数；传 0 表示取消睡眠关机。
  */
 void app_power_sleep_timer_set_minutes(uint16_t minutes);
 
 /** @brief 取消睡眠关机定时。 */
 void app_power_sleep_timer_cancel();
+
+/**
+ * @brief 睡眠定时有效时记录一次实体用户操作。
+ *
+ * 屏幕亮着时重新开始 15 秒无操作熄屏倒计时；屏幕已关闭时不主动点亮。
+ */
+void app_power_sleep_timer_note_user_activity();
 
 /** @brief 睡眠关机定时是否启用。 */
 bool app_power_sleep_timer_is_active();

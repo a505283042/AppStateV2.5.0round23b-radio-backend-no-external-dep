@@ -60,9 +60,23 @@ static bool nfc_binding_prepare_safe_commit(bool* was_playing_before)
         *was_playing_before = was_playing;
     }
 
-    // 与 NFC admin 保存保持一致：保存映射前先停音频，避免本地播放与 nfc_map.txt 同时占用 SD。
-    player_control_mark_manual_stop();
-    audio_service_stop(true);
+    const PlayerSourceType source_type = player_source_type_get();
+    const bool local_audio_uses_tf =
+        source_type == PlayerSourceType::LOCAL_TRACK &&
+        (audio_service_is_playing() || audio_service_is_paused());
+
+    if (local_audio_uses_tf) {
+        // 本地音频文件和 nfc_map.txt 共用 TF 卡，保持原有安全策略：
+        // 先停本地播放，保存完成后由调用方按需恢复。
+        player_control_mark_manual_stop();
+        audio_service_stop(true);
+        LOGD("[NFC绑定] 本地音频占用TF，保存前已停止播放");
+    } else {
+        // 网络电台和 NAS 音频不从 TF 读取音频数据。
+        // nfc_binding_save() 自身会获取 SD 互斥锁，无需停止网络音频。
+        LOGD("[NFC绑定] 网络或空闲音源保存绑定，不停止当前音频：来源=%s",
+             player_source_type_key(source_type));
+    }
     return true;
 }
 

@@ -158,6 +158,8 @@ static TaskHandle_t s_web_start_task = nullptr;
 static bool s_web_start_in_progress = false;
 static portMUX_TYPE s_web_start_task_mux = portMUX_INITIALIZER_UNLOCKED;
 static bool s_ap_mode = false;
+// 浏览器打开任意 Web 页面后，允许每次设备开机自动用浏览器本地时间校准一次 RTC。
+static bool s_rtc_browser_auto_sync_done = false;
 static bool s_wifi_config_apply_pending = false;
 static uint32_t s_wifi_config_apply_at_ms = 0;
 static portMUX_TYPE s_wifi_config_apply_mux = portMUX_INITIALIZER_UNLOCKED;
@@ -4147,10 +4149,13 @@ static void web_handle_audio_output_route()
   }
 
   if (!accepted) {
-    web_send_json_err("音频任务繁忙，输出路径切换未入队", 503);
+    web_send_json_err("音频输出路径切换失败", 503);
     return;
   }
-  web_send_json_ok_simple("route_switch_queued");
+
+  // 路由切换接口会等待 AudioTask 完成，直接返回切换后的真实状态。
+  // 前端无需依赖稍后的轮询猜测结果，避免旧状态阻止下一次切换。
+  web_send_audio_output_status_json();
 }
 
 static void web_handle_audio_output_amp_mute()
@@ -4506,6 +4511,12 @@ static bool web_validate_rtc_fields(const Pcf85063DateTime& t) {
 }
 
 static void web_handle_rtc_set_time() {
+  const bool auto_sync = web_parse_bool(s_server.arg("auto"), false);
+  if (auto_sync && s_rtc_browser_auto_sync_done) {
+    web_send_json_ok_simple("rtc_auto_sync_already_done");
+    return;
+  }
+
   int year = 0;
   int month = 0;
   int day = 0;
@@ -4547,6 +4558,17 @@ static void web_handle_rtc_set_time() {
   }
 
   (void)pcf85063_clear_interrupt_flags();
+
+  const bool alarm_ok = app_alarm_reschedule_after_time_change();
+  if (!alarm_ok) {
+    LOGW("[网页] RTC时间已写入，但当前闹钟重新安排失败：%s",
+         app_alarm_last_schedule_message());
+  }
+
+  if (auto_sync) {
+    s_rtc_browser_auto_sync_done = true;
+    LOGI("[网页] 已使用浏览器本地时间完成本次开机自动校时");
+  }
   web_send_rtc_status_json();
 }
 

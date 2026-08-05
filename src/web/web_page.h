@@ -249,12 +249,40 @@ static const char WEBCTRL_FEEDBACK_JS[] PROGMEM = R"JS(
     scheduleWebNoticePoll(document.hidden ? 3500 : 1000);
   }
 
+  async function autoSyncRtcFromBrowserOnce(){
+    // 每个页面都可以提交一次；设备端只接受每次开机的第一次自动校时。
+    // 这样设备重启后即使浏览器标签页没有关闭，也仍能再次校准。
+    const d = new Date();
+    if(Number.isNaN(d.getTime()) || d.getFullYear() < 2024) return;
+
+    const params = new URLSearchParams();
+    params.set('auto', '1');
+    params.set('year', String(d.getFullYear()));
+    params.set('month', String(d.getMonth() + 1));
+    params.set('day', String(d.getDate()));
+    params.set('weekday', String(d.getDay()));
+    params.set('hour', String(d.getHours()));
+    params.set('minute', String(d.getMinutes()));
+    params.set('second', String(d.getSeconds()));
+
+    try{
+      const r = await fetch('/api/rtc/time', {
+        method:'POST',
+        headers:{'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8'},
+        body:params.toString(),
+        cache:'no-store'
+      });
+      await r.json();
+    }catch(e){}
+  }
+
   function init(){
     installStyle();
     hapticEnabled = readHapticEnabled();
     syncHapticToggle();
     ensureWebNoticePopup();
     scheduleWebNoticePoll(120);
+    window.setTimeout(autoSyncRtcFromBrowserOnce, 600);
 
     const toggle = document.querySelector('[data-web-feedback-haptic-toggle]');
     if(toggle){
@@ -3078,13 +3106,13 @@ async function loadAudioOutputStatus(silent=false){
   }
 }
 
-async function postAudioOutput(url, params={}){
+async function postAudioOutput(url, params={}, timeoutMs=5000){
   const body = new URLSearchParams(params).toString();
   const r = await fetchWithTimeout(url, {
     method:'POST',
     headers:{'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8'},
     body
-  }, 5000);
+  }, timeoutMs);
   return r.json();
 }
 
@@ -3099,19 +3127,28 @@ async function applyAudioOutputRoute(){
   const select = document.getElementById('audio_output_route');
   const target = select ? select.value : 'speaker';
   const labels = {headphone:'耳机', speaker:'功放', bluetooth:'蓝牙'};
-  if(lastAudioOutputStatus && lastAudioOutputStatus.route === target) return;
+
+  // 不使用可能已经过期的 lastAudioOutputStatus 拦截请求。
+  // 上一次状态刷新失败时，旧状态正是“刷新页面后才能切回来”的根因。
   if(!confirm(`确认切换音频输出到“${labels[target] || target}”？`)){
     if(lastAudioOutputStatus && select) select.value = lastAudioOutputStatus.route;
     return;
   }
+
+  let result = null;
   setAudioOutputBusy(true);
   try{
-    const j = await postAudioOutput('/api/audio-output/route', {route:target});
-    if(!j || !j.ok) alert((j && j.message) || '输出路径切换失败');
+    result = await postAudioOutput('/api/audio-output/route', {route:target}, 12000);
+    if(!result || !result.ok){
+      alert((result && result.message) || '输出路径切换失败');
+    }
   }catch(e){
-    alert('输出路径切换失败');
+    alert('输出路径切换结果读取失败，正在重新查询实际状态');
   }finally{
     setAudioOutputBusy(false);
+    if(result && result.ok && result.route){
+      renderAudioOutputStatus(result);
+    }
     await refreshAudioOutputAfterAction();
   }
 }

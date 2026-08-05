@@ -29,7 +29,7 @@ static uint16_t s_sleep_preset_minutes = 0;
 static uint32_t s_sleep_deadline_ms = 0;
 static uint32_t s_sleep_last_ui_refresh_bucket = UINT32_MAX;
 
-// 设置睡眠关机后，屏幕保持一小段时间供用户确认，然后自动熄屏。
+// 设置睡眠关机后，屏幕在最后一次实体操作后保持一小段时间，再自动熄屏。
 // 熄屏后按界面类按键只负责唤醒；再次唤醒后会重新计时。
 static constexpr uint32_t SLEEP_SCREEN_OFF_DELAY_MS = 15000;
 static bool s_sleep_screen_off_pending = false;
@@ -179,6 +179,23 @@ void app_power_sleep_timer_cancel()
     s_sleep_shutdown_started = false;
 }
 
+void app_power_sleep_timer_note_user_activity()
+{
+    if (!s_sleep_timer_active || s_sleep_shutdown_started) {
+        return;
+    }
+
+    // 用户操作只延后熄屏，不负责点亮已经关闭的背光。
+    // 熄屏下的按键语义仍由 keys 模块决定。
+    if (!board_hw_get_backlight()) {
+        return;
+    }
+
+    s_sleep_screen_off_pending = true;
+    s_sleep_screen_off_deadline_ms = millis() + SLEEP_SCREEN_OFF_DELAY_MS;
+    s_sleep_last_backlight_enabled = true;
+}
+
 bool app_power_sleep_timer_is_active()
 {
     return s_sleep_timer_active;
@@ -237,7 +254,7 @@ void app_power_sleep_timer_tick()
     const uint32_t now = millis();
     const bool backlight_enabled = board_hw_get_backlight();
 
-    // 睡眠定时有效期间，屏幕每次被唤醒后重新开始 15 秒息屏计时。
+    // 睡眠定时有效期间，屏幕每次被唤醒后重新开始 15 秒无操作息屏计时。
     if (backlight_enabled && !s_sleep_last_backlight_enabled) {
         s_sleep_screen_off_pending = true;
         s_sleep_screen_off_deadline_ms = now + SLEEP_SCREEN_OFF_DELAY_MS;

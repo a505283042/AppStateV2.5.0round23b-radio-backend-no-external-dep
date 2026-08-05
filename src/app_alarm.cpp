@@ -507,6 +507,25 @@ bool app_alarm_delete()
     return true;
 }
 
+bool app_alarm_reschedule_after_time_change()
+{
+    if (!s_loaded) {
+        app_alarm_begin();
+    }
+
+    if (!s_cfg.enabled) {
+        s_last_schedule_ok = true;
+        set_schedule_message("时间已校准，闹钟未启用");
+        return true;
+    }
+
+    const bool ok = schedule_rtc_alarm_for_config(s_cfg);
+    LOGI("[闹钟] RTC校时后重新安排：成功=%d 结果=%s",
+         ok ? 1 : 0,
+         app_alarm_last_schedule_message());
+    return ok;
+}
+
 bool app_alarm_is_enabled()
 {
     return app_alarm_get_config().enabled;

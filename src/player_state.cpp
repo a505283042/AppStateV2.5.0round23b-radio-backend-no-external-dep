@@ -27,12 +27,113 @@
 #include "ui/ui.h"
 #include "utils/log.h"
 
-static void player_apply_alarm_wakeup_volume()
+namespace {
+
+static constexpr uint8_t ALARM_VOLUME_RAMP_START = 5;
+static constexpr uint8_t ALARM_VOLUME_RAMP_STEP = 2;
+static constexpr uint32_t ALARM_VOLUME_RAMP_INTERVAL_MS = 500;
+
+struct AlarmVolumeRampState {
+    bool active = false;
+    uint8_t current = 0;
+    uint8_t target = 0;
+    uint32_t next_step_ms = 0;
+};
+
+static AlarmVolumeRampState s_alarm_volume_ramp{};
+
+static void player_cancel_alarm_wakeup_volume_ramp(const char* reason)
 {
-    const uint8_t volume = app_alarm_wakeup_volume();
-    (void)audio_output_route_set_user_volume(volume);
-    LOGI("[闹钟] 已应用闹钟音量：%u", (unsigned)volume);
+    if (!s_alarm_volume_ramp.active) {
+        return;
+    }
+
+    LOGI("[闹钟] 音量渐增已停止：%s 当前=%u 目标=%u",
+         reason ? reason : "未指定",
+         (unsigned)s_alarm_volume_ramp.current,
+         (unsigned)s_alarm_volume_ramp.target);
+    s_alarm_volume_ramp = AlarmVolumeRampState{};
 }
+
+static bool player_begin_alarm_wakeup_volume_ramp()
+{
+    const uint8_t target = app_alarm_wakeup_volume() > 100
+        ? 100
+        : app_alarm_wakeup_volume();
+    const uint8_t start = target > ALARM_VOLUME_RAMP_START
+        ? ALARM_VOLUME_RAMP_START
+        : target;
+
+    if (!audio_output_route_set_user_volume(start)) {
+        LOGW("[闹钟] 初始音量设置失败：起始=%u 目标=%u",
+             (unsigned)start,
+             (unsigned)target);
+        s_alarm_volume_ramp = AlarmVolumeRampState{};
+        return false;
+    }
+
+    s_alarm_volume_ramp.current = start;
+    s_alarm_volume_ramp.target = target;
+    s_alarm_volume_ramp.active = start < target;
+    s_alarm_volume_ramp.next_step_ms = millis() + ALARM_VOLUME_RAMP_INTERVAL_MS;
+
+    LOGI("[闹钟] 已设置渐增音量：起始=%u 目标=%u 步进=%u/%lums",
+         (unsigned)start,
+         (unsigned)target,
+         (unsigned)ALARM_VOLUME_RAMP_STEP,
+         (unsigned long)ALARM_VOLUME_RAMP_INTERVAL_MS);
+    return true;
+}
+
+static void player_alarm_wakeup_volume_ramp_tick()
+{
+    if (!s_alarm_volume_ramp.active) {
+        return;
+    }
+
+    // 等实际音频开始后再递增，避免启动和曲库恢复耗时消耗掉渐增过程。
+    if (!audio_service_is_playing() || audio_service_is_paused()) {
+        return;
+    }
+
+    // 用户通过旋钮或 Web 主动改音量后，不再用闹钟渐增覆盖用户选择。
+    if (!audio_output_route_is_bluetooth_tx() ||
+        audio_output_route_bluetooth_tx_volume_known()) {
+        const uint8_t actual = audio_output_route_get_user_volume();
+        if (actual != s_alarm_volume_ramp.current) {
+            player_cancel_alarm_wakeup_volume_ramp("检测到用户或输出路线修改音量");
+            return;
+        }
+    }
+
+    const uint32_t now = millis();
+    if ((int32_t)(now - s_alarm_volume_ramp.next_step_ms) < 0) {
+        return;
+    }
+
+    uint16_t next = (uint16_t)s_alarm_volume_ramp.current + ALARM_VOLUME_RAMP_STEP;
+    if (next > s_alarm_volume_ramp.target) {
+        next = s_alarm_volume_ramp.target;
+    }
+
+    if (!audio_output_route_set_user_volume((uint8_t)next)) {
+        s_alarm_volume_ramp.next_step_ms = now + ALARM_VOLUME_RAMP_INTERVAL_MS;
+        LOGW("[闹钟] 音量渐增请求失败，将重试：当前=%u 目标=%u",
+             (unsigned)s_alarm_volume_ramp.current,
+             (unsigned)s_alarm_volume_ramp.target);
+        return;
+    }
+
+    s_alarm_volume_ramp.current = (uint8_t)next;
+    s_alarm_volume_ramp.next_step_ms = now + ALARM_VOLUME_RAMP_INTERVAL_MS;
+    if (s_alarm_volume_ramp.current >= s_alarm_volume_ramp.target) {
+        LOGI("[闹钟] 音量渐增完成：目标=%u",
+             (unsigned)s_alarm_volume_ramp.target);
+        s_alarm_volume_ramp = AlarmVolumeRampState{};
+    }
+}
+
+} // namespace
 
 static void player_mark_alarm_wakeup_handled(const char* reason)
 {
@@ -57,7 +158,7 @@ static void player_auto_resume_alarm_after_snapshot()
         return;
     }
 
-    player_apply_alarm_wakeup_volume();
+    player_begin_alarm_wakeup_volume_ramp();
     // 闹钟开机只保留一个弹窗提示，播放器界面继续负责显示封面/播放状态。
     ui_show_alarm_wakeup_popup("闹钟已响", "正在恢复播放");
     player_toggle_play(PlayerToggleTrigger::Alarm);
@@ -828,6 +929,8 @@ bool player_prepare_local_track_ui(int idx)
 
 void player_state_run(void)
 {
+    player_alarm_wakeup_volume_ramp_tick();
+
     static bool entered = false;
     static bool boot_restore_pending = false;
 
@@ -891,10 +994,11 @@ void player_state_run(void)
         }
 
         if (app_alarm_should_auto_resume_last()) {
-            player_apply_alarm_wakeup_volume();
+            player_begin_alarm_wakeup_volume_ramp();
             ui_show_alarm_wakeup_popup("闹钟已响", "正在播放默认歌曲");
         }
         if (!player_play_idx_v3((uint32_t)start_idx, true, true)) {
+            player_cancel_alarm_wakeup_volume_ramp("默认歌曲起播失败");
             LOGE("[播放器] boot 播放失败");
         }
         if (app_alarm_should_auto_resume_last()) {
@@ -922,10 +1026,11 @@ void player_state_run(void)
             return;
         }
         if (app_alarm_should_auto_resume_last()) {
-            player_apply_alarm_wakeup_volume();
+            player_begin_alarm_wakeup_volume_ramp();
             ui_show_alarm_wakeup_popup("闹钟已响", "正在播放默认歌曲");
         }
         if (!player_play_idx_v3((uint32_t)start_idx, true, true)) {
+            player_cancel_alarm_wakeup_volume_ramp("恢复回退起播失败");
             LOGE("[播放器] boot 播放失败 恢复回退后");
         }
         if (app_alarm_should_auto_resume_last()) {

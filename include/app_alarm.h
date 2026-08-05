@@ -68,6 +68,13 @@ bool app_alarm_disable();
 /** @brief 删除闹钟配置并关闭 RTC 闹钟。 */
 bool app_alarm_delete();
 
+/**
+ * @brief RTC 时间校准后，根据当前配置重新安排硬件闹钟。
+ *
+ * 当前闹钟未启用时直接返回 true。
+ */
+bool app_alarm_reschedule_after_time_change();
+
 /** @brief 当前配置是否启用。 */
 bool app_alarm_is_enabled();
 
