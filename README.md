@@ -428,7 +428,7 @@ tools/nas
 
 蓝牙发射采用两级音量：播放器 PCM 输入增益和 BT62SP 发射音量。
 
-播放器 PCM 输入可在圆屏“音频输出”菜单中上下调节，范围1～35档、每次1档、默认20档；菜单显示值就是实际送入 `audio_set_volume()` 的数值。设置在蓝牙路线中立即生效，离开蓝牙或关机时写入NVS。35档为固件上限，避免BT62SP模拟输入因PCM过高产生明显失真。
+播放器 PCM 输入可在圆屏“音频输出”菜单或 Web“蓝牙设置”中调节，范围1～35档、每次1档、默认20档；显示值就是实际送入 `audio_set_volume()` 的数值。两端共用同一设置，在蓝牙路线中立即生效，离开蓝牙或关机时写入NVS。35档为固件上限，避免BT62SP模拟输入因PCM过高产生明显失真。
 
 蓝牙发射音量使用面向用户的 `0..100` 逻辑范围：
 
@@ -987,7 +987,8 @@ NAS：
 - `POST /api/audio-output/route`
 - `POST /api/audio-output/amp-mute`
 - `POST /api/audio-output/bluetooth/query`
-- `POST /api/audio-output/bluetooth/volume`
+- `POST /api/audio-output/bluetooth/pcm`
+- `POST /api/audio-output/bluetooth/volume`（兼容旧客户端，调节BT62SP发射音量）
 - `POST /api/audio-output/bluetooth/pair`
 - `POST /api/audio-output/bluetooth/restart`
 

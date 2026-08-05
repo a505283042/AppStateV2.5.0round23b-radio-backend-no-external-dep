@@ -1839,10 +1839,10 @@ static const char WEBCTRL_SETTINGS_HTML[] PROGMEM = R"HTML(
         <div class="row"><label>蓝牙电源</label><div class="status-value" id="btPowerText">-</div></div>
         <div class="row"><label>连接状态</label><div class="status-value" id="btLinkText">-</div></div>
         <div class="row"><label>设备名称</label><div class="status-value" id="btDeviceText">-</div></div>
-        <div class="row"><label>蓝牙音量</label>
+        <div class="row"><label>蓝牙PCM增益</label>
           <div class="range-box">
-            <input id="bt_volume" type="range" min="0" max="100" step="1" oninput="syncBtVolumeText()" onchange="applyBtVolume()">
-            <span class="range-value" id="btVolumeText">0%</span>
+            <input id="bt_pcm_level" type="range" min="1" max="35" step="1" oninput="syncBtPcmText()" onchange="applyBtPcmLevel()">
+            <span class="range-value" id="btPcmText">20/35</span>
           </div>
         </div>
         <div class="actions">
@@ -3025,14 +3025,14 @@ function setAudioOutputBusy(busy){
   if(route) route.disabled = audioOutputBusy;
   const amp = document.getElementById('amp_muted');
   if(amp) amp.disabled = audioOutputBusy || !(lastAudioOutputStatus && lastAudioOutputStatus.can_amp_control);
-  const volume = document.getElementById('bt_volume');
-  if(volume) volume.disabled = audioOutputBusy || !(lastAudioOutputStatus && lastAudioOutputStatus.can_bt_control);
+  const pcm = document.getElementById('bt_pcm_level');
+  if(pcm) pcm.disabled = audioOutputBusy || !(lastAudioOutputStatus && lastAudioOutputStatus.can_bt_control);
 }
 
-function syncBtVolumeText(){
-  const slider = document.getElementById('bt_volume');
-  const text = document.getElementById('btVolumeText');
-  if(slider && text) text.textContent = `${slider.value}%`;
+function syncBtPcmText(){
+  const slider = document.getElementById('bt_pcm_level');
+  const text = document.getElementById('btPcmText');
+  if(slider && text) text.textContent = `${slider.value}/${slider.max || 35}`;
 }
 
 function renderAudioOutputStatus(j){
@@ -3071,9 +3071,14 @@ function renderAudioOutputStatus(j){
   if(btDevice){
     btDevice.textContent = j.bt_device_name || j.bt_device_mac || btDeviceStateLabel(j.bt_device_state);
   }
-  const btVolume = document.getElementById('bt_volume');
-  if(btVolume && document.activeElement !== btVolume) btVolume.value = String(Number(j.user_volume || 0));
-  syncBtVolumeText();
+  const btPcm = document.getElementById('bt_pcm_level');
+  if(btPcm && document.activeElement !== btPcm){
+    const maxLevel = Math.max(1, Number(j.bluetooth_pcm_max || 35));
+    const level = Math.max(1, Math.min(maxLevel, Number(j.bluetooth_pcm_level || 20)));
+    btPcm.max = String(maxLevel);
+    btPcm.value = String(level);
+  }
+  syncBtPcmText();
 
   setAudioOutputBusy(audioOutputBusy);
   const ampApply = document.getElementById('ampMuteApplyBtn');
@@ -3186,15 +3191,19 @@ async function queryBtDevice(auto=false){
   }
 }
 
-async function applyBtVolume(){
+async function applyBtPcmLevel(){
   if(audioOutputBusy) return;
-  const value = document.getElementById('bt_volume').value;
+  const value = document.getElementById('bt_pcm_level').value;
   setAudioOutputBusy(true);
   try{
-    const j = await postAudioOutput('/api/audio-output/bluetooth/volume', {value});
-    if(!j || !j.ok) alert((j && j.message) || '蓝牙音量设置失败');
+    const j = await postAudioOutput('/api/audio-output/bluetooth/pcm', {value});
+    if(!j || !j.ok){
+      alert((j && j.message) || '蓝牙PCM增益设置失败');
+    }else if(j.bluetooth_pcm_level){
+      renderAudioOutputStatus(j);
+    }
   }catch(e){
-    alert('蓝牙音量设置失败');
+    alert('蓝牙PCM增益设置失败');
   }finally{
     setAudioOutputBusy(false);
     await refreshAudioOutputAfterAction();

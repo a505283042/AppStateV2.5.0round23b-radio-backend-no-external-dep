@@ -4074,6 +4074,9 @@ static void web_send_audio_output_status_json()
   json += String((unsigned long)route.revision);
   json += ",\"user_volume\":";
   json += String((unsigned)audio_output_route_get_user_volume());
+  json += ",\"bluetooth_pcm_level\":";
+  json += String((unsigned)route.bluetooth_tx_player_volume);
+  json += ",\"bluetooth_pcm_max\":35";
 
   json += ",\"amp_mute_known\":";
   json += amp_mute_known ? "true" : "false";
@@ -4229,6 +4232,32 @@ static void web_handle_audio_output_bt_volume()
   }
   ui_volume_key_pressed();
   web_send_json_ok_simple("bluetooth_volume_queued");
+}
+
+static void web_handle_audio_output_bt_pcm()
+{
+  if (!web_require_bluetooth_output(false)) return;
+
+  String value = web_trim_copy(s_server.arg("value"));
+  if (!value.length()) {
+    web_send_json_err("缺少蓝牙PCM增益参数 value", 400);
+    return;
+  }
+
+  const int level = value.toInt();
+  if (level < 1 || level > 35) {
+    web_send_json_err("蓝牙PCM增益必须在1到35之间", 400);
+    return;
+  }
+
+  if (!audio_output_route_set_bluetooth_tx_player_volume(
+          static_cast<uint8_t>(level))) {
+    web_send_json_err("音频任务繁忙，蓝牙PCM增益未能立即应用", 503);
+    return;
+  }
+
+  // 直接返回当前真实状态，前端无需等待下一次轮询才能同步档位。
+  web_send_audio_output_status_json();
 }
 
 static void web_handle_audio_output_bt_pair()
@@ -6495,7 +6524,9 @@ static void web_setup_routes() {
   s_server.on("/api/audio-output/route", HTTP_POST, web_handle_audio_output_route);
   s_server.on("/api/audio-output/amp-mute", HTTP_POST, web_handle_audio_output_amp_mute);
   s_server.on("/api/audio-output/bluetooth/query", HTTP_POST, web_handle_audio_output_bt_query);
+  // 保留旧蓝牙音量接口供已有客户端使用；设置页改用PCM增益接口。
   s_server.on("/api/audio-output/bluetooth/volume", HTTP_POST, web_handle_audio_output_bt_volume);
+  s_server.on("/api/audio-output/bluetooth/pcm", HTTP_POST, web_handle_audio_output_bt_pcm);
   s_server.on("/api/audio-output/bluetooth/pair", HTTP_POST, web_handle_audio_output_bt_pair);
   s_server.on("/api/audio-output/bluetooth/restart", HTTP_POST, web_handle_audio_output_bt_restart);
   s_server.on("/api/system/diagnostics", HTTP_GET, web_handle_system_diagnostics);
