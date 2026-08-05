@@ -1,9 +1,6 @@
 # PlatformIO build directory
 .pio/
 
-# TF card structure folder
-TF卡结构/
-
 .pio/
 
 # Large binary tools (exceeds GitHub 100MB limit, keep local only)
