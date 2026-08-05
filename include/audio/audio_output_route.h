@@ -18,6 +18,7 @@ enum class AudioOutputRoute : uint8_t {
 struct AudioOutputRouteSnapshot {
     AudioOutputRoute route = AudioOutputRoute::Speaker;
     uint8_t bluetooth_tx_volume = 50;
+    uint8_t bluetooth_tx_player_volume = 20;
     uint8_t normal_volume = 80;
     bool bluetooth_tx_volume_known = false;
     bool bluetooth_tx_policy_active = false;
@@ -43,14 +44,18 @@ bool audio_output_route_is_bluetooth_tx();
 uint8_t audio_output_route_get_user_volume();
 /** @brief 普通耳机/功放路线音量；蓝牙发射时返回进入蓝牙前保存的播放器音量。 */
 uint8_t audio_output_route_get_normal_volume();
-/** @brief 设置面向用户的逻辑音量。蓝牙发射模式下只调 BT62SP，播放器输入固定安全值。 */
+/** @brief 设置面向用户的逻辑音量。蓝牙发射模式下调 BT62SP，PCM 输入增益保持菜单设定值。 */
 bool audio_output_route_set_user_volume(uint8_t value);
 /** @brief 按步进调整面向用户的音量。 */
 bool audio_output_route_step_user_volume(int delta);
 /** @brief 按当前路线同步 UI；蓝牙发射音量来自 NVS，首次使用默认 50%。 */
 void audio_output_route_sync_ui_volume();
-/** @brief 蓝牙发射模式下固定送入 BT62SP 模拟输入的播放器音量。 */
-uint8_t audio_output_route_bluetooth_tx_player_fixed_volume();
+/** @brief 蓝牙发射模式下送入 BT62SP 模拟输入的播放器 PCM 音量。 */
+uint8_t audio_output_route_bluetooth_tx_player_volume();
+/** @brief 设置蓝牙发射模拟输入的播放器 PCM 档位，范围 1..35、步进 1。 */
+bool audio_output_route_set_bluetooth_tx_player_volume(uint8_t value);
+/** @brief 蓝牙发射 PCM 档位按 delta 上下调节，结果始终限制在 1..35。 */
+bool audio_output_route_step_bluetooth_tx_player_volume(int delta);
 /** @brief 当前缓存的 BT62SP 蓝牙发射逻辑音量，而不是 UART 硬件值。 */
 uint8_t audio_output_route_bluetooth_tx_volume();
 /** @brief 是否已完成蓝牙发射音量初始化（NVS 保存值或首次默认值）。 */

@@ -14,9 +14,11 @@
 
 namespace {
 
-// 蓝牙发射模式下，BT62SP 的 L/R 是模拟输入。播放器音量过高会让模块输入级过载，
-// 蓝牙音箱端听起来会发糊。因此进入蓝牙发射后固定播放器音量，只调 BT62SP AT+VOL。
-static constexpr uint8_t BT_TX_PLAYER_FIXED_VOLUME = 20;
+// 蓝牙发射模式下，BT62SP 的 L/R 是模拟输入。PCM 过高可能让模块输入级过载，
+// 因此只开放 1..35 共 35 档，菜单每次上下调 1 档；显示值就是实际 audio_set_volume() 值。
+static constexpr uint8_t BT_TX_PLAYER_VOLUME_DEFAULT = 20;
+static constexpr uint8_t BT_TX_PLAYER_VOLUME_MIN = 1;
+static constexpr uint8_t BT_TX_PLAYER_VOLUME_MAX = 35;
 // UI、网页和旋钮始终使用 0..100 的逻辑音量。BT62SP 实测硬件音量 1..3 仍无声，
 // 因此仅在 UART 边界把逻辑 1..100 映射到硬件 4..100；逻辑 0 仍发送硬件 0 静音。
 static constexpr uint8_t BT_TX_VOLUME_DEFAULT = 50;
@@ -26,6 +28,10 @@ static constexpr char BT_TX_PREFS_NAMESPACE[] = "audio_route";
 // v1 保存的是直接发送给 BT62SP 的硬件值；v2 保存用户看到的逻辑音量。
 static constexpr char BT_TX_PREFS_KEY_V1[] = "bt_vol";
 static constexpr char BT_TX_PREFS_KEY_V2[] = "bt_vol_v2";
+static constexpr char BT_TX_PLAYER_VOLUME_PREFS_KEY[] = "bt_pcm_35";
+// 兼容此前试验版本；正式 Round 60 从 Round 59 基线使用 bt_pcm_35。
+static constexpr char BT_TX_PLAYER_VOLUME_PREFS_KEY_LEGACY[] = "bt_pcm";
+static constexpr char BT_TX_PLAYER_VOLUME_PREFS_KEY_LEGACY_PERCENT[] = "bt_pcm_pct";
 
 // 模块上电后可能先接收命令、稍后才完成音频运行态初始化。
 // 先在固定等待后应用一次；收到 CLEAR OK 后再应用一次最新值。
@@ -42,12 +48,15 @@ struct AudioOutputRouteState {
     // 默认使用功放输出；3.5 耳机/Line out 始终常通，不受本状态控制。
     AudioOutputRoute route = AudioOutputRoute::Speaker;
     uint8_t bt_tx_volume = BT_TX_VOLUME_DEFAULT; // 用户逻辑音量，不是 AT+VOL 硬件值。
+    uint8_t bt_tx_player_volume = BT_TX_PLAYER_VOLUME_DEFAULT; // 送入 BT62SP 模拟输入的 PCM 音量。
     uint8_t saved_normal_volume = 80;
     bool bt_tx_volume_known = false;
     bool bt_tx_volume_policy_active = false;
     bool bt_tx_nvs_loaded = false;
     bool bt_tx_nvs_valid = false;
     uint8_t bt_tx_persisted_volume = BT_TX_VOLUME_DEFAULT;
+    bool bt_tx_player_volume_nvs_valid = false;
+    uint8_t bt_tx_player_persisted_volume = BT_TX_PLAYER_VOLUME_DEFAULT;
     bool bt_tx_apply_pending = false;
     uint32_t bt_tx_apply_due_ms = 0;
     uint32_t bt_tx_ready_generation_seen = 0;
@@ -207,7 +216,10 @@ void load_bt_tx_volume_from_nvs_once()
         s_state.bt_tx_nvs_loaded = true;
         s_state.bt_tx_nvs_valid = false;
         s_state.bt_tx_persisted_volume = BT_TX_VOLUME_DEFAULT;
+        s_state.bt_tx_player_volume_nvs_valid = false;
+        s_state.bt_tx_player_persisted_volume = BT_TX_PLAYER_VOLUME_DEFAULT;
         s_state.bt_tx_volume = BT_TX_VOLUME_DEFAULT;
+        s_state.bt_tx_player_volume = BT_TX_PLAYER_VOLUME_DEFAULT;
         s_state.bt_tx_volume_known = false;
         state_revision_advance_locked();
         should_load = true;
@@ -219,7 +231,9 @@ void load_bt_tx_volume_from_nvs_once()
     }
 
     uint8_t loaded_volume = BT_TX_VOLUME_DEFAULT;
+    uint8_t loaded_player_volume = BT_TX_PLAYER_VOLUME_DEFAULT;
     bool loaded_valid = false;
+    bool loaded_player_valid = false;
 
     Preferences pref;
     // 迁移旧 bt_vol 时需要写入 bt_vol_v2，因此这里以可写方式打开；正常启动不会重复写。
@@ -264,13 +278,60 @@ void load_bt_tx_volume_from_nvs_once()
                  (unsigned)BT_TX_VOLUME_DEFAULT,
                  (unsigned)bt_tx_logical_to_hardware(BT_TX_VOLUME_DEFAULT));
         }
+
+        if (pref.isKey(BT_TX_PLAYER_VOLUME_PREFS_KEY)) {
+            const uint8_t saved = pref.getUChar(
+                BT_TX_PLAYER_VOLUME_PREFS_KEY,
+                BT_TX_PLAYER_VOLUME_DEFAULT);
+            loaded_player_volume = saved < BT_TX_PLAYER_VOLUME_MIN
+                ? BT_TX_PLAYER_VOLUME_MIN
+                : (saved > BT_TX_PLAYER_VOLUME_MAX
+                       ? BT_TX_PLAYER_VOLUME_MAX
+                       : saved);
+            loaded_player_valid = saved == loaded_player_volume;
+            if (!loaded_player_valid) {
+                LOGW("[音量] NVS 蓝牙 PCM 档位越界=%u，已限制为=%u",
+                     (unsigned)saved,
+                     (unsigned)loaded_player_volume);
+            }
+        } else if (pref.isKey(BT_TX_PLAYER_VOLUME_PREFS_KEY_LEGACY)) {
+            const uint8_t saved = pref.getUChar(
+                BT_TX_PLAYER_VOLUME_PREFS_KEY_LEGACY,
+                BT_TX_PLAYER_VOLUME_DEFAULT);
+            loaded_player_volume = saved < BT_TX_PLAYER_VOLUME_MIN
+                ? BT_TX_PLAYER_VOLUME_MIN
+                : (saved > BT_TX_PLAYER_VOLUME_MAX
+                       ? BT_TX_PLAYER_VOLUME_MAX
+                       : saved);
+            loaded_player_valid = false;
+            LOGI("[音量] 迁移旧蓝牙 PCM 设置=%u -> 新档位=%u/35",
+                 (unsigned)saved,
+                 (unsigned)loaded_player_volume);
+        } else if (pref.isKey(BT_TX_PLAYER_VOLUME_PREFS_KEY_LEGACY_PERCENT)) {
+            const uint8_t percent = pref.getUChar(
+                BT_TX_PLAYER_VOLUME_PREFS_KEY_LEGACY_PERCENT,
+                30);
+            // 旧百分比试验版的 100% 对应实际 PCM 70；先还原实际值，再限制到 35。
+            uint16_t migrated = static_cast<uint16_t>(percent) * 70U + 50U;
+            migrated /= 100U;
+            if (migrated < BT_TX_PLAYER_VOLUME_MIN) migrated = BT_TX_PLAYER_VOLUME_MIN;
+            if (migrated > BT_TX_PLAYER_VOLUME_MAX) migrated = BT_TX_PLAYER_VOLUME_MAX;
+            loaded_player_volume = static_cast<uint8_t>(migrated);
+            loaded_player_valid = false;
+            LOGI("[音量] 迁移旧蓝牙 PCM 百分比=%u%% -> 新档位=%u/35",
+                 (unsigned)percent,
+                 (unsigned)loaded_player_volume);
+        }
         pref.end();
     }
 
     portENTER_CRITICAL(&s_state_mux);
     s_state.bt_tx_volume = loaded_volume;
+    s_state.bt_tx_player_volume = loaded_player_volume;
     s_state.bt_tx_persisted_volume = loaded_volume;
     s_state.bt_tx_nvs_valid = loaded_valid;
+    s_state.bt_tx_player_persisted_volume = loaded_player_volume;
+    s_state.bt_tx_player_volume_nvs_valid = loaded_player_valid;
     s_state.bt_tx_volume_known = true;
     state_revision_advance_locked();
     portEXIT_CRITICAL(&s_state_mux);
@@ -282,34 +343,54 @@ bool save_bt_tx_volume_to_nvs_if_needed()
 
     const AudioOutputRouteState snapshot = state_snapshot_get();
     const uint8_t volume = snapshot.bt_tx_volume > 100 ? 100 : snapshot.bt_tx_volume;
-    if (snapshot.bt_tx_nvs_valid && snapshot.bt_tx_persisted_volume == volume) {
-        LOGD("[音量] 蓝牙发射音量未变化，跳过 NVS 写入=%u", (unsigned)volume);
+    const uint8_t player_volume = snapshot.bt_tx_player_volume;
+    const bool save_volume =
+        !snapshot.bt_tx_nvs_valid || snapshot.bt_tx_persisted_volume != volume;
+    const bool save_player_volume =
+        !snapshot.bt_tx_player_volume_nvs_valid ||
+        snapshot.bt_tx_player_persisted_volume != player_volume;
+
+    if (!save_volume && !save_player_volume) {
+        LOGD("[音量] 蓝牙音量与 PCM 输入增益未变化，跳过 NVS 写入");
         return true;
     }
 
     Preferences pref;
     if (!pref.begin(BT_TX_PREFS_NAMESPACE, false)) {
-        LOGE("[音量] 保存蓝牙发射音量失败：打开 NVS namespace");
+        LOGE("[音量] 保存蓝牙音量设置失败：打开 NVS namespace");
         return false;
     }
 
-    const bool ok = pref.putUChar(BT_TX_PREFS_KEY_V2, volume) > 0;
+    bool ok = true;
+    if (save_volume) {
+        ok = pref.putUChar(BT_TX_PREFS_KEY_V2, volume) > 0 && ok;
+    }
+    if (save_player_volume) {
+        ok = pref.putUChar(BT_TX_PLAYER_VOLUME_PREFS_KEY, player_volume) > 0 && ok;
+    }
     pref.end();
 
     if (!ok) {
-        LOGE("[音量] 保存蓝牙发射音量失败：写入 NVS");
+        LOGE("[音量] 保存蓝牙音量设置失败：写入 NVS");
         return false;
     }
 
     portENTER_CRITICAL(&s_state_mux);
-    s_state.bt_tx_persisted_volume = volume;
-    s_state.bt_tx_nvs_valid = true;
+    if (save_volume) {
+        s_state.bt_tx_persisted_volume = volume;
+        s_state.bt_tx_nvs_valid = true;
+    }
+    if (save_player_volume) {
+        s_state.bt_tx_player_persisted_volume = player_volume;
+        s_state.bt_tx_player_volume_nvs_valid = true;
+    }
     state_revision_advance_locked();
     portEXIT_CRITICAL(&s_state_mux);
 
-    LOGI("[音量] 退出蓝牙发射，已保存逻辑音量到 NVS=%u 硬件=%u",
+    LOGI("[音量] 退出蓝牙发射，已保存逻辑音量=%u 硬件=%u PCM档位=%u/35",
          (unsigned)volume,
-         (unsigned)bt_tx_logical_to_hardware(volume));
+         (unsigned)bt_tx_logical_to_hardware(volume),
+         (unsigned)player_volume);
     return true;
 }
 
@@ -362,9 +443,10 @@ void apply_bluetooth_tx_volume_policy()
 
     load_bt_tx_volume_from_nvs_once();
 
-    // 送入 BT62SP 模拟输入的播放器音量固定在安全值。
+    // 送入 BT62SP 模拟输入的播放器 PCM 音量使用用户保存值。
     // BT62SP 不负责持久化音量；进入发射模式时由 ESP32 把 NVS 保存值主动下发。
-    audio_set_volume(BT_TX_PLAYER_FIXED_VOLUME);
+    const uint8_t player_volume = state_snapshot_get().bt_tx_player_volume;
+    audio_set_volume(player_volume);
     bt62sp_uart_debug_cancel_volume_query();
     const uint32_t ready_generation = bt62sp_uart_debug_ready_generation();
     const uint32_t due_ms = millis() + BT_TX_VOLUME_APPLY_FALLBACK_MS;
@@ -377,8 +459,8 @@ void apply_bluetooth_tx_volume_policy()
     state_revision_advance_locked();
     portEXIT_CRITICAL(&s_state_mux);
 
-    LOGI("[音量] 蓝牙发射：播放器固定=%u，等待下发逻辑音量=%u 硬件=%u",
-         (unsigned)BT_TX_PLAYER_FIXED_VOLUME,
+    LOGI("[音量] 蓝牙发射：播放器 PCM档位=%u/35，等待下发逻辑音量=%u 硬件=%u",
+         (unsigned)player_volume,
          (unsigned)bt_volume,
          (unsigned)bt_tx_logical_to_hardware(bt_volume));
 }
@@ -420,6 +502,7 @@ AudioOutputRouteSnapshot audio_output_route_snapshot_get()
     AudioOutputRouteSnapshot snapshot{};
     snapshot.route = state.route;
     snapshot.bluetooth_tx_volume = state.bt_tx_volume;
+    snapshot.bluetooth_tx_player_volume = state.bt_tx_player_volume;
     snapshot.normal_volume = state.saved_normal_volume > 100
         ? 100
         : state.saved_normal_volume;
@@ -455,9 +538,54 @@ bool audio_output_route_is_bluetooth_tx()
     return audio_output_route_snapshot_get().route == AudioOutputRoute::BluetoothTx;
 }
 
-uint8_t audio_output_route_bluetooth_tx_player_fixed_volume()
+uint8_t audio_output_route_bluetooth_tx_player_volume()
 {
-    return BT_TX_PLAYER_FIXED_VOLUME;
+    load_bt_tx_volume_from_nvs_once();
+    return state_snapshot_get().bt_tx_player_volume;
+}
+
+bool audio_output_route_set_bluetooth_tx_player_volume(uint8_t value)
+{
+    load_bt_tx_volume_from_nvs_once();
+
+    if (value < BT_TX_PLAYER_VOLUME_MIN) value = BT_TX_PLAYER_VOLUME_MIN;
+    if (value > BT_TX_PLAYER_VOLUME_MAX) value = BT_TX_PLAYER_VOLUME_MAX;
+
+    const AudioOutputRouteState before = state_snapshot_get();
+    if (before.bt_tx_player_volume == value) {
+        return true;
+    }
+
+    portENTER_CRITICAL(&s_state_mux);
+    s_state.bt_tx_player_volume = value;
+    state_revision_advance_locked();
+    portEXIT_CRITICAL(&s_state_mux);
+
+    bool applied = true;
+    if (before.route == AudioOutputRoute::BluetoothTx) {
+        // 通过 AudioTask 重新应用当前蓝牙逻辑音量；该路径会同时更新 PCM 档位，
+        // 避免菜单任务直接调用 audio_set_volume()。
+        applied = audio_service_set_user_volume(before.bt_tx_volume, true);
+    }
+
+    LOGI("[音量] 蓝牙 PCM 档位=%u/35%s",
+         (unsigned)value,
+         before.route == AudioOutputRoute::BluetoothTx
+             ? "（已立即应用，退出蓝牙时保存）"
+             : "（下次进入蓝牙应用）");
+    return applied;
+}
+
+bool audio_output_route_step_bluetooth_tx_player_volume(int delta)
+{
+    load_bt_tx_volume_from_nvs_once();
+    if (delta == 0) return true;
+
+    int next = static_cast<int>(state_snapshot_get().bt_tx_player_volume) + delta;
+    if (next < BT_TX_PLAYER_VOLUME_MIN) next = BT_TX_PLAYER_VOLUME_MIN;
+    if (next > BT_TX_PLAYER_VOLUME_MAX) next = BT_TX_PLAYER_VOLUME_MAX;
+    return audio_output_route_set_bluetooth_tx_player_volume(
+        static_cast<uint8_t>(next));
 }
 
 uint8_t audio_output_route_bluetooth_tx_volume()
@@ -743,7 +871,8 @@ bool audio_output_route_set_user_volume_from_audio_task(uint8_t value)
         state_revision_advance_locked();
         portEXIT_CRITICAL(&s_state_mux);
 
-        audio_set_volume(BT_TX_PLAYER_FIXED_VOLUME);
+        const uint8_t player_volume = state_snapshot_get().bt_tx_player_volume;
+        audio_set_volume(player_volume);
         sync_ui_volume_from_route_state();
 
         // 立即下发改善交互；逻辑 1 已越过硬件 1..3 的无声区。
@@ -754,10 +883,10 @@ bool audio_output_route_set_user_volume_from_audio_task(uint8_t value)
             // UART 暂时不可用时保留最新值，由 AudioTask 的非阻塞轮询继续重试。
             schedule_bt_tx_volume_apply(BT_TX_VOLUME_APPLY_RETRY_MS);
         }
-        LOGD("[音量] 蓝牙逻辑音量=%u 硬件=%u 播放器固定=%u 命令排队=%d，退出蓝牙时写入 NVS",
+        LOGD("[音量] 蓝牙逻辑音量=%u 硬件=%u 播放器 PCM档位=%u/35 命令排队=%d，退出蓝牙时写入 NVS",
              (unsigned)value,
              (unsigned)hardware_volume,
-             (unsigned)BT_TX_PLAYER_FIXED_VOLUME,
+             (unsigned)player_volume,
              queued ? 1 : 0);
         return queued;
     }

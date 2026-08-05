@@ -72,6 +72,40 @@ const char* value_bt_link()
     return linked ? "已连接" : "未连接";
 }
 
+const char* value_bt_pcm_level()
+{
+    static char buf[12];
+    snprintf(buf,
+             sizeof(buf),
+             "%u/35",
+             (unsigned)audio_output_route_bluetooth_tx_player_volume());
+    return buf;
+}
+
+const char* value_bt_pcm_increase()
+{
+    return audio_output_route_bluetooth_tx_player_volume() >= 35
+        ? "已最大"
+        : "+1";
+}
+
+const char* value_bt_pcm_decrease()
+{
+    return audio_output_route_bluetooth_tx_player_volume() <= 1
+        ? "已最小"
+        : "-1";
+}
+
+bool action_increase_bt_pcm()
+{
+    return audio_output_route_step_bluetooth_tx_player_volume(+1);
+}
+
+bool action_decrease_bt_pcm()
+{
+    return audio_output_route_step_bluetooth_tx_player_volume(-1);
+}
+
 const char* value_bt_connected_device()
 {
     static char buf[40];
@@ -204,6 +238,9 @@ const QuickMenuItem SPEAKER_ITEMS[] = {
 
 const QuickMenuItem BLUETOOTH_TX_ITEMS[] = {
     {"输出路径", QuickMenuItemType::Status, QuickMenuPage::AudioOutput, "", value_output_path, nullptr, true, false},
+    {"蓝牙PCM档位", QuickMenuItemType::Status, QuickMenuPage::AudioOutput, "", value_bt_pcm_level, nullptr, true, false},
+    {"PCM增大", QuickMenuItemType::Action, QuickMenuPage::AudioOutput, "", value_bt_pcm_increase, action_increase_bt_pcm, true, false},
+    {"PCM减小", QuickMenuItemType::Action, QuickMenuPage::AudioOutput, "", value_bt_pcm_decrease, action_decrease_bt_pcm, true, false},
     {"切到耳机", QuickMenuItemType::Action, QuickMenuPage::AudioOutput, "", value_switch_route, action_select_headphone_only, true, false},
     {"切到功放", QuickMenuItemType::Action, QuickMenuPage::AudioOutput, "", value_switch_route, action_select_speaker, true, false},
     {"连接状态", QuickMenuItemType::Status, QuickMenuPage::AudioOutput, "", value_bt_link, nullptr, true, false},
