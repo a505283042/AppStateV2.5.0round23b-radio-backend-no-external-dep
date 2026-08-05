@@ -1,7 +1,9 @@
 # PlatformIO build directory
 .pio/
 
-.pio/
+# IDE config
+.vscode/
+.trae/
 
 # Large binary tools (exceeds GitHub 100MB limit, keep local only)
 tools/nas/ffprobe.exe
