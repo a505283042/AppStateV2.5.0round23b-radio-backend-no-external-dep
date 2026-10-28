@@ -7,3 +7,6 @@
 
 # Large binary tools (exceeds GitHub 100MB limit, keep local only)
 tools/nas/ffprobe.exe
+
+# 合并生成的完整烧录镜像（构建产物）
+VinylDeck_AppStateV2.5.0round23b_Full.bin
